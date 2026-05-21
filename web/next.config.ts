@@ -4,7 +4,7 @@ import type { NextConfig } from "next";
 // rewrites では HTTP ヘッダを付与できないため、共有キー (X-API-Key) を server-side で
 // 付与する必要があり、Route Handler 側に寄せている。
 //
-// 上流 (FastAPI) の URL は API_TARGET env で Route Handler に渡る (デフォ http://localhost:8787)。
+// 上流 (FastAPI) の URL は API_TARGET env で Route Handler に渡る (デフォ http://localhost:8788)。
 
 const nextConfig: NextConfig = {};
 

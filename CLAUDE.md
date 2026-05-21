@@ -180,6 +180,6 @@ make record RACE=20260521-521-1 ORDER=5,2,7 PAYOUT=25400
 make calibrate
 
 # FastAPI バックエンド + Next.js フロント
-make api      # uvicorn :8787
+make api      # uvicorn :8788  (keirin ev-api と被らない様 8788)
 make web      # next dev :3000
 ```

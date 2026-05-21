@@ -156,7 +156,7 @@ make calibrate PER_RACE=1
 ### FastAPI バックエンド + フロント (UI)
 
 ```bash
-make api          # uvicorn --reload :8787
+make api          # uvicorn --reload :8788  (keirin ev-api と被らないように 8788)
 # 別ターミナルで
 make web          # next dev :3000
 ```

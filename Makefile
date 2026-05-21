@@ -104,7 +104,8 @@ watch-auto:
 	done
 
 # --- FastAPI バックエンド ---
-API_PORT ?= 8787
+# keirin ev-api がデフォルトで 8787 を掴んでいるので、keiba-ev は 8788 を既定にする。
+API_PORT ?= 8788
 api:
 	$(PY) -m uvicorn api.main:app --reload --port $(API_PORT)
 

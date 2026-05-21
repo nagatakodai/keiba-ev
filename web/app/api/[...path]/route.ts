@@ -8,13 +8,13 @@ import type { NextRequest } from "next/server";
 // - Preserves query string.
 //
 // Environment:
-//   API_TARGET        upstream base (default http://localhost:8787 for `make api`)
+//   API_TARGET        upstream base (default http://localhost:8788 for `make api`)
 //   API_SHARED_KEY    shared X-API-Key value (省略可。ローカル運用なら未設定で OK)
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const API_TARGET = process.env.API_TARGET ?? "http://localhost:8787";
+const API_TARGET = process.env.API_TARGET ?? "http://localhost:8788";
 const API_KEY = process.env.API_SHARED_KEY ?? "";
 
 const HOP_BY_HOP = new Set([
