@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+data/raw/
+data/cache/
+data/predictions/
+data/results/
+data/probs/
+*.html
+*.har
+.env
+.idea/
+.vscode/
+node_modules/
+logs/
+# Next.js (web/)
+web/.next/
+web/node_modules/
+web/tsconfig.tsbuildinfo
+web/next-env.d.ts
+web/.vercel/

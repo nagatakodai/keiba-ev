@@ -1,0 +1,10 @@
+{
+  "name": "keiba-ev-mcp",
+  "version": "0.1.0",
+  "description": "MCP servers used by the spawned claude session (Brave Search + Tavily)",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/server-brave-search": "latest",
+    "tavily-mcp": "latest"
+  }
+}

@@ -1,0 +1,28 @@
+"use client";
+
+import Link from "next/link";
+import { useWatchStatus } from "./WatchStatusContext";
+
+export function WatchPill() {
+  const { status } = useWatchStatus();
+  const running = !!status?.running;
+  return (
+    <Link
+      href="/watch-auto"
+      className={`inline-flex items-center gap-2 px-3 py-1 border text-xs font-semibold transition-colors ${
+        running
+          ? "bg-(--color-good)/10 border-(--color-good) text-(--color-good)"
+          : "bg-white border-(--color-line) text-(--color-muted) hover:border-(--color-accent)"
+      }`}
+      title="watch-auto status"
+    >
+      <span
+        className={`inline-block w-2 h-2 rounded-full ${
+          running ? "bg-(--color-good) animate-pulse" : "bg-(--color-muted)/60"
+        }`}
+      />
+      <span>watch-auto</span>
+      <span>{running ? "稼働中" : "停止"}</span>
+    </Link>
+  );
+}

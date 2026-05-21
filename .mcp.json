@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "brave-search": {
+      "type": "stdio",
+      "command": "./node_modules/.bin/mcp-server-brave-search",
+      "args": [],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      }
+    },
+    "tavily": {
+      "type": "stdio",
+      "command": "./node_modules/.bin/tavily-mcp",
+      "args": [],
+      "env": {
+        "TAVILY_API_KEY": "${TAVILY_API_KEY}"
+      }
+    }
+  }
+}

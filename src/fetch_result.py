@@ -1,0 +1,288 @@
+"""netkeiba の結果ページからレース結果を自動取得して data/results/<race_id>.json に保存。
+
+タイミング:
+  - 中央競馬の結果反映は通常 発走 + 5〜10 分。
+  - 初回 fetch は **発走 +8 分**。失敗時は 2 分間隔で 8 回 (発走 +8 〜 +22 分)。
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+import typer
+from rich.console import Console
+
+from .parse import parse_result
+from .scrape import extract_race_id, fetch_html, result_url
+
+ROOT = Path(__file__).resolve().parents[1]
+RESULTS_DIR = ROOT / "data" / "results"
+PENDING_FILE = ROOT / "data" / "cache" / "pending_results.json"
+
+DEFAULT_DELAY_SEC = 8 * 60
+DEFAULT_RETRY_INTERVAL_SEC = 120
+DEFAULT_MAX_ATTEMPTS = 8
+MAX_PROCESS_PER_TICK = 3
+TERMINAL_RETENTION_SEC = 24 * 3600
+
+console = Console()
+app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+
+@dataclass
+class Pending:
+    race_id: str                 # YYYYMMDD-MMDD-R 正規化 ID
+    url: str                     # shutuba.html URL を保存 (fetch 時に result.html へ変換)
+    due_at: int
+    next_attempt_at: int
+    attempts: int = 0
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    retry_interval_sec: int = DEFAULT_RETRY_INTERVAL_SEC
+    status: str = "pending"
+    last_error: str = ""
+    scheduled_at: int = field(default_factory=lambda: int(time.time()))
+
+
+def result_url_from_racecard(url: str) -> str:
+    """shutuba / odds URL を結果ページ URL に変換。"""
+    rid = extract_race_id(url)
+    if not rid:
+        return url
+    return result_url(rid)
+
+
+def fetch_result(url: str, *, timeout_ms: int = 30_000) -> dict | None:
+    result, _ = fetch_result_with_reason(url, timeout_ms=timeout_ms)
+    return result
+
+
+def fetch_result_with_reason(url: str, *, timeout_ms: int = 30_000) -> tuple[dict | None, str]:
+    try:
+        html = fetch_html(url, timeout_ms=timeout_ms)
+    except Exception as ex:
+        msg = f"fetch_html: {type(ex).__name__}: {str(ex)[:200]}"
+        _log(msg, url)
+        return None, msg
+    result = parse_result(html)
+    if result is not None:
+        return result, ""
+    _log("no finish_order parsed", url)
+    return None, "no finish_order in result page (race not yet settled?)"
+
+
+def _log(msg: str, url: str) -> None:
+    import sys
+    print(f"[fetch_result] {msg} url={url}", file=sys.stderr, flush=True)
+
+
+def save_result(race_id: str, payload: dict, *, note: str = "") -> Path:
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = RESULTS_DIR / f"{race_id}.json"
+    data = {
+        "race_id": race_id,
+        "finish_order": payload["finish_order"],
+        "trifecta_payout": payload.get("payout", 0),
+        "note": note,
+        "recorded_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "source": payload.get("source", "auto"),
+    }
+    out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
+
+
+# --- 永続 pending キュー ---
+
+def _load_pending() -> list[Pending]:
+    if not PENDING_FILE.exists():
+        return []
+    try:
+        raw = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    out: list[Pending] = []
+    for r in raw.get("races", []):
+        try:
+            out.append(Pending(**{k: v for k, v in r.items() if k in Pending.__dataclass_fields__}))
+        except TypeError:
+            continue
+    return out
+
+
+def _save_pending(entries: list[Pending]) -> None:
+    PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PENDING_FILE.write_text(
+        json.dumps({"races": [asdict(e) for e in entries]}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def schedule(
+    race_id: str,
+    racecard_url: str,
+    race_start_at: int,
+    *,
+    delay_sec: int = DEFAULT_DELAY_SEC,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    retry_interval_sec: int = DEFAULT_RETRY_INTERVAL_SEC,
+) -> Pending:
+    if (RESULTS_DIR / f"{race_id}.json").exists():
+        return Pending(
+            race_id=race_id, url="", due_at=0, next_attempt_at=0, status="success",
+        )
+    entries = _load_pending()
+    for e in entries:
+        if e.race_id == race_id:
+            return e
+    due_at = int(race_start_at) + delay_sec
+    new = Pending(
+        race_id=race_id,
+        url=racecard_url,
+        due_at=due_at,
+        next_attempt_at=due_at,
+        max_attempts=max_attempts,
+        retry_interval_sec=retry_interval_sec,
+    )
+    entries.append(new)
+    _save_pending(entries)
+    return new
+
+
+def process_pending(
+    now_ts: int | None = None,
+    max_per_tick: int = MAX_PROCESS_PER_TICK,
+) -> dict:
+    if now_ts is None:
+        now_ts = int(time.time())
+    entries = _load_pending()
+    summary: dict[str, Any] = {
+        "checked": 0, "success": [], "failed": [],
+        "still_pending": 0, "not_due": 0, "pruned": 0,
+    }
+
+    cutoff = now_ts - TERMINAL_RETENTION_SEC
+    before_prune = len(entries)
+    entries = [
+        e for e in entries
+        if not (e.status in ("success", "failed") and e.scheduled_at < cutoff)
+    ]
+    summary["pruned"] = before_prune - len(entries)
+
+    due_idx = sorted(
+        (i for i, e in enumerate(entries) if e.status == "pending" and now_ts >= e.next_attempt_at),
+        key=lambda i: entries[i].next_attempt_at,
+    )
+    summary["not_due"] = sum(
+        1 for e in entries if e.status == "pending" and now_ts < e.next_attempt_at
+    )
+
+    if not due_idx:
+        if summary["pruned"] > 0:
+            _save_pending(entries)
+        return summary
+
+    changed = summary["pruned"] > 0
+    for i in due_idx[:max_per_tick]:
+        e = entries[i]
+        summary["checked"] += 1
+        fetch_url = result_url_from_racecard(e.url)
+        result, reason = fetch_result_with_reason(fetch_url)
+        e.last_error = reason
+        e.attempts += 1
+
+        if result and result.get("finish_order"):
+            try:
+                save_result(e.race_id, result)
+                e.status = "success"
+                e.last_error = ""
+                summary["success"].append(e.race_id)
+            except Exception as ex:
+                e.last_error = f"save error: {ex}"
+
+        if e.status != "success":
+            if e.attempts >= e.max_attempts:
+                e.status = "failed"
+                summary["failed"].append(e.race_id)
+            else:
+                e.next_attempt_at = now_ts + e.retry_interval_sec
+                summary["still_pending"] += 1
+        changed = True
+
+    summary["still_pending"] += max(0, len(due_idx) - max_per_tick)
+
+    if changed:
+        _save_pending(entries)
+    return summary
+
+
+# --- CLI ---
+
+@app.command("schedule")
+def cli_schedule(
+    race_id: str = typer.Argument(...),
+    url: str = typer.Argument(...),
+    start_at: int = typer.Argument(...),
+    delay: int = typer.Option(DEFAULT_DELAY_SEC, "--delay"),
+    max_attempts: int = typer.Option(DEFAULT_MAX_ATTEMPTS, "--max-attempts"),
+    retry_interval: int = typer.Option(DEFAULT_RETRY_INTERVAL_SEC, "--retry-interval"),
+):
+    p = schedule(
+        race_id, url, start_at,
+        delay_sec=delay, max_attempts=max_attempts, retry_interval_sec=retry_interval,
+    )
+    console.print(
+        f"[green]scheduled:[/green] {p.race_id} "
+        f"due={dt.datetime.fromtimestamp(p.due_at)} "
+        f"max_attempts={p.max_attempts} retry={p.retry_interval_sec}s"
+    )
+
+
+@app.command("process")
+def cli_process(max_per_tick: int = typer.Option(MAX_PROCESS_PER_TICK, "--max-per-tick")):
+    s = process_pending(max_per_tick=max_per_tick)
+    console.print(
+        f"checked={s['checked']} success={len(s['success'])} "
+        f"failed={len(s['failed'])} pending={s['still_pending']} not_due={s['not_due']}"
+    )
+    for r in s["success"]:
+        console.print(f"  [green]✓[/green] {r}")
+    for r in s["failed"]:
+        console.print(f"  [red]✗[/red] {r}")
+
+
+@app.command("fetch")
+def cli_fetch(
+    race_id: str = typer.Argument(...),
+    url: str = typer.Argument(...),
+):
+    url = result_url_from_racecard(url)
+    result = fetch_result(url)
+    if not result:
+        console.print(f"[yellow]結果未取得: {url}[/yellow]")
+        raise typer.Exit(1)
+    out = save_result(race_id, result)
+    console.print(f"[green]saved:[/green] {out} finish_order={result['finish_order']}")
+
+
+@app.command("list")
+def cli_list():
+    entries = _load_pending()
+    if not entries:
+        console.print("[dim]pending なし[/dim]")
+        return
+    now = int(time.time())
+    for e in entries:
+        due = dt.datetime.fromtimestamp(e.due_at).strftime("%Y-%m-%d %H:%M:%S")
+        nxt = dt.datetime.fromtimestamp(e.next_attempt_at).strftime("%H:%M:%S")
+        delta = e.next_attempt_at - now
+        console.print(
+            f"  {e.status:8s} {e.race_id:24s} attempts={e.attempts}/{e.max_attempts} "
+            f"due={due} next={nxt} ({delta:+d}s) {e.last_error}"
+        )
+
+
+if __name__ == "__main__":
+    app()

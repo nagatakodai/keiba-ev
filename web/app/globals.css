@@ -1,0 +1,89 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f5f4f1;
+  --section-head: #edece6;
+  --line: #d6d3ca;
+  --line-soft: #e8e5dc;
+  --text: #333333;
+  --muted: #6f6f6f;
+  --nav: #3251bc;
+  --nav-text: #ffffff;
+  --accent: #0033aa;       /* link blue */
+  --highlight: #d04a1a;    /* CTA / active orange */
+  --good: #1f9c54;
+  --warn: #d28f0a;
+  --bad: #c93030;
+  --magenta: #b332a0;
+  --gold: #ebb838;
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-section-head: var(--section-head);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-muted: var(--muted);
+  --color-nav: var(--nav);
+  --color-nav-text: var(--nav-text);
+  --color-accent: var(--accent);
+  --color-highlight: var(--highlight);
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-magenta: var(--magenta);
+  --color-gold: var(--gold);
+  --font-sans: var(--font-noto-jp);
+  --font-mono: var(--font-geist-mono);
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family:
+    var(--font-noto-jp), "Noto Sans JP",
+    "Hiragino Kaku Gothic ProN", "ヒラギノ角ゴ ProN W3",
+    "Yu Gothic", "Meiryo",
+    system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1, "palt" 1;
+}
+
+::selection { background: rgba(50, 81, 188, 0.25); }
+
+/* マウスクリック後にフォーカスリングが残らないようにする。
+   キーボード操作 (Tab) では `:focus-visible` で出るのでアクセシビリティは保持。 */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Custom scrollbar */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: #c8c4ba;
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-thumb:hover { background: #a8a499; }
+
+/* Utilities */
+.mono { font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tabnum { font-variant-numeric: tabular-nums; }
+
+/* テーブル行ストライプ + ホバー強調。クラスを付けた table に適用。
+   :where() でセレクタ特異度をゼロにし、行の Tailwind クラス
+   (bg-emerald-500/5 の的中強調など) が常に勝つようにしている。 */
+:where(.table-zebra tbody tr:nth-child(even)) {
+  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+}
+:where(.table-zebra tbody tr:hover) {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
