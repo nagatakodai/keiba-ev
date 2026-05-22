@@ -146,7 +146,8 @@ class AptitudeIndex:
     ability: float = 0.0
     distance_fit: float = 0.0
     last3f: float = 0.0
-    surface_fit: float = 0.0
+    surface_fit: float = 0.0       # 同 surface/venue 経験 + show率 (コース適性)
+    going_fit: float = 0.0          # 同馬場状態 (良/稍/重/不) での好走率 (馬場状態適性)
     condition: float = 0.0
     jockey_fit: float = 0.0
     pace_fit: float = 0.0
@@ -161,6 +162,7 @@ _WEIGHTS = {
     "distance_fit": 1.2,
     "last3f": 1.0,
     "surface_fit": 0.8,
+    "going_fit": 0.6,
     "condition": 0.6,
     "jockey_fit": 0.4,
     "pace_fit": 0.8,
@@ -205,12 +207,26 @@ def _last3f_raw(fv: FeatureVec) -> float:
 
 
 def _surface_fit_raw(fv: FeatureVec) -> float:
-    """馬場適性 raw: 同 surface 経験 + 当該場経験 + show rate。"""
+    """コース適性 raw: 同 surface 経験 + 当該場経験 + show rate (芝/ダート/障害 × 場)。"""
     return (
         min(fv.same_surface_count, 8) * 1.0
         + min(fv.same_venue_count, 5) * 1.5
         + fv.shrunk_show_rate * 30.0
     )
+
+
+def _going_fit_raw(fv: FeatureVec) -> float:
+    """馬場状態適性 raw: 同馬場 (良/稍/重/不) での好走実績。
+
+    same_going_count が 0 (未経験 or current going 不明) なら going_versatility で代用。
+    versatility 高い = 馬場不問タイプ。
+    """
+    if fv.same_going_count > 0:
+        # 同馬場で 1 走以上経験 → show 率 × 経験ボーナス
+        bonus = 1.0 + 0.1 * min(fv.same_going_count, 5)
+        return fv.same_going_show_rate * bonus * 100.0
+    # 未経験 / current going 不明 → 多様性スコア
+    return fv.going_versatility * 50.0
 
 
 def _condition_raw(fv: FeatureVec) -> float:
@@ -278,6 +294,7 @@ def compute_aptitudes(
     raw_dist: dict[int, float] = {}
     raw_last3f: dict[int, float] = {}
     raw_surface: dict[int, float] = {}
+    raw_going: dict[int, float] = {}
     raw_cond: dict[int, float] = {}
     raw_jockey: dict[int, float] = {}
     raw_pace: dict[int, float] = {}
@@ -293,6 +310,7 @@ def compute_aptitudes(
         raw_dist[h.number] = _distance_fit_raw(fv)
         raw_last3f[h.number] = _last3f_raw(fv)
         raw_surface[h.number] = _surface_fit_raw(fv)
+        raw_going[h.number] = _going_fit_raw(fv)
         raw_cond[h.number] = _condition_raw(fv)
         raw_jockey[h.number] = _jockey_fit_raw(fv)
         raw_pace[h.number] = _pace_fit_raw(fv)
@@ -304,6 +322,7 @@ def compute_aptitudes(
     n_dist = _normalize_to_100(raw_dist)
     n_last3f = _normalize_to_100(raw_last3f)
     n_surface = _normalize_to_100(raw_surface)
+    n_going = _normalize_to_100(raw_going)
     n_cond = _normalize_to_100(raw_cond)
     n_jockey = _normalize_to_100(raw_jockey)
     n_pace = _normalize_to_100(raw_pace)
@@ -321,6 +340,7 @@ def compute_aptitudes(
     th_dist = _top_quartile(n_dist)
     th_last3f = _top_quartile(n_last3f)
     th_surface = _top_quartile(n_surface)
+    th_going = _top_quartile(n_going)
     th_cond = _top_quartile(n_cond)
     th_pace = _top_quartile(n_pace)
 
@@ -335,6 +355,7 @@ def compute_aptitudes(
             distance_fit=n_dist[n],
             last3f=n_last3f[n],
             surface_fit=n_surface[n],
+            going_fit=n_going[n],
             condition=n_cond[n],
             jockey_fit=n_jockey[n],
             pace_fit=n_pace[n],
@@ -347,6 +368,7 @@ def compute_aptitudes(
             + _WEIGHTS["distance_fit"] * ai.distance_fit
             + _WEIGHTS["last3f"] * ai.last3f
             + _WEIGHTS["surface_fit"] * ai.surface_fit
+            + _WEIGHTS["going_fit"] * ai.going_fit
             + _WEIGHTS["condition"] * ai.condition
             + _WEIGHTS["jockey_fit"] * ai.jockey_fit
             + _WEIGHTS["pace_fit"] * ai.pace_fit
@@ -362,7 +384,9 @@ def compute_aptitudes(
         if ai.last3f >= th_last3f and ai.last3f > 0:
             reasons.append("末脚◎")
         if ai.surface_fit >= th_surface and ai.surface_fit > 0:
-            reasons.append("馬場/コース◎")
+            reasons.append("コース◎")
+        if ai.going_fit >= th_going and ai.going_fit > 0:
+            reasons.append("馬場状態◎")
         if ai.condition >= th_cond and ai.condition > 0:
             reasons.append("間隔良好")
         if ai.pace_fit >= th_pace and ai.pace_fit > 50:
@@ -386,7 +410,7 @@ def aptitude_summary_line(h: Horse, ai: AptitudeIndex) -> str:
     return (
         f"{h.number:2d} {h.name} 総{ai.total:5.1f} | "
         f"能{ai.ability:4.0f} 距{ai.distance_fit:4.0f} 末{ai.last3f:4.0f} "
-        f"馬{ai.surface_fit:4.0f} 状{ai.condition:4.0f} 騎{ai.jockey_fit:4.0f} "
-        f"ペ{ai.pace_fit:4.0f} 重{ai.graded_record:4.0f}"
+        f"コ{ai.surface_fit:4.0f} 馬{ai.going_fit:4.0f} 状{ai.condition:4.0f} "
+        f"騎{ai.jockey_fit:4.0f} ペ{ai.pace_fit:4.0f} 重{ai.graded_record:4.0f}"
         f"{' | ' + ', '.join(ai.reasons) if ai.reasons else ''}"
     )

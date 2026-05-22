@@ -380,7 +380,7 @@ def _predictions_block(rd: RaceData) -> str:
 
 
 def _aptitude_block(rd: RaceData, aptitudes: dict[int, Any]) -> str:
-    """各馬の適性指数 (0-100 / 8 因子内訳 + 主要根拠) を Markdown 表で。
+    """各馬の適性指数 (0-100 / 9 因子内訳 + 主要根拠) を Markdown 表で。
 
     aptitudes は AptitudeIndex dict[int, AptitudeIndex]。features.py の Layer 1 + 重賞実績
     を集約した「事前」適性指数で、検索 MCP の補強根拠を加味する前のベースライン。
@@ -390,16 +390,16 @@ def _aptitude_block(rd: RaceData, aptitudes: dict[int, Any]) -> str:
     name_by_n = {h.number: h.name for h in rd.race.horses}
     sorted_items = sorted(aptitudes.items(), key=lambda kv: kv[1].total, reverse=True)
     lines = [
-        "| 馬 | 馬名 | 総合 | 能力 | 距離 | 末脚 | 馬場 | 状態 | 騎手 | ペース | 重賞 | 主要根拠 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| 馬 | 馬名 | 総合 | 能力 | 距離 | 末脚 | コース | 馬場 | 状態 | 騎手 | ペース | 重賞 | 主要根拠 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for n, ai in sorted_items:
         reasons = ", ".join(ai.reasons) if ai.reasons else "-"
         lines.append(
             f"| {n} | {name_by_n.get(n, '-')} | {ai.total:.1f} | "
             f"{ai.ability:.0f} | {ai.distance_fit:.0f} | {ai.last3f:.0f} | "
-            f"{ai.surface_fit:.0f} | {ai.condition:.0f} | {ai.jockey_fit:.0f} | "
-            f"{ai.pace_fit:.0f} | {ai.graded_record:.0f} | {reasons} |"
+            f"{ai.surface_fit:.0f} | {ai.going_fit:.0f} | {ai.condition:.0f} | "
+            f"{ai.jockey_fit:.0f} | {ai.pace_fit:.0f} | {ai.graded_record:.0f} | {reasons} |"
         )
     return "\n".join(lines)
 
@@ -504,7 +504,7 @@ def build_prompt(
     caps_block = _caps_block(ev_max, min_prob)
     aptitude_block = _aptitude_block(rd, aptitudes) if aptitudes else ""
     aptitude_section = (
-        f"\n## 各馬の適性指数 (0-100 / 同レース内相対 / 8 因子内訳)\n{aptitude_block}\n"
+        f"\n## 各馬の適性指数 (0-100 / 同レース内相対 / 9 因子内訳)\n{aptitude_block}\n"
         "\n(因子: 能力=speed_idx / 距離=距離適性 / 末脚=上がり3F標準化 / "
         "馬場=同コース経験+show率 / 状態=間隔+馬体変動 / 騎手=継続/乗替 / "
         "ペース=脚質×想定ペース / 重賞=G1=10×finish倍率,G2=5,G3=3,L=2,OP=1。"
@@ -555,7 +555,7 @@ def build_prompt(
 ## あなたへの依頼
 
 ツールは 2 系統の指数を提示しています:
-1. **適性指数** (上記表): 競馬独自の 8 因子 (能力 / 距離 / 末脚 / 馬場 / 状態 / 騎手 / ペース / 重賞) を集約した「事前」指数。**Plan G の根拠**。
+1. **適性指数** (上記表): 競馬独自の 9 因子 (能力 / 距離 / 末脚 / コース / 馬場状態 / 状態 / 騎手 / ペース / 重賞) を集約した「事前」指数。**Plan G の根拠**。
 2. **ツール推定指数** (Plackett-Luce 由来): 確率モデルから出た 1着 / 2着 / 3着 / 総合の指数。Plan A/B/C/H の根拠。
 
 CLAUDE.md の **「検索 MCP の運用ルール」** に従って **適性指数と推定指数を検証 / 補正** し、Plan A/B/C/G を比較して最終提案を出してください。

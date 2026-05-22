@@ -427,7 +427,8 @@ function AptitudeCard({
               <th className="py-2 pr-2 text-right" title="speed_idx 重み付け">能力</th>
               <th className="py-2 pr-2 text-right" title="距離 × surface 条件付き shrinkage 勝率 + 経験">距離</th>
               <th className="py-2 pr-2 text-right" title="上がり 3F 距離標準化">末脚</th>
-              <th className="py-2 pr-2 text-right" title="同 surface + 当該場経験 + show率">馬場</th>
+              <th className="py-2 pr-2 text-right" title="同 surface + 当該場経験 + show率">コース</th>
+              <th className="py-2 pr-2 text-right" title="現馬場状態 (良/稍/重/不) での好走率 / 経験無しなら馬場多様性">馬場</th>
               <th className="py-2 pr-2 text-right" title="間隔 + 馬体重変動">状態</th>
               <th className="py-2 pr-2 text-right" title="騎手継続 / 乗替り">騎手</th>
               <th className="py-2 pr-2 text-right" title="脚質×想定ペース">ペース</th>
@@ -466,6 +467,9 @@ function AptitudeCard({
                   </td>
                   <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.surface_fit)}`}>
                     {a.surface_fit.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.going_fit ?? 0)}`}>
+                    {a.going_fit != null ? a.going_fit.toFixed(0) : "—"}
                   </td>
                   <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.condition)}`}>
                     {a.condition.toFixed(0)}

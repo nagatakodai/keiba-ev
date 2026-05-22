@@ -50,6 +50,10 @@ class FeatureVec:
     same_distance_count: int = 0         # 同距離 ±100m の過去走数 (= 適性経験)
     same_surface_count: int = 0
     same_venue_count: int = 0            # 当該場での過去走数
+    # 馬場状態適性 (current race の going が分かる時のみ意味を持つ)
+    same_going_count: int = 0            # 同馬場状態 (良/稍/重/不) での過去走数
+    same_going_show_rate: float = 0.0    # 同馬場状態での 3 着以内率 (0-1)
+    going_versatility: float = 0.0       # 異馬場での好走多様性 (0-1, 高いほど馬場不問)
     # 末脚
     last3f_idx_recent: float = 0.0       # 直近 3 走の上がり 3F を距離で標準化
     # コンディション
@@ -146,6 +150,29 @@ def normalize_last3f(seconds: float, distance: int, surface: str) -> float:
     return seconds / denom
 
 
+def _normalize_going(s: str) -> str:
+    """馬場状態文字列を 1 文字 (良/稍/重/不) に正規化。空文字は ""。
+
+    変換例:
+      "良" → "良"
+      "稍重" / "稍" → "稍"
+      "重" → "重"
+      "不良" / "不" → "不"
+    """
+    if not s:
+        return ""
+    s = s.strip()
+    if s.startswith("良"):
+        return "良"
+    if s.startswith("稍"):
+        return "稍"
+    if s.startswith("重"):
+        return "重"
+    if s.startswith("不"):
+        return "不"
+    return ""
+
+
 def _parse_jp_date(s: str) -> tuple[int, int, int] | None:
     """`2026.04.11` → (2026, 4, 11) または None。"""
     parts = s.split(".")
@@ -220,6 +247,27 @@ def build_features(rd: RaceData) -> dict[int, FeatureVec]:
         )
         fv.same_surface_count = sum(1 for r in runs if r.surface == race.surface)
         fv.same_venue_count = sum(1 for r in runs if r.venue == race.venue_name)
+
+        # 馬場状態適性 (current race の going が分かる時のみ意味を持つ)
+        # Race.weather.track_condition は "良"/"稍重"/"重"/"不良" の文字列。
+        # 過去走の PastRun.going は "良"/"稍"/"重"/"不" のような短縮形が来る場合あり。
+        # 部分一致で判定する。
+        current_going = (race.weather.track_condition if race.weather else "") or ""
+        # going を 1 文字に正規化 (良/稍/重/不)
+        cg_norm = _normalize_going(current_going)
+        if cg_norm:
+            same_going_runs = [r for r in runs if _normalize_going(r.going) == cg_norm]
+            fv.same_going_count = len(same_going_runs)
+            shows = sum(1 for r in same_going_runs if r.finish_pos in (1, 2, 3))
+            fv.same_going_show_rate = (
+                shows / len(same_going_runs) if same_going_runs else 0.0
+            )
+        # 馬場多様性: 過去走で良/稍/重/不の何種類で 3 着以内に入ったか / 4
+        diverse = {
+            _normalize_going(r.going)
+            for r in runs if r.finish_pos in (1, 2, 3) and _normalize_going(r.going)
+        }
+        fv.going_versatility = len(diverse) / 4.0 if diverse else 0.0
 
         # 末脚指数: 直近 3 走の標準化上がり 3F の平均
         last3f_vals: list[float] = []

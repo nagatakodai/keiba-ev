@@ -82,7 +82,8 @@ export type HorseAptitude = {
   ability: number;
   distance_fit: number;
   last3f: number;
-  surface_fit: number;
+  surface_fit: number;       // 同 surface/venue 経験 (コース適性)
+  going_fit?: number;        // 同馬場状態 (良/稍/重/不) での好走率
   condition: number;
   jockey_fit: number;
   pace_fit: number;

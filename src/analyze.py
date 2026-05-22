@@ -336,6 +336,7 @@ def _serialize_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> list[dict]:
             "distance_fit": round(ai.distance_fit, 1),
             "last3f": round(ai.last3f, 1),
             "surface_fit": round(ai.surface_fit, 1),
+            "going_fit": round(ai.going_fit, 1),
             "condition": round(ai.condition, 1),
             "jockey_fit": round(ai.jockey_fit, 1),
             "pace_fit": round(ai.pace_fit, 1),
@@ -577,6 +578,7 @@ def _print_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> None:
     tbl.add_column("能力", justify="right")
     tbl.add_column("距離", justify="right")
     tbl.add_column("末脚", justify="right")
+    tbl.add_column("コース", justify="right")
     tbl.add_column("馬場", justify="right")
     tbl.add_column("状態", justify="right")
     tbl.add_column("騎手", justify="right")
@@ -596,6 +598,7 @@ def _print_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> None:
             f"{ai.distance_fit:4.0f}",
             f"{ai.last3f:4.0f}",
             f"{ai.surface_fit:4.0f}",
+            f"{ai.going_fit:4.0f}",
             f"{ai.condition:4.0f}",
             f"{ai.jockey_fit:4.0f}",
             f"{ai.pace_fit:4.0f}",
