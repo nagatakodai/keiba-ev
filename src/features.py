@@ -58,6 +58,15 @@ class FeatureVec:
     # 当該条件で走った経験が無い時は 0。距離標準化はせず raw 秒で持つ (同条件比較用)。
     best_time_at_target: float = 0.0     # 秒 (例 95.3)
     best_time_runs: int = 0              # 持ち時計の元になった経験数
+    # 斤量変化 (current race の斤量 - past_runs の平均斤量)
+    # 増えた = 重荷 (一般にハンディ)、減った = 軽量 (一般に有利)。
+    weight_kg_delta: float = 0.0         # kg (例 +0.5 = 0.5kg 増)
+    # 直近 form score: 過去 3 走の (4 - finish_pos) 平均 (3 が満点)
+    # 4 着以下 (finish_pos=None) は 0 として扱う。
+    recent_form_score: float = 0.0       # 0-3
+    # 人気との乖離: 過去走で「人気以上に走ったか」を averaged
+    # 人気 5 で 1 着 → outperformance = +4 (好走)、人気 3 で 8 着 → outperformance = ~-5 (凡走)
+    popularity_outperformance: float = 0.0  # +5 〜 -10 範囲
     # 末脚
     last3f_idx_recent: float = 0.0       # 直近 3 走の上がり 3F を距離で標準化
     # コンディション
@@ -251,6 +260,32 @@ def build_features(rd: RaceData) -> dict[int, FeatureVec]:
         )
         fv.same_surface_count = sum(1 for r in runs if r.surface == race.surface)
         fv.same_venue_count = sum(1 for r in runs if r.venue == race.venue_name)
+
+        # 斤量変化 (current race の斤量 - past_runs の平均斤量)
+        if runs:
+            past_weights = [r.weight_kg for r in runs if r.weight_kg > 0]
+            if past_weights and h.weight_kg > 0:
+                fv.weight_kg_delta = h.weight_kg - sum(past_weights) / len(past_weights)
+
+        # 直近 form: 過去 3 走の (4 - finish_pos)、4 着以下は 0
+        recent3 = runs[:3]
+        if recent3:
+            form_vals = [
+                (4 - r.finish_pos) if r.finish_pos and r.finish_pos <= 3 else 0
+                for r in recent3
+            ]
+            fv.recent_form_score = sum(form_vals) / len(form_vals)
+
+        # 人気との乖離: past_runs で (popularity - finish_pos) を averaged
+        # 4 着以下は finish_pos が None なので field_size を上限として代用
+        outperf_vals = []
+        for r in runs:
+            if r.popularity <= 0:
+                continue
+            actual_pos = r.finish_pos if r.finish_pos else (r.field_size or 10)
+            outperf_vals.append(r.popularity - actual_pos)
+        if outperf_vals:
+            fv.popularity_outperformance = sum(outperf_vals) / len(outperf_vals)
 
         # 持ち時計 (venue × distance ± 100m × surface での best own_time_sec)
         # 同条件で複数走っていれば最速タイム、無ければ 0。

@@ -183,6 +183,45 @@ def test_weights_include_going_fit():
 # --- _normalize_going ---
 
 
+def test_features_new_columns_computed():
+    """Phase 17 で追加した weight_kg_delta / recent_form_score / popularity_outperformance を確認。"""
+    from src.features import build_features
+
+    horse = Horse(
+        number=1, name="A", weight_kg=56.0,
+        past_runs=[
+            _mk_past(finish_pos=1) ,  # ↓ override
+        ],
+    )
+    # 過去走 3 走: pop=3 → finish=1 / pop=5 → finish=2 / pop=10 → 6着
+    horse.past_runs = [
+        PastRun(date="2026.04.11", venue="東京", race_no=1, race_class="3勝クラス",
+                race_id="", surface="芝", distance=1600, going="良",
+                winner_time_sec=95.0, time_diff_sec=0.0, field_size=16,
+                horse_number=1, popularity=3, jockey="J", weight_kg=55.0,
+                passing="3-1-1", last_3f_sec=34.5, finish_pos=1),
+        PastRun(date="2026.03.20", venue="東京", race_no=2, race_class="2勝クラス",
+                race_id="", surface="芝", distance=1600, going="良",
+                winner_time_sec=95.0, time_diff_sec=0.2, field_size=16,
+                horse_number=1, popularity=5, jockey="J", weight_kg=55.5,
+                passing="2-1-2", last_3f_sec=34.7, finish_pos=2),
+        PastRun(date="2026.02.20", venue="東京", race_no=3, race_class="2勝クラス",
+                race_id="", surface="芝", distance=1600, going="良",
+                winner_time_sec=95.0, time_diff_sec=1.5, field_size=16,
+                horse_number=1, popularity=10, jockey="J", weight_kg=54.5,
+                passing="3-4-6", last_3f_sec=36.0, finish_pos=None),  # 4着以下
+    ]
+    rd = _mk_race([horse])
+    fv = build_features(rd)[1]
+    # 斤量変化: 56.0 - (55.0+55.5+54.5)/3 = 56.0 - 55.0 = 1.0
+    assert fv.weight_kg_delta == pytest.approx(1.0, abs=0.01)
+    # recent_form: ((4-1) + (4-2) + 0) / 3 = (3 + 2 + 0) / 3 = 1.67
+    assert fv.recent_form_score == pytest.approx(5 / 3, abs=0.01)
+    # popularity_outperformance: 過去 3 走
+    # (3 - 1) + (5 - 2) + (10 - 16=field_size) = 2 + 3 + (-6) = -1, /3 = -0.33
+    assert fv.popularity_outperformance == pytest.approx((2 + 3 + (10 - 16)) / 3, abs=0.01)
+
+
 def test_normalize_going_variants():
     assert _normalize_going("良") == "良"
     assert _normalize_going("稍") == "稍"
