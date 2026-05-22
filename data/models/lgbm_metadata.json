@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-05-23T03:40:41",
+  "trained_at": "2026-05-23T03:42:10",
   "n_train_races": 1308,
   "n_valid_races": 326,
   "n_train_rows": 13628,
@@ -41,25 +41,25 @@
       3,
       5
     ],
-    "learning_rate": 0.05,
-    "num_leaves": 31,
+    "learning_rate": 0.03,
+    "num_leaves": 24,
     "min_data_in_leaf": 10,
     "feature_fraction": 0.9,
     "bagging_fraction": 0.8,
     "bagging_freq": 5,
     "verbose": -1
   },
-  "best_iteration": 2,
+  "best_iteration": 102,
   "best_scores": {
     "train": {
-      "ndcg@1": 0.4076535006767566,
-      "ndcg@3": 0.5118104371306758,
-      "ndcg@5": 0.5995275688903958
+      "ndcg@1": 0.682908822443706,
+      "ndcg@3": 0.694892160864524,
+      "ndcg@5": 0.7548407397134885
     },
     "valid": {
-      "ndcg@1": 0.34118802160039274,
-      "ndcg@3": 0.4006855496656352,
-      "ndcg@5": 0.4847032295330679
+      "ndcg@1": 0.3657339224349533,
+      "ndcg@3": 0.4666215407118594,
+      "ndcg@5": 0.57181945593961
     }
   }
 }

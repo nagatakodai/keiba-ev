@@ -132,11 +132,14 @@ dataset:
 	$(PY) -m src.dataset build $(if $(LIMIT),--limit $(LIMIT),)
 
 # --- LightGBM lambdarank 学習 (data/models/) ---
-LR ?= 0.05
-ROUNDS ?= 500
-LEAVES ?= 31
+# tuned defaults (Phase 17): lr=0.03 / rounds=800 / leaves=24 / early_stop=100
+# valid ndcg@5 = 0.572 (28 features, 1,634 races, best_iter 102)
+LR ?= 0.03
+ROUNDS ?= 800
+LEAVES ?= 24
+EARLY_STOP ?= 100
 train:
-	$(PY) -m src.train --lr $(LR) --rounds $(ROUNDS) --leaves $(LEAVES)
+	$(PY) -m src.train --lr $(LR) --rounds $(ROUNDS) --leaves $(LEAVES) --early-stop $(EARLY_STOP)
 
 # --- 大量パイプライン: 列挙 → fetch → dataset → train → backtest 一気通貫 ---
 # 使い方: make bulk-pipeline BULK_SINCE=20260101 BULK_UNTIL=20260521
