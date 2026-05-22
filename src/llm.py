@@ -54,12 +54,18 @@ def evaluate_stream(
     ev_max: float | None = None,
     min_prob: float | None = None,
     probs: Probabilities | None = None,
+    aptitudes: dict[int, Any] | None = None,
+    aptitude_top_horses: list[int] | None = None,
 ) -> Iterator[tuple[str, Any]]:
     if not is_available():
         yield ("error", "claude CLI が見つかりません")
         return
 
-    prompt = build_prompt(rd, rows, ev_max=ev_max, min_prob=min_prob, probs=probs)
+    prompt = build_prompt(
+        rd, rows,
+        ev_max=ev_max, min_prob=min_prob, probs=probs,
+        aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
+    )
     cmd = [
         "claude", "-p", prompt,
         "--model", model,
@@ -132,11 +138,14 @@ def evaluate(
     ev_max: float | None = None,
     min_prob: float | None = None,
     probs: Probabilities | None = None,
+    aptitudes: dict[int, Any] | None = None,
+    aptitude_top_horses: list[int] | None = None,
 ) -> str:
     final = ""
     for etype, payload in evaluate_stream(
         rd, rows, model=model, timeout=timeout,
         ev_max=ev_max, min_prob=min_prob, probs=probs,
+        aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
     ):
         if etype == "result":
             final = payload
@@ -154,6 +163,8 @@ def build_refresh_prompt(
     ev_max: float | None = None,
     min_prob: float | None = None,
     probs: Probabilities | None = None,
+    aptitudes: dict[int, Any] | None = None,
+    aptitude_top_horses: list[int] | None = None,
 ) -> str:
     """締切直前用の短い再評価プロンプト。"""
     r = rd.race
@@ -180,6 +191,15 @@ def build_refresh_prompt(
 
     initial_short = (initial_summary or "").strip()[:1800] or "(初回 Claude 評価は実行されませんでした)"
     caps_block = _caps_block(ev_max, min_prob)
+    aptitude_block = _aptitude_block(rd, aptitudes) if aptitudes else ""
+    aptitude_section = (
+        f"\n## 各馬の適性指数 (refresh 時点)\n{aptitude_block}\n"
+        + (
+            f"\n**Plan G の適性ゲート集合: {', '.join(str(n) for n in aptitude_top_horses)}**\n"
+            if aptitude_top_horses else ""
+        )
+        if aptitude_block else ""
+    )
     index_block = _horse_index_block(rd, probs) if probs else ""
     index_section = f"\n## 各馬のツール推定指数 (0-100 / 同レース内相対)\n{index_block}\n" if index_block else ""
     weather_section = _weather_block(rd)
@@ -188,7 +208,7 @@ def build_refresh_prompt(
     return f"""**締切 5 分前の最終確認** ({r.venue_name} {r.schedule_index}日目 {r.race_number}R)
 
 オッズが更新されました。初回分析からの変動を踏まえ、**最終 Plan を確定**してください。
-{weather_section}{caps_block}{index_section}{predictions_section}
+{weather_section}{caps_block}{aptitude_section}{index_section}{predictions_section}
 ## 最新 P×O 上位 20 件
 {top_block}
 
@@ -237,6 +257,8 @@ def evaluate_refresh_stream(
     ev_max: float | None = None,
     min_prob: float | None = None,
     probs: Probabilities | None = None,
+    aptitudes: dict[int, Any] | None = None,
+    aptitude_top_horses: list[int] | None = None,
 ) -> Iterator[tuple[str, Any]]:
     if not is_available():
         yield ("error", "claude CLI が見つかりません")
@@ -245,6 +267,7 @@ def evaluate_refresh_stream(
     prompt = build_refresh_prompt(
         rd, rows, rows_old, initial_summary,
         ev_max=ev_max, min_prob=min_prob, probs=probs,
+        aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
     )
     cmd = [
         "claude", "-p", prompt,
@@ -356,6 +379,31 @@ def _predictions_block(rd: RaceData) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _aptitude_block(rd: RaceData, aptitudes: dict[int, Any]) -> str:
+    """各馬の適性指数 (0-100 / 8 因子内訳 + 主要根拠) を Markdown 表で。
+
+    aptitudes は AptitudeIndex dict[int, AptitudeIndex]。features.py の Layer 1 + 重賞実績
+    を集約した「事前」適性指数で、検索 MCP の補強根拠を加味する前のベースライン。
+    """
+    if not aptitudes:
+        return ""
+    name_by_n = {h.number: h.name for h in rd.race.horses}
+    sorted_items = sorted(aptitudes.items(), key=lambda kv: kv[1].total, reverse=True)
+    lines = [
+        "| 馬 | 馬名 | 総合 | 能力 | 距離 | 末脚 | 馬場 | 状態 | 騎手 | ペース | 重賞 | 主要根拠 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for n, ai in sorted_items:
+        reasons = ", ".join(ai.reasons) if ai.reasons else "-"
+        lines.append(
+            f"| {n} | {name_by_n.get(n, '-')} | {ai.total:.1f} | "
+            f"{ai.ability:.0f} | {ai.distance_fit:.0f} | {ai.last3f:.0f} | "
+            f"{ai.surface_fit:.0f} | {ai.condition:.0f} | {ai.jockey_fit:.0f} | "
+            f"{ai.pace_fit:.0f} | {ai.graded_record:.0f} | {reasons} |"
+        )
+    return "\n".join(lines)
+
+
 def _horse_index_block(rd: RaceData, probs: Probabilities) -> str:
     """フレームワーク確率から各馬の 1/2/3 着指数 (0-100 / 同レース相対) を算出して表化。"""
     if not probs.win:
@@ -407,6 +455,8 @@ def build_prompt(
     ev_max: float | None = None,
     min_prob: float | None = None,
     probs: Probabilities | None = None,
+    aptitudes: dict[int, Any] | None = None,
+    aptitude_top_horses: list[int] | None = None,
 ) -> str:
     r = rd.race
 
@@ -444,14 +494,34 @@ def build_prompt(
     plan_a = _fmt_plan(plan_balanced(rows))
     plan_b = _fmt_plan(plan_max_ev(rows))
     plan_c = _fmt_plan(plan_wide(rows))
+    # Plan G (適性ゲート→EV足切り): aptitude_top_horses が無ければ空。
+    plan_g_picks = []
+    if aptitude_top_horses:
+        from .ev import plan_aptitude_ev
+        plan_g_picks = plan_aptitude_ev(rows, aptitude_top_horses)
+    plan_g = _fmt_plan(plan_g_picks)
 
     caps_block = _caps_block(ev_max, min_prob)
+    aptitude_block = _aptitude_block(rd, aptitudes) if aptitudes else ""
+    aptitude_section = (
+        f"\n## 各馬の適性指数 (0-100 / 同レース内相対 / 8 因子内訳)\n{aptitude_block}\n"
+        "\n(因子: 能力=speed_idx / 距離=距離適性 / 末脚=上がり3F標準化 / "
+        "馬場=同コース経験+show率 / 状態=間隔+馬体変動 / 騎手=継続/乗替 / "
+        "ペース=脚質×想定ペース / 重賞=G1=10×finish倍率,G2=5,G3=3,L=2,OP=1。"
+        "総合は重み付け平均。検索 MCP の補強根拠を加味する前の事前値です。)\n"
+        + (
+            f"\n**Plan G の適性ゲート集合 (top {len(aptitude_top_horses)} 頭): "
+            f"{', '.join(str(n) for n in aptitude_top_horses)}**\n"
+            if aptitude_top_horses else ""
+        )
+        if aptitude_block else ""
+    )
     index_block = _horse_index_block(rd, probs) if probs else ""
     index_section = (
-        f"\n## 各馬のツール推定指数 (0-100 / 同レース内相対)\n{index_block}\n"
+        f"\n## 各馬のツール推定指数 (確率モデル由来 / 0-100 相対)\n{index_block}\n"
         "\n(算出: 1着=win_prob正規化, 2着=place2正規化, 3着=place3正規化, "
         "総合=1着×1.2+2着+3着×0.8 を 3 で割る。"
-        "あくまで framework の事前値で、検索後にあなたが補正する基準値です。)\n"
+        "適性指数とは独立 — こちらは Plackett-Luce 確率モデル経由の指数。)\n"
         if index_block else ""
     )
     weather_section = _weather_block(rd)
@@ -469,7 +539,7 @@ def build_prompt(
 {weather_section}
 ## 出走馬
 {horses_block}
-{interviews_section}{index_section}{predictions_section}
+{interviews_section}{aptitude_section}{index_section}{predictions_section}
 ## P×O 上位 25 件 (デフォルト推定)
 {top_block}
 
@@ -477,22 +547,28 @@ def build_prompt(
 {band_block}
 
 ## ツール側の推奨
-- Plan A (5点バランス): {plan_a}
-- Plan B (最高EV 1-3点): {plan_b}
-- Plan C (広め): {plan_c}
+- Plan A (5点バランス / EV-first): {plan_a}
+- Plan B (最高EV 1-3点 / EV-first): {plan_b}
+- Plan C (広め / EV-first): {plan_c}
+- **Plan G (適性ゲート → EV ≥ {PXO_FLOOR:.2f} 足切り / 競馬独自の当て方優先)**: {plan_g}
 
 ## あなたへの依頼
 
-ツールの確率推定は (1着率 × レーティング) ベースの粗い heuristics です。CLAUDE.md の **「検索 MCP の運用ルール」** に厳格に従い、以下を出力してください。
+ツールは 2 系統の指数を提示しています:
+1. **適性指数** (上記表): 競馬独自の 8 因子 (能力 / 距離 / 末脚 / 馬場 / 状態 / 騎手 / ペース / 重賞) を集約した「事前」指数。**Plan G の根拠**。
+2. **ツール推定指数** (Plackett-Luce 由来): 確率モデルから出た 1着 / 2着 / 3着 / 総合の指数。Plan A/B/C/H の根拠。
+
+CLAUDE.md の **「検索 MCP の運用ルール」** に従って **適性指数と推定指数を検証 / 補正** し、Plan A/B/C/G を比較して最終提案を出してください。
 
 ### 必須手順
 
-1. **検索フェーズ (最大 6 クエリ)**: P×O ≥ 2.0 の上位 8 候補に絡む馬について、以下を Brave / Tavily で調査:
+1. **検索フェーズ (最大 6 クエリ)**: P×O ≥ 2.0 の上位 8 候補に絡む馬 **および 適性 top 6 頭** について、以下を Brave / Tavily で調査:
    - 各馬の直近 5 走の着順詳細 (距離・馬場適性・コース実績)
    - 騎手相性 (主戦騎手 vs 乗り替わり、当該コース成績)
    - 当日の馬場状態 (高速 / 重 / 渋り) と当該馬の馬場適性
    - 厩舎調整 / パドック気配 / 馬体重変化の所感
    - 取消・除外・体調不安の有無 (絡む目を全カットする根拠)
+   - **適性 top 6 のうち補強根拠が薄い馬は減点候補。逆に top 外でも補強根拠が厚ければ追加候補**
 
 2. **各馬の最終指数を算出して提示**: ツール推定指数を基準値に、検索の補強・減点を加味して **最終 1着 / 2着 / 3着 / 総合指数 (0-100)** を全馬について出力。表形式必須:
 
@@ -513,6 +589,7 @@ def build_prompt(
    - **採用** (補強 2 件以上) → Plan A 候補
    - **保留** (補強 1 件のみ) → Plan C 候補
    - **却下** (補強 0 件 or 致命的マイナス) → Plan から外す
+   - **Plan G の補強**: ツールの Plan G picks (適性ゲート集合内 + P×O ≥ 1.02) を見て、検索補強で支持できる目を `final_plan.g` に列挙。EV-first の Plan A/B/C と並列に「適性で選んで EV で確認」の長期戦略として位置付ける。
 
 5. **シナリオ別の的中目**: 2-3 ケース。各シナリオで的中する車券を 1-2-3 形式で。
 
@@ -540,13 +617,14 @@ def build_prompt(
   "final_plan": {{
     "a": ["1-7-4", "5-7-4"],
     "b": ["1-7-4"],
-    "c": ["1-7-4", "5-7-4", "3-2-6"]
+    "c": ["1-7-4", "5-7-4", "3-2-6"],
+    "g": ["1-7-4", "5-7-4"]
   }}
 }}
 ```
 
 - `evidence_by_key`: 検索評価した買い目それぞれの補強根拠数 (count) と根拠 (reasons)。
 - `cuts`: 致命的マイナス (取消・大幅減量・体調不安) で完全除外する目。
-- `final_plan.a/b/c`: あなたが推奨する最終 Plan A/B/C の車券。
+- `final_plan.a/b/c/g`: あなたが推奨する最終 Plan A/B/C/G の車券。`g` はツール側の Plan G picks を検索補強で再評価した結果。
 - 車券キーは必ず `"{{a}}-{{b}}-{{c}}"` 形式 (1-7-4 など、馬番ハイフン区切り)。
 """

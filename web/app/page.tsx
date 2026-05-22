@@ -102,6 +102,7 @@ function PredictionRowItem({
     (hit.plan_a_hit ||
       hit.plan_b_hit ||
       hit.plan_c_hit ||
+      hit.plan_g_hit ||
       hit.plan_h1_hit ||
       hit.plan_h2_hit ||
       hit.plan_f_hit)
@@ -147,6 +148,7 @@ function PredictionRowItem({
             <PlanHitTag plan="A" hit={hit.plan_a_hit} />
             <PlanHitTag plan="B" hit={hit.plan_b_hit} />
             <PlanHitTag plan="C" hit={hit.plan_c_hit} />
+            <PlanHitTag plan="G" hit={!!hit.plan_g_hit} />
             <PlanHitTag plan="H1" hit={!!hit.plan_h1_hit} />
             <PlanHitTag plan="H2" hit={!!hit.plan_h2_hit} />
             {hit.payout > 0 && (

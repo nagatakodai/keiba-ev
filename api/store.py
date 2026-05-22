@@ -26,6 +26,16 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
             d = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        # 適性指数 top 3 (snapshot は既に total 降順で保存)
+        apt = d.get("horse_aptitude") or []
+        top_aptitude = [
+            {
+                "number": a.get("number"),
+                "name": a.get("name"),
+                "total": a.get("total"),
+            }
+            for a in apt[:3]
+        ]
         items.append(
             {
                 "race_id": d.get("race_id") or path.stem,
@@ -44,6 +54,7 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
                 "plan_h1_count": len(d.get("plan_h1_keys") or []),
                 "plan_h2_count": len(d.get("plan_h2_keys") or []),
                 "plan_f_count": len(d.get("plan_f_keys") or []),
+                "top_aptitude": top_aptitude,
                 "has_evidence": bool(d.get("evidence")),
                 "has_result": (RESULT_DIR / f"{path.stem}.json").exists(),
             }
@@ -189,10 +200,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
     )
     races: list[dict[str, Any]] = []
 
-    # Plan A/B/C は EV 枠 ¥8,000、H1/H2 は当て枠 ¥2,000 (analyze.py の hit_budget_ratio=0.2)。
+    # Plan A/B/C/G は EV 枠 ¥8,000、H1/H2 は当て枠 ¥2,000 (analyze.py の hit_budget_ratio=0.2)。
     # Plan F は union 採用なので ¥10,000 全額枠。
     BUDGET_SLOT = {
-        "Plan A": 8000, "Plan B": 8000, "Plan C": 8000,
+        "Plan A": 8000, "Plan B": 8000, "Plan C": 8000, "Plan G": 8000,
         "Plan H1": 2000, "Plan H2": 2000,
         "Plan F": 10000,
     }
@@ -200,6 +211,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         ("Plan A", "plan_a_keys"),
         ("Plan B", "plan_b_keys"),
         ("Plan C", "plan_c_keys"),
+        ("Plan G", "plan_g_keys"),
         ("Plan H1", "plan_h1_keys"),
         ("Plan H2", "plan_h2_keys"),
         ("Plan F", "plan_f_keys"),
@@ -219,7 +231,12 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
 
         race_plan_hits: dict[str, bool] = {}
         for plan_name, field_name in PLAN_KEY_FIELDS:
-            key_list = pred.get(field_name, []) or []
+            key_list_raw = pred.get(field_name)
+            # 古いスナップショットにキー不在 → そのレースはこの plan の集計対象外
+            # (空リスト [] = 「Plan は出したが picks 0」とは区別する)
+            if key_list_raw is None:
+                continue
+            key_list = key_list_raw
             plan_stats[plan_name]["races"] += 1
             plan_stats[plan_name]["total_points"] += len(key_list)
             if key_list:
@@ -245,6 +262,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "plan_a_hit": race_plan_hits.get("Plan A", False),
                 "plan_b_hit": race_plan_hits.get("Plan B", False),
                 "plan_c_hit": race_plan_hits.get("Plan C", False),
+                "plan_g_hit": race_plan_hits.get("Plan G", False),
                 "plan_h1_hit": race_plan_hits.get("Plan H1", False),
                 "plan_h2_hit": race_plan_hits.get("Plan H2", False),
                 "plan_f_hit": race_plan_hits.get("Plan F", False),

@@ -232,7 +232,7 @@ export function Select({
 //   H1 (当て枠: 確率最優先)   → amber/gold (オレンジ寄り。highlight CTA と色相が近い)
 //   H2 (当て枠: 確率 + P×O ≥ 1.0) → violet (青紫)
 //   F (最終買い目 union)      → rose (赤ピンク。実際に賭ける plan として最も目立つ)
-export type PlanLetter = "A" | "B" | "C" | "H1" | "H2" | "F";
+export type PlanLetter = "A" | "B" | "C" | "G" | "H1" | "H2" | "F";
 
 export function planTone(plan: PlanLetter): BadgeTone {
   switch (plan) {
@@ -242,6 +242,8 @@ export function planTone(plan: PlanLetter): BadgeTone {
       return "magenta";
     case "C":
       return "good";
+    case "G":
+      return "magenta";
     case "H1":
       return "warn";
     case "H2":
@@ -259,6 +261,8 @@ export function planAccentClass(plan: PlanLetter): string {
       return "text-fuchsia-700";
     case "C":
       return "text-emerald-700";
+    case "G":
+      return "text-purple-700";
     case "H1":
       return "text-amber-700";
     case "H2":
@@ -276,6 +280,8 @@ export function planBarClass(plan: PlanLetter): string {
       return "bg-fuchsia-500";
     case "C":
       return "bg-emerald-500";
+    case "G":
+      return "bg-purple-500";
     case "H1":
       return "bg-amber-500";
     case "H2":
@@ -288,7 +294,7 @@ export function planBarClass(plan: PlanLetter): string {
 // API レスポンスの "Plan A" / "Plan H1" / "Plan F" など文字列を PlanLetter に。
 // 未知の文字列は null を返す。
 export function parsePlanLabel(label: string): PlanLetter | null {
-  const m = label.match(/Plan\s+(A|B|C|H1|H2|F)/i);
+  const m = label.match(/Plan\s+(A|B|C|G|H1|H2|F)/i);
   if (!m) return null;
   return m[1].toUpperCase() as PlanLetter;
 }

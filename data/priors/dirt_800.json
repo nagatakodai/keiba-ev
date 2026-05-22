@@ -1,0 +1,18 @@
+{
+  "surface": "ダート",
+  "distance_band": 800,
+  "n_horses": 446,
+  "n_horse_races": 518,
+  "win": {
+    "alpha": 2.2059,
+    "beta": 22.6344
+  },
+  "place": {
+    "alpha": 8.7862,
+    "beta": 40.6841
+  },
+  "show": {
+    "alpha": 7.8492,
+    "beta": 21.6137
+  }
+}

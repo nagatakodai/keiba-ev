@@ -12,8 +12,10 @@
 
 const IS_SERVER = typeof window === "undefined";
 
+// keirin ev-api は 8787。本 keiba-ev は完全にずらして 9788 をデフォルトにする
+// (env 未設定で keirin に流れる事故を防ぐ — 2026-05-21 まで起きていた)。
 export const API_BASE = IS_SERVER
-  ? process.env.API_BASE ?? "http://localhost:8787"
+  ? process.env.API_BASE ?? "http://localhost:9788"
   : "";
 
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -56,6 +58,8 @@ export type PredictionSummary = {
   plan_h2_count?: number;
   // 最終買い目 Plan F = A/B/C/H1/H2 の union (backend 2026-05-21 以降)
   plan_f_count?: number;
+  // 適性指数 top 3 (total 降順)。snapshot に horse_aptitude が無いと空配列。
+  top_aptitude?: Array<{ number: number; name: string; total: number }>;
   has_evidence: boolean;
   has_result: boolean;
 };
@@ -69,6 +73,35 @@ export type PredictionRow = {
   tier: "honsen" | "chuana" | "oana" | "minus" | string;
 };
 
+// 各馬の適性指数 (0-100 / 同レース内相対) + 因子内訳 + 主要根拠。
+// total は重み付け平均。snapshot は total 降順で配列化されている。
+export type HorseAptitude = {
+  number: number;
+  name: string;
+  total: number;
+  ability: number;
+  distance_fit: number;
+  last3f: number;
+  surface_fit: number;
+  condition: number;
+  jockey_fit: number;
+  pace_fit: number;
+  graded_record: number;
+  graded_text: string;
+  reasons: string[];
+};
+
+// 馬連 / ワイド / 馬単 / 3連複 の EV row (3連単とは別の bet type)。
+// key 長は bet_type による (2 = 馬連/ワイド/馬単, 3 = 3連複)。
+export type BetEvRow = {
+  key: number[];
+  odds: number;
+  popularity: number;
+  prob: number;
+  px_o: number;
+  tier: string;
+};
+
 export type PredictionDetail = {
   race_id: string;
   saved_at: string;
@@ -80,18 +113,29 @@ export type PredictionDetail = {
   close_at: number | null;
   start_at: number | null;
   rows: PredictionRow[];
+  horse_aptitude?: HorseAptitude[];
+  // 馬連 (quinella) / ワイド (wide) / 馬単 (exacta) / 3連複 (trio) の EV table。
+  // 各 bet type の top 30 行 (P×O 降順)。fetch されていない bet type はキー無し。
+  bet_tables?: Record<string, BetEvRow[]>;
+  // bet_tables の「適性ゲート → EV 足切り」picks (Plan G の bet type 版)。
+  bet_tables_g?: Record<string, BetEvRow[]>;
+  // 適性総合 top N 頭の馬番リスト (Plan G が依拠する集合)。
+  aptitude_top_horses?: number[];
   plan_a_keys: number[][];
   plan_b_keys: number[][];
   plan_c_keys: number[][];
+  // Plan G: 適性 top N 頭の集合 → P×O≥1.02 で足切り (3連単)
+  plan_g_keys?: number[][];
   plan_h1_keys?: number[][];
   plan_h2_keys?: number[][];
-  // 最終買い目 Plan F: A/B/C/H1/H2 を union dedup・EV 降順
+  // 最終買い目 Plan F: A/B/C/G/H1/H2 を union dedup・EV 降順
   plan_f_keys?: number[][];
   evidence?: { evidence_by_key?: Record<string, { count: number; reasons?: string[] }>; cuts?: string[]; final_plan?: unknown };
   evidence_rows?: PredictionRow[];
   evidence_plan_a_keys?: number[][];
   evidence_plan_b_keys?: number[][];
   evidence_plan_c_keys?: number[][];
+  evidence_plan_g_keys?: number[][];
   evidence_plan_h1_keys?: number[][];
   evidence_plan_h2_keys?: number[][];
   evidence_plan_f_keys?: number[][];
@@ -117,6 +161,9 @@ export type WatchAutoStatus = {
     ev_max?: number | null;
     min_prob?: number | null;
     market_blend?: number | null;
+    aptitude_top?: number | null;
+    with_exacta?: boolean;
+    with_trio?: boolean;
   };
   job: JobInfo | null;
 };
@@ -212,6 +259,8 @@ export type CalibrationRaceItem = {
   plan_a_hit: boolean;
   plan_b_hit: boolean;
   plan_c_hit: boolean;
+  // Plan G (適性ゲート→EV足切り) の的中フラグ (backend 2026-05-22 以降)
+  plan_g_hit?: boolean;
   // 当て枠の的中フラグ (backend 2026-05-20 以降)。古いレースには欠落する可能性。
   plan_h1_hit?: boolean;
   plan_h2_hit?: boolean;
@@ -249,6 +298,9 @@ export const api = {
     ev_max?: number | null;
     min_prob?: number | null;
     market_blend?: number | null;
+    aptitude_top?: number | null;
+    with_exacta?: boolean;
+    with_trio?: boolean;
   }) =>
     jsonFetch<JobInfo>(`/api/analyze`, { method: "POST", body: JSON.stringify(body) }),
 
@@ -265,6 +317,9 @@ export const api = {
     ev_max?: number | null;
     min_prob?: number | null;
     market_blend?: number | null;
+    aptitude_top?: number | null;
+    with_exacta?: boolean;
+    with_trio?: boolean;
   }) =>
     jsonFetch<{ running: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

@@ -1,0 +1,276 @@
+{
+  "n_races_used": 1356,
+  "n_buckets": 15,
+  "buckets": [
+    {
+      "surface": "ダート",
+      "distance_band": 800,
+      "win": {
+        "alpha": 2.2059,
+        "beta": 22.6344
+      },
+      "place": {
+        "alpha": 8.7862,
+        "beta": 40.6841
+      },
+      "show": {
+        "alpha": 7.8492,
+        "beta": 21.6137
+      },
+      "n_horses": 446,
+      "n_horse_races": 518
+    },
+    {
+      "surface": "ダート",
+      "distance_band": 1000,
+      "win": {
+        "alpha": 1.3913,
+        "beta": 14.6087
+      },
+      "place": {
+        "alpha": 2.7826,
+        "beta": 13.2174
+      },
+      "show": {
+        "alpha": 4.1739,
+        "beta": 11.8261
+      },
+      "n_horses": 352,
+      "n_horse_races": 391
+    },
+    {
+      "surface": "ダート",
+      "distance_band": 1200,
+      "win": {
+        "alpha": 4.137,
+        "beta": 45.1293
+      },
+      "place": {
+        "alpha": 4.7047,
+        "beta": 23.3087
+      },
+      "show": {
+        "alpha": 7.4984,
+        "beta": 22.2667
+      },
+      "n_horses": 2036,
+      "n_horse_races": 2346
+    },
+    {
+      "surface": "ダート",
+      "distance_band": 1400,
+      "win": {
+        "alpha": 4.5694,
+        "beta": 44.0783
+      },
+      "place": {
+        "alpha": 5.6297,
+        "beta": 24.3385
+      },
+      "show": {
+        "alpha": 6.497,
+        "beta": 16.5597
+      },
+      "n_horses": 3491,
+      "n_horse_races": 4216
+    },
+    {
+      "surface": "ダート",
+      "distance_band": 1600,
+      "win": {
+        "alpha": 1.4245,
+        "beta": 14.4998
+      },
+      "place": {
+        "alpha": 2.3174,
+        "beta": 10.6354
+      },
+      "show": {
+        "alpha": 3.5085,
+        "beta": 9.5649
+      },
+      "n_horses": 2321,
+      "n_horse_races": 3130
+    },
+    {
+      "surface": "ダート",
+      "distance_band": 1800,
+      "win": {
+        "alpha": 16.8104,
+        "beta": 195.8922
+      },
+      "place": {
+        "alpha": 25.0242,
+        "beta": 133.2922
+      },
+      "show": {
+        "alpha": 14.9048,
+        "beta": 47.959
+      },
+      "n_horses": 1110,
+      "n_horse_races": 1240
+    },
+    {
+      "surface": "ダート",
+      "distance_band": 2000,
+      "win": {
+        "alpha": 4.2026,
+        "beta": 47.4489
+      },
+      "place": {
+        "alpha": 10.1657,
+        "beta": 52.3042
+      },
+      "show": {
+        "alpha": 28.6658,
+        "beta": 88.7715
+      },
+      "n_horses": 360,
+      "n_horse_races": 381
+    },
+    {
+      "surface": "芝",
+      "distance_band": 1200,
+      "win": {
+        "alpha": 0.2488,
+        "beta": 3.7512
+      },
+      "place": {
+        "alpha": 0.4976,
+        "beta": 3.5024
+      },
+      "show": {
+        "alpha": 0.7464,
+        "beta": 3.2536
+      },
+      "n_horses": 208,
+      "n_horse_races": 209
+    },
+    {
+      "surface": "芝",
+      "distance_band": 1400,
+      "win": {
+        "alpha": 0.2707,
+        "beta": 3.7293
+      },
+      "place": {
+        "alpha": 2.1654,
+        "beta": 13.8346
+      },
+      "show": {
+        "alpha": 0.812,
+        "beta": 3.188
+      },
+      "n_horses": 131,
+      "n_horse_races": 133
+    },
+    {
+      "surface": "芝",
+      "distance_band": 1600,
+      "win": {
+        "alpha": 1.0711,
+        "beta": 14.9289
+      },
+      "place": {
+        "alpha": 6.1538,
+        "beta": 39.8075
+      },
+      "show": {
+        "alpha": 7.9641,
+        "beta": 31.6907
+      },
+      "n_horses": 450,
+      "n_horse_races": 478
+    },
+    {
+      "surface": "芝",
+      "distance_band": 1800,
+      "win": {
+        "alpha": 1.1789,
+        "beta": 14.8211
+      },
+      "place": {
+        "alpha": 2.3579,
+        "beta": 13.6421
+      },
+      "show": {
+        "alpha": 3.5368,
+        "beta": 12.4632
+      },
+      "n_horses": 188,
+      "n_horse_races": 190
+    },
+    {
+      "surface": "芝",
+      "distance_band": 2000,
+      "win": {
+        "alpha": 1.0884,
+        "beta": 14.9116
+      },
+      "place": {
+        "alpha": 2.1769,
+        "beta": 13.8231
+      },
+      "show": {
+        "alpha": 3.2653,
+        "beta": 12.7347
+      },
+      "n_horses": 429,
+      "n_horse_races": 441
+    },
+    {
+      "surface": "芝",
+      "distance_band": 2200,
+      "win": {
+        "alpha": 0.2435,
+        "beta": 3.7565
+      },
+      "place": {
+        "alpha": 0.487,
+        "beta": 3.513
+      },
+      "show": {
+        "alpha": 2.9217,
+        "beta": 13.0783
+      },
+      "n_horses": 113,
+      "n_horse_races": 115
+    },
+    {
+      "surface": "芝",
+      "distance_band": 2400,
+      "win": {
+        "alpha": 1.2698,
+        "beta": 14.7302
+      },
+      "place": {
+        "alpha": 2.5397,
+        "beta": 13.4603
+      },
+      "show": {
+        "alpha": 3.8095,
+        "beta": 12.1905
+      },
+      "n_horses": 61,
+      "n_horse_races": 63
+    },
+    {
+      "surface": "障害",
+      "distance_band": 2800,
+      "win": {
+        "alpha": 1.3176,
+        "beta": 14.6824
+      },
+      "place": {
+        "alpha": 2.6353,
+        "beta": 13.3647
+      },
+      "show": {
+        "alpha": 3.9529,
+        "beta": 12.0471
+      },
+      "n_horses": 84,
+      "n_horse_races": 85
+    }
+  ]
+}

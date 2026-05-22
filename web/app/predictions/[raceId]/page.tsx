@@ -1,6 +1,12 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { api, type PredictionDetail, type PredictionRow } from "@/lib/api";
+import {
+  api,
+  type BetEvRow,
+  type HorseAptitude,
+  type PredictionDetail,
+  type PredictionRow,
+} from "@/lib/api";
 import {
   Badge,
   type BadgeTone,
@@ -99,6 +105,7 @@ export default async function PredictionDetailPage({
           { plan: "A", keys: d.plan_a_keys },
           { plan: "B", keys: d.plan_b_keys },
           { plan: "C", keys: d.plan_c_keys },
+          { plan: "G", keys: d.plan_g_keys },
           { plan: "H1", keys: d.plan_h1_keys },
           { plan: "H2", keys: d.plan_h2_keys },
         ];
@@ -153,6 +160,18 @@ export default async function PredictionDetailPage({
         );
       })()}
 
+      {d.horse_aptitude && d.horse_aptitude.length > 0 && (
+        <AptitudeCard items={d.horse_aptitude} finish={finish} />
+      )}
+
+      {d.bet_tables && Object.keys(d.bet_tables).length > 0 && (
+        <BetTablesCard
+          tables={d.bet_tables}
+          tablesG={d.bet_tables_g}
+          finish={finish}
+        />
+      )}
+
       {d.evidence && d.evidence_rows && (() => {
         const topEvRows = [...d.evidence_rows]
           .sort((a, b) => b.px_o - a.px_o)
@@ -205,6 +224,15 @@ export default async function PredictionDetailPage({
       <PlansCard plan="A" subtitle="EV 枠 / 5点バランス" keys={d.plan_a_keys} rows={d.rows} finish={finish} />
       <PlansCard plan="B" subtitle="EV 枠 / 最高 EV 集中" keys={d.plan_b_keys} rows={d.rows} finish={finish} />
       <PlansCard plan="C" subtitle="EV 枠 / 広め 保険" keys={d.plan_c_keys} rows={d.rows} finish={finish} />
+      {d.plan_g_keys && d.plan_g_keys.length > 0 && (
+        <PlansCard
+          plan="G"
+          subtitle={`適性ゲート (top ${d.aptitude_top_horses?.length ?? "N"} 頭 → P×O≥1.02) / EV は最終フィルタ`}
+          keys={d.plan_g_keys}
+          rows={d.rows}
+          finish={finish}
+        />
+      )}
       {d.plan_h1_keys && d.plan_h1_keys.length > 0 && (
         <PlansCard plan="H1" subtitle="当て枠 / 確率最優先" keys={d.plan_h1_keys} rows={d.rows} finish={finish} />
       )}
@@ -351,6 +379,310 @@ function ProbRankingTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+function totalTone(total: number): BadgeTone {
+  if (total >= 75) return "good";
+  if (total >= 60) return "warn";
+  if (total >= 45) return "default";
+  return "muted";
+}
+
+// 因子値 (0-100) を 0-5 段階の濃淡セルで表示。0 は dim。
+function factorCellClass(v: number): string {
+  if (v <= 0) return "text-(--color-muted)";
+  if (v >= 85) return "text-(--color-good) font-bold";
+  if (v >= 70) return "text-(--color-good)";
+  if (v >= 50) return "";
+  return "text-(--color-muted)";
+}
+
+function AptitudeCard({
+  items,
+  finish,
+}: {
+  items: HorseAptitude[];
+  finish?: number[];
+}) {
+  const finishSet = new Set(finish ?? []);
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <span>適性指数</span>
+          <span className="text-xs text-(--color-muted) font-normal">
+            各馬の相対適性 0-100 (同レース内 max=100) · 総合 = 8 因子重み付け平均
+          </span>
+        </span>
+      }
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabnum table-zebra">
+          <thead className="text-left text-(--color-muted) text-xs">
+            <tr className="border-b border-(--color-line)">
+              <th className="py-2 pr-3 text-right">馬</th>
+              <th className="py-2 pr-3">馬名</th>
+              <th className="py-2 pr-3 text-right">総合</th>
+              <th className="py-2 pr-2 text-right" title="speed_idx 重み付け">能力</th>
+              <th className="py-2 pr-2 text-right" title="距離 × surface 条件付き shrinkage 勝率 + 経験">距離</th>
+              <th className="py-2 pr-2 text-right" title="上がり 3F 距離標準化">末脚</th>
+              <th className="py-2 pr-2 text-right" title="同 surface + 当該場経験 + show率">馬場</th>
+              <th className="py-2 pr-2 text-right" title="間隔 + 馬体重変動">状態</th>
+              <th className="py-2 pr-2 text-right" title="騎手継続 / 乗替り">騎手</th>
+              <th className="py-2 pr-2 text-right" title="脚質×想定ペース">ペース</th>
+              <th className="py-2 pr-2 text-right" title="G1=10 / G2=5 / G3=3 / L=2 / OP=1 × finish 倍率">重賞</th>
+              <th className="py-2 pr-3">主要根拠</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((a) => {
+              const hit = finishSet.has(a.number);
+              return (
+                <tr
+                  key={a.number}
+                  className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                >
+                  <td className="py-1.5 pr-3 text-right font-bold">{a.number}</td>
+                  <td className="py-1.5 pr-3">
+                    {a.name}
+                    {hit && finish && (
+                      <span className="ml-2 text-(--color-good) text-xs">
+                        ●{finish.indexOf(a.number) + 1}着
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right">
+                    <Badge tone={totalTone(a.total)}>{a.total.toFixed(1)}</Badge>
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.ability)}`}>
+                    {a.ability.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.distance_fit)}`}>
+                    {a.distance_fit.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.last3f)}`}>
+                    {a.last3f.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.surface_fit)}`}>
+                    {a.surface_fit.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.condition)}`}>
+                    {a.condition.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.jockey_fit)}`}>
+                    {a.jockey_fit.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.pace_fit)}`}>
+                    {a.pace_fit.toFixed(0)}
+                  </td>
+                  <td className={`py-1.5 pr-2 text-right ${factorCellClass(a.graded_record)}`}>
+                    {a.graded_record > 0 ? a.graded_record.toFixed(0) : "—"}
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    <div className="flex flex-wrap gap-1">
+                      {a.reasons.length === 0 ? (
+                        <span className="text-(--color-muted) text-xs">—</span>
+                      ) : (
+                        a.reasons.map((r) => (
+                          <Badge key={r} tone="muted">{r}</Badge>
+                        ))
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-3 text-xs text-(--color-muted)">
+        注: 検索 MCP の補強根拠は含まない事前指数。LLM 評価後の補正は別。
+      </p>
+    </Card>
+  );
+}
+
+const BET_TYPE_JP: Record<string, string> = {
+  win: "単勝",
+  place: "複勝",
+  quinella: "馬連",
+  wide: "ワイド",
+  exacta: "馬単",
+  trio: "3連複",
+};
+
+// finish 着順から該当 bet type のキー (馬連/馬単/3連複/単勝) を生成。
+// 単勝は 1着馬、馬連/ワイドは top2 (順不同)、馬単は top2 (順序あり)、3連複は top3 (順不同)。
+// 複勝・ワイドは any-match なので null を返し、対応する hits 関数を別途使う。
+function finishKeyForBetType(bt: string, finish?: number[]): string | null {
+  if (!finish || finish.length < 1) return null;
+  if (bt === "win") return String(finish[0]);
+  if (finish.length < 2) return null;
+  if (bt === "exacta") return finish.slice(0, 2).join("-");
+  if (bt === "quinella") {
+    const [a, b] = [...finish.slice(0, 2)].sort((x, y) => x - y);
+    return `${a}-${b}`;
+  }
+  if (bt === "place" || bt === "wide") {
+    // 単一/2馬の「top3 含み」判定は finishKeyForBetType の役割外。
+    // BetTable 側で placeHits / wideHits を使って判定する。
+    return null;
+  }
+  if (bt === "trio") {
+    if (finish.length < 3) return null;
+    const [a, b, c] = [...finish.slice(0, 3)].sort((x, y) => x - y);
+    return `${a}-${b}-${c}`;
+  }
+  return null;
+}
+
+// 複勝専用: 「該当 key (1 馬) が finish の top3 に入っているか」を判定。
+function placeHits(key: number[], finish?: number[]): boolean {
+  if (!finish || finish.length < 3 || key.length !== 1) return false;
+  return finish.slice(0, 3).includes(key[0]);
+}
+
+// ワイド専用: 「該当 key (2 馬) が finish の top3 のうち 2 頭を含むか」を判定。
+function wideHits(key: number[], finish?: number[]): boolean {
+  if (!finish || finish.length < 3) return false;
+  const top3 = new Set(finish.slice(0, 3));
+  return key.every((k) => top3.has(k));
+}
+
+function BetTable({
+  bt,
+  rows,
+  rowsG,
+  finish,
+}: {
+  bt: string;
+  rows: BetEvRow[];
+  rowsG?: BetEvRow[];
+  finish?: number[];
+}) {
+  if (rows.length === 0) return null;
+  const finishKey = finishKeyForBetType(bt, finish);
+  const top = rows.slice(0, 10);
+  const totalProb = top.reduce((s, r) => s + r.prob, 0);
+  const avgPxo = top.reduce((s, r) => s + r.px_o, 0) / top.length;
+  const gKeySet = new Set((rowsG ?? []).map((r) => r.key.join("-")));
+  return (
+    <div className="mb-4">
+      <div className="text-xs text-(--color-muted) mb-1 tabnum">
+        <span className="font-bold text-(--color-foreground) mr-2">
+          {BET_TYPE_JP[bt] ?? bt}
+        </span>
+        top10 合計推定的中率 {fmtPct(totalProb, 2)} · 平均 P×O {avgPxo.toFixed(2)}
+        {rowsG && rowsG.length > 0 && (
+          <span className={`ml-2 font-bold ${planAccentClass("G")}`}>
+            · Plan G {rowsG.length}点
+          </span>
+        )}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabnum table-zebra">
+          <thead className="text-left text-(--color-muted) text-xs">
+            <tr className="border-b border-(--color-line)">
+              <th className="py-2 pr-3 text-right">#</th>
+              <th className="py-2 pr-3">買い目</th>
+              <th className="py-2 pr-3 text-right">人気</th>
+              <th className="py-2 pr-3 text-right">オッズ</th>
+              <th className="py-2 pr-3 text-right">推定 P</th>
+              <th className="py-2 pr-3 text-right">P×O</th>
+              <th className="py-2 pr-3">帯</th>
+              <th className="py-2 pr-3">適性G</th>
+            </tr>
+          </thead>
+          <tbody>
+            {top.map((r, i) => {
+              const k = r.key.join("-");
+              const hit =
+                bt === "wide"
+                  ? wideHits(r.key, finish)
+                  : bt === "place"
+                    ? placeHits(r.key, finish)
+                    : finishKey === k;
+              const inG = gKeySet.has(k);
+              return (
+                <tr
+                  key={k}
+                  className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                >
+                  <td className="py-1.5 pr-3 text-right text-(--color-muted)">
+                    {i + 1}
+                  </td>
+                  <td className="py-1.5 pr-3 font-medium mono">
+                    {k}
+                    {hit && <span className="ml-2 text-(--color-good)">●</span>}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right">
+                    {r.popularity ? r.popularity : "—"}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right">{r.odds.toFixed(1)}</td>
+                  <td className="py-1.5 pr-3 text-right">{fmtPct(r.prob, 2)}</td>
+                  <td className="py-1.5 pr-3 text-right">
+                    <Badge tone={pxoTone(r.px_o)}>{r.px_o.toFixed(2)}</Badge>
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    <Badge tone={tierTone(r.tier)}>{tierLabel(r.tier)}</Badge>
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    {inG ? (
+                      <Badge tone={planTone("G")}>G</Badge>
+                    ) : (
+                      <span className="text-(--color-muted) text-xs">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function BetTablesCard({
+  tables,
+  tablesG,
+  finish,
+}: {
+  tables: Record<string, BetEvRow[]>;
+  tablesG?: Record<string, BetEvRow[]>;
+  finish?: number[];
+}) {
+  // bet type の表示順: リスク低 → 高 (単勝 → 複勝 → 馬連 → ワイド → 馬単 → 3 連複)
+  const order = ["win", "place", "quinella", "wide", "exacta", "trio"];
+  const present = order.filter((bt) => (tables[bt]?.length ?? 0) > 0);
+  if (present.length === 0) return null;
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <span>他の bet type 比較</span>
+          <span className="text-xs text-(--color-muted) font-normal">
+            3 連単以外 (単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複) の P×O 上位 10 · 同じ確率モデル
+          </span>
+        </span>
+      }
+    >
+      {present.map((bt) => (
+        <BetTable
+          key={bt}
+          bt={bt}
+          rows={tables[bt]}
+          rowsG={tablesG?.[bt]}
+          finish={finish}
+        />
+      ))}
+      <p className="text-xs text-(--color-muted) mt-2">
+        注: 確率モデルは 3 連単と共通 (Plackett-Luce 連鎖)。低リスク bet type は
+        控除率が低い (単複 20% / 馬連 22.5% / 3 連単 27.5%) ぶん +EV が残りやすい。
+        複勝オッズは下限 (fuku_min) を採用 (実払戻が下限以上で確定する保守値)。
+      </p>
+    </Card>
   );
 }
 

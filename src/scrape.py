@@ -1,17 +1,22 @@
-"""netkeiba.com から HTML を取得する。
+"""netkeiba.com (中央 / 地方) から HTML を取得する。
 
-netkeiba は WINTICKET と違い __PRELOADED_STATE__ を埋め込んでいない (sevser-side HTML)。
+netkeiba は WINTICKET と違い __PRELOADED_STATE__ を埋め込んでいない (server-side HTML)。
 そのため Playwright で render 後の HTML を取り、BeautifulSoup でパースする方針。
 
 主要 URL:
-  - 出馬表    https://race.netkeiba.com/race/shutuba.html?race_id=YYYYMMDDPP00RR
-  - オッズ    https://race.netkeiba.com/odds/index.html?type=b8&race_id=...   (3 連単)
-  - 結果      https://race.netkeiba.com/race/result.html?race_id=...
-  - 開催一覧  https://race.netkeiba.com/top/race_list.html?kaisai_date=YYYYMMDD
+  - 出馬表    https://race.netkeiba.com/race/shutuba.html?race_id=...     (JRA)
+              https://nar.netkeiba.com/race/shutuba.html?race_id=...      (NAR)
+  - オッズ    .../odds/index.html?type=b8&race_id=...                     (画面)
+              .../odds/odds_get_form.html?type=b8&race_id=...&jiku=N      (AJAX 実体)
+  - 結果      .../race/result.html?race_id=...
+  - 開催一覧  .../top/race_list.html?kaisai_date=YYYYMMDD
 
-race_id 形式:
-  YYYY (年) + MMDD (開催日) + PP (場コード 2桁 01-10) + 00 + RR (R 数 2桁)
-  例: 202605210601 = 2026/05/21 阪神 (06) 1R
+race_id 形式 (12 桁、JRA と NAR で意味が違う):
+  JRA: YYYY(4) + 場(2) + 開催回(2) + 開催日(2) + R(2)
+       例 202605020711 = 2026 東京(05) 第2回 7日目 11R
+  NAR: YYYY(4) + 場(2) + MM(2) + DD(2) + R(2)
+       例 202644052111 = 2026 大井(44) 05月21日 11R
+  どちらも 4-5 文字目が場コード。01-10 が JRA、30+ が NAR。
 """
 from __future__ import annotations
 
@@ -27,6 +32,32 @@ UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/127.0.0.0 Safari/537.36"
 )
+
+JRA_HOST = "race.netkeiba.com"
+NAR_HOST = "nar.netkeiba.com"
+
+# JRA 場コード: 01-10 (札幌〜小倉)
+JRA_VENUE_CODES = {f"{i:02d}" for i in range(1, 11)}
+
+
+def is_nar_race_id(race_id: str) -> bool:
+    """race_id の場コード (4-5 文字目) から NAR/JRA を判定。
+
+    JRA = 01-10、それ以外 (30+ など) は NAR 扱い。
+    """
+    if not race_id or len(race_id) < 6:
+        return False
+    return race_id[4:6] not in JRA_VENUE_CODES
+
+
+def _host_for(race_id: str | None, *, nar: bool | None = None) -> str:
+    if nar is True:
+        return NAR_HOST
+    if nar is False:
+        return JRA_HOST
+    if race_id and is_nar_race_id(race_id):
+        return NAR_HOST
+    return JRA_HOST
 
 
 def fetch_html(url: str, *, timeout_ms: int = 60_000, settle_ms: int = 4_000) -> str:
@@ -76,20 +107,154 @@ def extract_race_id(url: str) -> str | None:
 
 
 def shutuba_url(race_id: str) -> str:
-    return f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
+    return f"https://{_host_for(race_id)}/race/shutuba.html?race_id={race_id}"
+
+
+def shutuba_past_url(race_id: str) -> str:
+    """馬柱 (各馬の直近 5 走) ページ URL。"""
+    return f"https://{_host_for(race_id)}/race/shutuba_past.html?race_id={race_id}"
+
+
+def odds_index_url(race_id: str, type_: str = "b8") -> str:
+    """オッズ画面 URL。type は b1=単複 / b3=馬連 / b4=ワイド / b5=馬単 / b6=3連複 / b8=3連単 / b9=枠連。"""
+    return f"https://{_host_for(race_id)}/odds/index.html?type={type_}&race_id={race_id}"
 
 
 def odds_trifecta_url(race_id: str) -> str:
-    """3 連単 (type=b8)。"""
-    return f"https://race.netkeiba.com/odds/index.html?type=b8&race_id={race_id}"
+    """3 連単 (type=b8) の表示画面 URL。互換のため残置。"""
+    return odds_index_url(race_id, "b8")
+
+
+def odds_get_form_url(race_id: str, type_: str, *, jiku: int | None = None, housiki: str | None = None) -> str:
+    """AJAX で各オッズ種の生 HTML を返す内部エンドポイント。
+
+    type:
+      b1 単複 / b3 馬連 / b4 ワイド / b5 馬単 / b6 3 連複 / b8 3 連単 / b9 枠連
+    jiku:
+      b8 (3 連単) で軸馬番を指定。指定がないと 1 着馬 1 の view のみ。
+      b3/b4/b5/b6 でも一部のレースで axis 指定が効く (効かない場合は無視される)。
+    """
+    url = f"https://{_host_for(race_id)}/odds/odds_get_form.html?type={type_}&race_id={race_id}"
+    if jiku is not None:
+        url += f"&jiku={jiku}"
+    if housiki:
+        url += f"&housiki={housiki}"
+    return url
 
 
 def result_url(race_id: str) -> str:
-    return f"https://race.netkeiba.com/race/result.html?race_id={race_id}"
+    return f"https://{_host_for(race_id)}/race/result.html?race_id={race_id}"
 
 
-def race_list_url(date_yyyymmdd: str) -> str:
-    return f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date_yyyymmdd}"
+def race_list_url(date_yyyymmdd: str, *, nar: bool = False) -> str:
+    """開催一覧 URL。NAR/JRA はホストが違うので nar=True で切替。"""
+    host = NAR_HOST if nar else JRA_HOST
+    return f"https://{host}/top/race_list.html?kaisai_date={date_yyyymmdd}"
+
+
+def fetch_trifecta_full(
+    race_id: str,
+    *,
+    n_horses: int,
+    settle_ms: int = 1500,
+    timeout_ms: int = 60_000,
+) -> list[str]:
+    """3 連単オッズを全 1 着馬ぶん AJAX 取得して HTML 配列で返す。
+
+    呼び出し側で `parse_trifecta_html_list` に渡して TrifectaOdds に変換する。
+    n_horses は出走頭数 (取消含まず)。1..n_horses 全てに対して fetch する。
+    """
+    htmls: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        ctx = browser.new_context(
+            user_agent=UA,
+            locale="ja-JP",
+            viewport={"width": 1280, "height": 1800},
+        )
+        page = ctx.new_page()
+        for jiku in range(1, n_horses + 1):
+            url = odds_get_form_url(race_id, "b8", jiku=jiku)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(settle_ms)
+            htmls.append(page.content())
+        browser.close()
+    return htmls
+
+
+def fetch_odds_simple(
+    race_id: str,
+    type_: str,
+    *,
+    settle_ms: int = 1500,
+    timeout_ms: int = 60_000,
+) -> str:
+    """1 fetch で全買い目が取れる odds page (b1 単複 / b3 馬連 / b4 ワイド) を取得。
+
+    馬連・ワイドは netkeiba のデフォルト view で全 (i,j) ペアが表示される前提。
+    馬単 (b5) / 3 連複 (b6) / 3 連単 (b8) は jiku 軸でビューが変わるため `fetch_odds_per_jiku` を使う。
+    """
+    if type_ not in ("b1", "b3", "b4"):
+        raise ValueError(
+            f"fetch_odds_simple は b1/b3/b4 のみ対応。{type_} は fetch_odds_per_jiku を使う。"
+        )
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        ctx = browser.new_context(
+            user_agent=UA,
+            locale="ja-JP",
+            viewport={"width": 1280, "height": 1800},
+        )
+        page = ctx.new_page()
+        url = odds_get_form_url(race_id, type_)
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(settle_ms)
+        html = page.content()
+        browser.close()
+    return html
+
+
+def fetch_odds_per_jiku(
+    race_id: str,
+    type_: str,
+    *,
+    n_horses: int,
+    settle_ms: int = 1500,
+    timeout_ms: int = 60_000,
+) -> list[str]:
+    """jiku iteration が必要な odds page (b5 馬単 / b6 3 連複 / b8 3 連単) を全軸馬ぶん取得。
+
+    馬単は jiku=1 着馬、3 連複は jiku=軸馬 1 頭、3 連単は jiku=1 着馬。
+    """
+    if type_ not in ("b5", "b6", "b8"):
+        raise ValueError(
+            f"fetch_odds_per_jiku は b5/b6/b8 のみ対応。{type_} は fetch_odds_simple を使う。"
+        )
+    htmls: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        ctx = browser.new_context(
+            user_agent=UA,
+            locale="ja-JP",
+            viewport={"width": 1280, "height": 1800},
+        )
+        page = ctx.new_page()
+        for jiku in range(1, n_horses + 1):
+            url = odds_get_form_url(race_id, type_, jiku=jiku)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(settle_ms)
+            htmls.append(page.content())
+        browser.close()
+    return htmls
 
 
 # --- 旧 WINTICKET 互換シム (テストや analyze CLI の --state からの読み込みを壊さないため) ---

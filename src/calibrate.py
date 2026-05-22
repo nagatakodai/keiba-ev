@@ -65,13 +65,21 @@ def main(
                 tier_stats[tier]["hits"] += 1
                 winning_tier = tier
 
-        # Plan 別集計
+        # Plan 別集計 (G/H1/H2/F も含む。古いスナップショットにキーが無い場合はスキップ)
         race_plan_results = {}
-        for plan_name, key_list in (
+        plan_specs = (
             ("Plan A", pred.get("plan_a_keys", [])),
             ("Plan B", pred.get("plan_b_keys", [])),
             ("Plan C", pred.get("plan_c_keys", [])),
-        ):
+            ("Plan G", pred.get("plan_g_keys")),
+            ("Plan H1", pred.get("plan_h1_keys")),
+            ("Plan H2", pred.get("plan_h2_keys")),
+            ("Plan F", pred.get("plan_f_keys")),
+        )
+        for plan_name, key_list in plan_specs:
+            if key_list is None:
+                # 旧スナップショットにキー不在 → そのレースはこの plan の集計対象外
+                continue
             plan_stats[plan_name]["races"] += 1
             plan_stats[plan_name]["total_points"] += len(key_list)
             keys_set = {tuple(k) for k in key_list}
@@ -91,6 +99,10 @@ def main(
             "plan_a_hit": race_plan_results.get("Plan A", False),
             "plan_b_hit": race_plan_results.get("Plan B", False),
             "plan_c_hit": race_plan_results.get("Plan C", False),
+            "plan_g_hit": race_plan_results.get("Plan G", False),
+            "plan_h1_hit": race_plan_results.get("Plan H1", False),
+            "plan_h2_hit": race_plan_results.get("Plan H2", False),
+            "plan_f_hit": race_plan_results.get("Plan F", False),
         })
 
     _print_tier_table(tier_stats)
@@ -150,7 +162,7 @@ def _print_plan_table(plan_stats: dict[str, dict], point_cost: int) -> None:
     tbl.add_column("累計賭金", justify="right")
     tbl.add_column("累計払戻", justify="right")
     tbl.add_column("ROI")
-    for name in ("Plan A", "Plan B", "Plan C"):
+    for name in ("Plan A", "Plan B", "Plan C", "Plan G", "Plan H1", "Plan H2", "Plan F"):
         s = plan_stats[name]
         if s["races"] == 0:
             continue
@@ -187,6 +199,10 @@ def _print_per_race(records: list[dict]) -> None:
     tbl.add_column("A")
     tbl.add_column("B")
     tbl.add_column("C")
+    tbl.add_column("G")
+    tbl.add_column("H1")
+    tbl.add_column("H2")
+    tbl.add_column("F")
     for r in records:
         f = r["finish"]
         tbl.add_row(
@@ -198,6 +214,10 @@ def _print_per_race(records: list[dict]) -> None:
             "[green]✓[/green]" if r["plan_a_hit"] else "[dim]·[/dim]",
             "[green]✓[/green]" if r["plan_b_hit"] else "[dim]·[/dim]",
             "[green]✓[/green]" if r["plan_c_hit"] else "[dim]·[/dim]",
+            "[green]✓[/green]" if r["plan_g_hit"] else "[dim]·[/dim]",
+            "[green]✓[/green]" if r["plan_h1_hit"] else "[dim]·[/dim]",
+            "[green]✓[/green]" if r["plan_h2_hit"] else "[dim]·[/dim]",
+            "[green]✓[/green]" if r["plan_f_hit"] else "[dim]·[/dim]",
         )
     console.print(tbl)
 

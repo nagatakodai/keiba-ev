@@ -1,0 +1,18 @@
+{
+  "surface": "芝",
+  "distance_band": 2400,
+  "n_horses": 61,
+  "n_horse_races": 63,
+  "win": {
+    "alpha": 1.2698,
+    "beta": 14.7302
+  },
+  "place": {
+    "alpha": 2.5397,
+    "beta": 13.4603
+  },
+  "show": {
+    "alpha": 3.8095,
+    "beta": 12.1905
+  }
+}

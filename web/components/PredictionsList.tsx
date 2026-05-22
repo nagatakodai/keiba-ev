@@ -121,6 +121,7 @@ export function PredictionsList({
                   (hit.plan_a_hit ||
                     hit.plan_b_hit ||
                     hit.plan_c_hit ||
+                    hit.plan_g_hit ||
                     hit.plan_h1_hit ||
                     hit.plan_h2_hit ||
                     hit.plan_f_hit)
@@ -176,6 +177,7 @@ export function PredictionsList({
                           <PlanHitTag plan="A" hit={hit.plan_a_hit} />
                           <PlanHitTag plan="B" hit={hit.plan_b_hit} />
                           <PlanHitTag plan="C" hit={hit.plan_c_hit} />
+                          <PlanHitTag plan="G" hit={!!hit.plan_g_hit} />
                           <PlanHitTag plan="H1" hit={!!hit.plan_h1_hit} />
                           <PlanHitTag plan="H2" hit={!!hit.plan_h2_hit} />
                           {hit.payout > 0 && (
@@ -212,6 +214,24 @@ export function PredictionsList({
                               H2·{p.plan_h2_count}
                             </span>
                           )}
+                        </div>
+                      )}
+                      {p.top_aptitude && p.top_aptitude.length > 0 && (
+                        <div className="text-[11px] tabnum mt-0.5 flex flex-wrap gap-x-2">
+                          <span className="text-(--color-muted) font-bold tracking-wider uppercase">
+                            適性
+                          </span>
+                          {p.top_aptitude.map((a, i) => (
+                            <span key={a.number} className={i === 0 ? "font-bold" : ""}>
+                              <span className="text-(--color-muted)">
+                                {i === 0 ? "◎" : i === 1 ? "○" : "▲"}
+                              </span>
+                              {a.number} {a.name}
+                              <span className="text-(--color-muted) ml-0.5">
+                                ({a.total.toFixed(0)})
+                              </span>
+                            </span>
+                          ))}
                         </div>
                       )}
                     </div>

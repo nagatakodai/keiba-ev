@@ -40,6 +40,7 @@ class Horse:
     absent: bool = False       # 取消 / 除外
     horse_id: str = ""         # netkeiba 内部 ID
     interview_comment: str = ""  # コメント (調教師談話など)
+    past_runs: list["PastRun"] = field(default_factory=list)  # 馬柱から (直近 5 走)
 
     @property
     def pure_second(self) -> float:
@@ -74,6 +75,55 @@ class Prediction:
     winning: int
     total: int
     trifecta_keys: list[tuple[int, int, int]]
+
+
+@dataclass
+class PastRun:
+    """馬の過去 1 走分。馬柱 (shutuba_past.html) からパース。
+
+    フィールド命名は西田式スピード指数等の計算で直接使えるよう、SI 単位 / 標準値で持つ。
+    finish_pos が None の場合: 4 着以下 (馬柱に着順が明示されていない)。
+    own_time_sec は「自分の走破時刻」。Data07 の winner_time_diff (正なら遅れ) を加味して算出。
+    """
+    date: str = ""               # "2026.04.11" 形式 (元データママ)
+    venue: str = ""              # 場名
+    race_no: int = 0             # R 数
+    race_class: str = ""         # 例 "4歳以上2勝クラス" "G1" "B1B2" etc.
+    race_id: str = ""            # netkeiba 12桁 race_id (リンクから抽出)
+    surface: str = ""            # "芝" / "ダート" / "障害"
+    distance: int = 0            # m
+    going: str = ""              # 馬場 "良" / "稍" / "重" / "不"
+    winner_time_sec: float = 0.0 # Data05 の勝ち馬タイム (秒換算)
+    time_diff_sec: float = 0.0   # Data07 の括弧内。winner との時間差 (秒、+=遅れ、-=リード)
+    field_size: int = 0          # 出走頭数
+    horse_number: int = 0        # 当該馬の馬番
+    popularity: int = 0          # 人気
+    jockey: str = ""             # 騎手名
+    weight_kg: float = 0.0       # 斤量
+    passing: str = ""            # 通過順 "12-14" or "3-3-1-1" など (文字列のまま)
+    last_3f_sec: float = 0.0     # 上がり 3F (秒)
+    body_weight: int = 0         # 馬体重 (kg)、0=計不
+    body_weight_diff: int = 0    # 前走比 (kg)
+    finish_pos: Optional[int] = None  # 1/2/3 のみ。それ以外は None (馬柱は明示しないため)
+
+    @property
+    def own_time_sec(self) -> float:
+        """自分の走破タイム (秒)。馬柱は勝ち馬タイム + 時間差で表記されているため再構成。"""
+        if self.winner_time_sec <= 0:
+            return 0.0
+        return self.winner_time_sec + self.time_diff_sec
+
+    @property
+    def won(self) -> bool:
+        return self.finish_pos == 1
+
+    @property
+    def placed(self) -> bool:
+        return self.finish_pos in (1, 2)
+
+    @property
+    def showed(self) -> bool:
+        return self.finish_pos in (1, 2, 3)
 
 
 @dataclass
@@ -112,9 +162,36 @@ class TrifectaOdds:
 
 
 @dataclass
+class BetOdds:
+    """汎用 bet オッズ。bet_type と key 長で識別。
+
+    bet_type:
+      "quinella" 馬連 (key 長 2 / 順不同)
+      "wide"     ワイド (key 長 2 / 順不同, 両馬3着以内)
+      "exacta"   馬単 (key 長 2 / 順あり)
+      "trio"     3連複 (key 長 3 / 順不同)
+      "win"      単勝 (key 長 1)
+      "place"    複勝 (key 長 1; odds は min-max のうち下限)
+    """
+    bet_type: str
+    key: tuple[int, ...]
+    odds: float
+    popularity: int = 0
+    absent: bool = False
+
+    @property
+    def label(self) -> str:
+        return "-".join(str(k) for k in self.key)
+
+
+@dataclass
 class RaceData:
     race: Race
     trifecta: list[TrifectaOdds]
+    # 馬連・ワイド・馬単・3連複・単勝・複勝 等の他 bet type オッズ。
+    # キーは bet_type 文字列 ("quinella" / "wide" / "exacta" / "trio" / "win" / "place")。
+    # parse 時点で fetch されなければ空 dict のまま (後方互換)。
+    other_bets: dict[str, list["BetOdds"]] = field(default_factory=dict)
 
 
 @dataclass
@@ -138,3 +215,19 @@ class EvRow:
     def label(self) -> str:
         a, b, c = self.key
         return f"{a}-{b}-{c}"
+
+
+@dataclass
+class BetEvRow:
+    """汎用 bet type の EV row。bet_type と可変長 key で識別。"""
+    bet_type: str
+    key: tuple[int, ...]
+    odds: float
+    popularity: int
+    prob: float
+    px_o: float
+    tier: str
+
+    @property
+    def label(self) -> str:
+        return "-".join(str(k) for k in self.key)

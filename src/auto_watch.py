@@ -19,7 +19,7 @@ import typer
 from rich.console import Console
 
 from .fetch_result import process_pending, schedule as schedule_result_fetch
-from .parse import parse_race_list
+from .parse import _split_race_id, parse_race_list
 from .scrape import fetch_html, race_list_url
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,10 +49,15 @@ def _append_history(record: dict) -> None:
 
 
 def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[dict]:
-    """その日 (JST) の開催一覧を netkeiba から取得し、締切 N±M 分のレースを抽出。"""
+    """その日 (JST) の開催一覧を netkeiba (JRA + NAR) から取得し、締切 N±M 分のレースを抽出。"""
     today = datetime.fromtimestamp(now_ts).strftime("%Y%m%d")
-    html = fetch_html(race_list_url(today), timeout_ms=30_000)
-    races = parse_race_list(html, today)
+    races: list[dict] = []
+    for is_nar in (False, True):
+        try:
+            html = fetch_html(race_list_url(today, nar=is_nar), timeout_ms=30_000)
+            races.extend(parse_race_list(html, today))
+        except Exception as ex:
+            console.print(f"[yellow]race_list fetch failed (nar={is_nar}): {ex}[/yellow]")
 
     low_sec = (window_min - tolerance_min) * 60
     high_sec = (window_min + tolerance_min) * 60
@@ -81,14 +86,15 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
 
 
 def _normalize_race_id(netkeiba_rid: str) -> str:
-    """netkeiba ID (YYYYMMDDPP00RR) → 旧フォーマット (YYYYMMDD-MMDD-R) に正規化。
+    """netkeiba race_id を `cup_id-schedule_index-race_number` 文字列に正規化。
 
-    キャリブレ join 用の race_id 形式。
-    cup_id (YYYYMMDD), schedule_index (MMDD), race_number の `-` 区切り。
+    キャリブレ join 用 (parse_shutuba 後の analyze.py が生成する形式と一致させる)。
+    JRA/NAR で race_id 形式が違うため `_split_race_id` に委譲する。
     """
     if not netkeiba_rid or len(netkeiba_rid) != 12:
         return netkeiba_rid
-    return f"{netkeiba_rid[:8]}-{int(netkeiba_rid[4:8])}-{int(netkeiba_rid[10:12])}"
+    _, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
+    return f"{cup_id}-{schedule_index}-{race_number}"
 
 
 def _dispatch_analyze(url: str, extra_args: list[str]) -> int:
@@ -138,9 +144,12 @@ def main(
     ev_max: float = typer.Option(None, "--ev-max"),
     min_prob: float = typer.Option(None, "--min-prob"),
     market_blend: float = typer.Option(None, "--market-blend"),
+    aptitude_top: int = typer.Option(None, "--aptitude-top"),
+    with_exacta: bool = typer.Option(False, "--with-exacta"),
+    with_trio: bool = typer.Option(False, "--with-trio"),
     active_hours: str = typer.Option(
-        "09:30-17:30", "--active-hours",
-        help="race detection を行う JST 時間帯。中央競馬は土日 ~9:50-17:00。",
+        "09:00-23:45", "--active-hours",
+        help="race detection を行う JST 時間帯。JRA 土日 ~9:50-17:00、NAR ナイター ~21:00、ばんえい 等の遅レースを含めて広めに。",
     ),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
@@ -179,6 +188,12 @@ def main(
         extra += ["--min-prob", str(min_prob)]
     if market_blend is not None:
         extra += ["--market-blend", str(market_blend)]
+    if aptitude_top is not None:
+        extra += ["--aptitude-top", str(aptitude_top)]
+    if with_exacta:
+        extra.append("--with-exacta")
+    if with_trio:
+        extra.append("--with-trio")
 
     for race in due:
         rid = race["race_id"]

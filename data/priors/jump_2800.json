@@ -1,0 +1,18 @@
+{
+  "surface": "障害",
+  "distance_band": 2800,
+  "n_horses": 84,
+  "n_horse_races": 85,
+  "win": {
+    "alpha": 1.3176,
+    "beta": 14.6824
+  },
+  "place": {
+    "alpha": 2.6353,
+    "beta": 13.3647
+  },
+  "show": {
+    "alpha": 3.9529,
+    "beta": 12.0471
+  }
+}

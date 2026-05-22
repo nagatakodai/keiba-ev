@@ -225,6 +225,7 @@ export default async function CalibratePage({
                     r.plan_a_hit ||
                     r.plan_b_hit ||
                     r.plan_c_hit ||
+                    !!r.plan_g_hit ||
                     !!r.plan_h1_hit ||
                     !!r.plan_h2_hit ||
                     !!r.plan_f_hit;
@@ -256,6 +257,7 @@ export default async function CalibratePage({
                             {r.plan_a_hit && <Badge tone={planTone("A")}>A</Badge>}
                             {r.plan_b_hit && <Badge tone={planTone("B")}>B</Badge>}
                             {r.plan_c_hit && <Badge tone={planTone("C")}>C</Badge>}
+                            {r.plan_g_hit && <Badge tone={planTone("G")}>G</Badge>}
                             {r.plan_h1_hit && <Badge tone={planTone("H1")}>H1</Badge>}
                             {r.plan_h2_hit && <Badge tone={planTone("H2")}>H2</Badge>}
                           </div>

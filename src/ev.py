@@ -7,7 +7,11 @@
                             × (s3[c]/Σ_{k≠a,b} s3[k])
   - 競馬には「並び・ライン連携」概念がないため、KEIRIN 版にあった
     `_line_bonus` / `_line_strength` / pair_factor は **削除**。
-  - 1 着確率は (1着率 × レーティング補正) を正規化し、市場暗黙率と blend。
+
+Phase A 改修 (2026-05): **生涯 1 着率を完全廃止**。代わりに features.py の
+  Layer 1 特徴量 (西田式スピード指数 + 距離・サーフェス条件付き shrinkage 勝率
+  + 末脚指数) を softmax で fundamental probability に変換。
+  Bolton-Chapman / Benter / Yurelu の知見に準拠 — 詳細は research log 参照。
 """
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ from typing import Iterable
 
 import yaml
 
-from .models import EvRow, Horse, Probabilities, RaceData, TrifectaOdds
+from .models import BetEvRow, BetOdds, EvRow, Horse, Probabilities, RaceData, TrifectaOdds
 
 # 競馬市場の平均控除率 ≒ 20% (中央競馬の場合 / WIN 単勝)。3 連単は 22.5%。
 # `P × O = 1.0` が理論上の +EV ライン。確率モデルの楽観バイアスを差し引いて
@@ -24,6 +28,12 @@ PXO_FLOOR = 1.02
 PXO_HONSEN = (PXO_FLOOR, 1.4)
 PXO_CHUANA = (1.5, 3.0)
 PXO_OANA = (3.0, float("inf"))
+
+# Henery / Discounted Harville の λ (Lo-Bacon-Shone 1995 の経験値)。
+# 1.0 = 素の Harville (人気馬の 2/3 着を過大評価)。0.65-0.85 ≒ 文献標準。
+# λ < 1 で 2-3 着分布が平坦化 → 大穴に +EV が残る (favorite-longshot bias の構造補正)。
+DEFAULT_LAMBDA_2 = 0.81
+DEFAULT_LAMBDA_3 = 0.65
 
 
 # ---------- 確率推定 ----------
@@ -34,63 +44,272 @@ def estimate_probs(
     *,
     market_blend: float = 0.4,
     market_floor: float = 0.01,
+    blend_method: str = "loglinear",   # "loglinear" (Benter 2-step) | "linear" (旧)
+    lambda_2: float = DEFAULT_LAMBDA_2,
+    lambda_3: float = DEFAULT_LAMBDA_3,
+    use_show_bias: bool = True,
 ) -> Probabilities:
-    """馬の rate / レーティングから素朴な事前確率を作る。
+    """Layer 1 特徴量 (features.py) + 市場ブレンド + Discounted Harville で Probabilities を作る。
 
-    市場ブレンディング:
-      市場の 3 連単オッズを 1 着で marginalize した暗黙確率と、モデル 1 着確率を
-      `market_blend` の比率で混合する。market_blend=0.4 ならモデル 6 / 市場 4。
-      これでモデル側の楽観バイアス (レーティング線形補正等) を市場の集合知が
-      機械的に打ち消す。`market_floor` は大穴を 0 で潰さないための下限。
+    1 着強度 s_i:
+      LightGBM 学習済モデルがあれば → softmax(model_score)
+      無ければ → softmax(W_speed·z_speed + W_win·z_shrunk_win + W_show·z_shrunk_show − W_last3f·z_last3f)
 
-    あくまでデフォルト。本格的な分析では YAML で上書きすること (`--probs`)。
+    市場ブレンド (`blend_method`):
+      "loglinear" (Benter 2-step、推奨):
+          c_i = softmax(α·log f_i + β·log π_i)
+          α = 1 - market_blend、β = market_blend
+          π_i は power-method de-overround された市場暗黙率
+      "linear" (旧、後方互換用):
+          c_i = (1-β)·f_i + β·π_i
+
+    2 着・3 着強度 (Discounted Harville):
+      place2[i] = win[i]^λ_2   (λ_2 ≈ 0.81)
+      place3[i] = win[i]^λ_3   (λ_3 ≈ 0.65)
+      これにより人気馬の 2/3 着過大評価 (素の Harville の構造的欠陥) を平坦化する。
+      `use_show_bias=True` でさらに shrunk_show_rate を乗じて 3 着スペシャリストを優遇。
+
+    past_runs が空の場合は Layer 1 特徴量が全 0 → 市場ブレンドのみが動く後方互換動作。
     """
+    import math
+
+    from .features import build_features
+
     horses = [h for h in rd.race.horses if not h.absent]
     n = len(horses)
     if n == 0:
         return Probabilities(win={}, place2={}, place3={})
 
-    rating_mean = sum(h.rating for h in horses) / n if n > 0 else 0.0
+    feats = build_features(rd)
+    fundamental_win = _fundamental_win_probs(horses, feats)
 
-    # 1 着確率: 1着率 × レーティング補正 を正規化
-    raw_win: dict[int, float] = {}
-    for h in horses:
-        # レーティング補正: 平均との差を 12 で割って 0.5 〜 1.5 倍に。
-        # rating が 0 の場合 (取得できなかった等) は補正なし。
-        if rating_mean > 0 and h.rating > 0:
-            rp_factor = max(0.3, 1.0 + (h.rating - rating_mean) / max(rating_mean, 1.0) * 0.6)
-        else:
-            rp_factor = 1.0
-        # 1 着率は %。0 を許容しない (フロア 0.5%)。
-        score = max(h.win_rate, 0.5) * rp_factor
-        raw_win[h.number] = max(score, 1e-6)
-    s = sum(raw_win.values())
-    model_win = {k: v / s for k, v in raw_win.items()}
-
-    # 市場ブレンディング (1 着のみ)
-    win = model_win
+    # 市場ブレンド
+    win = fundamental_win
     if market_blend > 0 and rd.trifecta:
-        market = market_win_probs(rd.trifecta)
-        if market:
-            for k in model_win:
+        market_raw = market_win_probs(rd.trifecta)
+        if market_raw:
+            market = market_raw
+            try:
+                market = power_method_overround(market_raw)
+            except Exception:
+                pass
+            # floor 適用
+            for k in fundamental_win:
                 market[k] = max(market.get(k, 0.0), market_floor)
             ms = sum(market.values())
             if ms > 0:
                 market = {k: v / ms for k, v in market.items()}
-            blended = {
-                k: (1.0 - market_blend) * model_win.get(k, 0.0)
-                + market_blend * market.get(k, 0.0)
-                for k in set(model_win) | set(market)
-            }
-            bs = sum(blended.values())
-            if bs > 0:
-                win = {k: v / bs for k, v in blended.items()}
 
-    # 純 2 着率・純 3 着率を重みに (0 は 0.5 でフロア)
-    place2 = {h.number: max(h.pure_second, 0.5) for h in horses}
-    place3 = {h.number: max(h.pure_third, 0.5) for h in horses}
+            if blend_method == "loglinear":
+                alpha = max(1.0 - market_blend, 0.0)
+                beta = max(market_blend, 0.0)
+                logs: dict[int, float] = {}
+                for k in set(fundamental_win) | set(market):
+                    f = max(fundamental_win.get(k, 0.0), 1e-9)
+                    pi = max(market.get(k, 0.0), 1e-9)
+                    logs[k] = alpha * math.log(f) + beta * math.log(pi)
+                m = max(logs.values())
+                exps = {k: math.exp(v - m) for k, v in logs.items()}
+                z = sum(exps.values())
+                if z > 0:
+                    win = {k: v / z for k, v in exps.items()}
+            else:  # linear
+                blended = {
+                    k: (1.0 - market_blend) * fundamental_win.get(k, 0.0)
+                    + market_blend * market.get(k, 0.0)
+                    for k in set(fundamental_win) | set(market)
+                }
+                bs = sum(blended.values())
+                if bs > 0:
+                    win = {k: v / bs for k, v in blended.items()}
+
+    # Discounted Harville: place2/place3 = win^λ (relative なので正規化不要)
+    place2: dict[int, float] = {}
+    place3: dict[int, float] = {}
+    for h in horses:
+        n_ = h.number
+        w = max(win.get(n_, 0.0), 1e-9)
+        p2 = w ** lambda_2
+        p3 = w ** lambda_3
+        if use_show_bias:
+            # 3 着スペシャリスト効果: shrunk_show_rate を相対重みとして乗じる
+            show = feats[n_].shrunk_show_rate
+            avg_show = (
+                sum(feats[h2.number].shrunk_show_rate for h2 in horses) / n
+                if n > 0 else 0.0
+            )
+            if avg_show > 0:
+                bias = show / avg_show  # 平均 1 になる
+                p2 *= max(bias, 0.1)
+                p3 *= max(bias, 0.1)
+        place2[n_] = p2
+        place3[n_] = p3
 
     return Probabilities(win=win, place2=place2, place3=place3)
+
+
+def power_method_overround(raw_probs: dict[int, float], *, tol: float = 1e-6, max_iter: int = 60) -> dict[int, float]:
+    """Power-method de-overround (Clarke 2017): Σ p_i^(1/k) = 1 を満たす k を Brent 法で解く。
+
+    raw_probs は「1/odds を正規化しただけの暗黙率」(= Σ=1)。これを power 変換で
+    favorite-longshot bias を補正する。k > 1 で人気馬寄り、k < 1 で大穴寄りに歪む。
+    JRA / NAR は overround が大きいため k は通常 1.0-1.2 の間に収まる。
+    """
+    if not raw_probs:
+        return raw_probs
+
+    # Σ p_i^(1/k) = 1 を k について解く。f(k) = Σ p_i^(1/k) - 1
+    # 単調 (k 大きいほど Σ 小、k 小さいほど Σ 大) なので bisection で十分。
+    items = list(raw_probs.values())
+
+    def f(k: float) -> float:
+        try:
+            return sum(p ** (1.0 / k) for p in items if p > 0) - 1.0
+        except (ValueError, ZeroDivisionError, OverflowError):
+            return float("inf")
+
+    # bracket
+    lo, hi = 0.5, 3.0
+    f_lo, f_hi = f(lo), f(hi)
+    if f_lo == f_hi or f_lo * f_hi > 0:
+        return raw_probs  # bracket できなかったらそのまま返す
+    for _ in range(max_iter):
+        mid = (lo + hi) / 2.0
+        fm = f(mid)
+        if abs(fm) < tol:
+            break
+        if fm * f_lo < 0:
+            hi, f_hi = mid, fm
+        else:
+            lo, f_lo = mid, fm
+    k = (lo + hi) / 2.0
+    return {key: (max(p, 0.0) ** (1.0 / k)) for key, p in raw_probs.items()}
+
+
+def _z_score(values: dict[int, float]) -> dict[int, float]:
+    """値を z-score 化。SD が小さい場合 (全て同値) は 0 を返す。"""
+    if not values:
+        return {}
+    xs = list(values.values())
+    n = len(xs)
+    mean = sum(xs) / n
+    var = sum((x - mean) ** 2 for x in xs) / max(n - 1, 1)
+    sd = var ** 0.5
+    if sd < 1e-6:
+        return {k: 0.0 for k in values}
+    return {k: (v - mean) / sd for k, v in values.items()}
+
+
+def _fundamental_win_probs(horses, feats) -> dict[int, float]:
+    """Layer 1 特徴量 → softmax で 1 着確率。
+
+    学習済 LightGBM lambdarank モデル (`data/models/lgbm_lambdarank.txt`) があれば
+    それを使う。無ければ z-score 線形和を softmax する Phase A 初期版にフォールバック。
+    """
+    lgb_probs = _lgbm_predict(horses, feats)
+    if lgb_probs is not None:
+        return lgb_probs
+    return _linear_softmax_fallback(horses, feats)
+
+
+def _linear_softmax_fallback(horses, feats) -> dict[int, float]:
+    """LightGBM モデル無いとき: 各特徴量を z-score 化 → 重み付け softmax。
+
+    重みは Bolton-Chapman / Benter / Yurelu の文献値を踏まえた粗い初期値。
+    符号:
+      speed_idx_weighted: + (大きいほど速い)
+      shrunk_win_rate: + (大きいほど勝つ)
+      shrunk_show_rate: + (大きいほど上位安定)
+      last3f_idx_recent: - (小さいほど速い末脚)
+    """
+    import math
+
+    si_w = _z_score({h.number: feats[h.number].speed_idx_weighted for h in horses})
+    sh_w = _z_score({h.number: feats[h.number].shrunk_win_rate for h in horses})
+    sh_s = _z_score({h.number: feats[h.number].shrunk_show_rate for h in horses})
+    l3f = _z_score({h.number: feats[h.number].last3f_idx_recent for h in horses})
+
+    W_SPEED = 1.0
+    W_WIN = 0.6
+    W_SHOW = 0.3
+    W_LAST3F = 0.4
+
+    raw: dict[int, float] = {}
+    for h in horses:
+        n = h.number
+        z = (
+            W_SPEED * si_w.get(n, 0.0)
+            + W_WIN * sh_w.get(n, 0.0)
+            + W_SHOW * sh_s.get(n, 0.0)
+            - W_LAST3F * l3f.get(n, 0.0)
+        )
+        raw[n] = math.exp(z)
+    s = sum(raw.values())
+    if s <= 0:
+        return {h.number: 1.0 / len(horses) for h in horses}
+    return {k: v / s for k, v in raw.items()}
+
+
+# --- LightGBM lambdarank integration ---
+
+_LGBM_MODEL = None  # lazy-loaded
+_LGBM_META = None
+_LGBM_LOAD_TRIED = False
+
+
+def _lgbm_predict(horses, feats) -> dict[int, float] | None:
+    """LightGBM 学習済モデルがあれば feats 行列で score 予測 → softmax で 1 着確率。
+
+    返り値 None: モデルなし or 予測失敗 (呼び出し側がフォールバック)。
+    """
+    global _LGBM_MODEL, _LGBM_META, _LGBM_LOAD_TRIED
+    if _LGBM_MODEL is None and not _LGBM_LOAD_TRIED:
+        _LGBM_LOAD_TRIED = True
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            import lightgbm as _lgb
+            root = _Path(__file__).resolve().parents[1]
+            mp = root / "data" / "models" / "lgbm_lambdarank.txt"
+            meta = root / "data" / "models" / "lgbm_metadata.json"
+            if not mp.exists() or not meta.exists():
+                return None
+            _LGBM_MODEL = _lgb.Booster(model_file=str(mp))
+            _LGBM_META = _json.loads(meta.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    if _LGBM_MODEL is None or _LGBM_META is None:
+        return None
+
+    try:
+        import math
+        from dataclasses import asdict as _asdict
+        feature_cols = _LGBM_META.get("feature_cols", [])
+        if not feature_cols:
+            return None
+        rows = []
+        nums = []
+        for h in horses:
+            fv = feats.get(h.number)
+            if fv is None:
+                continue
+            d = _asdict(fv)
+            # 文字列キーで欠落フィールドは 0.0
+            row = [float(d.get(c, 0.0) or 0.0) for c in feature_cols]
+            rows.append(row)
+            nums.append(h.number)
+        if not rows:
+            return None
+        scores = _LGBM_MODEL.predict(rows)
+        # softmax
+        m = max(scores)
+        exps = [math.exp(s - m) for s in scores]
+        z = sum(exps)
+        if z <= 0:
+            return None
+        return {n: e / z for n, e in zip(nums, exps)}
+    except Exception:
+        return None
 
 
 def market_win_probs(trifecta: Iterable[TrifectaOdds]) -> dict[int, float]:
@@ -158,6 +377,97 @@ def trifecta_prob(key: tuple[int, int, int], probs: Probabilities) -> float:
     return p1 * p2 * p3
 
 
+# ---------- 馬連 / ワイド / 馬単 / 3 連複 確率 ----------
+
+
+def win_prob(key: tuple[int, ...], probs: Probabilities) -> float:
+    """単勝 (i 1着) の的中確率。"""
+    if len(key) != 1:
+        return 0.0
+    return probs.win.get(key[0], 0.0)
+
+
+def place_prob(key: tuple[int, ...], probs: Probabilities) -> float:
+    """複勝 (i が 3 着以内) の的中確率。
+
+    Plackett-Luce 連鎖を 1-2-3 着の全順序組み合わせで marginalize:
+      P(i in top3) = Σ_{(a,b,c) where i ∈ {a,b,c}} P(a=1, b=2, c=3)
+    """
+    if len(key) != 1:
+        return 0.0
+    i = key[0]
+    if probs.win.get(i, 0.0) <= 0:
+        return 0.0
+    horse_set = list(probs.win.keys())
+    total = 0.0
+    for a in horse_set:
+        for b in horse_set:
+            if b == a:
+                continue
+            for c in horse_set:
+                if c == a or c == b:
+                    continue
+                if i == a or i == b or i == c:
+                    total += trifecta_prob((a, b, c), probs)
+    return total
+
+
+def _exacta_prob_pair(i: int, j: int, probs: Probabilities) -> float:
+    """P(i=1着, j=2着) を Plackett-Luce で。3 着以下は marginalize 済 (PL の連鎖は独立)。"""
+    if i == j:
+        return 0.0
+    p1 = probs.win.get(i, 0.0)
+    if p1 <= 0:
+        return 0.0
+    raw_b = probs.place2.get(j, 0.0)
+    denom_b = sum(probs.place2.get(k, 0.0) for k in probs.win if k != i)
+    if denom_b <= 0:
+        return 0.0
+    return p1 * raw_b / denom_b
+
+
+def exacta_prob(key: tuple[int, ...], probs: Probabilities) -> float:
+    """馬単 (1 着 i, 2 着 j) の的中確率。"""
+    if len(key) != 2:
+        return 0.0
+    return _exacta_prob_pair(key[0], key[1], probs)
+
+
+def quinella_prob(key: tuple[int, ...], probs: Probabilities) -> float:
+    """馬連 (i, j 順不同) の的中確率 = P(i=1着, j=2着) + P(j=1着, i=2着)。"""
+    if len(key) != 2:
+        return 0.0
+    i, j = key
+    return _exacta_prob_pair(i, j, probs) + _exacta_prob_pair(j, i, probs)
+
+
+def trio_prob(key: tuple[int, ...], probs: Probabilities) -> float:
+    """3 連複 (i, j, k 順不同) の的中確率 = Σ_{perm of key} trifecta_prob(perm)。"""
+    if len(key) != 3:
+        return 0.0
+    from itertools import permutations
+    total = 0.0
+    for perm in permutations(key):
+        total += trifecta_prob(perm, probs)
+    return total
+
+
+def wide_prob(key: tuple[int, ...], probs: Probabilities) -> float:
+    """ワイド (両馬 i, j とも 3 着以内) の的中確率。
+
+    = Σ_{k ∉ {i,j}} P(3 連複 {i, j, k} 的中)
+    """
+    if len(key) != 2:
+        return 0.0
+    i, j = key
+    total = 0.0
+    for k in probs.win:
+        if k == i or k == j:
+            continue
+        total += trio_prob((i, j, k), probs)
+    return total
+
+
 # ---------- EV テーブル ----------
 
 
@@ -180,6 +490,65 @@ def build_table(rd: RaceData, probs: Probabilities) -> list[EvRow]:
         )
     rows.sort(key=lambda r: r.px_o, reverse=True)
     return rows
+
+
+# bet_type → 確率関数の対応表
+_BET_PROB_FN = {
+    "win": win_prob,
+    "place": place_prob,
+    "quinella": quinella_prob,
+    "wide": wide_prob,
+    "exacta": exacta_prob,
+    "trio": trio_prob,
+}
+
+
+def build_bet_table(
+    bets: list[BetOdds],
+    probs: Probabilities,
+    bet_type: str | None = None,
+) -> list[BetEvRow]:
+    """汎用 bet オッズリスト → BetEvRow リスト (P×O 降順)。
+
+    bet_type を渡すと確率関数を上書き。省略時は各 BetOdds.bet_type を見て分岐。
+    """
+    rows: list[BetEvRow] = []
+    for b in bets:
+        if b.absent or b.odds <= 0:
+            continue
+        bt = bet_type or b.bet_type
+        prob_fn = _BET_PROB_FN.get(bt)
+        if prob_fn is None:
+            continue
+        p = prob_fn(b.key, probs)
+        pxo = p * b.odds
+        rows.append(
+            BetEvRow(
+                bet_type=bt,
+                key=b.key,
+                odds=b.odds,
+                popularity=b.popularity,
+                prob=p,
+                px_o=pxo,
+                tier=_tier(pxo),
+            )
+        )
+    rows.sort(key=lambda r: r.px_o, reverse=True)
+    return rows
+
+
+def build_all_bet_tables(
+    rd: RaceData, probs: Probabilities
+) -> dict[str, list[BetEvRow]]:
+    """RaceData.other_bets に格納された全 bet type の EV table。空の bet type は省く。"""
+    out: dict[str, list[BetEvRow]] = {}
+    for bt, bets in (rd.other_bets or {}).items():
+        if not bets:
+            continue
+        table = build_bet_table(bets, probs, bet_type=bt)
+        if table:
+            out[bt] = table
+    return out
 
 
 def _tier(pxo: float) -> str:
@@ -283,6 +652,62 @@ def plan_max_ev(rows: list[EvRow]) -> list[EvRow]:
     pos = [r for r in rows if r.px_o >= PXO_FLOOR]
     return pos[:3]
 
+
+# ---------- Plan G: 適性ゲート → EV 足切り ----------
+
+PLAN_G_DEFAULT_TOP_HORSES = 6
+PLAN_G_MAX_POINTS = 10
+
+
+def plan_aptitude_ev(
+    rows: list[EvRow],
+    aptitude_top_horses: list[int],
+    *,
+    pxo_floor: float = PXO_FLOOR,
+    max_picks: int = PLAN_G_MAX_POINTS,
+) -> list[EvRow]:
+    """適性指数 top N 頭の集合内で生成される 3 連単のみ候補 → P×O >= floor で足切り。
+
+    aptitude_top_horses: 適性総合上位の馬番リスト (上位順)。長さで対象集合を決める。
+    EV (P×O) を「最終判断」として使うパイプライン。Plan A/B/C のような EV-first ではなく、
+    まず適性で候補を絞り込んでから EV 足切りで「市場と整合する目」だけ残す。
+    """
+    if not aptitude_top_horses:
+        return []
+    top_set = set(aptitude_top_horses)
+    out = [
+        r for r in rows
+        if r.key[0] in top_set
+        and r.key[1] in top_set
+        and r.key[2] in top_set
+        and r.px_o >= pxo_floor
+    ]
+    # rows は既に px_o 降順で並んでいるので順序は保たれる
+    return out[:max_picks]
+
+
+def plan_aptitude_ev_bet(
+    rows: list,  # list[BetEvRow]
+    aptitude_top_horses: list[int],
+    *,
+    pxo_floor: float = PXO_FLOOR,
+    max_picks: int = PLAN_G_MAX_POINTS,
+) -> list:
+    """BetEvRow 版 (馬連 / ワイド / 馬単 / 3 連複) の適性ゲート→EV足切り。
+
+    key 全要素が aptitude_top_horses に入っているかでフィルタ。
+    """
+    if not aptitude_top_horses:
+        return []
+    top_set = set(aptitude_top_horses)
+    out = [
+        r for r in rows
+        if all(k in top_set for k in r.key) and r.px_o >= pxo_floor
+    ]
+    return out[:max_picks]
+
+
+# ---------- 既存 Plan ----------
 
 PLAN_C_MAX_POINTS = 12
 

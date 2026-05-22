@@ -1,0 +1,55 @@
+{
+  "trained_at": "2026-05-21T20:07:12",
+  "n_train_races": 116,
+  "n_valid_races": 28,
+  "n_train_rows": 1104,
+  "feature_cols": [
+    "speed_idx_weighted",
+    "speed_idx_best",
+    "speed_idx_last",
+    "shrunk_win_rate",
+    "shrunk_show_rate",
+    "effective_starts",
+    "same_distance_count",
+    "same_surface_count",
+    "same_venue_count",
+    "last3f_idx_recent",
+    "days_since_last_run",
+    "body_weight",
+    "body_weight_diff",
+    "big_weight_change",
+    "jockey_change",
+    "weight_kg"
+  ],
+  "params": {
+    "objective": "lambdarank",
+    "metric": [
+      "ndcg"
+    ],
+    "ndcg_eval_at": [
+      1,
+      3,
+      5
+    ],
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "min_data_in_leaf": 10,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1
+  },
+  "best_iteration": 43,
+  "best_scores": {
+    "train": {
+      "ndcg@1": 0.9830268741159831,
+      "ndcg@3": 0.955389539728144,
+      "ndcg@5": 0.9736713240319482
+    },
+    "valid": {
+      "ndcg@1": 0.2360248447204969,
+      "ndcg@3": 0.3821563452612017,
+      "ndcg@5": 0.42919030840763955
+    }
+  }
+}

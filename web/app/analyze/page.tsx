@@ -13,6 +13,9 @@ export default function AnalyzePage() {
   const [evMax, setEvMax] = useState("");
   const [minProb, setMinProb] = useState("2.0");
   const [marketBlend, setMarketBlend] = useState("0.9");
+  const [aptitudeTop, setAptitudeTop] = useState("6");
+  const [withExacta, setWithExacta] = useState(false);
+  const [withTrio, setWithTrio] = useState(false);
 
   const [job, setJob] = useState<JobInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -31,6 +34,9 @@ export default function AnalyzePage() {
         ev_max: evMax === "" ? null : parseFloat(evMax),
         min_prob: minProb === "" ? null : parseFloat(minProb),
         market_blend: marketBlend === "" ? null : parseFloat(marketBlend),
+        aptitude_top: aptitudeTop === "" ? null : parseInt(aptitudeTop, 10),
+        with_exacta: withExacta,
+        with_trio: withTrio,
       });
       setJob(j);
     } catch (e) {
@@ -61,7 +67,7 @@ export default function AnalyzePage() {
         <form onSubmit={submit} className="space-y-3">
           <Input
             label="URL"
-            placeholder="https://race.netkeiba.com/race/shutuba.html?race_id=YYYYMMDDPP00RR"
+            placeholder="https://race.netkeiba.com/race/shutuba.html?race_id=… (JRA) または https://nar.netkeiba.com/race/shutuba.html?race_id=… (地方)"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             required
@@ -94,9 +100,16 @@ export default function AnalyzePage() {
               onChange={(e) => setMarketBlend(e.target.value)}
               inputMode="decimal"
             />
+            <Input
+              label="Plan G 適性 top N 頭"
+              placeholder="6 (default)"
+              value={aptitudeTop}
+              onChange={(e) => setAptitudeTop(e.target.value)}
+              inputMode="numeric"
+            />
           </div>
 
-          <div className="flex items-center gap-4 text-sm">
+          <div className="flex items-center gap-4 text-sm flex-wrap">
             <label className="inline-flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -114,6 +127,24 @@ export default function AnalyzePage() {
                 className="accent-(--color-accent)"
               />
               <span>LLM をスキップ</span>
+            </label>
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={withExacta}
+                onChange={(e) => setWithExacta(e.target.checked)}
+                className="accent-(--color-accent)"
+              />
+              <span>馬単も取得 (fetch +40s)</span>
+            </label>
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={withTrio}
+                onChange={(e) => setWithTrio(e.target.checked)}
+                className="accent-(--color-accent)"
+              />
+              <span>3 連複も取得 (fetch +40s)</span>
             </label>
           </div>
 

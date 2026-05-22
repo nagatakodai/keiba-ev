@@ -286,6 +286,9 @@ def build_analyze_cmd(
     ev_max: float | None = None,
     min_prob: float | None = None,
     market_blend: float | None = None,
+    aptitude_top: int | None = None,
+    with_exacta: bool = False,
+    with_trio: bool = False,
 ) -> list[str]:
     cmd = [PY, "-m", "src.analyze", url, "--llm-model", llm_model]
     if refresh:
@@ -298,6 +301,12 @@ def build_analyze_cmd(
         cmd += ["--min-prob", str(min_prob)]
     if market_blend is not None:
         cmd += ["--market-blend", str(market_blend)]
+    if aptitude_top is not None:
+        cmd += ["--aptitude-top", str(aptitude_top)]
+    if with_exacta:
+        cmd.append("--with-exacta")
+    if with_trio:
+        cmd.append("--with-trio")
     return cmd
 
 
@@ -330,6 +339,9 @@ class WatchAutoManager:
         ev_max: float | None = None,
         min_prob: float | None = None,
         market_blend: float | None = None,
+        aptitude_top: int | None = None,
+        with_exacta: bool = False,
+        with_trio: bool = False,
         active_hours: str = "09:00-23:45",
     ) -> Job:
         if self.running:
@@ -349,6 +361,12 @@ class WatchAutoManager:
             inner += ["--min-prob", str(min_prob)]
         if market_blend is not None:
             inner += ["--market-blend", str(market_blend)]
+        if aptitude_top is not None:
+            inner += ["--aptitude-top", str(aptitude_top)]
+        if with_exacta:
+            inner.append("--with-exacta")
+        if with_trio:
+            inner.append("--with-trio")
         cmd = [
             PY, "-m", "api._watch_loop",
             "--interval", str(interval_sec),
@@ -363,6 +381,9 @@ class WatchAutoManager:
             "ev_max": ev_max,
             "min_prob": min_prob,
             "market_blend": market_blend,
+            "aptitude_top": aptitude_top,
+            "with_exacta": with_exacta,
+            "with_trio": with_trio,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -392,6 +413,9 @@ class WatchAutoManager:
                 ev_max=cfg.get("ev_max"),
                 min_prob=cfg.get("min_prob"),
                 market_blend=cfg.get("market_blend"),
+                aptitude_top=cfg.get("aptitude_top"),
+                with_exacta=bool(cfg.get("with_exacta")),
+                with_trio=bool(cfg.get("with_trio")),
                 active_hours=cfg.get("active_hours", "09:00-23:45"),
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行

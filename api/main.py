@@ -1,7 +1,7 @@
 """FastAPI エンドポイント。
 
 起動:
-    uvicorn api.main:app --reload --port 8787
+    uvicorn api.main:app --reload --port 9788
 
 機能:
 - GET  /api/predictions             予測スナップショット一覧
@@ -122,6 +122,11 @@ class AnalyzeRequest(BaseModel):
     ev_max: float | None = None
     min_prob: float | None = None
     market_blend: float | None = None
+    # Plan G の適性 top N (頭数)。None なら CLI default (6)。
+    aptitude_top: int | None = None
+    # 馬単 (b5) / 3 連複 (b6) を追加 fetch するか。jiku iteration で重い。
+    with_exacta: bool = False
+    with_trio: bool = False
 
 
 @app.post("/api/analyze")
@@ -134,6 +139,9 @@ async def api_analyze(req: AnalyzeRequest) -> dict[str, Any]:
         ev_max=req.ev_max,
         min_prob=req.min_prob,
         market_blend=req.market_blend,
+        aptitude_top=req.aptitude_top,
+        with_exacta=req.with_exacta,
+        with_trio=req.with_trio,
     )
     label = f"{'refresh' if req.refresh else 'analyze'}: {req.url}"
     job = JOBS.new(label=label, cmd=cmd)
@@ -188,10 +196,13 @@ class WatchAutoStartRequest(BaseModel):
     ev_max: float | None = None
     min_prob: float | None = None
     market_blend: float | None = None
+    aptitude_top: int | None = None
+    with_exacta: bool = False
+    with_trio: bool = False
     # race detection を行う JST 時間帯 (HH:MM-HH:MM)。
     # 範囲外は result fetch のみ動かして race detection はスキップ。
-    # 中央競馬は土日中心 ~9:50-17:00 にレースがあり、result fetch を含めて 09:30-17:30 でカバー。
-    active_hours: str = "09:30-17:30"
+    # JRA 土日 ~9:50-17:00 + NAR ナイター ~14:00-21:00 + ばんえい 等の遅レースを含めて広め。
+    active_hours: str = "09:00-23:45"
 
 
 @app.post("/api/watch-auto/start")
@@ -203,6 +214,9 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         ev_max=req.ev_max,
         min_prob=req.min_prob,
         market_blend=req.market_blend,
+        aptitude_top=req.aptitude_top,
+        with_exacta=req.with_exacta,
+        with_trio=req.with_trio,
         active_hours=req.active_hours,
     )
     return {"running": WATCH.running, "config": WATCH.config, "job": job.to_dict()}

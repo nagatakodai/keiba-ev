@@ -12,7 +12,8 @@
 ```
 keiba-ev/
 ├── src/                # Python バックエンド (CLI + ライブラリ)
-│   ├── analyze.py      # メインエントリ (race_id URL → P×O ランキング + Plan A/B/C)
+│   ├── analyze.py      # メインエントリ (race_id URL → 適性指数 + 複数 bet type EV + Plan A/B/C/G/H1/H2/F)
+│   ├── aptitude.py     # 各馬の 8 因子適性指数 (能力/距離/末脚/馬場/状態/騎手/ペース/重賞)
 │   ├── parse.py        # netkeiba HTML → RaceData
 │   ├── scrape.py       # Playwright で HTML 取得
 │   ├── ev.py           # 確率推定 + Plackett-Luce 連鎖
@@ -46,15 +47,26 @@ make setup        # python3.13 + venv + pip install + Playwright Chromium
 make setup-uv     # uv 経由で 3.13 を入れる
 ```
 
+### Claude CLI (LLM 評価)
+
+LLM 評価は Anthropic API を直叩きせず、ローカルの `claude` CLI を `claude -p` で subprocess spawn します (`src/llm.py`)。
+
+```bash
+# Claude Pro / Max サブスクリプションでログイン (推奨)
+claude login
+```
+
+サブスクリプションでログイン済みなら `ANTHROPIC_API_KEY` は不要です。API キー経由で動かしたい場合のみ `.env` に設定してください (詳細は `.env.example`)。
+
 ### MCP サーバ (任意 / Claude 評価で使う Brave Search + Tavily)
 
 ```bash
 npm install       # ./node_modules/.bin/{mcp-server-brave-search,tavily-mcp} を取得
 cp .env.example .env
-# .env を編集して BRAVE_API_KEY / TAVILY_API_KEY / ANTHROPIC_API_KEY を記入
+# .env を編集して BRAVE_API_KEY / TAVILY_API_KEY を記入
 ```
 
-`make run` 時に `.env` が `python-dotenv` で読まれ、spawn する `claude` CLI に継承されます。
+`make run` 時に `.env` が `python-dotenv` で読まれ、spawn する `claude` CLI に継承されます (Brave / Tavily MCP の認証に使用)。
 
 ### フロントエンド
 
@@ -110,13 +122,24 @@ python -m src.analyze <url> --probs data/probs/<race_id>.yaml
 python -m src.analyze --html shutuba.html --odds-html odds.html
 ```
 
-### Plan キャップ
+### Plan キャップ / 適性ゲート / 多 bet type
 
 ```bash
-make run URL='...' EV_MAX=3 MIN_PROB=2.0
-#   EV_MAX   : Plan に組む最大 P×O (大穴除外)
-#   MIN_PROB : Plan に組む最低当選率 % (低当選率除外)
+make run URL='...' EV_MAX=3 MIN_PROB=2.0 APTITUDE_TOP=6 WITH_EXACTA=1 WITH_TRIO=1
+#   EV_MAX        : Plan に組む最大 P×O (大穴除外)
+#   MIN_PROB      : Plan に組む最低当選率 % (低当選率除外)
+#   APTITUDE_TOP  : Plan G の適性 top N 頭 (default 6)
+#   WITH_EXACTA=1 : 馬単オッズも fetch (jiku iteration / +40s)
+#   WITH_TRIO=1   : 3 連複オッズも fetch (jiku iteration / +40s)
 ```
+
+Plan の種類:
+- **Plan A** (5 点バランス / EV-first), **B** (最高 EV 集中), **C** (広め保険)
+- **Plan G** (適性ゲート → P×O ≥ 1.02 足切り / **競馬独自の当て方優先**)
+- **Plan H1** (確率最優先), **H2** (確率 + P×O ≥ 1.0)
+- **Plan F** = A/B/C/G/H1/H2 の union (最終買い目候補)
+
+bet type は 単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複 / 3 連単 を統一確率モデルで EV 計算。控除率が低い bet type (単複 20% / 馬連 22.5%) は +EV が残りやすい。
 
 ### 発走前 Refresh
 
@@ -156,12 +179,12 @@ make calibrate PER_RACE=1
 ### FastAPI バックエンド + フロント (UI)
 
 ```bash
-make api          # uvicorn --reload :8788  (keirin ev-api と被らないように 8788)
+make api          # uvicorn --reload :9788  (keirin ev-api 8787 と完全にずらす。「788」は keiba シグネチャ)
 # 別ターミナルで
-make web          # next dev :3000
+make web          # next dev :3788 (keirin web 3000 と被らないように)
 ```
 
-ブラウザで http://localhost:3000 を開く。
+ブラウザで http://localhost:3788 を開く。
 
 ## netkeiba 構造の前提
 

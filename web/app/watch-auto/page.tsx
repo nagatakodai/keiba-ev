@@ -48,6 +48,9 @@ export default function WatchAutoPage() {
   const [evMax, setEvMax] = useState("");
   const [minProb, setMinProb] = useState("2.0");
   const [marketBlend, setMarketBlend] = useState("0.9");
+  const [aptitudeTop, setAptitudeTop] = useState("6");
+  const [withExacta, setWithExacta] = useState(false);
+  const [withTrio, setWithTrio] = useState(false);
 
   const refreshHistory = async () => {
     try {
@@ -87,6 +90,9 @@ export default function WatchAutoPage() {
         ev_max: evMax === "" ? null : parseFloat(evMax),
         min_prob: minProb === "" ? null : parseFloat(minProb),
         market_blend: marketBlend === "" ? null : parseFloat(marketBlend),
+        aptitude_top: aptitudeTop === "" ? null : parseInt(aptitudeTop, 10),
+        with_exacta: withExacta,
+        with_trio: withTrio,
       });
       await Promise.all([refreshStatus(), refreshHistory()]);
     } catch (e) {
@@ -250,6 +256,35 @@ export default function WatchAutoPage() {
                 onChange={(e) => setMarketBlend(e.target.value)}
                 disabled={running}
               />
+              <Input
+                label="Plan G 適性 top N 頭"
+                placeholder="6 (default)"
+                value={aptitudeTop}
+                onChange={(e) => setAptitudeTop(e.target.value)}
+                disabled={running}
+              />
+            </div>
+            <div className="mt-3 flex items-center gap-4 text-sm flex-wrap">
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={withExacta}
+                  onChange={(e) => setWithExacta(e.target.checked)}
+                  disabled={running}
+                  className="accent-(--color-accent)"
+                />
+                <span>馬単も取得 (jiku iter / fetch +40s)</span>
+              </label>
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={withTrio}
+                  onChange={(e) => setWithTrio(e.target.checked)}
+                  disabled={running}
+                  className="accent-(--color-accent)"
+                />
+                <span>3 連複も取得 (jiku iter / fetch +40s)</span>
+              </label>
             </div>
             {error && <div className="mt-3 text-sm text-(--color-bad)">{error}</div>}
             <p className="mt-3 text-xs text-(--color-muted)">

@@ -19,6 +19,23 @@ EV (回収率) = 的中率 × 平均オッズ ÷ 点数
 - `P × O > 1.0` で理論上 +EV だが、本リポジトリの確率モデルは粗い heuristic で **楽観バイアス** がある。実運用の **Plan 入りフロアは P × O ≥ 1.02** に引き上げる。
 - **点数で割らないと意味がない**。「想定的中率 × 想定オッズ = EV」のテンプレ計算には騙されない。
 
+## パイプライン構成 (Phase 5 以降)
+
+**EV だけでなく競馬独自の当て方も使う。EV は最終フィルタ。**
+
+1. **適性指数 (`src/aptitude.py`)**: 各馬の 8 因子 (能力 / 距離適性 / 末脚 / 馬場 / 状態 / 騎手 / ペース fit / 重賞実績) を 0-100 でレース内正規化。総合は重み付け平均。
+2. **確率モデル (`src/ev.py:estimate_probs`)**: Layer 1 特徴量 + 市場ブレンド + Discounted Harville で win/place2/place3 確率を出す。Plackett-Luce 連鎖で 3 連単・3 連複・馬連・ワイド・馬単・単勝・複勝 すべての確率を導出。
+3. **複数 bet type の EV**: 単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複 / 3 連単 を同じ確率モデルで EV table 化。控除率の低い bet type (単複 20%、馬連 22.5%) は +EV が残りやすい。
+4. **Plan G (適性ゲート → EV 足切り)**: 適性総合 top N 頭 (デフォルト 6) の集合内で生成される買い目のみ → P×O ≥ 1.02 で足切り。EV-first の Plan A/B/C と並列で提案される、競馬独自の「適性で選んで EV で確認」戦略。
+5. **検索 MCP 補強**: LLM (`claude -p`) が適性指数 + Plan G を受け取って、検索で根拠を検証 / 補強根拠数で再ランク。
+
+snapshot に保存される主要フィールド:
+- `horse_aptitude`: 各馬の指数 + 内訳 (total 降順)
+- `aptitude_top_horses`: Plan G の集合
+- `plan_a_keys` / `plan_b_keys` / `plan_c_keys` / `plan_g_keys` / `plan_h1_keys` / `plan_h2_keys` / `plan_f_keys` (3 連単)
+- `bet_tables`: 単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複 の EV top 30
+- `bet_tables_g`: 各 bet type の Plan G picks
+
 ## 確率モデルの保守化 (このプロジェクトで最も重要)
 
 EV の絶対値を「現実の的中率」に近づけることが、長期回収率底上げの **根幹**。
@@ -180,6 +197,6 @@ make record RACE=20260521-521-1 ORDER=5,2,7 PAYOUT=25400
 make calibrate
 
 # FastAPI バックエンド + Next.js フロント
-make api      # uvicorn :8788  (keirin ev-api と被らない様 8788)
-make web      # next dev :3000
+make api      # uvicorn :9788  (keirin ev-api 8787 と完全にずらす。「788」は keiba シグネチャ)
+make web      # next dev :3788 (keirin web 3000 と被らないように)
 ```

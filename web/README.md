@@ -14,7 +14,7 @@ pnpm dev
 bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3788](http://localhost:3788) with your browser to see the result (keiba-ev のデフォルトポートは keirin web 3000 と衝突しないよう 3788)。
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
