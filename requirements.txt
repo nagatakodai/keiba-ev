@@ -8,3 +8,9 @@ python-dotenv>=1.0.1
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 sse-starlette>=2.1.3
+# ML pipeline (Phase A 以降)
+pandas>=2.2.0
+numpy>=2.0.0
+lightgbm>=4.5.0
+scikit-learn>=1.5.0
+pyarrow>=18.0.0
