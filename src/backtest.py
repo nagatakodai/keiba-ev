@@ -75,6 +75,9 @@ class RaceCase:
     rows: list[TripleRow]            # 全 3 連単オッズ + モデル prob
     finish: tuple[int, int, int]     # 実着順 (1, 2, 3 着 馬番)
     payout: int                      # 3 連単 100 円あたり払戻
+    # Plan G 用の適性 top N 頭 (snapshot に保存されていれば inject、無ければ空)。
+    # make_rerun_model 内では past_runs から再計算して上書きする。
+    aptitude_top_horses: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -111,9 +114,21 @@ class AggregateMetrics:
     plan_b_payout: int = 0
     plan_c_stake: int = 0
     plan_c_payout: int = 0
+    plan_g_stake: int = 0
+    plan_g_payout: int = 0
+    plan_h1_stake: int = 0
+    plan_h1_payout: int = 0
+    plan_h2_stake: int = 0
+    plan_h2_payout: int = 0
+    plan_f_stake: int = 0
+    plan_f_payout: int = 0
     plan_a_hits: int = 0
     plan_b_hits: int = 0
     plan_c_hits: int = 0
+    plan_g_hits: int = 0
+    plan_h1_hits: int = 0
+    plan_h2_hits: int = 0
+    plan_f_hits: int = 0
 
     @property
     def plan_a_roi(self) -> float:
@@ -126,6 +141,22 @@ class AggregateMetrics:
     @property
     def plan_c_roi(self) -> float:
         return self.plan_c_payout / self.plan_c_stake if self.plan_c_stake > 0 else 0.0
+
+    @property
+    def plan_g_roi(self) -> float:
+        return self.plan_g_payout / self.plan_g_stake if self.plan_g_stake > 0 else 0.0
+
+    @property
+    def plan_h1_roi(self) -> float:
+        return self.plan_h1_payout / self.plan_h1_stake if self.plan_h1_stake > 0 else 0.0
+
+    @property
+    def plan_h2_roi(self) -> float:
+        return self.plan_h2_payout / self.plan_h2_stake if self.plan_h2_stake > 0 else 0.0
+
+    @property
+    def plan_f_roi(self) -> float:
+        return self.plan_f_payout / self.plan_f_stake if self.plan_f_stake > 0 else 0.0
 
 
 # --- モデルインタフェース ---
@@ -171,6 +202,7 @@ def make_rerun_model(market_blend: float = 0.4) -> ModelFn:
     import gzip
     from pathlib import Path as _Path
 
+    from .aptitude import compute_aptitudes
     from .ev import build_table, estimate_probs
     from .models import TrifectaOdds
     from .parse import parse_past_runs, parse_shutuba
@@ -205,6 +237,16 @@ def make_rerun_model(market_blend: float = 0.4) -> ModelFn:
             ]
             probs = estimate_probs(rd, market_blend=market_blend)
             ev_rows = build_table(rd, probs)
+            # 適性 top 6 を再計算して RaceCase に書き戻す (Plan G の集合)
+            try:
+                apts = compute_aptitudes(rd)
+                case.aptitude_top_horses = [
+                    n for n, _ in sorted(
+                        apts.items(), key=lambda kv: kv[1].total, reverse=True
+                    )[:6]
+                ]
+            except Exception:
+                case.aptitude_top_horses = []
             return [
                 TripleRow(
                     key=er.key, odds=er.odds, popularity=er.popularity,
@@ -388,6 +430,7 @@ def load_cases_from_snapshots(
             rows=rows,
             finish=(int(finish_list[0]), int(finish_list[1]), int(finish_list[2])),
             payout=int(result.get("trifecta_payout") or 0),
+            aptitude_top_horses=list(pred.get("aptitude_top_horses") or []),
         )
 
 
@@ -399,17 +442,28 @@ def run_models(
 ) -> dict[str, AggregateMetrics]:
     """各モデルに対して全レースを評価し、集約指標を返す。
 
-    Plan A/B/C synthetic ROI も計算 (各レースで Plan を組み、的中したら配当を加算)。
+    Plan A/B/C/G/H1/H2/F synthetic ROI も計算 (各レースで Plan を組み、的中したら配当を加算)。
+    Plan G は適性ゲート → P×O ≥ 1.02 足切り、Plan F は A/B/C/G/H1/H2 union。
     """
-    from .ev import EvRow, plan_balanced, plan_max_ev, plan_wide
+    from .ev import (
+        EvRow, plan_aptitude_ev, plan_balanced, plan_final,
+        plan_hit_pure, plan_hit_safe, plan_max_ev, plan_wide,
+    )
 
     out: dict[str, AggregateMetrics] = {}
     for name, model_fn in models.items():
         per_race: list[RaceMetrics] = []
         rows_for_ece: list[tuple[float, float]] = []
-        plan_a_stake = plan_a_payout = plan_a_hits = 0
-        plan_b_stake = plan_b_payout = plan_b_hits = 0
-        plan_c_stake = plan_c_payout = plan_c_hits = 0
+        # Plan A/B/C/G/H1/H2/F の累計
+        plan_acc = {
+            "A": [0, 0, 0],  # stake, payout, hits
+            "B": [0, 0, 0],
+            "C": [0, 0, 0],
+            "G": [0, 0, 0],
+            "H1": [0, 0, 0],
+            "H2": [0, 0, 0],
+            "F": [0, 0, 0],
+        }
 
         for case in cases:
             m = evaluate_race(case, model_fn)
@@ -429,49 +483,62 @@ def run_models(
                 for r in evaluated_rows
             ]
             ev_rows.sort(key=lambda x: x.px_o, reverse=True)
-            for plan_label, plan_fn, (stake_acc, payout_acc, hits_acc) in [
-                ("A", plan_balanced, (plan_a_stake, plan_a_payout, plan_a_hits)),
-                ("B", plan_max_ev,   (plan_b_stake, plan_b_payout, plan_b_hits)),
-                ("C", plan_wide,     (plan_c_stake, plan_c_payout, plan_c_hits)),
-            ]:
-                try:
-                    plan_rows = plan_fn(ev_rows)
-                except Exception:
-                    plan_rows = []
+
+            apt_top = case.aptitude_top_horses or []
+            plan_a_rows = _safe(plan_balanced, ev_rows)
+            plan_b_rows = _safe(plan_max_ev, ev_rows)
+            plan_c_rows = _safe(plan_wide, ev_rows)
+            plan_g_rows = (
+                _safe(plan_aptitude_ev, ev_rows, apt_top) if apt_top else []
+            )
+            plan_h1_rows = _safe(plan_hit_pure, ev_rows, 3)
+            plan_h2_rows = _safe(plan_hit_safe, ev_rows, 3)
+            try:
+                plan_f_rows = plan_final(
+                    plan_a_rows, plan_b_rows, plan_c_rows,
+                    plan_g_rows, plan_h1_rows, plan_h2_rows,
+                )
+            except Exception:
+                plan_f_rows = []
+
+            for label, plan_rows in (
+                ("A", plan_a_rows),
+                ("B", plan_b_rows),
+                ("C", plan_c_rows),
+                ("G", plan_g_rows),
+                ("H1", plan_h1_rows),
+                ("H2", plan_h2_rows),
+                ("F", plan_f_rows),
+            ):
                 n_pts = len(plan_rows)
                 if n_pts == 0:
                     continue
                 stake = n_pts * point_cost
                 hit = any(r.key == case.finish for r in plan_rows)
                 payout = case.payout if (hit and case.payout > 0) else 0
-                if plan_label == "A":
-                    plan_a_stake += stake
-                    plan_a_payout += payout
-                    if hit:
-                        plan_a_hits += 1
-                elif plan_label == "B":
-                    plan_b_stake += stake
-                    plan_b_payout += payout
-                    if hit:
-                        plan_b_hits += 1
-                elif plan_label == "C":
-                    plan_c_stake += stake
-                    plan_c_payout += payout
-                    if hit:
-                        plan_c_hits += 1
+                plan_acc[label][0] += stake
+                plan_acc[label][1] += payout
+                if hit:
+                    plan_acc[label][2] += 1
 
         agg = aggregate(name, per_race, rows_for_ece)
-        agg.plan_a_stake = plan_a_stake
-        agg.plan_a_payout = plan_a_payout
-        agg.plan_a_hits = plan_a_hits
-        agg.plan_b_stake = plan_b_stake
-        agg.plan_b_payout = plan_b_payout
-        agg.plan_b_hits = plan_b_hits
-        agg.plan_c_stake = plan_c_stake
-        agg.plan_c_payout = plan_c_payout
-        agg.plan_c_hits = plan_c_hits
+        agg.plan_a_stake, agg.plan_a_payout, agg.plan_a_hits = plan_acc["A"]
+        agg.plan_b_stake, agg.plan_b_payout, agg.plan_b_hits = plan_acc["B"]
+        agg.plan_c_stake, agg.plan_c_payout, agg.plan_c_hits = plan_acc["C"]
+        agg.plan_g_stake, agg.plan_g_payout, agg.plan_g_hits = plan_acc["G"]
+        agg.plan_h1_stake, agg.plan_h1_payout, agg.plan_h1_hits = plan_acc["H1"]
+        agg.plan_h2_stake, agg.plan_h2_payout, agg.plan_h2_hits = plan_acc["H2"]
+        agg.plan_f_stake, agg.plan_f_payout, agg.plan_f_hits = plan_acc["F"]
         out[name] = agg
     return out
+
+
+def _safe(fn, *args, **kwargs):
+    """plan_* を呼んで例外を握りつぶす (空リスト fallback)。"""
+    try:
+        return fn(*args, **kwargs)
+    except Exception:
+        return []
 
 
 def _tier_for_pxo(pxo: float) -> str:
@@ -519,33 +586,55 @@ def print_summary(metrics: dict[str, AggregateMetrics]) -> None:
         )
     console.print(tbl)
 
-    # Synthetic ROI table (Plan A/B/C 仮想エントリ累積)
-    tbl2 = Table(title="Synthetic Plan ROI (¥100/pt 仮想エントリ)", show_lines=False)
-    tbl2.add_column("Model", style="bold")
-    tbl2.add_column("Plan A ROI", justify="right")
-    tbl2.add_column("(hits/stake/payout)")
-    tbl2.add_column("Plan B ROI", justify="right")
-    tbl2.add_column("(hits/stake/payout)")
-    tbl2.add_column("Plan C ROI", justify="right")
-    tbl2.add_column("(hits/stake/payout)")
+    # Synthetic ROI table (Plan A/B/C/G/H1/H2/F): モデル × Plan で wide table を作ると
+    # 14 列で見切れるので、Plan を行に置いて Model を列にする (転置レイアウト)。
+    def _fmt_roi(roi: float) -> str:
+        if roi >= 1.0:
+            return f"[bold green]{roi:.3f}[/]"
+        elif roi >= 0.85:
+            return f"[green]{roi:.3f}[/]"
+        else:
+            return f"[red]{roi:.3f}[/]"
+
+    plan_specs = [
+        ("A", "5点バランス", "plan_a"),
+        ("B", "最高EV集中", "plan_b"),
+        ("C", "広め保険", "plan_c"),
+        ("G", "適性ゲート", "plan_g"),
+        ("H1", "当て枠/確率最優先", "plan_h1"),
+        ("H2", "当て枠/P×O≥1.0", "plan_h2"),
+        ("F", "A〜H2 union", "plan_f"),
+    ]
     for name, m in metrics.items():
-        def _fmt_roi(roi: float) -> str:
-            if roi >= 1.0:
-                return f"[bold green]{roi:.3f}[/]"
-            elif roi >= 0.85:
-                return f"[green]{roi:.3f}[/]"
-            else:
-                return f"[red]{roi:.3f}[/]"
-        tbl2.add_row(
-            name,
-            _fmt_roi(m.plan_a_roi),
-            f"{m.plan_a_hits}/{m.plan_a_stake:,}/{m.plan_a_payout:,}",
-            _fmt_roi(m.plan_b_roi),
-            f"{m.plan_b_hits}/{m.plan_b_stake:,}/{m.plan_b_payout:,}",
-            _fmt_roi(m.plan_c_roi),
-            f"{m.plan_c_hits}/{m.plan_c_stake:,}/{m.plan_c_payout:,}",
+        tbl2 = Table(
+            title=f"Synthetic Plan ROI — {name} (¥100/pt 仮想エントリ)",
+            show_lines=False,
         )
-    console.print(tbl2)
+        tbl2.add_column("Plan", style="bold")
+        tbl2.add_column("性質", style="dim")
+        tbl2.add_column("ROI", justify="right")
+        tbl2.add_column("hits", justify="right")
+        tbl2.add_column("stake", justify="right")
+        tbl2.add_column("payout", justify="right")
+        tbl2.add_column("avg payout/hit", justify="right")
+        for label, desc, prefix in plan_specs:
+            hits = getattr(m, f"{prefix}_hits")
+            stake = getattr(m, f"{prefix}_stake")
+            payout = getattr(m, f"{prefix}_payout")
+            roi = getattr(m, f"{prefix}_roi")
+            if stake == 0:
+                continue
+            avg = payout / hits if hits > 0 else 0
+            tbl2.add_row(
+                label,
+                desc,
+                _fmt_roi(roi),
+                str(hits),
+                f"¥{stake:,}",
+                f"¥{payout:,}",
+                f"¥{avg:,.0f}" if avg > 0 else "—",
+            )
+        console.print(tbl2)
 
 
 def print_reliability(metrics: dict[str, AggregateMetrics]) -> None:
