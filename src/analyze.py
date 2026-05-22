@@ -16,6 +16,7 @@ from . import llm as llm_mod
 from .aptitude import AptitudeIndex, compute_aptitudes
 from .ev import PXO_FLOOR
 from .features import build_features
+from .market_signal import MarketSignal, compute_market_signals
 from .parse import fetch_and_parse, parse_shutuba, parse_trifecta
 from .scrape import (
     cache_html,
@@ -96,12 +97,14 @@ def main(
     feats = build_features(rd)
     aptitudes = compute_aptitudes(rd, feats=feats)
     apt_top = _aptitude_top_horses(aptitudes, n=aptitude_top)
+    market_signals = compute_market_signals(rd)
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_floor=market_floor)
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
 
     _print_race_header(rd)
     _print_horse_table(rd)
     _print_aptitudes(rd, aptitudes)
+    _print_market_signals(rd, market_signals)
     _print_weather(rd)
     _print_predictions(rd)
     _print_interviews(rd)
@@ -113,7 +116,10 @@ def main(
     plan_rows = ev_mod.apply_caps(rows, ev_max=ev_max, min_prob=min_prob_dec)
 
     if not no_cache:
-        _save_prediction_snapshot(race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top)
+        _save_prediction_snapshot(
+            race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
+            feats=feats,
+        )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
         total = len(rows)
@@ -323,6 +329,46 @@ def _serialize_bet_tables_g(
     return out
 
 
+def _serialize_best_times(rd, feats: dict) -> list[dict]:
+    """各馬の 持ち時計 (venue × distance ± 100m × surface での best own_time_sec)。
+
+    best_time_at_target が 0 (未経験) の馬は除外。秒数 + 元になった経験数を出力。
+    """
+    name_by_n = {h.number: h.name for h in rd.race.horses}
+    items = []
+    for n, fv in feats.items():
+        if fv.best_time_at_target <= 0:
+            continue
+        items.append({
+            "number": n,
+            "name": name_by_n.get(n, ""),
+            "best_time_sec": round(fv.best_time_at_target, 2),
+            "runs": fv.best_time_runs,
+        })
+    # 速い順 (秒数が小さい順)
+    items.sort(key=lambda x: x["best_time_sec"])
+    return items
+
+
+def _serialize_market_signals(rd, signals: dict[int, MarketSignal]) -> list[dict]:
+    """snapshot JSON 用に MarketSignal を直列化。"""
+    name_by_n = {h.number: h.name for h in rd.race.horses}
+    items = []
+    for n in sorted(signals):
+        s = signals[n]
+        items.append({
+            "number": n,
+            "name": name_by_n.get(n, ""),
+            "win_odds": round(s.win_odds, 1),
+            "place_odds_min": round(s.place_odds_min, 1),
+            "win_implied": round(s.win_implied, 4),
+            "place_implied": round(s.place_implied, 4),
+            "place_to_win_ratio": round(s.place_to_win_ratio, 2),
+            "interpretation": s.interpretation,
+        })
+    return items
+
+
 def _serialize_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> list[dict]:
     """snapshot JSON 用に AptitudeIndex を直列化。総合降順で配列化。"""
     name_by_n = {h.number: h.name for h in rd.race.horses}
@@ -355,6 +401,8 @@ def _save_prediction_snapshot(
     aptitudes: dict[int, AptitudeIndex] | None = None,
     bet_tables: dict[str, list] | None = None,
     aptitude_top_horses: list[int] | None = None,
+    market_signals: dict[int, MarketSignal] | None = None,
+    feats: dict | None = None,
 ) -> None:
     plan_a = ev_mod.plan_balanced(plan_rows)
     plan_b = ev_mod.plan_max_ev(plan_rows)
@@ -395,6 +443,8 @@ def _save_prediction_snapshot(
             for r in rows
         ],
         "horse_aptitude": _serialize_aptitudes(rd, aptitudes) if aptitudes else [],
+        "horse_best_times": _serialize_best_times(rd, feats) if feats else [],
+        "market_signals": _serialize_market_signals(rd, market_signals) if market_signals else [],
         "bet_tables": _serialize_bet_tables(bet_tables) if bet_tables else {},
         "bet_tables_g": (
             _serialize_bet_tables_g(bet_tables, aptitude_top_horses)
@@ -562,6 +612,53 @@ def _print_bet_tables(
                 f"  [magenta]→ {name} Plan G (適性 top {len(aptitude_top_horses)} 頭 → P×O≥{ev_mod.PXO_FLOOR:.2f}): "
                 f"{len(g_picks)}点: {joined}[/magenta]"
             )
+
+
+def _print_market_signals(rd, signals: dict[int, MarketSignal]) -> None:
+    """市場乖離 (1 着型 / 3 着型 / 標準) を horse 順に表示。3 着型のみ強調。"""
+    if not signals:
+        return
+    # 3 着型 or 1 着型に分類された馬がある場合のみ表示 (標準だらけならノイズ)
+    interesting = [s for s in signals.values() if s.interpretation in ("3着型", "1着型", "極端")]
+    if not interesting:
+        return
+    tbl = Table(
+        title="市場乖離 (単勝 vs 複勝オッズの implied prob 比率)",
+        show_lines=False,
+    )
+    tbl.add_column("馬", justify="right", style="bold")
+    tbl.add_column("馬名")
+    tbl.add_column("単勝", justify="right")
+    tbl.add_column("複(下限)", justify="right")
+    tbl.add_column("win%", justify="right")
+    tbl.add_column("place%", justify="right")
+    tbl.add_column("ratio", justify="right")
+    tbl.add_column("解釈")
+    name_by_n = {h.number: h.name for h in rd.race.horses}
+    # 解釈順: 3 着型 → 1 着型 → 極端 → (標準は省略)
+    order = {"3着型": 0, "1着型": 1, "極端": 2}
+    for s in sorted(interesting, key=lambda x: (order.get(x.interpretation, 9), -x.place_to_win_ratio)):
+        if s.interpretation == "3着型":
+            mark = "[bold magenta]3着型[/bold magenta]"
+        elif s.interpretation == "1着型":
+            mark = "[bold cyan]1着型[/bold cyan]"
+        else:
+            mark = f"[red]{s.interpretation}[/red]"
+        tbl.add_row(
+            str(s.number),
+            name_by_n.get(s.number, "-"),
+            f"{s.win_odds:.1f}" if s.win_odds else "-",
+            f"{s.place_odds_min:.1f}" if s.place_odds_min else "-",
+            f"{s.win_implied*100:.2f}",
+            f"{s.place_implied*100:.2f}",
+            f"{s.place_to_win_ratio:.2f}",
+            mark,
+        )
+    console.print(tbl)
+    console.print(
+        "[dim]3 着型 = 市場が「3 着までは堅いが 1 着は薄い」と見る馬 (= Plan G の 2/3 着スロット候補)。"
+        "1 着型 = 市場が「1 着取らないと終わり」と見る馬 (= Plan G の 1 着スロット候補)。[/dim]"
+    )
 
 
 def _print_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> None:
@@ -975,6 +1072,7 @@ def _refresh_and_reevaluate(
     feats2 = build_features(rd2)
     aptitudes2 = compute_aptitudes(rd2, feats=feats2)
     apt_top2 = _aptitude_top_horses(aptitudes2, n=aptitude_top)
+    market_signals2 = compute_market_signals(rd2)
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor)
     probs2 = ev_mod.load_probs(None, probs2)
     rows2 = ev_mod.build_table(rd2, probs2)
@@ -990,7 +1088,8 @@ def _refresh_and_reevaluate(
 
     if not no_cache:
         _save_prediction_snapshot(
-            race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2
+            race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
+            feats=feats2,
         )
 
     _print_top(rows2, n=show)

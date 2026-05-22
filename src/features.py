@@ -54,6 +54,10 @@ class FeatureVec:
     same_going_count: int = 0            # 同馬場状態 (良/稍/重/不) での過去走数
     same_going_show_rate: float = 0.0    # 同馬場状態での 3 着以内率 (0-1)
     going_versatility: float = 0.0       # 異馬場での好走多様性 (0-1, 高いほど馬場不問)
+    # 持ち時計 (best own_time_sec at venue × distance ± 100m × surface)
+    # 当該条件で走った経験が無い時は 0。距離標準化はせず raw 秒で持つ (同条件比較用)。
+    best_time_at_target: float = 0.0     # 秒 (例 95.3)
+    best_time_runs: int = 0              # 持ち時計の元になった経験数
     # 末脚
     last3f_idx_recent: float = 0.0       # 直近 3 走の上がり 3F を距離で標準化
     # コンディション
@@ -247,6 +251,19 @@ def build_features(rd: RaceData) -> dict[int, FeatureVec]:
         )
         fv.same_surface_count = sum(1 for r in runs if r.surface == race.surface)
         fv.same_venue_count = sum(1 for r in runs if r.venue == race.venue_name)
+
+        # 持ち時計 (venue × distance ± 100m × surface での best own_time_sec)
+        # 同条件で複数走っていれば最速タイム、無ければ 0。
+        same_target_runs = [
+            r for r in runs
+            if r.venue == race.venue_name
+            and abs(r.distance - race.distance) <= 100
+            and r.surface == race.surface
+            and r.own_time_sec > 0
+        ]
+        if same_target_runs:
+            fv.best_time_at_target = min(r.own_time_sec for r in same_target_runs)
+            fv.best_time_runs = len(same_target_runs)
 
         # 馬場状態適性 (current race の going が分かる時のみ意味を持つ)
         # Race.weather.track_condition は "良"/"稍重"/"重"/"不良" の文字列。
