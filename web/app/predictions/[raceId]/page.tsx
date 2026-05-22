@@ -4,6 +4,8 @@ import {
   api,
   type BetEvRow,
   type HorseAptitude,
+  type HorseBestTime,
+  type MarketSignal,
   type PredictionDetail,
   type PredictionRow,
 } from "@/lib/api";
@@ -162,6 +164,14 @@ export default async function PredictionDetailPage({
 
       {d.horse_aptitude && d.horse_aptitude.length > 0 && (
         <AptitudeCard items={d.horse_aptitude} finish={finish} />
+      )}
+
+      {d.market_signals && d.market_signals.length > 0 && (
+        <MarketSignalCard items={d.market_signals} finish={finish} />
+      )}
+
+      {d.horse_best_times && d.horse_best_times.length > 0 && (
+        <BestTimesCard items={d.horse_best_times} finish={finish} />
       )}
 
       {d.bet_tables && Object.keys(d.bet_tables).length > 0 && (
@@ -685,6 +695,158 @@ function BetTablesCard({
         注: 確率モデルは 3 連単と共通 (Plackett-Luce 連鎖)。低リスク bet type は
         控除率が低い (単複 20% / 馬連 22.5% / 3 連単 27.5%) ぶん +EV が残りやすい。
         複勝オッズは下限 (fuku_min) を採用 (実払戻が下限以上で確定する保守値)。
+      </p>
+    </Card>
+  );
+}
+
+function MarketSignalCard({
+  items,
+  finish,
+}: {
+  items: MarketSignal[];
+  finish?: number[];
+}) {
+  // 1着型 / 3着型 / 極端 のみ表示 (標準・不明はノイズ)
+  const interesting = items.filter(
+    (s) => s.interpretation === "3着型" || s.interpretation === "1着型" || s.interpretation === "極端",
+  );
+  if (interesting.length === 0) return null;
+  const finishSet = new Set(finish ?? []);
+  const order: Record<string, number> = { "3着型": 0, "1着型": 1, "極端": 2 };
+  const sorted = [...interesting].sort(
+    (a, b) =>
+      (order[a.interpretation] ?? 9) - (order[b.interpretation] ?? 9) ||
+      b.place_to_win_ratio - a.place_to_win_ratio,
+  );
+  const toneFor = (interp: string) => {
+    if (interp === "3着型") return "magenta" as const;
+    if (interp === "1着型") return "info" as const;
+    return "bad" as const;
+  };
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <span>市場乖離 (1着型 / 3着型)</span>
+          <span className="text-xs text-(--color-muted) font-normal">
+            単勝 vs 複勝 implied prob 比率で構造的ミスプライスを検出
+          </span>
+        </span>
+      }
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabnum table-zebra">
+          <thead className="text-left text-(--color-muted) text-xs">
+            <tr className="border-b border-(--color-line)">
+              <th className="py-2 pr-3 text-right">馬</th>
+              <th className="py-2 pr-3">馬名</th>
+              <th className="py-2 pr-3">解釈</th>
+              <th className="py-2 pr-3 text-right">単勝</th>
+              <th className="py-2 pr-3 text-right">複(下限)</th>
+              <th className="py-2 pr-3 text-right">win%</th>
+              <th className="py-2 pr-3 text-right">place%</th>
+              <th className="py-2 pr-3 text-right">ratio</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((s) => {
+              const hit = finishSet.has(s.number);
+              return (
+                <tr key={s.number} className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}>
+                  <td className="py-1.5 pr-3 text-right font-bold">{s.number}</td>
+                  <td className="py-1.5 pr-3">
+                    {s.name}
+                    {hit && finish && (
+                      <span className="ml-2 text-(--color-good) text-xs">
+                        ●{finish.indexOf(s.number) + 1}着
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    <Badge tone={toneFor(s.interpretation)}>{s.interpretation}</Badge>
+                  </td>
+                  <td className="py-1.5 pr-3 text-right">{s.win_odds.toFixed(1)}</td>
+                  <td className="py-1.5 pr-3 text-right">{s.place_odds_min.toFixed(1)}</td>
+                  <td className="py-1.5 pr-3 text-right">{(s.win_implied * 100).toFixed(2)}%</td>
+                  <td className="py-1.5 pr-3 text-right">{(s.place_implied * 100).toFixed(2)}%</td>
+                  <td className="py-1.5 pr-3 text-right">{s.place_to_win_ratio.toFixed(2)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-3 text-xs text-(--color-muted)">
+        <span className="font-bold">3着型</span> = 市場が「3 着までは堅いが 1 着は薄い」と見る馬 (Plan G の 2/3 着スロット候補)。
+        <span className="font-bold ml-2">1着型</span> = 市場が「1 着取らないと終わり」と見る馬 (Plan G の 1 着スロット候補)。
+      </p>
+    </Card>
+  );
+}
+
+function BestTimesCard({
+  items,
+  finish,
+}: {
+  items: HorseBestTime[];
+  finish?: number[];
+}) {
+  const finishSet = new Set(finish ?? []);
+  // 速い順 (snapshot は既に best_time_sec 昇順) — top 10 まで表示
+  const top = items.slice(0, 10);
+  if (top.length === 0) return null;
+  const fastest = top[0].best_time_sec;
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <span>持ち時計</span>
+          <span className="text-xs text-(--color-muted) font-normal">
+            同 venue × 同距離 ±100m × 同 surface での past best own_time_sec (速い順)
+          </span>
+        </span>
+      }
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabnum table-zebra">
+          <thead className="text-left text-(--color-muted) text-xs">
+            <tr className="border-b border-(--color-line)">
+              <th className="py-2 pr-3 text-right">馬</th>
+              <th className="py-2 pr-3">馬名</th>
+              <th className="py-2 pr-3 text-right">持ち時計</th>
+              <th className="py-2 pr-3 text-right">トップ差</th>
+              <th className="py-2 pr-3 text-right">経験</th>
+            </tr>
+          </thead>
+          <tbody>
+            {top.map((t) => {
+              const hit = finishSet.has(t.number);
+              const diff = t.best_time_sec - fastest;
+              return (
+                <tr key={t.number} className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}>
+                  <td className="py-1.5 pr-3 text-right font-bold">{t.number}</td>
+                  <td className="py-1.5 pr-3">
+                    {t.name}
+                    {hit && finish && (
+                      <span className="ml-2 text-(--color-good) text-xs">
+                        ●{finish.indexOf(t.number) + 1}着
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right font-medium">{t.best_time_sec.toFixed(1)}s</td>
+                  <td className="py-1.5 pr-3 text-right text-(--color-muted)">
+                    {diff === 0 ? "—" : `+${diff.toFixed(1)}s`}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right text-(--color-muted)">{t.runs} 走</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-3 text-xs text-(--color-muted)">
+        speed_idx (適性「能力」列) と独立した同条件絶対値。秒数の差が小さいほど能力拮抗。
       </p>
     </Card>
   );

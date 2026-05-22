@@ -147,9 +147,12 @@ def main(
     initial_eval = ""
     evidence: dict = {}
     if not no_llm:
+        # LLM に持ち時計を渡す: snapshot 直列化と同じヘルパを再利用
+        best_times_for_llm = _serialize_best_times(rd, feats) if feats else []
         initial_eval = _print_llm_evaluation(
             rd, plan_rows, model=llm_model, ev_max=ev_max, min_prob=min_prob, probs=probs,
             aptitudes=aptitudes, aptitude_top_horses=apt_top,
+            market_signals=market_signals, horse_best_times=best_times_for_llm,
         )
         evidence = llm_mod.parse_evidence(initial_eval)
         if evidence:
@@ -950,6 +953,8 @@ def _print_llm_evaluation(
     probs=None,
     aptitudes: dict | None = None,
     aptitude_top_horses: list[int] | None = None,
+    market_signals: dict | None = None,
+    horse_best_times: list | None = None,
 ) -> str:
     if not llm_mod.is_available():
         console.print("[yellow]claude CLI が見つかりません。--no-llm でスキップ可。[/yellow]")
@@ -964,6 +969,7 @@ def _print_llm_evaluation(
     for etype, payload in llm_mod.evaluate_stream(
         rd, rows, model=model, ev_max=ev_max, min_prob=min_prob, probs=probs,
         aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
+        market_signals=market_signals, horse_best_times=horse_best_times,
     ):
         if etype == "init":
             saw_init = True

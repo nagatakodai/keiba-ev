@@ -56,6 +56,8 @@ def evaluate_stream(
     probs: Probabilities | None = None,
     aptitudes: dict[int, Any] | None = None,
     aptitude_top_horses: list[int] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
 ) -> Iterator[tuple[str, Any]]:
     if not is_available():
         yield ("error", "claude CLI が見つかりません")
@@ -65,6 +67,7 @@ def evaluate_stream(
         rd, rows,
         ev_max=ev_max, min_prob=min_prob, probs=probs,
         aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
+        market_signals=market_signals, horse_best_times=horse_best_times,
     )
     cmd = [
         "claude", "-p", prompt,
@@ -140,12 +143,15 @@ def evaluate(
     probs: Probabilities | None = None,
     aptitudes: dict[int, Any] | None = None,
     aptitude_top_horses: list[int] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
 ) -> str:
     final = ""
     for etype, payload in evaluate_stream(
         rd, rows, model=model, timeout=timeout,
         ev_max=ev_max, min_prob=min_prob, probs=probs,
         aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
+        market_signals=market_signals, horse_best_times=horse_best_times,
     ):
         if etype == "result":
             final = payload
@@ -379,6 +385,43 @@ def _predictions_block(rd: RaceData) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _market_signal_block(market_signals: dict[int, Any] | None) -> str:
+    """市場乖離 (1 着型 / 3 着型) のみ Markdown で抜粋。標準・不明は省く。"""
+    if not market_signals:
+        return ""
+    interesting = [
+        s for s in market_signals.values()
+        if s.interpretation in ("3着型", "1着型", "極端")
+    ]
+    if not interesting:
+        return ""
+    lines = [
+        "| 馬 | 解釈 | 単勝 | 複(下限) | ratio (place/win) |",
+        "|---|---|---|---|---|",
+    ]
+    for s in sorted(interesting, key=lambda x: (x.interpretation != "3着型", -x.place_to_win_ratio)):
+        lines.append(
+            f"| {s.number} | **{s.interpretation}** | "
+            f"{s.win_odds:.1f} | {s.place_odds_min:.1f} | {s.place_to_win_ratio:.2f} |"
+        )
+    return "\n".join(lines)
+
+
+def _best_times_block(horse_best_times: list[dict] | None) -> str:
+    """持ち時計 (venue × distance での past best time) を Markdown 表で。"""
+    if not horse_best_times:
+        return ""
+    lines = [
+        "| 馬 | 馬名 | 持ち時計 (秒) | 経験 |",
+        "|---|---|---|---|",
+    ]
+    for x in horse_best_times[:10]:
+        lines.append(
+            f"| {x['number']} | {x['name']} | {x['best_time_sec']:.1f} | {x['runs']} 走 |"
+        )
+    return "\n".join(lines)
+
+
 def _aptitude_block(rd: RaceData, aptitudes: dict[int, Any]) -> str:
     """各馬の適性指数 (0-100 / 9 因子内訳 + 主要根拠) を Markdown 表で。
 
@@ -457,6 +500,8 @@ def build_prompt(
     probs: Probabilities | None = None,
     aptitudes: dict[int, Any] | None = None,
     aptitude_top_horses: list[int] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
 ) -> str:
     r = rd.race
 
@@ -502,6 +547,20 @@ def build_prompt(
     plan_g = _fmt_plan(plan_g_picks)
 
     caps_block = _caps_block(ev_max, min_prob)
+    market_block = _market_signal_block(market_signals)
+    market_section = (
+        f"\n## 市場乖離 (1着型 / 3着型 のみ)\n{market_block}\n"
+        "\n(ratio = 複勝 implied prob / 単勝 implied prob。**3着型 = Plan G の 2/3 着スロット候補**。"
+        "1着型 = Plan G の 1 着スロット候補。検索でこの解釈を支持/反証する根拠を探してください。)\n"
+        if market_block else ""
+    )
+    best_times_block = _best_times_block(horse_best_times)
+    best_times_section = (
+        f"\n## 持ち時計 (同 venue × 同距離 ±100m × 同 surface での best own_time_sec)\n{best_times_block}\n"
+        "\n(同条件経験者の絶対値ベンチマーク。秒数が小さい = 速い。"
+        "speed_idx と独立した「この特定の舞台での実績」シグナル。)\n"
+        if best_times_block else ""
+    )
     aptitude_block = _aptitude_block(rd, aptitudes) if aptitudes else ""
     aptitude_section = (
         f"\n## 各馬の適性指数 (0-100 / 同レース内相対 / 9 因子内訳)\n{aptitude_block}\n"
@@ -539,7 +598,7 @@ def build_prompt(
 {weather_section}
 ## 出走馬
 {horses_block}
-{interviews_section}{aptitude_section}{index_section}{predictions_section}
+{interviews_section}{aptitude_section}{best_times_section}{market_section}{index_section}{predictions_section}
 ## P×O 上位 25 件 (デフォルト推定)
 {top_block}
 

@@ -73,6 +73,27 @@ export type PredictionRow = {
   tier: "honsen" | "chuana" | "oana" | "minus" | string;
 };
 
+// 市場乖離 (単勝オッズと複勝オッズの implied prob 比率) per-horse。
+// interpretation で「3着型」「1着型」「標準」「極端」「不明」を判定。
+export type MarketSignal = {
+  number: number;
+  name: string;
+  win_odds: number;
+  place_odds_min: number;
+  win_implied: number;
+  place_implied: number;
+  place_to_win_ratio: number;
+  interpretation: "3着型" | "1着型" | "標準" | "極端" | "不明" | string;
+};
+
+// 持ち時計 (venue × distance × surface で過去走った own_time_sec の最速値)。
+export type HorseBestTime = {
+  number: number;
+  name: string;
+  best_time_sec: number;
+  runs: number;
+};
+
 // 各馬の適性指数 (0-100 / 同レース内相対) + 因子内訳 + 主要根拠。
 // total は重み付け平均。snapshot は total 降順で配列化されている。
 export type HorseAptitude = {
@@ -115,6 +136,10 @@ export type PredictionDetail = {
   start_at: number | null;
   rows: PredictionRow[];
   horse_aptitude?: HorseAptitude[];
+  // 市場乖離 (単勝 vs 複勝 implied prob 比率)。fetch されていなければ空配列。
+  market_signals?: MarketSignal[];
+  // 持ち時計 (同 venue × 同距離 × 同 surface での best own_time_sec)。速い順。
+  horse_best_times?: HorseBestTime[];
   // 馬連 (quinella) / ワイド (wide) / 馬単 (exacta) / 3連複 (trio) の EV table。
   // 各 bet type の top 30 行 (P×O 降順)。fetch されていない bet type はキー無し。
   bet_tables?: Record<string, BetEvRow[]>;
