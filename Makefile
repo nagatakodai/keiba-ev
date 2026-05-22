@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train api web web-install
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train api web web-install test
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -64,6 +64,11 @@ refresh:
 
 verify:
 	$(PY) -m src.analyze --help
+
+# --- テスト ---
+# uv pip install pytest --python $(PY) で pytest が入っている前提
+test:
+	$(PY) -m pytest tests/ -v
 
 # --- キャリブレーション ---
 #   make record RACE=2026052102-3-2 ORDER=5,2,7 [PAYOUT=25400] [NOTE='大外不利']
