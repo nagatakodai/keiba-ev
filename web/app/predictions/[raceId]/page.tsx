@@ -62,6 +62,15 @@ export default async function PredictionDetailPage({
           <span className="flex items-center gap-3">
             {d.venue_name} {d.race_number}R
             <Badge tone="muted">{d.race_class}</Badge>
+            {d.model_info?.engine === "lgbm" ? (
+              <span title={`LightGBM ${d.model_info.n_features ?? "?"} features, trained ${d.model_info.trained_at ?? "?"}`}>
+                <Badge tone="info">LGBM</Badge>
+              </span>
+            ) : d.model_info?.engine === "linear-fallback" ? (
+              <span title="LightGBM 学習済モデル未利用 - 線形 softmax fallback">
+                <Badge tone="warn">linear</Badge>
+              </span>
+            ) : null}
             {d.evidence && <Badge tone="magenta">補強済</Badge>}
             {d.result && <Badge tone="good">結果あり</Badge>}
           </span>

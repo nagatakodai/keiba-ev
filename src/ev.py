@@ -257,6 +257,50 @@ _LGBM_META = None
 _LGBM_LOAD_TRIED = False
 
 
+def lgbm_status() -> dict:
+    """LightGBM 学習済モデルがロード可能かを返す。
+
+    フィールド:
+      available: True なら estimate_probs が lgbm を使う、False なら linear softmax fallback
+      feature_cols: 使用する FeatureVec フィールド名
+      n_features: feature_cols の長さ
+      model_path: モデルファイルパス (存在する場合)
+      load_error: 失敗時のエラーメッセージ
+    """
+    global _LGBM_MODEL, _LGBM_META, _LGBM_LOAD_TRIED
+    out: dict = {"available": False, "feature_cols": [], "n_features": 0}
+    if _LGBM_MODEL is None and not _LGBM_LOAD_TRIED:
+        _LGBM_LOAD_TRIED = True
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            import lightgbm as _lgb
+            root = _Path(__file__).resolve().parents[1]
+            mp = root / "data" / "models" / "lgbm_lambdarank.txt"
+            meta = root / "data" / "models" / "lgbm_metadata.json"
+            if not mp.exists() or not meta.exists():
+                out["load_error"] = f"model files missing: {mp.name} / {meta.name}"
+                return out
+            _LGBM_MODEL = _lgb.Booster(model_file=str(mp))
+            _LGBM_META = _json.loads(meta.read_text(encoding="utf-8"))
+            out["model_path"] = str(mp.relative_to(root))
+        except Exception as ex:  # noqa: BLE001
+            out["load_error"] = str(ex)[:200]
+            return out
+    if _LGBM_MODEL is not None and _LGBM_META is not None:
+        out["available"] = True
+        cols = _LGBM_META.get("feature_cols", [])
+        out["feature_cols"] = cols
+        out["n_features"] = len(cols)
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parents[1]
+        out["model_path"] = "data/models/lgbm_lambdarank.txt"
+        # trained_at / num_iters があれば付ける
+        out["trained_at"] = _LGBM_META.get("trained_at")
+        out["n_iterations"] = _LGBM_META.get("num_iterations") or _LGBM_META.get("n_iterations")
+    return out
+
+
 def _lgbm_predict(horses, feats) -> dict[int, float] | None:
     """LightGBM 学習済モデルがあれば feats 行列で score 予測 → softmax で 1 着確率。
 

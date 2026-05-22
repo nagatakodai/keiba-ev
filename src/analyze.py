@@ -98,6 +98,20 @@ def main(
     aptitudes = compute_aptitudes(rd, feats=feats)
     apt_top = _aptitude_top_horses(aptitudes, n=aptitude_top)
     market_signals = compute_market_signals(rd)
+    lgbm_info = ev_mod.lgbm_status()
+    if lgbm_info.get("available"):
+        n_feat = lgbm_info["n_features"]
+        # FeatureVec の新フィールドが model 学習時に無かった場合は warning
+        from dataclasses import fields as _fields
+        fv_field_names = {f.name for f in _fields(__import__("src.features", fromlist=["FeatureVec"]).FeatureVec)}
+        missing = fv_field_names - set(lgbm_info["feature_cols"]) - {"number", "absent", "win_odds", "style_score", "pace_fit", "same_going_count", "same_going_show_rate", "going_versatility", "best_time_at_target", "best_time_runs"}
+        console.print(
+            f"[dim]✓ LightGBM 学習済モデル使用 ({n_feat} features, "
+            f"trained {lgbm_info.get('trained_at', '?')})[/dim]"
+        )
+    else:
+        err = lgbm_info.get("load_error", "model files missing")
+        console.print(f"[yellow]⚠ LightGBM 不可 (linear softmax fallback): {err}[/yellow]")
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_floor=market_floor)
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
 
@@ -118,7 +132,7 @@ def main(
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
-            feats=feats,
+            feats=feats, lgbm_info=lgbm_info,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -406,6 +420,7 @@ def _save_prediction_snapshot(
     aptitude_top_horses: list[int] | None = None,
     market_signals: dict[int, MarketSignal] | None = None,
     feats: dict | None = None,
+    lgbm_info: dict | None = None,
 ) -> None:
     plan_a = ev_mod.plan_balanced(plan_rows)
     plan_b = ev_mod.plan_max_ev(plan_rows)
@@ -448,6 +463,12 @@ def _save_prediction_snapshot(
         "horse_aptitude": _serialize_aptitudes(rd, aptitudes) if aptitudes else [],
         "horse_best_times": _serialize_best_times(rd, feats) if feats else [],
         "market_signals": _serialize_market_signals(rd, market_signals) if market_signals else [],
+        "model_info": {
+            "available": bool(lgbm_info and lgbm_info.get("available")),
+            "n_features": (lgbm_info or {}).get("n_features", 0),
+            "trained_at": (lgbm_info or {}).get("trained_at"),
+            "engine": "lgbm" if (lgbm_info and lgbm_info.get("available")) else "linear-fallback",
+        } if lgbm_info is not None else {"engine": "unknown"},
         "bet_tables": _serialize_bet_tables(bet_tables) if bet_tables else {},
         "bet_tables_g": (
             _serialize_bet_tables_g(bet_tables, aptitude_top_horses)
@@ -1079,6 +1100,7 @@ def _refresh_and_reevaluate(
     aptitudes2 = compute_aptitudes(rd2, feats=feats2)
     apt_top2 = _aptitude_top_horses(aptitudes2, n=aptitude_top)
     market_signals2 = compute_market_signals(rd2)
+    lgbm_info2 = ev_mod.lgbm_status()
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor)
     probs2 = ev_mod.load_probs(None, probs2)
     rows2 = ev_mod.build_table(rd2, probs2)
@@ -1095,7 +1117,7 @@ def _refresh_and_reevaluate(
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
-            feats=feats2,
+            feats=feats2, lgbm_info=lgbm_info2,
         )
 
     _print_top(rows2, n=show)

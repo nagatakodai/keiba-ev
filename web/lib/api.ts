@@ -140,6 +140,13 @@ export type PredictionDetail = {
   market_signals?: MarketSignal[];
   // 持ち時計 (同 venue × 同距離 × 同 surface での best own_time_sec)。速い順。
   horse_best_times?: HorseBestTime[];
+  // どの確率モデルが使われたか (lgbm = LightGBM 学習済 / linear-fallback = 線形 softmax)
+  model_info?: {
+    available?: boolean;
+    n_features?: number;
+    trained_at?: string | null;
+    engine: "lgbm" | "linear-fallback" | "unknown" | string;
+  };
   // 馬連 (quinella) / ワイド (wide) / 馬単 (exacta) / 3連複 (trio) の EV table。
   // 各 bet type の top 30 行 (P×O 降順)。fetch されていない bet type はキー無し。
   bet_tables?: Record<string, BetEvRow[]>;
