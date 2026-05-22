@@ -1,8 +1,8 @@
 {
-  "trained_at": "2026-05-21T20:07:12",
-  "n_train_races": 116,
-  "n_valid_races": 28,
-  "n_train_rows": 1104,
+  "trained_at": "2026-05-23T03:05:21",
+  "n_train_races": 1308,
+  "n_valid_races": 326,
+  "n_train_rows": 13628,
   "feature_cols": [
     "speed_idx_weighted",
     "speed_idx_best",
@@ -13,12 +13,19 @@
     "same_distance_count",
     "same_surface_count",
     "same_venue_count",
+    "same_going_count",
+    "same_going_show_rate",
+    "going_versatility",
+    "best_time_at_target",
+    "best_time_runs",
     "last3f_idx_recent",
     "days_since_last_run",
     "body_weight",
     "body_weight_diff",
     "big_weight_change",
     "jockey_change",
+    "style_score",
+    "pace_fit",
     "weight_kg"
   ],
   "params": {
@@ -39,17 +46,17 @@
     "bagging_freq": 5,
     "verbose": -1
   },
-  "best_iteration": 43,
+  "best_iteration": 33,
   "best_scores": {
     "train": {
-      "ndcg@1": 0.9830268741159831,
-      "ndcg@3": 0.955389539728144,
-      "ndcg@5": 0.9736713240319482
+      "ndcg@1": 0.6360280546327055,
+      "ndcg@3": 0.6664268008046191,
+      "ndcg@5": 0.7291413037803569
     },
     "valid": {
-      "ndcg@1": 0.2360248447204969,
-      "ndcg@3": 0.3821563452612017,
-      "ndcg@5": 0.42919030840763955
+      "ndcg@1": 0.29945999018163977,
+      "ndcg@3": 0.40128536016251265,
+      "ndcg@5": 0.5049982783210952
     }
   }
 }
