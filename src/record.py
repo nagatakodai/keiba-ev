@@ -79,16 +79,49 @@ def main(
             f"[yellow]✗ 的中目 {finish_order} は prediction rows に含まれていません[/yellow]"
         )
 
-    for plan_name, key_list in (
-        ("Plan A", pred.get("plan_a_keys", [])),
-        ("Plan B", pred.get("plan_b_keys", [])),
-        ("Plan C", pred.get("plan_c_keys", [])),
-    ):
+    # Plan A/B/C に加えて Phase 19-23 で追加された G/H1/H2/F も表示。
+    # 旧 snapshot にキー不在なら "—" を表示。
+    plan_specs = [
+        ("Plan A", "plan_a_keys"),
+        ("Plan B", "plan_b_keys"),
+        ("Plan C", "plan_c_keys"),
+        ("Plan G", "plan_g_keys"),
+        ("Plan H1", "plan_h1_keys"),
+        ("Plan H2", "plan_h2_keys"),
+        ("Plan F", "plan_f_keys"),
+    ]
+    for plan_name, field in plan_specs:
+        key_list = pred.get(field)
+        if key_list is None:
+            console.print(f"  {plan_name}: [dim]—(旧 snapshot)[/dim]")
+            continue
         keys_set = {tuple(k) for k in key_list}
         hit = finish_tuple in keys_set
         mark = "[green]✓ HIT[/green]" if hit else "[dim]miss[/dim]"
         size = len(key_list)
         console.print(f"  {plan_name} ({size}点): {mark}")
+
+    # LLM 補強後の Plan (evidence_plan_*_keys) があれば併記
+    if pred.get("evidence"):
+        console.print("[dim]--- LLM 補強後 ---[/dim]")
+        evidence_specs = [
+            ("Plan A", "evidence_plan_a_keys"),
+            ("Plan B", "evidence_plan_b_keys"),
+            ("Plan C", "evidence_plan_c_keys"),
+            ("Plan G", "evidence_plan_g_keys"),
+            ("Plan H1", "evidence_plan_h1_keys"),
+            ("Plan H2", "evidence_plan_h2_keys"),
+            ("Plan F", "evidence_plan_f_keys"),
+        ]
+        for plan_name, field in evidence_specs:
+            key_list = pred.get(field)
+            if key_list is None:
+                continue
+            keys_set = {tuple(k) for k in key_list}
+            hit = finish_tuple in keys_set
+            mark = "[green]✓ HIT[/green]" if hit else "[dim]miss[/dim]"
+            size = len(key_list)
+            console.print(f"  evidence {plan_name} ({size}点): {mark}")
 
 
 if __name__ == "__main__":
