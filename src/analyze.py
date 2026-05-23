@@ -2,10 +2,23 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import json
 import time
 from pathlib import Path
 from typing import Optional
+
+
+def _read_html_file(path: Path) -> str:
+    """`*.html` も `*.html.gz` も透過に読む helper。
+
+    data/raw/ のキャッシュは gz 圧縮なので、ユーザーがそのまま `--html` で
+    渡せるように拡張子で分岐する。
+    """
+    if path.suffix == ".gz" or path.name.endswith(".html.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            return f.read()
+    return path.read_text(encoding="utf-8")
 
 import typer
 from rich.console import Console
@@ -70,9 +83,11 @@ def main(
         raise typer.Exit(2)
 
     if html_file:
-        rd = parse_shutuba(html_file.read_text(encoding="utf-8"))
+        # CLAUDE.md オフライン解析の用途で `data/raw/<rid>-shutuba.html.gz` を
+        # そのまま渡せるよう gz 拡張子を自動展開。
+        rd = parse_shutuba(_read_html_file(html_file))
         if odds_html_file:
-            rd.trifecta = parse_trifecta(odds_html_file.read_text(encoding="utf-8"))
+            rd.trifecta = parse_trifecta(_read_html_file(odds_html_file))
         else:
             console.print("[yellow]--html だけ指定 (オッズなし)。--odds-html も渡してください[/yellow]")
     else:
