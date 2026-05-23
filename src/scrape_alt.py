@@ -54,37 +54,53 @@ def _http_get(url: str, *, timeout: int = 15) -> str:
 
 
 def fetch_race_list_keibalab(yyyymmdd: str | None = None) -> list[AltRace]:
-    """keibalab.jp 当日 race list を取得。
+    """keibalab.jp で指定日の race list (race_id + 発走時刻) を取得。
 
-    URL: https://keibalab.jp/db/race/
-    HTML 内に `/db/race/<rid>/` 形式の link が並び、発走時刻 + 場名が
-    table 構造で含まれる。
+    URL: https://keibalab.jp/db/race/<YYYYMMDD>/
+    各 race row の <td> に race_id link と HH:MM 発走時刻が含まれる。
     """
-    html = _http_get("https://keibalab.jp/db/race/")
-    # 当日 = `/db/race/` の default 表示が today's list
-    # race_id は <a href="/db/race/202605230401/"> 形式
-    rids = re.findall(r'href="/db/race/(\d{12})/"', html)
-    rids = sorted(set(rids))  # uniq + sort
+    from datetime import time as _time
+    target_date = yyyymmdd or datetime.now().strftime("%Y%m%d")
+    html = _http_get(f"https://keibalab.jp/db/race/{target_date}/")
 
-    # 発走時刻と場名は table row 単位で並んでいる。同じ順序で抽出する。
-    # 完璧なパーサは難しいので、まず race_id だけ返して、必要なら呼び出し側で
-    # /db/race/<rid>/ を個別 fetch して詳細を取る方針。
-    today = yyyymmdd or datetime.now().strftime("%Y%m%d")
+    # 各 <tr> ブロックを舐めて、race_id と HH:MM を 1 ペアずつ取り出す
     out: list[AltRace] = []
-    for rid in rids:
-        if not rid.startswith(today[:8]):
+    tr_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL)
+    rid_pattern = re.compile(r'/db/race/(\d{12})/')
+    time_pattern = re.compile(r'>(\d{1,2}):(\d{2})<')
+
+    for tr_html in tr_pattern.findall(html):
+        rid_match = rid_pattern.search(tr_html)
+        if not rid_match:
             continue
-        # netkeiba style URL を構築 (block 解除後の再取得用)
+        rid = rid_match.group(1)
+        time_match = time_pattern.search(tr_html)
+        if not time_match:
+            continue
+        hh = int(time_match.group(1))
+        mm = int(time_match.group(2))
+        # target_date + HH:MM → JST unix timestamp
+        dt = datetime.strptime(target_date, "%Y%m%d").replace(hour=hh, minute=mm)
+        # naive JST as local time
+        start_at = int(dt.timestamp())
         url = f"https://race.netkeiba.com/race/shutuba.html?race_id={rid}"
         out.append(AltRace(
             race_id=rid,
-            venue="",       # 後段の per-race fetch で埋める
+            venue="",  # 場名は per-race fetch で得る (現状未取得)
             race_no=int(rid[-2:]),
-            start_at=0,     # 同上
+            start_at=start_at,
             url=url,
             source="keibalab",
         ))
-    return out
+    # uniq by race_id (table 重複がある場合)
+    seen = set()
+    uniq: list[AltRace] = []
+    for r in out:
+        if r.race_id in seen:
+            continue
+        seen.add(r.race_id)
+        uniq.append(r)
+    return uniq
 
 
 def is_alt_available() -> bool:

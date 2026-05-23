@@ -21,6 +21,7 @@ from rich.console import Console
 from .fetch_result import process_pending, schedule as schedule_result_fetch
 from .parse import _split_race_id, parse_race_list
 from .scrape import NetkeibaBlocked, fetch_html, race_list_url
+from .scrape_alt import fetch_race_list_keibalab
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE_FILE = ROOT / "data/cache/auto_watch_analyzed.txt"
@@ -49,7 +50,12 @@ def _append_history(record: dict) -> None:
 
 
 def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[dict]:
-    """その日 (JST) の開催一覧を netkeiba (JRA + NAR) から取得し、締切 N±M 分のレースを抽出。"""
+    """その日 (JST) の開催一覧を netkeiba (JRA + NAR) から取得し、締切 N±M 分のレースを抽出。
+
+    netkeiba 両ドメインが block されたら keibalab.jp に fallback する
+    (race_id + 発走時刻だけ取れる; live odds は不可なので analyze 自体は失敗するが、
+    どの race が走るかは把握できる)。
+    """
     today = datetime.fromtimestamp(now_ts).strftime("%Y%m%d")
     races: list[dict] = []
     blocked_count = 0
@@ -63,12 +69,30 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
         except Exception as ex:
             console.print(f"[yellow]race_list fetch failed (nar={is_nar}): {ex}[/yellow]")
     if blocked_count >= 2:
-        # 両ドメイン block → IP rate-limit と判断。明確なヒント表示。
+        # 両ドメイン block → keibalab.jp に fallback。race_id + 発走時刻が取れれば
+        # watch-auto は当該 race の analyze を試みる (analyze 内部で netkeiba odds
+        # fetch が失敗すれば skip される)。
         console.print(
-            "[bold red]race.netkeiba.com / nar.netkeiba.com が両方とも 400 を返した。"
-            "直近の大量 scrape で IP が rate-limit されている可能性。"
-            "数時間-1日待つか、別 IP/VPN から再試行してください。[/bold red]"
+            "[bold yellow]netkeiba 両ドメイン block → keibalab.jp に fallback します。"
+            "発走時刻まで分かれば watch は続行できますが live odds 取得は不可なので "
+            "analyze 段階で失敗する可能性があります。[/bold yellow]"
         )
+        try:
+            alt = fetch_race_list_keibalab(today)
+            console.print(f"[cyan]keibalab fallback: {len(alt)} races detected[/cyan]")
+            for a in alt:
+                races.append({
+                    "race_id": a.race_id,
+                    "url": a.url,
+                    "start_at": a.start_at,
+                    "venue": a.venue or "?",  # keibalab simple parser では未取得
+                    "race_no": a.race_no,
+                })
+        except Exception as ex:
+            console.print(f"[red]keibalab fallback も失敗: {ex}[/red]")
+            console.print(
+                "[bold red]race discovery 不能。数時間-1日待つか、別 IP/VPN から再試行してください。[/bold red]"
+            )
 
     low_sec = (window_min - tolerance_min) * 60
     high_sec = (window_min + tolerance_min) * 60
