@@ -108,6 +108,27 @@ Plan A/B/C は検索 MCP の補強根拠で慎重にフィルタし、Plan G/H1/
 
 → **単勝賭けに限れば β=0.78 + T=metadata 由来 は実用的な +EV 戦略**。3 連単 / 馬連等は N が足りないので慎重に。
 
+### race-class 別の signal 強度 (`scripts/race_class_diagnostic.py`)
+
+production model + β=0.78 + T=0.45 で W3 valid (n=291) の **top-1 単勝**の hit/ROI を race 特性別に diagnostic した結果:
+
+| filter | n | hit% | ROI |
+|---|---|---|---|
+| ALL | 291 | 44.7% | 92.9% |
+| ダート | 126 | 56.3% | 97.8% |
+| **Sprint ≤1300m** | 36 | **63.9%** | **115.3%** ★ |
+| **confidence 0.25-0.35** | 101 | 44.6% | **105.7%** ★ |
+| confidence ≥0.35 | 115 | 57.4% | 85.7% (favorite-heavy) |
+| confidence 0.15-0.25 | 75 | 25.3% | 86.7% |
+
+**汎用な actionable filter** = `0.25 ≤ top-1 model prob < 0.35` (n=101, ROI 105.7%):
+- モデルが中等度に確信する race だけに絞ると +EV になる
+- 過信 (≥0.35) は favorite-heavy で odds 低、controlled では break-even
+- 過少 (<0.25) は不確実すぎて当たらない
+- この band は本セッションの分析が後付け discovery なので overfit リスク残るが、複数の意味ある cell に同パターン (中等度 confidence で peak ROI) が出ているため signal が強い
+
+**NAR ダート bias 注意**: validation set は時系列後半 = NAR ダート に偏る (芝 0 race)。"Sprint" finding は実質「NAR Sprint ダート」。JRA 芝 への transfer は別途検証必要。
+
 ### Plan B の経験的弱さ (holdout 観察)
 
 n=291 races の real-odds 評価で **Plan B (最高 P×O 上位 3 点) は全 β で hit 0 / 0% ROI**。Plan A も β=0.4-0.80 で hit 0、β=0.85-0.90 で hit 1。これは N が小さくて結論できない (Plan B 全 picks = 873、期待 hit ≈ 3-10) が、傾向として:
