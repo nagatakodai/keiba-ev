@@ -49,6 +49,38 @@ def _append_history(record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+# 失敗 race の再試行 cooldown (秒)。
+# auto_watch は 60 秒毎にループするので、毎 tick 同じ race を再分析しないよう
+# 一定時間 skip する。netkeiba 規制 / network エラー / fetch 失敗で永遠に
+# 再試行 → CPU 浪費を防ぐ。block 解除 / 一時的エラーなら 5 分後にリトライ可能。
+FAILED_RETRY_COOLDOWN_SEC = 300
+
+
+def _recently_failed(race_id: str, now_ts: int, cooldown_sec: int = FAILED_RETRY_COOLDOWN_SEC) -> bool:
+    """history を遡って race_id が直近 cooldown_sec 秒以内に rc != 0 で
+    失敗していたかを返す。True なら skip 推奨。"""
+    if not HISTORY_FILE.exists():
+        return False
+    cutoff = now_ts - cooldown_sec
+    try:
+        # 末尾から読む方が効率的だが、簡易に全行読み (typically <1000 lines)
+        for line in HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("race_id") != race_id:
+                continue
+            if rec.get("rc", 0) == 0:
+                continue  # success は cooldown 対象外 (analyzed cache が別途扱う)
+            finished_at = rec.get("finished_at") or 0
+            if finished_at >= cutoff:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[dict]:
     """その日 (JST) の開催一覧を netkeiba (JRA + NAR) から取得し、締切 N±M 分のレースを抽出。
 
@@ -236,6 +268,11 @@ def main(
         tag = f"{race['venue']} {race['race_no']}R 発走まで {mins:.1f}分"
         if rid in analyzed:
             console.print(f"[dim]skip (already analyzed): {tag} {rid}[/dim]")
+            continue
+        if _recently_failed(rid, int(time.time())):
+            console.print(
+                f"[dim]skip (recently failed, cooldown {FAILED_RETRY_COOLDOWN_SEC}s): {tag} {rid}[/dim]"
+            )
             continue
         console.print(f"[bold green]match:[/bold green] {tag} ({rid})")
         if dry_run:
