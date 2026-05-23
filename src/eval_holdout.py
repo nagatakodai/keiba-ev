@@ -571,7 +571,8 @@ def main(
 
         def plan_roi_for(score_col: str, label: str) -> dict:
             # Plan G は適性ゲートが必要 (apt_cache 経由)。Plan F は other plans の union。
-            plan_codes = ("A", "B", "C", "G", "H1", "H2", "F")
+            # B1 / B2 = Plan B + prob floor 1% / 2% (Plan B 楽観バイアス対策の比較)
+            plan_codes = ("A", "B", "B1", "B2", "C", "G", "H1", "H2", "F")
             stake: dict[str, int] = {c: 0 for c in plan_codes}
             payout: dict[str, int] = {c: 0 for c in plan_codes}
             hits: dict[str, int] = {c: 0 for c in plan_codes}
@@ -659,6 +660,8 @@ def main(
                 apt_top = aptitude_cache.get(rid, [])
                 picks_a = plan_balanced(ev_rows)
                 picks_b = plan_max_ev(ev_rows)
+                picks_b1 = plan_max_ev(ev_rows, min_prob=0.01)  # B + 1% prob floor
+                picks_b2 = plan_max_ev(ev_rows, min_prob=0.02)  # B + 2% prob floor
                 picks_c = plan_wide(ev_rows)
                 picks_g = plan_aptitude_ev(ev_rows, apt_top) if apt_top else []
                 picks_h1 = plan_hit_pure(ev_rows, target=3)
@@ -666,7 +669,9 @@ def main(
                 picks_f = plan_final(picks_a, picks_b, picks_c, picks_g, picks_h1, picks_h2)
 
                 for code, picks in (
-                    ("A", picks_a), ("B", picks_b), ("C", picks_c),
+                    ("A", picks_a), ("B", picks_b),
+                    ("B1", picks_b1), ("B2", picks_b2),
+                    ("C", picks_c),
                     ("G", picks_g), ("H1", picks_h1), ("H2", picks_h2),
                     ("F", picks_f),
                 ):
@@ -704,12 +709,14 @@ def main(
 
         plan_specs_disp = (
             ("A", "5 点バランス"),
-            ("B", "最高 EV 集中"),
+            ("B", "最高 EV"),
+            ("B1", "B + p≥1%"),
+            ("B2", "B + p≥2%"),
             ("C", "広め保険"),
             ("G", "適性ゲート"),
-            ("H1", "確率上位 3 点"),
-            ("H2", "確率 +EV≥1"),
-            ("F", "A〜H2 union"),
+            ("H1", "確率上位"),
+            ("H2", "確率+EV≥1"),
+            ("F", "union"),
         )
         used = plan_rows[0]["n_used"] if plan_rows else 0
         tbl5 = Table(

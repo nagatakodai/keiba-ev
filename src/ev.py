@@ -711,9 +711,15 @@ def plan_balanced(
     return picks
 
 
-def plan_max_ev(rows: list[EvRow]) -> list[EvRow]:
-    """最高 EV (Plan B): 上位 1-3 点。"""
-    pos = [r for r in rows if r.px_o >= PXO_FLOOR]
+def plan_max_ev(rows: list[EvRow], min_prob: float = 0.0) -> list[EvRow]:
+    """最高 EV (Plan B): 上位 1-3 点。
+
+    `min_prob`: 確率下限 (例: 0.01 = 1%)。0 で従来挙動。
+    holdout n=291 で min_prob=0 だと Plan B が 0/291 hit (extreme outsider 中心)
+    だったため、UI 側で warning + 別途 prob floor を活用したい時はここを 0.01-0.02
+    にする。eval は `eval_holdout` の Plan B variant test を参照。
+    """
+    pos = [r for r in rows if r.px_o >= PXO_FLOOR and r.prob >= min_prob]
     return pos[:3]
 
 
