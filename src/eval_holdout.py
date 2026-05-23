@@ -26,13 +26,26 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .ev import DEFAULT_LAMBDA_2, DEFAULT_LAMBDA_3, power_method_overround
+from .ev import (
+    DEFAULT_LAMBDA_2,
+    DEFAULT_LAMBDA_3,
+    PXO_CHUANA,
+    PXO_FLOOR,
+    PXO_HONSEN,
+    EvRow,
+    plan_balanced,
+    plan_hit_pure,
+    plan_max_ev,
+    plan_wide,
+    power_method_overround,
+)
 from .parse import parse_result
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASETS_DIR = ROOT / "data" / "datasets"
 MODELS_DIR = ROOT / "data" / "models"
 RAW_DIR = ROOT / "data" / "raw"
+TRIFECTA_CACHE_DIR = ROOT / "data" / "cache" / "trifecta_odds"
 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -422,6 +435,231 @@ def main(
         console.print(
             "[dim]控除率 22.5% より理論期待 ROI は ~77.5%。"
             "実 ROI が 77.5% を超え、かつ市場単独より高い β が β=0.78 の妥当性。[/dim]"
+        )
+
+    # ---- Plan A/B/C/H1 synthetic ROI (real trifecta odds から production plan_*) ----
+    # data/cache/trifecta_odds/{race_id}.json があれば、scrape 済の real odds で
+    # production の plan_balanced / plan_max_ev / plan_wide / plan_hit_pure を回す。
+    # この section だけが真の β 決定証拠になる (他は単勝/PL hit/合成 ROI の参考値)。
+    odds_cache: dict[str, dict[tuple[int, int, int], tuple[float, int]]] = {}
+    if TRIFECTA_CACHE_DIR.exists():
+        for j in TRIFECTA_CACHE_DIR.glob("*.json"):
+            try:
+                d = json.loads(j.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            rid = d.get("race_id") or j.stem
+            triplets = d.get("trifecta") or []
+            mp: dict[tuple[int, int, int], tuple[float, int]] = {}
+            for t in triplets:
+                key = tuple(t["key"])
+                if len(key) != 3:
+                    continue
+                try:
+                    mp[(int(key[0]), int(key[1]), int(key[2]))] = (
+                        float(t["odds"]), int(t.get("popularity") or 0)
+                    )
+                except (ValueError, TypeError):
+                    continue
+            odds_cache[rid] = mp
+
+    if odds_cache and payout_cache:
+        n_odds = sum(1 for rid in valid["race_id"].unique() if rid in odds_cache)
+        console.rule(
+            f"[bold]Plan ROI (real trifecta odds, n={n_odds} races)[/bold]"
+        )
+
+        def _tier(pxo: float) -> str:
+            if pxo < PXO_FLOOR:
+                return "minus"
+            if pxo <= PXO_HONSEN[1]:
+                return "honsen"
+            if pxo <= PXO_CHUANA[1]:
+                return "chuana"
+            return "oana"
+
+        def plan_roi_for(score_col: str, label: str) -> dict:
+            plan_specs = (
+                ("A", "5 点バランス", lambda r: plan_balanced(r)),
+                ("B", "最高 EV 集中", lambda r: plan_max_ev(r)),
+                ("C", "広め保険", lambda r: plan_wide(r)),
+                ("H1", "確率上位 3 点", lambda r: plan_hit_pure(r, target=3)),
+            )
+            stake: dict[str, int] = {p[0]: 0 for p in plan_specs}
+            payout: dict[str, int] = {p[0]: 0 for p in plan_specs}
+            hits: dict[str, int] = {p[0]: 0 for p in plan_specs}
+            points: dict[str, int] = {p[0]: 0 for p in plan_specs}
+            n_used = 0
+            for rid, g in valid.groupby("race_id", sort=False):
+                if rid not in odds_cache or rid not in payout_cache:
+                    continue
+                n = len(g)
+                if n < 3:
+                    continue
+                horse_numbers = g["horse_number"].to_numpy().astype(int)
+                show = g["shrunk_show_rate"].to_numpy()
+                avg_show = float(np.mean(show)) if n > 0 else 0.0
+                bias = (
+                    np.clip(show / avg_show, 0.1, None)
+                    if avg_show > 0 else np.ones(n)
+                )
+
+                # Model PL prob cube (β に依存)
+                w = np.maximum(g[score_col].to_numpy(), 1e-12)
+                s1 = w
+                s2 = (s1 ** DEFAULT_LAMBDA_2) * bias
+                s3 = (s1 ** DEFAULT_LAMBDA_3) * bias
+                S1 = float(s1.sum()); S2 = float(s2.sum()); S3 = float(s3.sum())
+                if S1 <= 0 or S2 <= 0 or S3 <= 0:
+                    continue
+                w1 = s1 / S1
+                w2 = s2[None, :] / np.maximum(S2 - s2[:, None], 1e-12)
+                np.fill_diagonal(w2, 0.0)
+                w3 = s3[None, None, :] / np.maximum(
+                    S3 - s3[:, None, None] - s3[None, :, None], 1e-12
+                )
+                for ii in range(n):
+                    w3[ii, ii, :] = 0.0
+                    w3[ii, :, ii] = 0.0
+                    w3[:, ii, ii] = 0.0
+                p_cube = w1[:, None, None] * w2[:, :, None] * w3
+
+                # EvRow list (key, odds, popularity, prob, px_o)
+                race_odds = odds_cache[rid]
+                ev_rows: list[EvRow] = []
+                for i in range(n):
+                    for j in range(n):
+                        if j == i:
+                            continue
+                        for k in range(n):
+                            if k == i or k == j:
+                                continue
+                            key = (
+                                int(horse_numbers[i]),
+                                int(horse_numbers[j]),
+                                int(horse_numbers[k]),
+                            )
+                            entry = race_odds.get(key)
+                            if entry is None:
+                                continue
+                            odds, popularity = entry
+                            if odds <= 0:
+                                continue
+                            p = float(p_cube[i, j, k])
+                            pxo = p * odds
+                            ev_rows.append(EvRow(
+                                key=key, odds=odds, popularity=popularity,
+                                prob=p, px_o=pxo, tier=_tier(pxo),
+                            ))
+                if not ev_rows:
+                    continue
+                ev_rows.sort(key=lambda r: r.px_o, reverse=True)
+
+                finish = g["finish_pos"].to_numpy()
+                a_idx = np.where(finish == 1.0)[0]
+                b_idx = np.where(finish == 2.0)[0]
+                c_idx = np.where(finish == 3.0)[0]
+                if len(a_idx) != 1 or len(b_idx) != 1 or len(c_idx) != 1:
+                    continue
+                actual_key = (
+                    int(horse_numbers[a_idx[0]]),
+                    int(horse_numbers[b_idx[0]]),
+                    int(horse_numbers[c_idx[0]]),
+                )
+                real_payout = payout_cache.get(rid, 0)
+                n_used += 1
+
+                for code, _desc, fn in plan_specs:
+                    picks = fn(ev_rows)
+                    n_pts = len(picks)
+                    if n_pts == 0:
+                        continue
+                    stake[code] += n_pts * 100
+                    points[code] += n_pts
+                    if any(r.key == actual_key for r in picks):
+                        payout[code] += real_payout
+                        hits[code] += 1
+            return {
+                "label": label,
+                "n_used": n_used,
+                "plans": {
+                    code: {
+                        "stake": stake[code],
+                        "payout": payout[code],
+                        "hits": hits[code],
+                        "points": points[code],
+                        "roi": (payout[code] / stake[code]) if stake[code] else 0.0,
+                        "avg_pts": (points[code] / n_used) if n_used else 0.0,
+                    }
+                    for code, _desc, _fn in plan_specs
+                },
+            }
+
+        plan_rows: list[dict] = []
+        plan_rows.append(plan_roi_for("lgbm_prob", "LightGBM (pure, β=0.0)"))
+        plan_rows.append(plan_roi_for("market_prob", "Market only (β=1.0)"))
+        for col, beta in blend_cols.items():
+            if beta in (0.0, 1.0):
+                continue
+            plan_rows.append(plan_roi_for(col, f"Loglinear blend β={beta:.2f}"))
+
+        plan_specs_disp = (
+            ("A", "5 点バランス"),
+            ("B", "最高 EV 集中"),
+            ("C", "広め保険"),
+            ("H1", "確率上位 3 点"),
+        )
+        used = plan_rows[0]["n_used"] if plan_rows else 0
+        tbl5 = Table(
+            title=f"Plan A/B/C/H1 real-odds ROI (n={used} races)"
+        )
+        tbl5.add_column("Model", style="bold")
+        for code, desc in plan_specs_disp:
+            tbl5.add_column(f"Plan {code} ({desc})", justify="right")
+        for m in plan_rows:
+            cells = [m["label"]]
+            for code, _desc in plan_specs_disp:
+                d = m["plans"][code]
+                if d["stake"] == 0:
+                    cells.append("—")
+                    continue
+                roi = d["roi"]
+                if roi >= 1.0:
+                    rs = f"[bold green]{roi*100:.1f}%[/]"
+                elif roi >= 0.775:
+                    rs = f"[green]{roi*100:.1f}%[/]"
+                else:
+                    rs = f"[red]{roi*100:.1f}%[/]"
+                cells.append(f"{rs} avg{d['avg_pts']:.1f}pt hit{d['hits']}")
+            tbl5.add_row(*cells)
+        console.print(tbl5)
+
+        for code, desc in plan_specs_disp:
+            valid_rows = [r for r in plan_rows if r["plans"][code]["stake"] > 0]
+            if not valid_rows:
+                continue
+            best = max(valid_rows, key=lambda r: r["plans"][code]["roi"])
+            console.print(
+                f"[bold]Plan {code}[/bold] best: {best['label']} "
+                f"ROI={best['plans'][code]['roi']*100:.1f}% "
+                f"(hits {best['plans'][code]['hits']}, "
+                f"avg {best['plans'][code]['avg_pts']:.1f} pt/race)"
+            )
+        console.print(
+            "[dim]Plan A/B/C は P×O ≥ 1.02 で EV filter する production logic。"
+            "Plan H1 は EV 不問で確率上位 3 点。控除率 22.5% より理論期待 ROI ~77.5%。"
+            "1.0 を超える β が長期黒字。[/dim]"
+        )
+    elif TRIFECTA_CACHE_DIR.exists() and not odds_cache:
+        console.print(
+            "[yellow]trifecta odds キャッシュは空。"
+            f"`python scripts/fetch_trifecta_odds_holdout.py` で {TRIFECTA_CACHE_DIR.name} を埋めると "
+            "Plan A/B/C/H1 の real-odds ROI が出る[/yellow]"
+        )
+    else:
+        console.print(
+            "[dim]Plan A/B/C/H1 real-odds ROI を出すには "
+            "`python scripts/fetch_trifecta_odds_holdout.py` で trifecta odds を scrape する必要あり。[/dim]"
         )
 
 
