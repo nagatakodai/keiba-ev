@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train api web web-install test
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -140,6 +140,13 @@ LEAVES ?= 24
 EARLY_STOP ?= 100
 train:
 	$(PY) -m src.train --lr $(LR) --rounds $(ROUNDS) --leaves $(LEAVES) --early-stop $(EARLY_STOP)
+
+# --- holdout 評価 (chronological split で 単勝 ROI / top-K / market 比較) ---
+# train.py と同じ last-20% を valid に固定。複数 β で loglinear blend ROI を出すので
+# `estimate_probs(market_blend=β)` の正味効果が分かる。
+HOLDOUT_VALID_FRAC ?= 0.2
+holdout:
+	$(PY) -m src.eval_holdout --valid-frac $(HOLDOUT_VALID_FRAC)
 
 # --- 大量パイプライン: 列挙 → fetch → dataset → train → backtest 一気通貫 ---
 # 使い方: make bulk-pipeline BULK_SINCE=20260101 BULK_UNTIL=20260521

@@ -193,7 +193,7 @@ def market_baseline(case: RaceCase) -> list[TripleRow]:
     return out
 
 
-def make_rerun_model(market_blend: float = 0.4) -> ModelFn:
+def make_rerun_model(market_blend: float = 0.78) -> ModelFn:
     """raw HTML から RaceData を再構築 → 現 estimate_probs を回し直して TripleRow を返す。
 
     backtest 時に最新の estimate_probs (LightGBM 学習済モデル含む) を当てるため。
@@ -678,7 +678,7 @@ def main(
     baseline: bool = typer.Option(True, "--baseline/--no-baseline", help="市場 baseline も計算"),
     reliability: bool = typer.Option(False, "--reliability", help="Reliability diagram を表示"),
     rerun: bool = typer.Option(False, "--rerun", help="raw HTML から再構築して現 estimate_probs を回す (LightGBM 学習済モデルを試したい時)"),
-    market_blend: float = typer.Option(0.4, "--market-blend", help="rerun 時のモデル/市場ブレンド比"),
+    market_blend: float = typer.Option(0.78, "--market-blend", help="rerun 時のモデル/市場ブレンド比 (holdout 291 races peak)"),
 ):
     """data/predictions/ + data/results/ を join してバックテスト指標を出す。"""
     cases = list(load_cases_from_snapshots(since=since, until=until))

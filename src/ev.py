@@ -42,7 +42,7 @@ DEFAULT_LAMBDA_3 = 0.65
 def estimate_probs(
     rd: RaceData,
     *,
-    market_blend: float = 0.4,
+    market_blend: float = 0.78,
     market_floor: float = 0.01,
     blend_method: str = "loglinear",   # "loglinear" (Benter 2-step) | "linear" (旧)
     lambda_2: float = DEFAULT_LAMBDA_2,
