@@ -14,6 +14,7 @@ CLI:
 """
 from __future__ import annotations
 
+import gzip
 import json
 import math
 from pathlib import Path
@@ -25,11 +26,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .ev import power_method_overround
+from .ev import DEFAULT_LAMBDA_2, DEFAULT_LAMBDA_3, power_method_overround
+from .parse import parse_result
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASETS_DIR = ROOT / "data" / "datasets"
 MODELS_DIR = ROOT / "data" / "models"
+RAW_DIR = ROOT / "data" / "raw"
 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -227,6 +230,199 @@ def main(
         "[dim]控除率 20% より単勝 ROI 期待値は ~80%。"
         "blend β を上げる = 市場寄り。モデル寄り (β 小) が市場単独を上回るなら学習が効いている。[/dim]"
     )
+
+    # ---- 3 連単 Plackett-Luce 連鎖 top-K hit rate ----
+    # production の estimate_probs が 3 連単確率を生成する手順:
+    #   place2[i] = win[i]^λ_2 * show_bias[i]
+    #   place3[i] = win[i]^λ_3 * show_bias[i]
+    #   p(a,b,c)  = s1[a]/Σs1 * s2[b]/(Σs2-s2[a]) * s3[c]/(Σs3-s3[a]-s3[b])
+    # オッズは無いので ROI は出せない (※ 3 連単 odds は raw HTML にしかない)。
+    # その代わり、実着順 triple がモデル確率ランクの top-K に入る割合を測る。
+    # 単勝 ROI と一緒に β を選ぶ判断材料になる。
+    console.rule("[bold]3 連単 top-K hit rate (Plackett-Luce, use_show_bias=True)[/bold]")
+
+    # 3 連単 払戻金キャッシュ: race_id → payout (¥100 賭けに対する払戻)
+    # raw HTML から事前に 1 度だけパースする。result HTML 無い / payout 不明は除外。
+    payout_cache: dict[str, int] = {}
+    for rid in valid["race_id"].unique():
+        rp = RAW_DIR / f"{rid}-result.html.gz"
+        if not rp.exists():
+            continue
+        try:
+            html = gzip.open(rp, "rt", encoding="utf-8").read()
+        except OSError:
+            continue
+        try:
+            parsed = parse_result(html)
+        except Exception:
+            continue
+        if parsed and parsed.get("payout"):
+            payout_cache[rid] = int(parsed["payout"])
+    console.print(
+        f"trifecta payouts loaded: {len(payout_cache)}/{n_eval_races} races"
+    )
+
+    def trifecta_topk_for(score_col: str, label: str) -> dict:
+        ks = (1, 10, 100, 1000)
+        hits = {k: 0 for k in ks}
+        # synthetic ROI: top-K 機械購入 (¥100/pt) — 的中時 payout
+        roi_stake = {k: 0 for k in ks}
+        roi_payout = {k: 0 for k in ks}
+        rank_sum = 0
+        rank_n = 0
+        for rid, g in valid.groupby("race_id", sort=False):
+            n = len(g)
+            if n < 3:
+                continue
+            win_arr = g[score_col].to_numpy()
+            show = g["shrunk_show_rate"].to_numpy()
+            avg_show = float(np.mean(show)) if n > 0 else 0.0
+            bias = np.clip(show / avg_show, 0.1, None) if avg_show > 0 else np.ones(n)
+            s1 = np.maximum(win_arr, 1e-12)
+            s2 = (s1 ** DEFAULT_LAMBDA_2) * bias
+            s3 = (s1 ** DEFAULT_LAMBDA_3) * bias
+            sum1 = float(s1.sum())
+            sum2 = float(s2.sum())
+            sum3 = float(s3.sum())
+            if sum1 <= 0 or sum2 <= 0 or sum3 <= 0:
+                continue
+            # 全 ordered triple の PL prob (n,n,n) を vectorized で構築
+            w1 = s1 / sum1
+            denom2 = sum2 - s2[:, None]  # i 行: i を除いた時の Σ
+            w2 = s2[None, :] / np.maximum(denom2, 1e-12)
+            np.fill_diagonal(w2, 0.0)
+            denom3 = sum3 - s3[:, None, None] - s3[None, :, None]
+            w3 = s3[None, None, :] / np.maximum(denom3, 1e-12)
+            # mask: i==j, i==k, j==k 全て無効
+            for ii in range(n):
+                w3[ii, ii, :] = 0.0
+                w3[ii, :, ii] = 0.0
+                w3[:, ii, ii] = 0.0
+            p_cube = w1[:, None, None] * w2[:, :, None] * w3
+
+            finish = g["finish_pos"].to_numpy()
+            a_idx = np.where(finish == 1.0)[0]
+            b_idx = np.where(finish == 2.0)[0]
+            c_idx = np.where(finish == 3.0)[0]
+            if len(a_idx) != 1 or len(b_idx) != 1 or len(c_idx) != 1:
+                continue
+            a, b, c = int(a_idx[0]), int(b_idx[0]), int(c_idx[0])
+            actual_p = float(p_cube[a, b, c])
+            # rank = 自分より prob が大きい triple の数 + 1
+            higher = int((p_cube > actual_p).sum())
+            rank = higher + 1
+            rank_sum += rank
+            rank_n += 1
+            payout = payout_cache.get(rid, 0)
+            for k in ks:
+                if rank <= k:
+                    hits[k] += 1
+                # ROI 集計は payout が取れたレースのみ (公平な分母)
+                if payout > 0:
+                    roi_stake[k] += k * 100
+                    if rank <= k:
+                        roi_payout[k] += payout
+        roi = {k: (roi_payout[k] / roi_stake[k] if roi_stake[k] else 0.0) for k in ks}
+        return {
+            "label": label,
+            "n_races": rank_n,
+            "topk": {k: (hits[k] / rank_n if rank_n else 0.0) for k in ks},
+            "mean_rank": (rank_sum / rank_n) if rank_n else 0.0,
+            "roi": roi,
+            "roi_stake": roi_stake,
+            "roi_payout": roi_payout,
+        }
+
+    trifecta_rows: list[dict] = []
+    trifecta_rows.append(trifecta_topk_for("lgbm_prob", "LightGBM (pure, β=0.0)"))
+    trifecta_rows.append(trifecta_topk_for("market_prob", "Market only (β=1.0)"))
+    for col, beta in blend_cols.items():
+        if beta in (0.0, 1.0):
+            continue
+        trifecta_rows.append(trifecta_topk_for(col, f"Loglinear blend β={beta:.2f}"))
+
+    tbl3 = Table(title=f"3 連単 top-K hit (n={trifecta_rows[0]['n_races']} races)")
+    tbl3.add_column("Model", style="bold")
+    tbl3.add_column("top-1", justify="right")
+    tbl3.add_column("top-10", justify="right")
+    tbl3.add_column("top-100", justify="right")
+    tbl3.add_column("top-1000", justify="right")
+    tbl3.add_column("mean rank", justify="right")
+    for m in trifecta_rows:
+        tbl3.add_row(
+            m["label"],
+            f"{m['topk'][1]*100:.2f}%",
+            f"{m['topk'][10]*100:.1f}%",
+            f"{m['topk'][100]*100:.1f}%",
+            f"{m['topk'][1000]*100:.1f}%",
+            f"{m['mean_rank']:.1f}",
+        )
+    console.print(tbl3)
+
+    market_t = next(r for r in trifecta_rows if r["label"].startswith("Market only"))
+    best_t = max(trifecta_rows, key=lambda r: r["topk"][10])
+    console.print(
+        f"\nbest top-10 variant: [bold]{best_t['label']}[/bold] "
+        f"top-10={best_t['topk'][10]*100:.2f}% "
+        f"(Δ vs Market only: {(best_t['topk'][10]-market_t['topk'][10])*100:+.2f} pt)"
+    )
+    prod_t = next((r for r in trifecta_rows if r["label"].startswith("Loglinear blend β=0.40")), None)
+    new_def_t = next((r for r in trifecta_rows if r["label"].startswith("Loglinear blend β=0.80")), None)
+    if prod_t and new_def_t:
+        console.print(
+            f"旧既定 β=0.4: top-10={prod_t['topk'][10]*100:.2f}%, "
+            f"新既定 β=0.8: top-10={new_def_t['topk'][10]*100:.2f}% "
+            f"(Δ {(new_def_t['topk'][10]-prod_t['topk'][10])*100:+.2f} pt)"
+        )
+    console.print(
+        "[dim]3 連単 top-10 hit rate ≒ 「10 点買えば 1 着」確率。"
+        "市場 baseline を上回るほどモデルが triple ranking に効いている。[/dim]"
+    )
+
+    # ---- 3 連単 synthetic ROI (top-K 機械購入) ----
+    # 各レースで「モデル確率の高い順 top-K triple」をそれぞれ ¥100 で買う想定。
+    # 的中時 payout = result.html の 3 連単払戻金。
+    # 注意: これは "Plan A/B/C" の本番ロジックではなく、純粋な top-K 機械購入。
+    # 控除率 22.5% → 期待 ROI は ~77.5%。100% を超えれば長期黒字。
+    if payout_cache:
+        console.rule("[bold]3 連単 synthetic top-K 購入 ROI[/bold]")
+        tbl4 = Table(
+            title=f"3 連単 top-K 機械購入 ROI (¥100/pt, 払戻あり n={len(payout_cache)} races)"
+        )
+        tbl4.add_column("Model", style="bold")
+        for k in (1, 10, 100):
+            tbl4.add_column(f"top-{k}", justify="right")
+        for m in trifecta_rows:
+            cells = [m["label"]]
+            for k in (1, 10, 100):
+                roi = m["roi"][k]
+                if roi >= 1.0:
+                    s = f"[bold green]{roi*100:.1f}%[/]"
+                elif roi >= 0.775:
+                    s = f"[green]{roi*100:.1f}%[/]"
+                else:
+                    s = f"[red]{roi*100:.1f}%[/]"
+                cells.append(s)
+            tbl4.add_row(*cells)
+        console.print(tbl4)
+
+        best_roi_10 = max(trifecta_rows, key=lambda r: r["roi"][10])
+        market_roi_10 = market_t["roi"][10]
+        console.print(
+            f"\nbest top-10 ROI: [bold]{best_roi_10['label']}[/bold] "
+            f"ROI={best_roi_10['roi'][10]*100:.1f}% "
+            f"(Δ vs Market only: {(best_roi_10['roi'][10]-market_roi_10)*100:+.2f} pt)"
+        )
+        if prod_t and new_def_t:
+            console.print(
+                f"旧既定 β=0.4: top-10 ROI={prod_t['roi'][10]*100:.1f}%, "
+                f"新既定 β=0.8: top-10 ROI={new_def_t['roi'][10]*100:.1f}% "
+                f"(Δ {(new_def_t['roi'][10]-prod_t['roi'][10])*100:+.2f} pt)"
+            )
+        console.print(
+            "[dim]控除率 22.5% より理論期待 ROI は ~77.5%。"
+            "実 ROI が 77.5% を超え、かつ市場単独より高い β が β=0.78 の妥当性。[/dim]"
+        )
 
 
 if __name__ == "__main__":
