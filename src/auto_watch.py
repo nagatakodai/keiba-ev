@@ -20,7 +20,7 @@ from rich.console import Console
 
 from .fetch_result import process_pending, schedule as schedule_result_fetch
 from .parse import _split_race_id, parse_race_list
-from .scrape import fetch_html, race_list_url
+from .scrape import NetkeibaBlocked, fetch_html, race_list_url
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE_FILE = ROOT / "data/cache/auto_watch_analyzed.txt"
@@ -52,12 +52,23 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
     """その日 (JST) の開催一覧を netkeiba (JRA + NAR) から取得し、締切 N±M 分のレースを抽出。"""
     today = datetime.fromtimestamp(now_ts).strftime("%Y%m%d")
     races: list[dict] = []
+    blocked_count = 0
     for is_nar in (False, True):
         try:
             html = fetch_html(race_list_url(today, nar=is_nar), timeout_ms=30_000)
             races.extend(parse_race_list(html, today))
+        except NetkeibaBlocked as ex:
+            blocked_count += 1
+            console.print(f"[red]netkeiba blocked (nar={is_nar}): {ex}[/red]")
         except Exception as ex:
             console.print(f"[yellow]race_list fetch failed (nar={is_nar}): {ex}[/yellow]")
+    if blocked_count >= 2:
+        # 両ドメイン block → IP rate-limit と判断。明確なヒント表示。
+        console.print(
+            "[bold red]race.netkeiba.com / nar.netkeiba.com が両方とも 400 を返した。"
+            "直近の大量 scrape で IP が rate-limit されている可能性。"
+            "数時間-1日待つか、別 IP/VPN から再試行してください。[/bold red]"
+        )
 
     low_sec = (window_min - tolerance_min) * 60
     high_sec = (window_min + tolerance_min) * 60

@@ -60,8 +60,22 @@ def _host_for(race_id: str | None, *, nar: bool | None = None) -> str:
     return JRA_HOST
 
 
+class NetkeibaBlocked(RuntimeError):
+    """netkeiba (CloudFront) から空 HTML / 400 が返ってきた場合に投げる。
+
+    多数の連続 request 後に IP / UA がレート制限される現象が知られている。
+    `fetch_html` が body の無い HTML (≤60 字、`<body></body>` 形式) を検出
+    したら本例外を投げて呼び出し側で明示的に扱う。
+    """
+
+
 def fetch_html(url: str, *, timeout_ms: int = 60_000, settle_ms: int = 4_000) -> str:
-    """URL を開いて render 後の HTML を返す。"""
+    """URL を開いて render 後の HTML を返す。
+
+    netkeiba は CloudFront 経由で HTTP 400 を返すことがあり、その場合
+    Playwright は ~40 字の空 HTML を返す。これを silently 通すと「レースが
+    見つからない」と誤認するので `NetkeibaBlocked` を投げる。
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -77,6 +91,13 @@ def fetch_html(url: str, *, timeout_ms: int = 60_000, settle_ms: int = 4_000) ->
         page.wait_for_timeout(settle_ms)
         html = page.content()
         browser.close()
+    # 空 body 検出: netkeiba の CloudFront 400 は <body></body> 形式 (~40 字)
+    stripped = html.strip()
+    if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+        raise NetkeibaBlocked(
+            f"netkeiba returned empty body for {url} "
+            f"(likely CloudFront 400; possibly IP rate-limited after recent heavy scraping)"
+        )
     return html
 
 
