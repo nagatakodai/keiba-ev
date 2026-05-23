@@ -158,6 +158,50 @@ def main() -> int:
     X = valid[feature_cols].astype("float64").fillna(0.0)
     valid["score"] = booster.predict(X.values)
 
+    # T sweep: 別 LGBM で T=0.4 が本当に best か検証
+    print()
+    print("=== T sweep on new LGBM (W4 model, n=149 races) ===", flush=True)
+    print(f"{'T':>5} {'log loss':>10} {'top-1 hit':>10}", flush=True)
+    print("-" * 30, flush=True)
+    t_grid = (0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.5, 2.0)
+    best_T_w4 = 1.0
+    best_ll = float("inf")
+    for T_test in t_grid:
+        col = f"lp_T{T_test}"
+        valid[col] = valid.groupby("race_id", sort=False)["score"].transform(
+            lambda s, t=T_test: (lambda ex: ex / ex.sum())(np.exp((s - s.max()) / t - (s.max() / t - s.max() / t)))
+        )
+        # Simpler softmax
+        def _race_softmax_T(s: pd.Series, t: float) -> pd.Series:
+            scaled = s / t
+            m = scaled.max()
+            ex = np.exp(scaled - m)
+            return ex / ex.sum()
+        valid[col] = valid.groupby("race_id", sort=False)["score"].transform(
+            lambda s, t=T_test: _race_softmax_T(s, t)
+        )
+        ll = 0.0
+        top1_hits = 0
+        n_r = 0
+        for _rid, g in valid.groupby("race_id", sort=False):
+            winner = g[g["target_top1"] == 1]
+            if len(winner) != 1: continue
+            p = float(winner[col].iloc[0])
+            ll += -math.log(max(p, 1e-12))
+            top_idx = g[col].idxmax()
+            if g.loc[top_idx, "target_top1"] == 1:
+                top1_hits += 1
+            n_r += 1
+        ll_mean = ll / n_r if n_r else 0.0
+        marker = ""
+        if ll_mean < best_ll:
+            best_ll = ll_mean
+            best_T_w4 = T_test
+            marker = " ←"
+        print(f"{T_test:>5.2f}{marker} {ll_mean:>9.4f} {top1_hits/n_r*100:>9.1f}%", flush=True)
+    print(f"W4 best T = {best_T_w4} (production T = {LGBM_TEMPERATURE})", flush=True)
+    print()
+
     T = LGBM_TEMPERATURE
     def _softmax(s: pd.Series) -> pd.Series:
         scaled = s / T

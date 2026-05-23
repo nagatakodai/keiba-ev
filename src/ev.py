@@ -363,8 +363,15 @@ def _lgbm_predict(horses, feats) -> dict[int, float] | None:
             return None
         scores = _LGBM_MODEL.predict(rows)
         # 温度スケーリング付き softmax: probs = softmax(score / T)
-        # T < 1 で sharpening (Phase 21)。holdout で T=0.4 が log loss 最小。
-        T = max(LGBM_TEMPERATURE, 1e-3)
+        # T は model-specific (W3 model T=0.4、W4 model T=1-2 等)、retraining 時に
+        # train.py が valid set で log loss 最小の T を fit して metadata に保存する。
+        # metadata に softmax_temperature があればそれを優先、無ければ
+        # LGBM_TEMPERATURE 定数 (= 0.4、Phase 21 旧 model 用) にフォールバック。
+        T = float(
+            (_LGBM_META or {}).get("softmax_temperature")
+            or LGBM_TEMPERATURE
+        )
+        T = max(T, 1e-3)
         scaled = [s / T for s in scores]
         m = max(scaled)
         exps = [math.exp(s - m) for s in scaled]

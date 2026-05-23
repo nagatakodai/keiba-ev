@@ -166,6 +166,54 @@ def main(
     model_path = output_dir / "lgbm_lambdarank.txt"
     model.save_model(str(model_path))
 
+    # === softmax temperature calibration ===
+    # 訓練後の valid set で T を sweep し、log loss 最小の T を採用する。
+    # T は model-specific (W3 model は T=0.4、W4 model は T=1-2 が最適だった経験あり)
+    # ので、retrain ごとに自動で T を更新するため metadata に保存する。
+    # _lgbm_predict は metadata の `softmax_temperature` を読んで適用。
+    console.rule("[bold]softmax temperature calibration[/bold]")
+    valid_scores = model.predict(X_valid, num_iteration=model.best_iteration)
+    # valid_df を sort 順で再構築 (X_valid と同じ順)
+    vdf = valid_df.sort_values(["race_id", "horse_number"]).reset_index(drop=True)
+    vdf = vdf[vdf["race_id"].isin(
+        vdf.groupby("race_id")["target_top1"].sum().pipe(lambda s: s[s > 0]).index
+    )].copy()
+    # X_valid と整合するよう同 race set に絞り score 配列を作る
+    vdf["_score"] = valid_scores[:len(vdf)] if len(valid_scores) == len(vdf) else None
+    if vdf["_score"].isna().any():
+        # 数が合わない場合 (rare)、計算し直す
+        from src.train import _prep_xy as _prep
+        Xv2, _, _ = _prep(vdf)
+        vdf["_score"] = model.predict(Xv2, num_iteration=model.best_iteration)
+    t_grid = [round(t, 2) for t in np.arange(0.20, 2.51, 0.05)]
+    best_T = 1.0
+    best_ll = float("inf")
+    for T in t_grid:
+        ll_sum = 0.0
+        n_r = 0
+        for _rid, g in vdf.groupby("race_id", sort=False):
+            scaled = (g["_score"].to_numpy() / T)
+            m = scaled.max()
+            exps = np.exp(scaled - m)
+            probs = exps / exps.sum()
+            winner_mask = (g["target_top1"] == 1).to_numpy()
+            if winner_mask.sum() != 1:
+                continue
+            p = float(probs[winner_mask][0])
+            import math as _math
+            ll_sum += -_math.log(max(p, 1e-12))
+            n_r += 1
+        if n_r == 0:
+            continue
+        ll = ll_sum / n_r
+        if ll < best_ll:
+            best_ll = ll
+            best_T = T
+    console.print(
+        f"calibrated softmax temperature T = [bold]{best_T}[/bold] "
+        f"(valid log loss {best_ll:.4f})"
+    )
+
     meta = {
         "trained_at": datetime.now().isoformat(timespec="seconds"),
         "n_train_races": int(train_df["race_id"].nunique()),
@@ -175,6 +223,8 @@ def main(
         "params": params,
         "best_iteration": model.best_iteration,
         "best_scores": {k: dict(v) for k, v in model.best_score.items()},
+        "softmax_temperature": best_T,
+        "softmax_temperature_valid_log_loss": best_ll,
     }
     meta_path = output_dir / "lgbm_metadata.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
