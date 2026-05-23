@@ -114,14 +114,17 @@ def main(
         console.print(f"[yellow]⚠ LightGBM 不可 (linear softmax fallback): {err}[/yellow]")
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_floor=market_floor)
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
-    # Plan H1 (確率上位 3 点) は holdout eval で pure LGBM (β=0) が ROI 109.6% を
-    # 達成したため、専用に別の Probabilities を作る。
+    # Plan H1/H2 (確率上位) は当初 holdout で pure LGBM (β=0) が +EV に見えた
+    # が、5-fold CV (scripts/cv_beta.py) で β=0 は overfit と判明
+    # (mean hold-out ROI 64% < 77.5%)。conservative に default β を使う。
+    # `probs_hit` は維持 (CLI 互換 + 将来データ蓄積後の再 sweep 用)。
     probs_hit = ev_mod.estimate_probs(
         rd, market_blend=ev_mod.BLEND_HIT_PURE, market_floor=market_floor
     )
-    # Plan G (適性ゲート) は holdout eval で market-only (β=1.0) が ROI 108.1%
-    # を達成。aptitude index に model 信号が織り込み済みのため、market 暗黙率
-    # との PL 連鎖だけで +EV triple を発見できる。
+    # Plan G (適性ゲート) は holdout + 5-fold CV 両方で β=1.0 (market only) が
+    # robust (全 5 fold で β=1.0 が best, std=0)、mean hold-out ROI 106.6%。
+    # aptitude index が model 信号を 8 因子合成済みなので、市場暗黙率と PL 連鎖
+    # だけで +EV triple を発見できる。
     probs_apt = ev_mod.estimate_probs(
         rd, market_blend=ev_mod.BLEND_APTITUDE_GATE, market_floor=market_floor
     )
@@ -324,14 +327,9 @@ def _save_evidence_to_snapshot(
         plan_g = ev_mod.plan_aptitude_ev(adjusted, aptitude_top_horses)
     else:
         plan_g = []
-    # Plan H1 / H2 は β=0 (pure LGBM) 用の plan_rows_hit がある場合はそちらから生成
-    if plan_rows_hit is not None:
-        adjusted_hit = ev_mod.apply_evidence(plan_rows_hit, evidence_by_key, cuts)
-        plan_h1 = ev_mod.plan_hit_pure(adjusted_hit, target=3)
-        plan_h2 = ev_mod.plan_hit_safe(adjusted_hit, target=3)
-    else:
-        plan_h1 = ev_mod.plan_hit_pure(adjusted, target=3)
-        plan_h2 = ev_mod.plan_hit_safe(adjusted, target=3)
+    # Plan H1 / H2 は 5-fold CV で β=0 が overfit と判明 → default β を使う
+    plan_h1 = ev_mod.plan_hit_pure(adjusted, target=3)
+    plan_h2 = ev_mod.plan_hit_safe(adjusted, target=3)
     plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
     snap["evidence"] = evidence
     snap["evidence_rows"] = [
@@ -477,14 +475,9 @@ def _save_prediction_snapshot(
     plan_b = ev_mod.plan_max_ev(plan_rows)
     plan_c = ev_mod.plan_wide(plan_rows)
     # H1/H2 ("当て枠") も min_prob/ev_max のキャップは尊重する。
-    # Plan H1 / H2 は両方とも holdout で β=0 (BLEND_HIT_PURE) + T=0.4 が +EV を
-    # 出した (H1 ROI 101% / H2 ROI 132%)。plan_rows_hit があればそちらを使う。
-    if plan_rows_hit is not None:
-        plan_h1 = ev_mod.plan_hit_pure(plan_rows_hit, target=3)
-        plan_h2 = ev_mod.plan_hit_safe(plan_rows_hit, target=3)
-    else:
-        plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=3)
-        plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=3)
+    # 5-fold CV で β=0 は overfit と判明 → default β を使う。
+    plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=3)
+    plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=3)
     # Plan G: 適性ゲート → EV 足切り (適性指数 top N 頭の集合で P×O≥1.02)。
     # holdout で market-only (β=1.0) が +EV (ROI 108.1%) → plan_rows_apt 優先。
     # apt_top が空 = aptitudes が空 = past_runs 未取得などの場合は空リスト。
@@ -945,13 +938,15 @@ def _print_plans(
         f"[dim]予算配分: +EV 枠 ¥{ev_budget:,} (Plan A/B/C/G のいずれか) / "
         f"当て枠 ¥{hit_budget:,} (Plan H1/H2 のいずれか)[/dim]"
     )
-    # Plan H1 は pure LGBM (β=0) 用の別 rows がある場合はそちらを使う
-    h1_rows = plan_rows_hit if plan_rows_hit is not None else rows
-    # Plan G は market-only (β=1.0) 用の別 rows がある場合はそちらを使う
+    # Plan H1/H2 は 5-fold CV (scripts/cv_beta.py) で β=0 が overfit と判明 →
+    # default rows を使う。plan_rows_hit は将来 sweep 用に保持。
+    # Plan G は β=1.0 が CV robust (mean hold-out +EV 106.6%) なので plan_rows_apt
+    # 優先。
     g_rows = plan_rows_apt if plan_rows_apt is not None else rows
-    # holdout n=291 race の評価結果を Plan title に付記:
-    #   +EV = ROI ≥ 100% (長期黒字), -EV = ROI < 控除 77.5% (長期赤字),
-    #   small N = 0-3 hits でノイズ支配
+    # holdout n=291 race + 5-fold CV の評価結果を Plan title に付記:
+    #   +EV = CV mean hold-out ROI ≥ 100%
+    #   -EV = ROI < 控除 77.5%
+    #   小サンプル = hits 0-3 でノイズ
     ev_plans = [
         (
             "Plan A — 5点バランス (holdout -EV 54%, small N=1)",
@@ -967,13 +962,13 @@ def _print_plans(
             ev_budget,
         ),
         (
-            "Plan H1 — 当て枠 / 確率最優先 (β=0, holdout +EV 101%)",
-            ev_mod.plan_hit_pure(h1_rows, target=hit_points),
+            "Plan H1 — 当て枠 / 確率最優先 (CV: β tuning 不安定)",
+            ev_mod.plan_hit_pure(rows, target=hit_points),
             hit_budget,
         ),
         (
-            "Plan H2 — 当て枠 / 確率+EV≥1 (β=0+T=0.4, holdout +EV 132%) ★",
-            ev_mod.plan_hit_safe(h1_rows, target=hit_points),
+            "Plan H2 — 当て枠 / 確率 +P×O ≥ 1.0 (CV: β tuning 不安定)",
+            ev_mod.plan_hit_safe(rows, target=hit_points),
             hit_budget,
         ),
     ]
@@ -982,7 +977,7 @@ def _print_plans(
         ev_plans.insert(
             3,
             (
-                f"Plan G — 適性ゲート top{top_n} (β=1.0, holdout +EV 108%) ★",
+                f"Plan G — 適性ゲート top{top_n} (β=1.0, CV robust mean hold ROI 106.6%) ★",
                 ev_mod.plan_aptitude_ev(g_rows, aptitude_top_horses),
                 ev_budget,
             ),
