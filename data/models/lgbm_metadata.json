@@ -105,5 +105,5 @@
     }
   ],
   "softmax_temperature": 0.45,
-  "softmax_temperature_valid_log_loss": 1.9479063536423367
+  "softmax_temperature_valid_log_loss": 1.9524236301214386
 }
