@@ -35,15 +35,17 @@ PXO_OANA = (3.0, float("inf"))
 DEFAULT_LAMBDA_2 = 0.81
 DEFAULT_LAMBDA_3 = 0.65
 
-# bet-type-specific market_blend (Phase 19: holdout 291 races real-odds eval 由来)。
+# bet-type-specific market_blend (Phase 19/20: holdout 291 races real-odds eval 由来)。
 # 各 bet type で最適な β が異なる。eval_holdout の結果:
 #   - 単勝 ROI peak:        β=0.75-0.80 (95.9%, 市場 88.5% 比 +7pt)
 #   - 3 連単 PL hit rate:   β=0.70-0.80 で並ぶ (mean rank 86)
 #   - Plan A/B/C ROI:       N=291 では結論不能 (β=0.78 で安全側)
-#   - Plan H1 ROI:          β=0 が peak (109.6%, +EV)
-# 既定 0.78 は Plan A/B/C/単勝 用。Plan H1 (確率上位 3 点) だけは β=0 を使う。
+#   - Plan H1 ROI:          β=0 が peak (109.6%, +EV) ← Phase 19
+#   - Plan G ROI:           β=1.0 が peak (108.1%, +EV, hit 5/291) ← Phase 20
+#                            β=0→1 で単調 0% → 108% に上昇
 BLEND_DEFAULT = 0.78
 BLEND_HIT_PURE = 0.0
+BLEND_APTITUDE_GATE = 1.0
 
 
 # ---------- 確率推定 ----------

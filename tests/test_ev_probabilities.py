@@ -11,6 +11,7 @@ from itertools import combinations, permutations
 import pytest
 
 from src.ev import (
+    BLEND_APTITUDE_GATE,
     BLEND_DEFAULT,
     BLEND_HIT_PURE,
     build_table,
@@ -169,10 +170,11 @@ def test_plan_aptitude_ev_bet_handles_2_horse_keys():
 
 
 def test_blend_constants():
-    """Phase 19 で導入した β の既定値定数を確認。
+    """Phase 19/20 で導入した β の既定値定数を確認。
     変更時は holdout eval を再走して根拠を更新すること。"""
-    assert BLEND_DEFAULT == 0.78  # Plan A/B/C/G/H2/単勝/3連単 EV table
-    assert BLEND_HIT_PURE == 0.0  # Plan H1 (確率上位 3 点) 専用
+    assert BLEND_DEFAULT == 0.78         # Plan A/B/C/H2/単勝/3連単 EV table
+    assert BLEND_HIT_PURE == 0.0         # Plan H1 (確率上位 3 点) 専用
+    assert BLEND_APTITUDE_GATE == 1.0    # Plan G (適性ゲート) 専用 (Phase 20)
 
 
 def _make_race_data_5h() -> RaceData:
