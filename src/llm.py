@@ -23,6 +23,9 @@ ALLOWED_TOOLS = [
     "mcp__tavily__tavily_extract",
     "mcp__tavily__tavily-extract",
     "WebFetch",
+    # 学習データ / モデルメタ / 過去 snapshot を読めるように Read を許可
+    # (data/datasets, data/models, data/predictions, data/results, etc.)
+    "Read",
 ]
 DISALLOWED_TOOLS = "Bash,Edit,Write,Glob,Grep,Agent,TaskCreate,TaskUpdate,TaskList,NotebookEdit"
 
@@ -211,10 +214,14 @@ def build_refresh_prompt(
     weather_section = _weather_block(rd)
     predictions_section = _predictions_block(rd)
 
+    training_block = _training_data_block()
+
     return f"""**締切 5 分前の最終確認** ({r.venue_name} {r.schedule_index}日目 {r.race_number}R)
 
 オッズが更新されました。初回分析からの変動を踏まえ、**最終 Plan を確定**してください。
-{weather_section}{caps_block}{aptitude_section}{index_section}{predictions_section}
+{weather_section}{caps_block}
+{training_block}
+{aptitude_section}{index_section}{predictions_section}
 ## 最新 P×O 上位 20 件
 {top_block}
 
@@ -476,6 +483,77 @@ def _horse_index_block(rd: RaceData, probs: Probabilities) -> str:
     return "\n".join(lines)
 
 
+def _training_data_block() -> str:
+    """学習データ / モデルメタの要約 + Read で参照可能なファイルパスを案内。
+
+    LLM がモデルの強み/弱み (どの特徴量に依存しているか、validation 性能、
+    Phase 18-23 の holdout finding) を把握した上で補強根拠を判断できるよう、
+    要点を圧縮して prompt に埋め込み、詳細は Read で取りに行ってもらう。
+    """
+    meta_path = ROOT / "data" / "models" / "lgbm_metadata.json"
+    dataset_path = ROOT / "data" / "datasets" / "all.parquet"
+
+    summary_lines: list[str] = []
+    meta_block = ""
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            trained_at = meta.get("trained_at", "?")
+            n_train = meta.get("n_train_races", "?")
+            n_valid = meta.get("n_valid_races", "?")
+            best_iter = meta.get("best_iteration", "?")
+            best_scores = (meta.get("best_scores") or {}).get("valid") or {}
+            ndcg5 = best_scores.get("ndcg@5")
+            ndcg1 = best_scores.get("ndcg@1")
+            feature_cols = meta.get("feature_cols") or []
+            T_meta = meta.get("softmax_temperature")
+            meta_block = (
+                f"- 学習日時: {trained_at}\n"
+                f"- 訓練 race 数: {n_train} (時系列前半)\n"
+                f"- 検証 race 数: {n_valid} (時系列後半)\n"
+                f"- best iteration: {best_iter}\n"
+                f"- valid ndcg@5: {ndcg5:.3f} / ndcg@1: {ndcg1:.3f}\n"
+                if isinstance(ndcg5, (int, float)) and isinstance(ndcg1, (int, float))
+                else f"- 学習日時: {trained_at} / 訓練 {n_train} 検証 {n_valid} race\n"
+            )
+            meta_block += f"- 特徴量数: {len(feature_cols)}\n"
+            if T_meta is not None:
+                meta_block += f"- softmax temperature (model-specific): {T_meta}\n"
+        except Exception:
+            meta_block = "- (metadata 読込失敗)\n"
+
+    findings = (
+        "## 学習データ / モデルの背景知識 (Phase 18-23 holdout findings, n=291+149)\n\n"
+        "**確認済み +EV (sliding-window でも robust):**\n"
+        "- 単勝 (1 着馬予測) を β=0.78 で blend すると市場 baseline +7-8 pt の ROI 改善。\n"
+        "  W3: 95.9% (vs 88.5%)、W4: 88.3% (vs 80.4%)。\n\n"
+        "**Plan-level の +EV 主張は overfit と判明 (CV + sliding-window で破綻):**\n"
+        "- Plan H1/H2 β=0 (in-sample 110-132% ROI に見えた) → CV mean 64% < 控除率 77.5%\n"
+        "- Plan G β=1.0 (in-sample 108% ROI) → 新規 LGBM での W4 で hit 0/149\n"
+        "- Plan B (最高 P×O 上位 3 点) は 0 hits / 440 races の楽観バイアスの罠\n\n"
+        "**示唆:**\n"
+        "- モデルの確率は **rank に意味あり** だが **絶対値の calibration は粗い**\n"
+        "- 検索の補強根拠を「ツール推定指数の絶対値」より重視すべき\n"
+        "- 単勝向けの 1 着馬予測が最もシャープ。3 連単は連鎖確率で誤差が積み上がる\n"
+        f"\n{meta_block if meta_block else ''}"
+    )
+
+    paths_section = (
+        "\n**詳しく見たいときは Read tool で以下を参照可能:**\n"
+        f"- `{meta_path.relative_to(ROOT)}` — モデルメタ (特徴量一覧、ハイパラ、best_iter、ndcg@5 等)\n"
+        f"- `{dataset_path.relative_to(ROOT)}` — 学習データ全体 (parquet)。"
+        "race_id 12 桁の時系列順、各馬の特徴量 / win_odds / finish_pos / target_top1 を含む\n"
+        "- `data/predictions/<race_id>.json` — 過去の analyze snapshot (P×O / Plan picks / aptitude)\n"
+        "- `data/results/<race_id>.json` — 過去の結果 (finish_order, payout)\n"
+        "- `CLAUDE.md` — 確率モデルの保守化哲学、bet-type-specific β、Plan の実証階層\n"
+        "- `data/cache/aptitudes/<race_id>.json` — 過去 race の aptitude top 6 横顔\n"
+        "\n注意: parquet は pandas が無い環境では schema 確認程度。"
+        "主に metadata.json と CLAUDE.md と過去 snapshot を参照することを推奨。\n"
+    )
+
+    return findings + paths_section
+
+
 def _caps_block(ev_max: float | None, min_prob: float | None) -> str:
     if ev_max is None and min_prob is None:
         return ""
@@ -590,8 +668,12 @@ def build_prompt(
     surface = f"{r.surface}" if r.surface else ""
     direction = f"({r.direction})" if r.direction else ""
 
+    training_block = _training_data_block()
+
     return f"""あなたは中央競馬 (JRA) 3 連単 EV 分析のレビュアーです。CLAUDE.md の分析フレームワークに必ず従って評価してください。
 {caps_block}
+{training_block}
+
 ## レース
 - {r.venue_name} {r.schedule_index}日目 {r.race_number}R / {r.race_class} {surface}{r.distance}m{direction}
 - オッズ更新 unix: {r.odds_updated_at}
