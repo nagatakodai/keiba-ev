@@ -66,15 +66,24 @@ def main(
                 winning_tier = tier
 
         # Plan 別集計 (G/H1/H2/F も含む。古いスナップショットにキーが無い場合はスキップ)
+        # `evidence_plan_*_keys` (LLM 補強後) を優先、無ければ raw `plan_*_keys`。
+        # Web UI / api/store.compute_calibration と同じ pattern で
+        # 「user が実際に打った picks」を集計する。
+        def _picks(plan_short: str, raw_default=None):
+            ev = pred.get(f"evidence_plan_{plan_short}_keys")
+            if ev is not None:
+                return ev
+            return pred.get(f"plan_{plan_short}_keys", raw_default)
+
         race_plan_results = {}
         plan_specs = (
-            ("Plan A", pred.get("plan_a_keys", [])),
-            ("Plan B", pred.get("plan_b_keys", [])),
-            ("Plan C", pred.get("plan_c_keys", [])),
-            ("Plan G", pred.get("plan_g_keys")),
-            ("Plan H1", pred.get("plan_h1_keys")),
-            ("Plan H2", pred.get("plan_h2_keys")),
-            ("Plan F", pred.get("plan_f_keys")),
+            ("Plan A", _picks("a", [])),
+            ("Plan B", _picks("b", [])),
+            ("Plan C", _picks("c", [])),
+            ("Plan G", _picks("g")),
+            ("Plan H1", _picks("h1")),
+            ("Plan H2", _picks("h2")),
+            ("Plan F", _picks("f")),
         )
         for plan_name, key_list in plan_specs:
             if key_list is None:

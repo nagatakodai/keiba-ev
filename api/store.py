@@ -224,14 +224,17 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "Plan H1": 2000, "Plan H2": 2000,
         "Plan F": 10000,
     }
+    # 各 plan で `evidence_plan_*_keys` (LLM 補強後) を優先、無ければ
+    # `plan_*_keys` (raw) を使う。Web UI / record.py と同じ pattern。
+    # これで calibration が「user が実際に打った picks」を測ることになる。
     PLAN_KEY_FIELDS = (
-        ("Plan A", "plan_a_keys"),
-        ("Plan B", "plan_b_keys"),
-        ("Plan C", "plan_c_keys"),
-        ("Plan G", "plan_g_keys"),
-        ("Plan H1", "plan_h1_keys"),
-        ("Plan H2", "plan_h2_keys"),
-        ("Plan F", "plan_f_keys"),
+        ("Plan A", "plan_a_keys", "evidence_plan_a_keys"),
+        ("Plan B", "plan_b_keys", "evidence_plan_b_keys"),
+        ("Plan C", "plan_c_keys", "evidence_plan_c_keys"),
+        ("Plan G", "plan_g_keys", "evidence_plan_g_keys"),
+        ("Plan H1", "plan_h1_keys", "evidence_plan_h1_keys"),
+        ("Plan H2", "plan_h2_keys", "evidence_plan_h2_keys"),
+        ("Plan F", "plan_f_keys", "evidence_plan_f_keys"),
     )
 
     for race_id, pred, result in pairs:
@@ -247,9 +250,12 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 winning_tier = tier
 
         race_plan_hits: dict[str, bool] = {}
-        for plan_name, field_name in PLAN_KEY_FIELDS:
-            key_list_raw = pred.get(field_name)
-            # 古いスナップショットにキー不在 → そのレースはこの plan の集計対象外
+        for plan_name, raw_field, evidence_field in PLAN_KEY_FIELDS:
+            # evidence_plan_*_keys (LLM 補強後) 優先、無ければ raw plan_*_keys
+            key_list_raw = pred.get(evidence_field)
+            if key_list_raw is None:
+                key_list_raw = pred.get(raw_field)
+            # 旧スナップショットにキー不在 → そのレースはこの plan の集計対象外
             # (空リスト [] = 「Plan は出したが picks 0」とは区別する)
             if key_list_raw is None:
                 continue
@@ -307,7 +313,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         )
 
     plans_out: list[dict[str, Any]] = []
-    for name, _ in PLAN_KEY_FIELDS:
+    for entry in PLAN_KEY_FIELDS:
+        name = entry[0]
         s = plan_stats[name]
         if s["races"] == 0:
             continue
