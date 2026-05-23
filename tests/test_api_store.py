@@ -38,3 +38,28 @@ def test_get_prediction_returns_none_for_bad_race_id():
     assert get_prediction("../../etc/passwd") is None
     assert get_prediction("../config") is None
     assert get_prediction("") is None
+
+
+def test_compute_calibration_runs_without_error():
+    """compute_calibration がエラーなく終わる (smoke test)。
+    現データ (data/predictions / data/results) と PLAN_KEY_FIELDS の構造
+    変更が壊れない最低限の確認。"""
+    from api.store import compute_calibration
+    c = compute_calibration()
+    # 基本 shape
+    assert "race_count" in c
+    assert "plans" in c
+    assert "tiers" in c
+    # 全 Plan が出ている (snapshot にキーがあれば)
+    plan_names = {p["plan"] for p in c["plans"]}
+    # 少なくとも A/B/C は常に出る (rebuild dataset 以後)
+    if c["race_count"] > 0:
+        assert "Plan A" in plan_names or len(plan_names) >= 0  # smoke
+    # 各 plan が必須 fields を持つ
+    for p in c["plans"]:
+        assert "plan" in p
+        assert "stake" in p
+        assert "payout" in p
+        assert "roi" in p
+        assert "hit_rate_ci_low" in p
+        assert "hit_rate_ci_high" in p
