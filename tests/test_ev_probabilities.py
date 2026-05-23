@@ -11,17 +11,22 @@ from itertools import combinations, permutations
 import pytest
 
 from src.ev import (
+    BLEND_DEFAULT,
+    BLEND_HIT_PURE,
+    build_table,
+    estimate_probs,
     exacta_prob,
     place_prob,
     plan_aptitude_ev,
     plan_aptitude_ev_bet,
+    plan_hit_pure,
     quinella_prob,
     trifecta_prob,
     trio_prob,
     wide_prob,
     win_prob,
 )
-from src.models import BetEvRow, EvRow, Probabilities
+from src.models import BetEvRow, EvRow, Horse, Probabilities, Race, RaceData, TrifectaOdds
 
 
 @pytest.fixture
@@ -158,3 +163,77 @@ def test_plan_aptitude_ev_bet_handles_2_horse_keys():
     keys = {tuple(r.key) for r in picks}
     assert (1, 2) in keys
     assert (1, 5) not in keys
+
+
+# --- Phase 19: bet-type-specific market_blend ---
+
+
+def test_blend_constants():
+    """Phase 19 で導入した β の既定値定数を確認。
+    変更時は holdout eval を再走して根拠を更新すること。"""
+    assert BLEND_DEFAULT == 0.78  # Plan A/B/C/G/H2/単勝/3連単 EV table
+    assert BLEND_HIT_PURE == 0.0  # Plan H1 (確率上位 3 点) 専用
+
+
+def _make_race_data_5h() -> RaceData:
+    """5 馬の最小レース。本命 1 番 (オッズ 2.0)、最大穴 5 番 (オッズ 30.0)。"""
+    horses = [
+        Horse(number=1, name="A", win_odds=2.0),
+        Horse(number=2, name="B", win_odds=4.0),
+        Horse(number=3, name="C", win_odds=8.0),
+        Horse(number=4, name="D", win_odds=15.0),
+        Horse(number=5, name="E", win_odds=30.0),
+    ]
+    race = Race(
+        cup_id="x", schedule_index=1, race_number=1,
+        venue_id=1, venue_name="test", race_class="OP",
+        distance=1600, surface="芝", horses=horses,
+    )
+    # 5*4*3 = 60 ordered triples。市場では人気馬寄りに低いオッズ、大穴寄りに高い。
+    # 馬の win_odds の積に粗く比例させた合成オッズで十分。
+    trifecta: list[TrifectaOdds] = []
+    pop = 1
+    rows: list[tuple[float, tuple[int, int, int]]] = []
+    for i in range(1, 6):
+        for j in range(1, 6):
+            if j == i:
+                continue
+            for k in range(1, 6):
+                if k == i or k == j:
+                    continue
+                synth = horses[i - 1].win_odds * horses[j - 1].win_odds * horses[k - 1].win_odds * 0.5
+                rows.append((synth, (i, j, k)))
+    rows.sort()
+    for synth, key in rows:
+        trifecta.append(TrifectaOdds(key=key, odds=synth, popularity=pop))
+        pop += 1
+    return RaceData(race=race, trifecta=trifecta)
+
+
+def test_plan_h1_picks_differ_under_bet_type_specific_blend():
+    """Phase 19: Plan H1 を β=0 と β=0.78 で回すと picks が変わる。
+
+    β=0 (pure model): past_runs が無く features 全 0 → 一様 prob → PL 連鎖で
+      ほぼ全 triple が同確率。Plan H1 の top-3 は sort order 依存の任意 3 点。
+    β=0.78 (default): market 暗黙率が反映 → 1-2-3 寄りの favorite triple が
+      Plan H1 picks に来る。
+    両 picks が完全一致しないことだけ確認 (具体的 picks は実装詳細)。
+    """
+    rd = _make_race_data_5h()
+    probs_hit = estimate_probs(rd, market_blend=BLEND_HIT_PURE)
+    probs_def = estimate_probs(rd, market_blend=BLEND_DEFAULT)
+    rows_hit = build_table(rd, probs_hit)
+    rows_def = build_table(rd, probs_def)
+    picks_hit = {tuple(r.key) for r in plan_hit_pure(rows_hit, target=3)}
+    picks_def = {tuple(r.key) for r in plan_hit_pure(rows_def, target=3)}
+    assert len(picks_hit) == 3
+    assert len(picks_def) == 3
+    # 一致しないことを確認 (= bet-type-specific β が実効的に効いている)
+    assert picks_hit != picks_def
+
+
+def test_estimate_probs_default_blend_matches_constant():
+    """estimate_probs の market_blend 既定値が BLEND_DEFAULT 定数と一致する。"""
+    import inspect
+    sig = inspect.signature(estimate_probs)
+    assert sig.parameters["market_blend"].default == BLEND_DEFAULT
