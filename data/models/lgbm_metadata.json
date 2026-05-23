@@ -103,5 +103,7 @@
       "name": "same_venue_count",
       "gain": 1002.2064390182495
     }
-  ]
+  ],
+  "softmax_temperature": 0.45,
+  "softmax_temperature_valid_log_loss": 1.9479063536423367
 }
