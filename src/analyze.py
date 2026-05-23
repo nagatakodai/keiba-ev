@@ -114,6 +114,11 @@ def main(
         console.print(f"[yellow]⚠ LightGBM 不可 (linear softmax fallback): {err}[/yellow]")
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_floor=market_floor)
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
+    # Plan H1 (確率上位 3 点) は holdout eval で pure LGBM (β=0) が ROI 109.6% を
+    # 達成したため、専用に別の Probabilities を作る。Plan A/B/C/G は既定 β を維持。
+    probs_hit = ev_mod.estimate_probs(
+        rd, market_blend=ev_mod.BLEND_HIT_PURE, market_floor=market_floor
+    )
 
     _print_race_header(rd)
     _print_horse_table(rd)
@@ -124,15 +129,17 @@ def main(
     _print_interviews(rd)
 
     rows = ev_mod.build_table(rd, probs)
+    rows_hit = ev_mod.build_table(rd, probs_hit)
     bet_tables = ev_mod.build_all_bet_tables(rd, probs)
 
     min_prob_dec = min_prob / 100.0 if min_prob is not None else None
     plan_rows = ev_mod.apply_caps(rows, ev_max=ev_max, min_prob=min_prob_dec)
+    plan_rows_hit = ev_mod.apply_caps(rows_hit, ev_max=ev_max, min_prob=min_prob_dec)
 
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
-            feats=feats, lgbm_info=lgbm_info,
+            feats=feats, lgbm_info=lgbm_info, plan_rows_hit=plan_rows_hit,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -154,6 +161,7 @@ def main(
         hit_points=hit_points,
         hit_budget_ratio=hit_budget_ratio,
         aptitude_top_horses=apt_top,
+        plan_rows_hit=plan_rows_hit,
     )
     _print_bet_tables(bet_tables, aptitude_top_horses=apt_top)
     _print_judgment_notes(rd, rows)
@@ -174,9 +182,13 @@ def main(
                 plan_rows, evidence,
                 hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
                 aptitude_top_horses=apt_top,
+                plan_rows_hit=plan_rows_hit,
             )
             if not no_cache:
-                _save_evidence_to_snapshot(race_id, plan_rows, evidence, apt_top)
+                _save_evidence_to_snapshot(
+                    race_id, plan_rows, evidence, apt_top,
+                    plan_rows_hit=plan_rows_hit,
+                )
 
     if refresh:
         if not url:
@@ -213,12 +225,17 @@ def _print_evidence_adjusted(
     hit_points: int = 3,
     hit_budget_ratio: float = 0.2,
     aptitude_top_horses: list[int] | None = None,
+    plan_rows_hit: list | None = None,
 ) -> None:
     evidence_by_key = evidence.get("evidence_by_key") or {}
     cuts = evidence.get("cuts") or []
     if not evidence_by_key and not cuts:
         return
     adjusted = ev_mod.apply_evidence(plan_rows, evidence_by_key, cuts)
+    adjusted_hit = (
+        ev_mod.apply_evidence(plan_rows_hit, evidence_by_key, cuts)
+        if plan_rows_hit is not None else None
+    )
     console.rule("[bold magenta]検索補強適用後の Plan[/bold magenta]")
     console.print(
         f"[dim]補強根拠で {len(evidence_by_key)} 件評価、cuts {len(cuts)} 件除外 → "
@@ -255,6 +272,7 @@ def _print_evidence_adjusted(
         hit_points=hit_points,
         hit_budget_ratio=hit_budget_ratio,
         aptitude_top_horses=aptitude_top_horses,
+        plan_rows_hit=adjusted_hit,
     )
 
 
@@ -263,6 +281,7 @@ def _save_evidence_to_snapshot(
     plan_rows,
     evidence: dict,
     aptitude_top_horses: list[int] | None = None,
+    plan_rows_hit: list | None = None,
 ) -> None:
     snap_path = ROOT / "data" / "predictions" / f"{race_id}.json"
     if not snap_path.exists():
@@ -281,7 +300,13 @@ def _save_evidence_to_snapshot(
         ev_mod.plan_aptitude_ev(adjusted, aptitude_top_horses)
         if aptitude_top_horses else []
     )
-    plan_h1 = ev_mod.plan_hit_pure(adjusted, target=3)
+    # Plan H1 は pure LGBM 用の plan_rows_hit がある場合はそちらから生成
+    # (holdout eval で +EV を達成した bet-type-specific β=0)
+    if plan_rows_hit is not None:
+        adjusted_hit = ev_mod.apply_evidence(plan_rows_hit, evidence_by_key, cuts)
+        plan_h1 = ev_mod.plan_hit_pure(adjusted_hit, target=3)
+    else:
+        plan_h1 = ev_mod.plan_hit_pure(adjusted, target=3)
     plan_h2 = ev_mod.plan_hit_safe(adjusted, target=3)
     plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
     snap["evidence"] = evidence
@@ -421,14 +446,19 @@ def _save_prediction_snapshot(
     market_signals: dict[int, MarketSignal] | None = None,
     feats: dict | None = None,
     lgbm_info: dict | None = None,
+    plan_rows_hit: list | None = None,
 ) -> None:
     plan_a = ev_mod.plan_balanced(plan_rows)
     plan_b = ev_mod.plan_max_ev(plan_rows)
     plan_c = ev_mod.plan_wide(plan_rows)
     # H1/H2 ("当て枠") も min_prob/ev_max のキャップは尊重する。
-    # rows (uncapped) を渡すとフィルタを bypass してしまい、UI 上で
-    # 「min_prob が反映されない」ように見える。
-    plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=3)
+    # Plan H1 は holdout で +EV を出した pure LGBM β=0 の plan_rows_hit を使う
+    # (無ければ既定の plan_rows にフォールバック)。Plan H2 は EV ≥1.0 フィルタを
+    # 通すので default β のままで OK。
+    if plan_rows_hit is not None:
+        plan_h1 = ev_mod.plan_hit_pure(plan_rows_hit, target=3)
+    else:
+        plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=3)
     plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=3)
     # Plan G: 適性ゲート → EV 足切り (適性指数 top N 頭の集合で P×O≥1.02)。
     # apt_top が空 = aptitudes が空 = past_runs 未取得などの場合は空リスト。
@@ -878,6 +908,7 @@ def _print_plans(
     hit_budget_ratio: float = 0.2,
     total_budget: int = 10_000,
     aptitude_top_horses: list[int] | None = None,
+    plan_rows_hit: list | None = None,
 ) -> None:
     ev_budget = int(total_budget * (1.0 - hit_budget_ratio))
     hit_budget = total_budget - ev_budget
@@ -885,6 +916,8 @@ def _print_plans(
         f"[dim]予算配分: +EV 枠 ¥{ev_budget:,} (Plan A/B/C/G のいずれか) / "
         f"当て枠 ¥{hit_budget:,} (Plan H1/H2 のいずれか)[/dim]"
     )
+    # Plan H1 は pure LGBM 用の別 rows がある場合はそちらを使う
+    h1_rows = plan_rows_hit if plan_rows_hit is not None else rows
     ev_plans = [
         ("Plan A — 5点バランス (推奨)", ev_mod.plan_balanced(rows), ev_budget),
         ("Plan B — 最高EV (集中 1-3点)", ev_mod.plan_max_ev(rows), ev_budget),
@@ -894,8 +927,8 @@ def _print_plans(
             ev_budget,
         ),
         (
-            "Plan H1 — 当て枠 / 確率最優先 (EV 不問)",
-            ev_mod.plan_hit_pure(rows, target=hit_points),
+            "Plan H1 — 当て枠 / 確率最優先 (β=0, holdout +EV)",
+            ev_mod.plan_hit_pure(h1_rows, target=hit_points),
             hit_budget,
         ),
         (
@@ -1103,7 +1136,11 @@ def _refresh_and_reevaluate(
     lgbm_info2 = ev_mod.lgbm_status()
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor)
     probs2 = ev_mod.load_probs(None, probs2)
+    probs2_hit = ev_mod.estimate_probs(
+        rd2, market_blend=ev_mod.BLEND_HIT_PURE, market_floor=market_floor
+    )
     rows2 = ev_mod.build_table(rd2, probs2)
+    rows2_hit = ev_mod.build_table(rd2, probs2_hit)
     bet_tables2 = ev_mod.build_all_bet_tables(rd2, probs2)
 
     console.print(
@@ -1113,11 +1150,12 @@ def _refresh_and_reevaluate(
 
     min_prob_dec = min_prob / 100.0 if min_prob is not None else None
     plan_rows2 = ev_mod.apply_caps(rows2, ev_max=ev_max, min_prob=min_prob_dec)
+    plan_rows2_hit = ev_mod.apply_caps(rows2_hit, ev_max=ev_max, min_prob=min_prob_dec)
 
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
-            feats=feats2, lgbm_info=lgbm_info2,
+            feats=feats2, lgbm_info=lgbm_info2, plan_rows_hit=plan_rows2_hit,
         )
 
     _print_top(rows2, n=show)
@@ -1129,6 +1167,7 @@ def _refresh_and_reevaluate(
         hit_points=hit_points,
         hit_budget_ratio=hit_budget_ratio,
         aptitude_top_horses=apt_top2,
+        plan_rows_hit=plan_rows2_hit,
     )
     _print_bet_tables(bet_tables2, aptitude_top_horses=apt_top2)
     _print_judgment_notes(rd2, rows2)
@@ -1140,6 +1179,7 @@ def _refresh_and_reevaluate(
             race_id=race_id, no_cache=no_cache,
             hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
             aptitudes=aptitudes2, aptitude_top_horses=apt_top2,
+            plan_rows_hit=plan_rows2_hit,
         )
 
 
@@ -1257,6 +1297,7 @@ def _print_llm_refresh_evaluation(
     hit_budget_ratio: float = 0.2,
     aptitudes: dict | None = None,
     aptitude_top_horses: list[int] | None = None,
+    plan_rows_hit: list | None = None,
 ) -> None:
     if not llm_mod.is_available():
         return
@@ -1306,9 +1347,12 @@ def _print_llm_refresh_evaluation(
         _print_evidence_adjusted(
             rows, evidence,
             hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
+            plan_rows_hit=plan_rows_hit,
         )
         if race_id and not no_cache:
-            _save_evidence_to_snapshot(race_id, rows, evidence)
+            _save_evidence_to_snapshot(
+                race_id, rows, evidence, plan_rows_hit=plan_rows_hit,
+            )
 
 
 def _market_rate_str(odds: float) -> str:

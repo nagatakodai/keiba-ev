@@ -35,6 +35,16 @@ PXO_OANA = (3.0, float("inf"))
 DEFAULT_LAMBDA_2 = 0.81
 DEFAULT_LAMBDA_3 = 0.65
 
+# bet-type-specific market_blend (Phase 19: holdout 291 races real-odds eval 由来)。
+# 各 bet type で最適な β が異なる。eval_holdout の結果:
+#   - 単勝 ROI peak:        β=0.75-0.80 (95.9%, 市場 88.5% 比 +7pt)
+#   - 3 連単 PL hit rate:   β=0.70-0.80 で並ぶ (mean rank 86)
+#   - Plan A/B/C ROI:       N=291 では結論不能 (β=0.78 で安全側)
+#   - Plan H1 ROI:          β=0 が peak (109.6%, +EV)
+# 既定 0.78 は Plan A/B/C/単勝 用。Plan H1 (確率上位 3 点) だけは β=0 を使う。
+BLEND_DEFAULT = 0.78
+BLEND_HIT_PURE = 0.0
+
 
 # ---------- 確率推定 ----------
 
@@ -42,7 +52,7 @@ DEFAULT_LAMBDA_3 = 0.65
 def estimate_probs(
     rd: RaceData,
     *,
-    market_blend: float = 0.78,
+    market_blend: float = BLEND_DEFAULT,
     market_floor: float = 0.01,
     blend_method: str = "loglinear",   # "loglinear" (Benter 2-step) | "linear" (旧)
     lambda_2: float = DEFAULT_LAMBDA_2,
