@@ -108,10 +108,13 @@ def main(
     ),
     output_dir: Path = typer.Option(MODELS_DIR, "--output", "-o"),
     valid_frac: float = typer.Option(0.2, "--valid-frac"),
-    num_boost_round: int = typer.Option(500, "--rounds"),
-    learning_rate: float = typer.Option(0.05, "--lr"),
-    num_leaves: int = typer.Option(31, "--leaves"),
-    early_stopping: int = typer.Option(50, "--early-stop"),
+    # tuned defaults (Phase 17 follow-up, b6ff829): valid ndcg@5 0.485 → 0.572
+    # を達成した値。Makefile も同値。直接 `python -m src.train` でも tuning 後
+    # の品質が出るように default で揃える。
+    num_boost_round: int = typer.Option(800, "--rounds"),
+    learning_rate: float = typer.Option(0.03, "--lr"),
+    num_leaves: int = typer.Option(24, "--leaves"),
+    early_stopping: int = typer.Option(100, "--early-stop"),
 ):
     """LightGBM lambdarank 学習。"""
     if not input_path.exists():
