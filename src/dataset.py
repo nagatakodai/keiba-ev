@@ -54,9 +54,7 @@ def _iter_race_ids() -> Iterator[str]:
     """data/raw/ に shutuba + past + result の 3 つが揃っている race_id を yield。"""
     seen: set[str] = set()
     for p in sorted(RAW_DIR.glob("*-shutuba.html.gz")):
-        rid = p.stem.replace("-shutuba.html", "").replace(".gz", "")
-        # p.stem = "<rid>-shutuba.html" (.gz は stem に含まれない)
-        # 実際: p.name = "<rid>-shutuba.html.gz", p.stem = "<rid>-shutuba.html"
+        # p.name = "<rid>-shutuba.html.gz" → race_id を `-shutuba` の前で切る
         rid = p.name.split("-shutuba")[0]
         if rid in seen:
             continue
