@@ -47,6 +47,11 @@ BLEND_DEFAULT = 0.78
 BLEND_HIT_PURE = 0.0
 BLEND_APTITUDE_GATE = 1.0
 
+# LightGBM softmax の temperature (Phase 21: holdout 291 races log loss 最小化由来)。
+# T < 1 で sharpening (model 過小自信を補正)、T > 1 で flattening。
+# holdout で T=0.4 が log loss 最小 (T=1 比 -0.089)、Plan H2 が 2 → 11 hits に安定化。
+LGBM_TEMPERATURE = 0.4
+
 
 # ---------- 確率推定 ----------
 
@@ -357,9 +362,12 @@ def _lgbm_predict(horses, feats) -> dict[int, float] | None:
         if not rows:
             return None
         scores = _LGBM_MODEL.predict(rows)
-        # softmax
-        m = max(scores)
-        exps = [math.exp(s - m) for s in scores]
+        # 温度スケーリング付き softmax: probs = softmax(score / T)
+        # T < 1 で sharpening (Phase 21)。holdout で T=0.4 が log loss 最小。
+        T = max(LGBM_TEMPERATURE, 1e-3)
+        scaled = [s / T for s in scores]
+        m = max(scaled)
+        exps = [math.exp(s - m) for s in scaled]
         z = sum(exps)
         if z <= 0:
             return None

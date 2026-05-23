@@ -77,6 +77,10 @@ def main(
     model_path: Path = typer.Option(MODELS_DIR / "lgbm_lambdarank.txt", "--model"),
     meta_path: Path = typer.Option(MODELS_DIR / "lgbm_metadata.json", "--meta"),
     stake_per_race: int = typer.Option(100, "--stake", help="1 レースあたりの単勝賭け金"),
+    temperature: float = typer.Option(
+        1.0, "--temperature", "-T",
+        help="LGBM softmax の温度 (T<1 で sharpening, T>1 で flattening, holdout で T=0.4 が log loss 最小)",
+    ),
 ):
     if not input_path.exists():
         console.print(f"[red]not found: {input_path}[/red]")
@@ -106,11 +110,73 @@ def main(
     valid["score"] = booster.predict(X.values, num_iteration=booster.best_iteration)
 
     # レース内 softmax: LightGBM score → モデル確率 (sum=1 per race)
+    # T (temperature) で sharpness 調整: probs = softmax(score / T)
+    T_eff = max(temperature, 1e-3)
+    console.print(
+        f"[dim]temperature T = {T_eff} "
+        f"({'sharpening' if T_eff < 1 else ('flattening' if T_eff > 1 else 'identity')})[/dim]"
+    )
     def _race_softmax(s: pd.Series) -> pd.Series:
-        m = s.max()
-        ex = np.exp(s - m)
+        scaled = s / T_eff
+        m = scaled.max()
+        ex = np.exp(scaled - m)
         return ex / ex.sum()
     valid["lgbm_prob"] = valid.groupby("race_id", sort=False)["score"].transform(_race_softmax)
+
+    # --- 温度スケーリング (T sweep): softmax(score / T) で sharpness 調整 ---
+    # 確率モデルの楽観バイアスを補正する単純な calibration。
+    # T > 1 で分布が平坦化 (model 過信を抑制)、T < 1 で sharper。
+    # T=1 が現状、T = ∞ で uniform に近づく。
+    # 評価指標: log loss (winner の prob で評価)、top-1 hit rate。
+    console.rule("[bold]Temperature scaling sweep (LGBM softmax sharpness)[/bold]")
+    t_grid = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0)
+    t_rows: list[dict] = []
+    for T in t_grid:
+        col = f"lgbm_prob_T{T}"
+        valid[col] = valid.groupby("race_id", sort=False)["score"].transform(
+            lambda s, t=T: (lambda m: (lambda ex: ex / ex.sum())(np.exp((s - m) / t)))(s.max())
+        )
+        # log loss: 各レースの winner の prob で -log
+        ll_sum = 0.0
+        top1_hits = 0
+        n_r = 0
+        for _rid, g in valid.groupby("race_id", sort=False):
+            winner = g[g["target_top1"] == 1]
+            if len(winner) != 1:
+                continue
+            p = float(winner[col].iloc[0])
+            ll_sum += -math.log(max(p, 1e-12))
+            # top-1 hit
+            top_idx = g[col].idxmax()
+            if g.loc[top_idx, "target_top1"] == 1:
+                top1_hits += 1
+            n_r += 1
+        t_rows.append({
+            "T": T,
+            "log_loss": ll_sum / n_r if n_r else 0.0,
+            "top1": top1_hits / n_r if n_r else 0.0,
+            "n": n_r,
+        })
+
+    tbl_t = Table(title="Temperature scaling — LGBM softmax sharpness")
+    tbl_t.add_column("T", justify="right")
+    tbl_t.add_column("log loss (winner)", justify="right")
+    tbl_t.add_column("top-1 hit", justify="right")
+    for r in t_rows:
+        marker = " ←" if r["T"] == min(t_rows, key=lambda x: x["log_loss"])["T"] else ""
+        tbl_t.add_row(
+            f"{r['T']:.2f}{marker}",
+            f"{r['log_loss']:.4f}",
+            f"{r['top1']*100:.1f}%",
+        )
+    console.print(tbl_t)
+    best_T = min(t_rows, key=lambda x: x["log_loss"])["T"]
+    cur_ll = next(r for r in t_rows if r["T"] == 1.0)["log_loss"]
+    best_ll = next(r for r in t_rows if r["T"] == best_T)["log_loss"]
+    console.print(
+        f"best T = [bold]{best_T}[/bold] (log loss {best_ll:.4f}, "
+        f"T=1 比 {(cur_ll - best_ll):.4f} 改善)"
+    )
 
     # 市場暗黙率: 1/win_odds をレース内正規化 → power_method_overround を 1 レースずつ適用
     def _market_prob(g: pd.DataFrame) -> pd.Series:
