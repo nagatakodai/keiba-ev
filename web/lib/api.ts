@@ -53,10 +53,13 @@ export type PredictionSummary = {
   plan_a_count: number;
   plan_b_count: number;
   plan_c_count: number;
+  // Plan G (適性ゲート → EV 足切り, Phase 20) の point 数。API が exposing する
+  // ようになったのは 2026-05-24 以降、それ以前の snapshot は欠落することがある。
+  plan_g_count?: number;
   // 当て枠 Plan H1 / H2 (backend 2026-05-20 以降。古いスナップショットには欠落する)
   plan_h1_count?: number;
   plan_h2_count?: number;
-  // 最終買い目 Plan F = A/B/C/H1/H2 の union (backend 2026-05-21 以降)
+  // 最終買い目 Plan F = A/B/C/G/H1/H2 の union (backend 2026-05-21 以降)
   plan_f_count?: number;
   // 適性指数 top 3 (total 降順)。snapshot に horse_aptitude が無いと空配列。
   top_aptitude?: Array<{ number: number; name: string; total: number }>;

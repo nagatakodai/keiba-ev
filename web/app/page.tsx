@@ -177,6 +177,11 @@ function PredictionRowItem({
             <span className={`font-bold ${planAccentClass("A")}`}>A{p.plan_a_count}</span>
             <span className={`font-bold ${planAccentClass("B")}`}>B{p.plan_b_count}</span>
             <span className={`font-bold ${planAccentClass("C")}`}>C{p.plan_c_count}</span>
+            {(p.plan_g_count ?? 0) > 0 && (
+              <span className={`font-bold ${planAccentClass("G")}`}>
+                G·{p.plan_g_count}
+              </span>
+            )}
             {(p.plan_h1_count ?? 0) > 0 && (
               <span className={`font-bold ${planAccentClass("H1")}`}>
                 H1·{p.plan_h1_count}

@@ -51,6 +51,10 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
                 "plan_a_count": len(d.get("plan_a_keys") or []),
                 "plan_b_count": len(d.get("plan_b_keys") or []),
                 "plan_c_count": len(d.get("plan_c_keys") or []),
+                # plan_g_count: Phase 20 で追加された Plan G の point 数。
+                # 旧 list_predictions は A/B/C/H1/H2/F のみ exposing しており、
+                # Web UI top で G·n バッジが表示されなかった bug を修正。
+                "plan_g_count": len(d.get("plan_g_keys") or []),
                 "plan_h1_count": len(d.get("plan_h1_keys") or []),
                 "plan_h2_count": len(d.get("plan_h2_keys") or []),
                 "plan_f_count": len(d.get("plan_f_keys") or []),
