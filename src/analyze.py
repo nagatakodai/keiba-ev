@@ -19,6 +19,7 @@ from .features import build_features
 from .market_signal import MarketSignal, compute_market_signals
 from .parse import fetch_and_parse, parse_shutuba, parse_trifecta
 from .scrape import (
+    NetkeibaBlocked,
     cache_html,
     extract_race_id,
     fetch_html,
@@ -76,11 +77,19 @@ def main(
             console.print("[yellow]--html だけ指定 (オッズなし)。--odds-html も渡してください[/yellow]")
     else:
         console.print(f"[dim]fetching {url}...[/dim]")
-        rd = fetch_and_parse(
-            url,
-            with_exacta=with_exacta,
-            with_trio=with_trio,
-        )  # type: ignore[arg-type]
+        try:
+            rd = fetch_and_parse(
+                url,
+                with_exacta=with_exacta,
+                with_trio=with_trio,
+            )  # type: ignore[arg-type]
+        except NetkeibaBlocked as ex:
+            console.print(
+                f"[bold red]netkeiba から空 HTML が返りました (CloudFront 400)。"
+                f"IP 規制中の可能性。analyze 不能。[/bold red]\n"
+                f"[dim]{ex}[/dim]"
+            )
+            raise typer.Exit(2)
 
     race_id = f"{rd.race.cup_id}-{rd.race.schedule_index}-{rd.race.race_number}"
 
@@ -1101,7 +1110,14 @@ def _refresh_and_reevaluate(
         console.print("[dim]既に締切 N 分前を過ぎているので即時 refresh[/dim]")
 
     console.print(f"[dim]fetching {url} (refresh)...[/dim]")
-    rd2 = fetch_and_parse(url, with_exacta=with_exacta, with_trio=with_trio)
+    try:
+        rd2 = fetch_and_parse(url, with_exacta=with_exacta, with_trio=with_trio)
+    except NetkeibaBlocked as ex:
+        console.print(
+            f"[bold red]refresh 時に netkeiba block 検出。初回 evaluation を維持して終了。[/bold red]\n"
+            f"[dim]{ex}[/dim]"
+        )
+        return
     race_id = f"{rd2.race.cup_id}-{rd2.race.schedule_index}-{rd2.race.race_number}"
     if not no_cache:
         rid2 = extract_race_id(url) or race_id
