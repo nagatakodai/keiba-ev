@@ -318,6 +318,11 @@ def _save_evidence_to_snapshot(
     snap["evidence_plan_b_keys"] = [list(r.key) for r in plan_b]
     snap["evidence_plan_c_keys"] = [list(r.key) for r in plan_c]
     snap["evidence_plan_g_keys"] = [list(r.key) for r in plan_g]
+    # plan_h1 / plan_h2 は LLM 補強後に再計算済 (plan_rows と apply_evidence 経由)。
+    # 旧コードでは H1/H2 の evidence_*_keys 保存が欠落していて UI で見えなかったので
+    # 修正。Plan F は H1/H2 含む union を反映済。
+    snap["evidence_plan_h1_keys"] = [list(r.key) for r in plan_h1]
+    snap["evidence_plan_h2_keys"] = [list(r.key) for r in plan_h2]
     snap["evidence_plan_f_keys"] = [list(r.key) for r in plan_f]
     snap_path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
 
