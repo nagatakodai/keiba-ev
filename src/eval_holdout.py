@@ -79,10 +79,11 @@ def main(
     meta_path: Path = typer.Option(MODELS_DIR / "lgbm_metadata.json", "--meta"),
     stake_per_race: int = typer.Option(100, "--stake", help="1 レースあたりの単勝賭け金"),
     temperature: float = typer.Option(
-        LGBM_TEMPERATURE, "--temperature", "-T",
+        -1.0, "--temperature", "-T",
         help=(
-            "LGBM softmax の温度 (T<1 で sharpening, T>1 で flattening, "
-            "既定 = src.ev.LGBM_TEMPERATURE = production と同じ値)"
+            "LGBM softmax の温度 (T<1 で sharpening, T>1 で flattening)。"
+            "省略時 (-1) は metadata.softmax_temperature を使用 = production と同じ。"
+            "明示すれば sweep 用に override 可能。"
         ),
     ),
 ):
@@ -115,7 +116,12 @@ def main(
 
     # レース内 softmax: LightGBM score → モデル確率 (sum=1 per race)
     # T (temperature) で sharpness 調整: probs = softmax(score / T)
-    T_eff = max(temperature, 1e-3)
+    # temperature == -1 (default sentinel) なら metadata から読む
+    if temperature == -1.0:
+        T_eff = float(meta.get("softmax_temperature") or LGBM_TEMPERATURE)
+    else:
+        T_eff = temperature
+    T_eff = max(T_eff, 1e-3)
     console.print(
         f"[dim]temperature T = {T_eff} "
         f"({'sharpening' if T_eff < 1 else ('flattening' if T_eff > 1 else 'identity')})[/dim]"
