@@ -79,9 +79,28 @@ class FetchTarget:
 
 @dataclass
 class WorkerStats:
+    """並列 worker 間で共有する集計カウンタ。
+
+    Python の `x += 1` は LOAD/ADD/STORE の 3 bytecode で、GIL 越しでも
+    bytecode 境界で thread switch されると lost-update が起き得る。3 workers
+    程度ならズレは小さいが正確を期して Lock 経由で更新する。
+    """
     fetched: int = 0
     skipped: int = 0
     errors: int = 0
+    _lock: Lock = field(default_factory=Lock)
+
+    def add_fetched(self, n: int = 1) -> None:
+        with self._lock:
+            self.fetched += n
+
+    def add_skipped(self, n: int = 1) -> None:
+        with self._lock:
+            self.skipped += n
+
+    def add_errors(self, n: int = 1) -> None:
+        with self._lock:
+            self.errors += n
 
 
 # --- 取得 ---
@@ -152,7 +171,7 @@ def _worker_loop(
                     break
                 try:
                     if target.already_done:
-                        stats.skipped += 1
+                        stats.add_skipped()
                     else:
                         page.goto(target.url, wait_until="domcontentloaded", timeout=timeout_ms)
                         page.wait_for_timeout(settle_ms)
@@ -165,11 +184,11 @@ def _worker_loop(
                         # 成功したら counter reset
                         consecutive_blocks = 0
                         _gzip_write(target.out_path, html)
-                        stats.fetched += 1
+                        stats.add_fetched()
                         if polite_sleep_ms > 0:
                             page.wait_for_timeout(polite_sleep_ms)
                 except Exception as ex:  # noqa: BLE001
-                    stats.errors += 1
+                    stats.add_errors()
                     _log_error({
                         "race_id": target.race_id,
                         "kind": target.kind,
