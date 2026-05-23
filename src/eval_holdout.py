@@ -33,8 +33,11 @@ from .ev import (
     PXO_FLOOR,
     PXO_HONSEN,
     EvRow,
+    plan_aptitude_ev,
     plan_balanced,
+    plan_final,
     plan_hit_pure,
+    plan_hit_safe,
     plan_max_ev,
     plan_wide,
     power_method_overround,
@@ -46,6 +49,7 @@ DATASETS_DIR = ROOT / "data" / "datasets"
 MODELS_DIR = ROOT / "data" / "models"
 RAW_DIR = ROOT / "data" / "raw"
 TRIFECTA_CACHE_DIR = ROOT / "data" / "cache" / "trifecta_odds"
+APTITUDE_CACHE_DIR = ROOT / "data" / "cache" / "aptitudes"
 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -467,10 +471,23 @@ def main(
                     continue
             odds_cache[rid] = mp
 
+    # Aptitude top horses キャッシュ (Plan G で使う)
+    aptitude_cache: dict[str, list[int]] = {}
+    if APTITUDE_CACHE_DIR.exists():
+        for j in APTITUDE_CACHE_DIR.glob("*.json"):
+            try:
+                d = json.loads(j.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            rid = d.get("race_id") or j.stem
+            top = d.get("aptitude_top_horses") or []
+            aptitude_cache[rid] = [int(h) for h in top]
+
     if odds_cache and payout_cache:
         n_odds = sum(1 for rid in valid["race_id"].unique() if rid in odds_cache)
         console.rule(
-            f"[bold]Plan ROI (real trifecta odds, n={n_odds} races)[/bold]"
+            f"[bold]Plan ROI (real trifecta odds, n={n_odds} races, "
+            f"aptitude cached={len(aptitude_cache)})[/bold]"
         )
 
         def _tier(pxo: float) -> str:
@@ -483,16 +500,12 @@ def main(
             return "oana"
 
         def plan_roi_for(score_col: str, label: str) -> dict:
-            plan_specs = (
-                ("A", "5 点バランス", lambda r: plan_balanced(r)),
-                ("B", "最高 EV 集中", lambda r: plan_max_ev(r)),
-                ("C", "広め保険", lambda r: plan_wide(r)),
-                ("H1", "確率上位 3 点", lambda r: plan_hit_pure(r, target=3)),
-            )
-            stake: dict[str, int] = {p[0]: 0 for p in plan_specs}
-            payout: dict[str, int] = {p[0]: 0 for p in plan_specs}
-            hits: dict[str, int] = {p[0]: 0 for p in plan_specs}
-            points: dict[str, int] = {p[0]: 0 for p in plan_specs}
+            # Plan G は適性ゲートが必要 (apt_cache 経由)。Plan F は other plans の union。
+            plan_codes = ("A", "B", "C", "G", "H1", "H2", "F")
+            stake: dict[str, int] = {c: 0 for c in plan_codes}
+            payout: dict[str, int] = {c: 0 for c in plan_codes}
+            hits: dict[str, int] = {c: 0 for c in plan_codes}
+            points: dict[str, int] = {c: 0 for c in plan_codes}
             n_used = 0
             for rid, g in valid.groupby("race_id", sort=False):
                 if rid not in odds_cache or rid not in payout_cache:
@@ -573,8 +586,20 @@ def main(
                 real_payout = payout_cache.get(rid, 0)
                 n_used += 1
 
-                for code, _desc, fn in plan_specs:
-                    picks = fn(ev_rows)
+                apt_top = aptitude_cache.get(rid, [])
+                picks_a = plan_balanced(ev_rows)
+                picks_b = plan_max_ev(ev_rows)
+                picks_c = plan_wide(ev_rows)
+                picks_g = plan_aptitude_ev(ev_rows, apt_top) if apt_top else []
+                picks_h1 = plan_hit_pure(ev_rows, target=3)
+                picks_h2 = plan_hit_safe(ev_rows, target=3)
+                picks_f = plan_final(picks_a, picks_b, picks_c, picks_g, picks_h1, picks_h2)
+
+                for code, picks in (
+                    ("A", picks_a), ("B", picks_b), ("C", picks_c),
+                    ("G", picks_g), ("H1", picks_h1), ("H2", picks_h2),
+                    ("F", picks_f),
+                ):
                     n_pts = len(picks)
                     if n_pts == 0:
                         continue
@@ -595,7 +620,7 @@ def main(
                         "roi": (payout[code] / stake[code]) if stake[code] else 0.0,
                         "avg_pts": (points[code] / n_used) if n_used else 0.0,
                     }
-                    for code, _desc, _fn in plan_specs
+                    for code in plan_codes
                 },
             }
 
@@ -611,15 +636,19 @@ def main(
             ("A", "5 点バランス"),
             ("B", "最高 EV 集中"),
             ("C", "広め保険"),
+            ("G", "適性ゲート"),
             ("H1", "確率上位 3 点"),
+            ("H2", "確率 +EV≥1"),
+            ("F", "A〜H2 union"),
         )
         used = plan_rows[0]["n_used"] if plan_rows else 0
         tbl5 = Table(
-            title=f"Plan A/B/C/H1 real-odds ROI (n={used} races)"
+            title=f"Plan A/B/C/G/H1/H2/F real-odds ROI (n={used} races)",
+            show_lines=False,
         )
         tbl5.add_column("Model", style="bold")
-        for code, desc in plan_specs_disp:
-            tbl5.add_column(f"Plan {code} ({desc})", justify="right")
+        for code, _desc in plan_specs_disp:
+            tbl5.add_column(f"Plan {code}", justify="right")
         for m in plan_rows:
             cells = [m["label"]]
             for code, _desc in plan_specs_disp:
@@ -629,12 +658,12 @@ def main(
                     continue
                 roi = d["roi"]
                 if roi >= 1.0:
-                    rs = f"[bold green]{roi*100:.1f}%[/]"
+                    rs = f"[bold green]{roi*100:.0f}%[/]"
                 elif roi >= 0.775:
-                    rs = f"[green]{roi*100:.1f}%[/]"
+                    rs = f"[green]{roi*100:.0f}%[/]"
                 else:
-                    rs = f"[red]{roi*100:.1f}%[/]"
-                cells.append(f"{rs} avg{d['avg_pts']:.1f}pt hit{d['hits']}")
+                    rs = f"[red]{roi*100:.0f}%[/]"
+                cells.append(f"{rs} h{d['hits']}/{d['avg_pts']:.1f}p")
             tbl5.add_row(*cells)
         console.print(tbl5)
 
