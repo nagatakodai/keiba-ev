@@ -240,24 +240,41 @@ export default async function PredictionDetailPage({
         );
       })()}
 
-      <PlansCard plan="A" subtitle="EV 枠 / 5点バランス" keys={d.plan_a_keys} rows={d.rows} finish={finish} />
-      <PlansCard plan="B" subtitle="EV 枠 / 最高 EV 集中" keys={d.plan_b_keys} rows={d.rows} finish={finish} />
-      <PlansCard plan="C" subtitle="EV 枠 / 広め 保険" keys={d.plan_c_keys} rows={d.rows} finish={finish} />
-      {d.plan_g_keys && d.plan_g_keys.length > 0 && (
-        <PlansCard
-          plan="G"
-          subtitle={`適性ゲート (top ${d.aptitude_top_horses?.length ?? "N"} 頭 → P×O≥1.02) / EV は最終フィルタ`}
-          keys={d.plan_g_keys}
-          rows={d.rows}
-          finish={finish}
-        />
-      )}
-      {d.plan_h1_keys && d.plan_h1_keys.length > 0 && (
-        <PlansCard plan="H1" subtitle="当て枠 / 確率最優先" keys={d.plan_h1_keys} rows={d.rows} finish={finish} />
-      )}
-      {d.plan_h2_keys && d.plan_h2_keys.length > 0 && (
-        <PlansCard plan="H2" subtitle="当て枠 / 確率優先 + P×O ≥ 1.0" keys={d.plan_h2_keys} rows={d.rows} finish={finish} />
-      )}
+      {(() => {
+        // Plan F と同じ pattern: evidence_plan_*_keys があればそれを優先、無ければ raw plan_*_keys。
+        // Plan F だけ evidence-aware だった旧仕様を A/B/C/G/H1/H2 にも揃える。
+        const hasEv = !!d.evidence_rows;
+        const rowsToUse = hasEv ? d.evidence_rows! : d.rows;
+        const aKeys = d.evidence_plan_a_keys ?? d.plan_a_keys;
+        const bKeys = d.evidence_plan_b_keys ?? d.plan_b_keys;
+        const cKeys = d.evidence_plan_c_keys ?? d.plan_c_keys;
+        const gKeys = d.evidence_plan_g_keys ?? d.plan_g_keys;
+        const h1Keys = d.evidence_plan_h1_keys ?? d.plan_h1_keys;
+        const h2Keys = d.evidence_plan_h2_keys ?? d.plan_h2_keys;
+        const evSuffix = hasEv ? " (LLM 補強反映)" : "";
+        return (
+          <>
+            <PlansCard plan="A" subtitle={`EV 枠 / 5点バランス${evSuffix}`} keys={aKeys} rows={rowsToUse} finish={finish} />
+            <PlansCard plan="B" subtitle={`EV 枠 / 最高 EV 集中${evSuffix}`} keys={bKeys} rows={rowsToUse} finish={finish} />
+            <PlansCard plan="C" subtitle={`EV 枠 / 広め 保険${evSuffix}`} keys={cKeys} rows={rowsToUse} finish={finish} />
+            {gKeys && gKeys.length > 0 && (
+              <PlansCard
+                plan="G"
+                subtitle={`適性ゲート (top ${d.aptitude_top_horses?.length ?? "N"} 頭 → P×O≥1.02) / EV は最終フィルタ${evSuffix}`}
+                keys={gKeys}
+                rows={rowsToUse}
+                finish={finish}
+              />
+            )}
+            {h1Keys && h1Keys.length > 0 && (
+              <PlansCard plan="H1" subtitle={`当て枠 / 確率最優先${evSuffix}`} keys={h1Keys} rows={rowsToUse} finish={finish} />
+            )}
+            {h2Keys && h2Keys.length > 0 && (
+              <PlansCard plan="H2" subtitle={`当て枠 / 確率優先 + P×O ≥ 1.0${evSuffix}`} keys={h2Keys} rows={rowsToUse} finish={finish} />
+            )}
+          </>
+        );
+      })()}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card title="P×O ランキング 上位 30">
