@@ -121,10 +121,11 @@ def main(
     probs_hit = ev_mod.estimate_probs(
         rd, market_blend=ev_mod.BLEND_HIT_PURE, market_floor=market_floor
     )
-    # Plan G (適性ゲート) は holdout + 5-fold CV 両方で β=1.0 (market only) が
-    # robust (全 5 fold で β=1.0 が best, std=0)、mean hold-out ROI 106.6%。
-    # aptitude index が model 信号を 8 因子合成済みなので、市場暗黙率と PL 連鎖
-    # だけで +EV triple を発見できる。
+    # Plan G の β=1.0 は Phase 20 で採用、Phase 22 の CV では β robust (std=0)
+    # だったが、Phase 23 の sliding-window 独立検証 (新規 LGBM, valid 1471-1634,
+    # n=149) で Plan G が hit 0/149 となり +EV 主張が破綻。combined hit 5/440 =
+    # weighted ROI 約 71% < 77.5%。よって Plan G も default β を使う。
+    # probs_apt は実験 / 将来 sweep 用に計算は残す。
     probs_apt = ev_mod.estimate_probs(
         rd, market_blend=ev_mod.BLEND_APTITUDE_GATE, market_floor=market_floor
     )
@@ -318,16 +319,12 @@ def _save_evidence_to_snapshot(
     plan_a = ev_mod.plan_balanced(adjusted)
     plan_b = ev_mod.plan_max_ev(adjusted)
     plan_c = ev_mod.plan_wide(adjusted)
-    # Plan G は market-only (β=1.0) 用の plan_rows_apt がある場合はそちらから
-    # (holdout +EV を達成した bet-type-specific β=1.0)
-    if plan_rows_apt is not None and aptitude_top_horses:
-        adjusted_apt = ev_mod.apply_evidence(plan_rows_apt, evidence_by_key, cuts)
-        plan_g = ev_mod.plan_aptitude_ev(adjusted_apt, aptitude_top_horses)
-    elif aptitude_top_horses:
+    # Plan G: Phase 23 で β=1.0 が overfit と判明 → default β
+    if aptitude_top_horses:
         plan_g = ev_mod.plan_aptitude_ev(adjusted, aptitude_top_horses)
     else:
         plan_g = []
-    # Plan H1 / H2 は 5-fold CV で β=0 が overfit と判明 → default β を使う
+    # Plan H1 / H2: Phase 22 で β=0 が overfit と判明 → default β
     plan_h1 = ev_mod.plan_hit_pure(adjusted, target=3)
     plan_h2 = ev_mod.plan_hit_safe(adjusted, target=3)
     plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
@@ -479,11 +476,8 @@ def _save_prediction_snapshot(
     plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=3)
     plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=3)
     # Plan G: 適性ゲート → EV 足切り (適性指数 top N 頭の集合で P×O≥1.02)。
-    # holdout で market-only (β=1.0) が +EV (ROI 108.1%) → plan_rows_apt 優先。
-    # apt_top が空 = aptitudes が空 = past_runs 未取得などの場合は空リスト。
-    if aptitude_top_horses and plan_rows_apt is not None:
-        plan_g = ev_mod.plan_aptitude_ev(plan_rows_apt, aptitude_top_horses)
-    elif aptitude_top_horses:
+    # Phase 23 の sliding-window で β=1.0 +EV 主張が破綻 → default β を使う。
+    if aptitude_top_horses:
         plan_g = ev_mod.plan_aptitude_ev(plan_rows, aptitude_top_horses)
     else:
         plan_g = []
@@ -938,18 +932,13 @@ def _print_plans(
         f"[dim]予算配分: +EV 枠 ¥{ev_budget:,} (Plan A/B/C/G のいずれか) / "
         f"当て枠 ¥{hit_budget:,} (Plan H1/H2 のいずれか)[/dim]"
     )
-    # Plan H1/H2 は 5-fold CV (scripts/cv_beta.py) で β=0 が overfit と判明 →
-    # default rows を使う。plan_rows_hit は将来 sweep 用に保持。
-    # Plan G は β=1.0 が CV robust (mean hold-out +EV 106.6%) なので plan_rows_apt
-    # 優先。
-    g_rows = plan_rows_apt if plan_rows_apt is not None else rows
-    # holdout n=291 race + 5-fold CV の評価結果を Plan title に付記:
-    #   +EV = CV mean hold-out ROI ≥ 100%
-    #   -EV = ROI < 控除 77.5%
-    #   小サンプル = hits 0-3 でノイズ
+    # Phase 19-23 の旅: bet-type-specific β は in-sample で +EV に見えたが
+    # CV + sliding-window で全て overfit と判明 → 全 Plan が default β=0.78 を使う
+    # (plan_rows_hit / plan_rows_apt は引数として受けるが production では未使用、
+    # CLI からの experimental 試行 / 将来 sweep 用に維持)。
     ev_plans = [
         (
-            "Plan A — 5点バランス (holdout -EV 54%, small N=1)",
+            "Plan A — 5点バランス (holdout -EV / N=291 で hit 1)",
             ev_mod.plan_balanced(rows), ev_budget,
         ),
         (
@@ -957,17 +946,17 @@ def _print_plans(
             ev_mod.plan_max_ev(rows), ev_budget,
         ),
         (
-            f"Plan C — 広め (保険型 ≤{ev_mod.PLAN_C_MAX_POINTS}点) (holdout -EV 57%)",
+            f"Plan C — 広め (保険型 ≤{ev_mod.PLAN_C_MAX_POINTS}点) (holdout -EV)",
             ev_mod.plan_wide(rows),
             ev_budget,
         ),
         (
-            "Plan H1 — 当て枠 / 確率最優先 (CV: β tuning 不安定)",
+            "Plan H1 — 当て枠 / 確率最優先 (CV: β 不安定)",
             ev_mod.plan_hit_pure(rows, target=hit_points),
             hit_budget,
         ),
         (
-            "Plan H2 — 当て枠 / 確率 +P×O ≥ 1.0 (CV: β tuning 不安定)",
+            "Plan H2 — 当て枠 / 確率 +P×O ≥ 1.0 (W4: 89% ROI / hit 3)",
             ev_mod.plan_hit_safe(rows, target=hit_points),
             hit_budget,
         ),
@@ -977,8 +966,8 @@ def _print_plans(
         ev_plans.insert(
             3,
             (
-                f"Plan G — 適性ゲート top{top_n} (β=1.0, CV robust mean hold ROI 106.6%) ★",
-                ev_mod.plan_aptitude_ev(g_rows, aptitude_top_horses),
+                f"Plan G — 適性ゲート top{top_n} (W4: hit 0/149, +EV claim 取消)",
+                ev_mod.plan_aptitude_ev(rows, aptitude_top_horses),
                 ev_budget,
             ),
         )
