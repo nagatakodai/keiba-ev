@@ -112,23 +112,13 @@ def main(
     else:
         err = lgbm_info.get("load_error", "model files missing")
         console.print(f"[yellow]⚠ LightGBM 不可 (linear softmax fallback): {err}[/yellow]")
+    # Phase 18 以降、全 Plan は単一の β=BLEND_DEFAULT=0.78 で動作。
+    # かつて Plan H1/H2 を β=0、Plan G を β=1.0 で動かしていた path は
+    # CV / sliding-window で overfit と判明し Phase 22/23 で revert (詳細
+    # CLAUDE.md)。BLEND_HIT_PURE / BLEND_APTITUDE_GATE 定数は実験用に ev.py
+    # に残置、CLI の --market-blend で 1 回限り試せる。
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_floor=market_floor)
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
-    # Plan H1/H2 (確率上位) は当初 holdout で pure LGBM (β=0) が +EV に見えた
-    # が、5-fold CV (scripts/cv_beta.py) で β=0 は overfit と判明
-    # (mean hold-out ROI 64% < 77.5%)。conservative に default β を使う。
-    # `probs_hit` は維持 (CLI 互換 + 将来データ蓄積後の再 sweep 用)。
-    probs_hit = ev_mod.estimate_probs(
-        rd, market_blend=ev_mod.BLEND_HIT_PURE, market_floor=market_floor
-    )
-    # Plan G の β=1.0 は Phase 20 で採用、Phase 22 の CV では β robust (std=0)
-    # だったが、Phase 23 の sliding-window 独立検証 (新規 LGBM, valid 1471-1634,
-    # n=149) で Plan G が hit 0/149 となり +EV 主張が破綻。combined hit 5/440 =
-    # weighted ROI 約 71% < 77.5%。よって Plan G も default β を使う。
-    # probs_apt は実験 / 将来 sweep 用に計算は残す。
-    probs_apt = ev_mod.estimate_probs(
-        rd, market_blend=ev_mod.BLEND_APTITUDE_GATE, market_floor=market_floor
-    )
 
     _print_race_header(rd)
     _print_horse_table(rd)
@@ -139,20 +129,15 @@ def main(
     _print_interviews(rd)
 
     rows = ev_mod.build_table(rd, probs)
-    rows_hit = ev_mod.build_table(rd, probs_hit)
-    rows_apt = ev_mod.build_table(rd, probs_apt)
     bet_tables = ev_mod.build_all_bet_tables(rd, probs)
 
     min_prob_dec = min_prob / 100.0 if min_prob is not None else None
     plan_rows = ev_mod.apply_caps(rows, ev_max=ev_max, min_prob=min_prob_dec)
-    plan_rows_hit = ev_mod.apply_caps(rows_hit, ev_max=ev_max, min_prob=min_prob_dec)
-    plan_rows_apt = ev_mod.apply_caps(rows_apt, ev_max=ev_max, min_prob=min_prob_dec)
 
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
             feats=feats, lgbm_info=lgbm_info,
-            plan_rows_hit=plan_rows_hit, plan_rows_apt=plan_rows_apt,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -174,8 +159,6 @@ def main(
         hit_points=hit_points,
         hit_budget_ratio=hit_budget_ratio,
         aptitude_top_horses=apt_top,
-        plan_rows_hit=plan_rows_hit,
-        plan_rows_apt=plan_rows_apt,
     )
     _print_bet_tables(bet_tables, aptitude_top_horses=apt_top)
     _print_judgment_notes(rd, rows)
@@ -196,14 +179,10 @@ def main(
                 plan_rows, evidence,
                 hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
                 aptitude_top_horses=apt_top,
-                plan_rows_hit=plan_rows_hit,
-                plan_rows_apt=plan_rows_apt,
             )
             if not no_cache:
                 _save_evidence_to_snapshot(
                     race_id, plan_rows, evidence, apt_top,
-                    plan_rows_hit=plan_rows_hit,
-                    plan_rows_apt=plan_rows_apt,
                 )
 
     if refresh:
@@ -241,22 +220,12 @@ def _print_evidence_adjusted(
     hit_points: int = 3,
     hit_budget_ratio: float = 0.2,
     aptitude_top_horses: list[int] | None = None,
-    plan_rows_hit: list | None = None,
-    plan_rows_apt: list | None = None,
 ) -> None:
     evidence_by_key = evidence.get("evidence_by_key") or {}
     cuts = evidence.get("cuts") or []
     if not evidence_by_key and not cuts:
         return
     adjusted = ev_mod.apply_evidence(plan_rows, evidence_by_key, cuts)
-    adjusted_hit = (
-        ev_mod.apply_evidence(plan_rows_hit, evidence_by_key, cuts)
-        if plan_rows_hit is not None else None
-    )
-    adjusted_apt = (
-        ev_mod.apply_evidence(plan_rows_apt, evidence_by_key, cuts)
-        if plan_rows_apt is not None else None
-    )
     console.rule("[bold magenta]検索補強適用後の Plan[/bold magenta]")
     console.print(
         f"[dim]補強根拠で {len(evidence_by_key)} 件評価、cuts {len(cuts)} 件除外 → "
@@ -293,8 +262,6 @@ def _print_evidence_adjusted(
         hit_points=hit_points,
         hit_budget_ratio=hit_budget_ratio,
         aptitude_top_horses=aptitude_top_horses,
-        plan_rows_hit=adjusted_hit,
-        plan_rows_apt=adjusted_apt,
     )
 
 
@@ -303,8 +270,6 @@ def _save_evidence_to_snapshot(
     plan_rows,
     evidence: dict,
     aptitude_top_horses: list[int] | None = None,
-    plan_rows_hit: list | None = None,
-    plan_rows_apt: list | None = None,
 ) -> None:
     snap_path = ROOT / "data" / "predictions" / f"{race_id}.json"
     if not snap_path.exists():
@@ -465,8 +430,6 @@ def _save_prediction_snapshot(
     market_signals: dict[int, MarketSignal] | None = None,
     feats: dict | None = None,
     lgbm_info: dict | None = None,
-    plan_rows_hit: list | None = None,
-    plan_rows_apt: list | None = None,
 ) -> None:
     plan_a = ev_mod.plan_balanced(plan_rows)
     plan_b = ev_mod.plan_max_ev(plan_rows)
@@ -923,8 +886,6 @@ def _print_plans(
     hit_budget_ratio: float = 0.2,
     total_budget: int = 10_000,
     aptitude_top_horses: list[int] | None = None,
-    plan_rows_hit: list | None = None,
-    plan_rows_apt: list | None = None,
 ) -> None:
     ev_budget = int(total_budget * (1.0 - hit_budget_ratio))
     hit_budget = total_budget - ev_budget
@@ -933,9 +894,7 @@ def _print_plans(
         f"当て枠 ¥{hit_budget:,} (Plan H1/H2 のいずれか)[/dim]"
     )
     # Phase 19-23 の旅: bet-type-specific β は in-sample で +EV に見えたが
-    # CV + sliding-window で全て overfit と判明 → 全 Plan が default β=0.78 を使う
-    # (plan_rows_hit / plan_rows_apt は引数として受けるが production では未使用、
-    # CLI からの experimental 試行 / 将来 sweep 用に維持)。
+    # CV + sliding-window で全て overfit と判明 → 全 Plan が default β=0.78 を使う。
     ev_plans = [
         (
             "Plan A — 5点バランス (holdout -EV / N=291 で hit 1)",
@@ -1160,15 +1119,7 @@ def _refresh_and_reevaluate(
     lgbm_info2 = ev_mod.lgbm_status()
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor)
     probs2 = ev_mod.load_probs(None, probs2)
-    probs2_hit = ev_mod.estimate_probs(
-        rd2, market_blend=ev_mod.BLEND_HIT_PURE, market_floor=market_floor
-    )
-    probs2_apt = ev_mod.estimate_probs(
-        rd2, market_blend=ev_mod.BLEND_APTITUDE_GATE, market_floor=market_floor
-    )
     rows2 = ev_mod.build_table(rd2, probs2)
-    rows2_hit = ev_mod.build_table(rd2, probs2_hit)
-    rows2_apt = ev_mod.build_table(rd2, probs2_apt)
     bet_tables2 = ev_mod.build_all_bet_tables(rd2, probs2)
 
     console.print(
@@ -1178,14 +1129,11 @@ def _refresh_and_reevaluate(
 
     min_prob_dec = min_prob / 100.0 if min_prob is not None else None
     plan_rows2 = ev_mod.apply_caps(rows2, ev_max=ev_max, min_prob=min_prob_dec)
-    plan_rows2_hit = ev_mod.apply_caps(rows2_hit, ev_max=ev_max, min_prob=min_prob_dec)
-    plan_rows2_apt = ev_mod.apply_caps(rows2_apt, ev_max=ev_max, min_prob=min_prob_dec)
 
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
             feats=feats2, lgbm_info=lgbm_info2,
-            plan_rows_hit=plan_rows2_hit, plan_rows_apt=plan_rows2_apt,
         )
 
     _print_top(rows2, n=show)
@@ -1197,8 +1145,6 @@ def _refresh_and_reevaluate(
         hit_points=hit_points,
         hit_budget_ratio=hit_budget_ratio,
         aptitude_top_horses=apt_top2,
-        plan_rows_hit=plan_rows2_hit,
-        plan_rows_apt=plan_rows2_apt,
     )
     _print_bet_tables(bet_tables2, aptitude_top_horses=apt_top2)
     _print_judgment_notes(rd2, rows2)
@@ -1210,8 +1156,6 @@ def _refresh_and_reevaluate(
             race_id=race_id, no_cache=no_cache,
             hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
             aptitudes=aptitudes2, aptitude_top_horses=apt_top2,
-            plan_rows_hit=plan_rows2_hit,
-            plan_rows_apt=plan_rows2_apt,
         )
 
 
@@ -1329,8 +1273,6 @@ def _print_llm_refresh_evaluation(
     hit_budget_ratio: float = 0.2,
     aptitudes: dict | None = None,
     aptitude_top_horses: list[int] | None = None,
-    plan_rows_hit: list | None = None,
-    plan_rows_apt: list | None = None,
 ) -> None:
     if not llm_mod.is_available():
         return
@@ -1380,14 +1322,10 @@ def _print_llm_refresh_evaluation(
         _print_evidence_adjusted(
             rows, evidence,
             hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
-            plan_rows_hit=plan_rows_hit,
-            plan_rows_apt=plan_rows_apt,
         )
         if race_id and not no_cache:
             _save_evidence_to_snapshot(
                 race_id, rows, evidence,
-                plan_rows_hit=plan_rows_hit,
-                plan_rows_apt=plan_rows_apt,
             )
 
 
