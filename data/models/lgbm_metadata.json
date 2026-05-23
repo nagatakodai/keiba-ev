@@ -61,5 +61,47 @@
       "ndcg@3": 0.4666215407118594,
       "ndcg@5": 0.57181945593961
     }
-  }
+  },
+  "top_features_by_gain": [
+    {
+      "name": "recent_form_score",
+      "gain": 8192.522268295288
+    },
+    {
+      "name": "last3f_idx_recent",
+      "gain": 3301.080018043518
+    },
+    {
+      "name": "popularity_outperformance",
+      "gain": 2950.838870048523
+    },
+    {
+      "name": "shrunk_show_rate",
+      "gain": 2899.013720035553
+    },
+    {
+      "name": "body_weight",
+      "gain": 2169.23770570755
+    },
+    {
+      "name": "style_score",
+      "gain": 1285.635588645935
+    },
+    {
+      "name": "speed_idx_weighted",
+      "gain": 1285.0119051933289
+    },
+    {
+      "name": "speed_idx_last",
+      "gain": 1282.536319732666
+    },
+    {
+      "name": "shrunk_win_rate",
+      "gain": 1257.9144320487976
+    },
+    {
+      "name": "same_venue_count",
+      "gain": 1002.2064390182495
+    }
+  ]
 }

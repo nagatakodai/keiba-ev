@@ -214,6 +214,17 @@ def main(
         f"(valid log loss {best_ll:.4f})"
     )
 
+    # 特徴量重要度 (gain) も metadata に保存 → LLM が「モデルがどの特徴量に依存
+    # しているか」を context として読める。最重要 top 10 のみ保存 (全 26 だと長い)。
+    feature_importance_pairs = sorted(
+        zip(X_train.columns, model.feature_importance(importance_type="gain")),
+        key=lambda x: -x[1],
+    )
+    top_features = [
+        {"name": name, "gain": float(gain)}
+        for name, gain in feature_importance_pairs[:10]
+    ]
+
     meta = {
         "trained_at": datetime.now().isoformat(timespec="seconds"),
         "n_train_races": int(train_df["race_id"].nunique()),
@@ -225,6 +236,7 @@ def main(
         "best_scores": {k: dict(v) for k, v in model.best_score.items()},
         "softmax_temperature": best_T,
         "softmax_temperature_valid_log_loss": best_ll,
+        "top_features_by_gain": top_features,
     }
     meta_path = output_dir / "lgbm_metadata.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

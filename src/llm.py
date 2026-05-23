@@ -519,6 +519,19 @@ def _training_data_block() -> str:
             meta_block += f"- 特徴量数: {len(feature_cols)}\n"
             if T_meta is not None:
                 meta_block += f"- softmax temperature (model-specific): {T_meta}\n"
+            top_feats = meta.get("top_features_by_gain") or []
+            if top_feats:
+                top5 = top_feats[:5]
+                top_names = ", ".join(f["name"] for f in top5)
+                meta_block += (
+                    f"- 重要特徴量 top 5 (gain 順): {top_names}\n"
+                    "  (モデルはこれらを最も重視。"
+                    "recent_form_score = 直近 3 走の重み付け着順スコア、"
+                    "last3f_idx_recent = 直近の上がり 3F 指数、"
+                    "popularity_outperformance = 人気との乖離、"
+                    "shrunk_show_rate = 条件付き shrinkage 3着率、"
+                    "body_weight = 馬体重)\n"
+                )
         except Exception:
             meta_block = "- (metadata 読込失敗)\n"
 

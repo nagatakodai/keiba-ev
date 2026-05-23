@@ -243,6 +243,27 @@ def test_estimate_probs_default_blend_matches_constant():
     assert sig.parameters["market_blend"].default == BLEND_DEFAULT
 
 
+def test_training_data_block_present_and_safe():
+    """`_training_data_block()` は metadata 有無に関わらず非空の string を返す。
+
+    Phase 24: claude -p に学習データ context を渡す path の smoke test。
+    """
+    from src.llm import _training_data_block
+    block = _training_data_block()
+    assert isinstance(block, str)
+    assert len(block) > 200
+    # 必ず holdout finding と Read 案内が含まれる
+    assert "+EV" in block or "EV" in block
+    assert "Read" in block or "data/" in block
+
+
+def test_llm_allows_read_tool():
+    """Phase 24: claude -p の --allowedTools に Read が含まれる。
+    学習データ / snapshot を LLM が参照できる前提を test で固定する。"""
+    from src.llm import ALLOWED_TOOLS
+    assert "Read" in ALLOWED_TOOLS
+
+
 def test_lgbm_predict_reads_temperature_from_metadata(monkeypatch):
     """_lgbm_predict が metadata の softmax_temperature を優先して読むこと。
 
