@@ -68,6 +68,10 @@ class Job:
         self.label = label
         self.cmd = cmd
         self.lines: deque[dict[str, Any]] = deque(maxlen=4000)
+        # `seq` は単調増加するカウンタ。deque が maxlen を超えて古い entry を
+        # evict しても seq は更新し続ける (旧実装は len(self.lines) を使って
+        # おり 4000 件で頭打ちになり stream の since= 比較が壊れていた)。
+        self._seq_counter: int = 0
         self.status: str = "pending"  # pending / running / done / failed / cancelled
         self.return_code: int | None = None
         self.started_at: float | None = None
@@ -144,7 +148,11 @@ class Job:
             )
 
     async def _append(self, entry: dict[str, Any]) -> None:
-        entry = {"seq": len(self.lines), "ts": time.time(), **entry}
+        # seq は単調増加 (deque eviction の影響を受けない)。これで stream の
+        # since=N 比較が長時間 job (>4000 lines) でも壊れない。
+        seq = self._seq_counter
+        self._seq_counter += 1
+        entry = {"seq": seq, "ts": time.time(), **entry}
         self.lines.append(entry)
         async with self._cond:
             self._cond.notify_all()
