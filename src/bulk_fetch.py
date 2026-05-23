@@ -92,10 +92,18 @@ def _gzip_write(path: Path, text: str) -> None:
         f.write(text)
 
 
+# 並列 worker が同時に書き込む可能性があるので Lock で順序化
+# (POSIX append は短い write はおおむね atomic だが Python の buffered IO で
+#  flush 順が乱れる可能性があるため明示的に同期する)
+_LOG_LOCK = Lock()
+
+
 def _log_error(rec: dict) -> None:
     ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with ERROR_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    with _LOG_LOCK:
+        with ERROR_LOG.open("a", encoding="utf-8") as f:
+            f.write(line)
 
 
 def _make_targets(race_id: str) -> list[FetchTarget]:

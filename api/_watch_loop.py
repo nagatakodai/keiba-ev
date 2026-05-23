@@ -101,7 +101,9 @@ def _interruptible_sleep(seconds: int, should_stop) -> None:
     while time.time() < end:
         if should_stop():
             return
-        time.sleep(min(0.5, end - time.time()))
+        # max(0, ...) で負値 (race: time advances between check & sleep) を防ぐ
+        remaining = end - time.time()
+        time.sleep(max(0.0, min(0.5, remaining)))
 
 
 if __name__ == "__main__":
