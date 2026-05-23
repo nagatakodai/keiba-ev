@@ -276,7 +276,8 @@ def main(
     )
 
     def trifecta_topk_for(score_col: str, label: str) -> dict:
-        ks = (1, 10, 100, 1000)
+        # K grid: K=1-7 で Plan H1 の target 最適化、K=10/100/1000 で曲線形を確認
+        ks = (1, 2, 3, 4, 5, 6, 7, 10, 100, 1000)
         hits = {k: 0 for k in ks}
         # synthetic ROI: top-K 機械購入 (¥100/pt) — 的中時 payout
         roi_stake = {k: 0 for k in ks}
@@ -357,17 +358,19 @@ def main(
     tbl3 = Table(title=f"3 連単 top-K hit (n={trifecta_rows[0]['n_races']} races)")
     tbl3.add_column("Model", style="bold")
     tbl3.add_column("top-1", justify="right")
+    tbl3.add_column("top-3", justify="right")
+    tbl3.add_column("top-5", justify="right")
     tbl3.add_column("top-10", justify="right")
     tbl3.add_column("top-100", justify="right")
-    tbl3.add_column("top-1000", justify="right")
     tbl3.add_column("mean rank", justify="right")
     for m in trifecta_rows:
         tbl3.add_row(
             m["label"],
             f"{m['topk'][1]*100:.2f}%",
+            f"{m['topk'][3]*100:.2f}%",
+            f"{m['topk'][5]*100:.2f}%",
             f"{m['topk'][10]*100:.1f}%",
             f"{m['topk'][100]*100:.1f}%",
-            f"{m['topk'][1000]*100:.1f}%",
             f"{m['mean_rank']:.1f}",
         )
     console.print(tbl3)
@@ -403,11 +406,12 @@ def main(
             title=f"3 連単 top-K 機械購入 ROI (¥100/pt, 払戻あり n={len(payout_cache)} races)"
         )
         tbl4.add_column("Model", style="bold")
-        for k in (1, 10, 100):
+        roi_ks = (1, 2, 3, 5, 10, 100)
+        for k in roi_ks:
             tbl4.add_column(f"top-{k}", justify="right")
         for m in trifecta_rows:
             cells = [m["label"]]
-            for k in (1, 10, 100):
+            for k in roi_ks:
                 roi = m["roi"][k]
                 if roi >= 1.0:
                     s = f"[bold green]{roi*100:.1f}%[/]"
