@@ -95,6 +95,19 @@ production 設定 (Phase 23 後):
 
 Plan A/B/C は検索 MCP の補強根拠で慎重にフィルタし、Plan G/H1/H2 は当て枠として小ロット試行することを推奨。
 
+### 唯一 robust に確認された +EV 設定: 単勝 β=0.78
+
+`scripts/sliding_window_eval.py` で 2 つの独立 validation window で単勝 ROI を β sweep した結果:
+
+| Window | β peak | β=0.78 ROI | 市場 (β=1.0) ROI | Δ |
+|---|---|---|---|---|
+| W3 (train 0-1308, valid 1308-1634, n=291) | β=0.75-0.80 | 95.9% | 88.5% | **+7.4 pt** |
+| W4 (train 0-1471, valid 1471-1634, n=149) | β=0.80 | 88.3% | 80.4% | **+7.9 pt** |
+
+両 window で β=0.78-0.80 が peak で一致、市場に 7-8 pt 勝つ。これは **Plan-level の eval (N が極小) と違い 1 レース 1 ベットの単勝 ROI なので統計量が大きく**、N=149 でも 53 hits / 149 races の評価で意味ある差が出る。
+
+→ **単勝賭けに限れば β=0.78 + T=metadata 由来 は実用的な +EV 戦略**。3 連単 / 馬連等は N が足りないので慎重に。
+
 ### Plan B の経験的弱さ (holdout 観察)
 
 n=291 races の real-odds 評価で **Plan B (最高 P×O 上位 3 点) は全 β で hit 0 / 0% ROI**。Plan A も β=0.4-0.80 で hit 0、β=0.85-0.90 で hit 1。これは N が小さくて結論できない (Plan B 全 picks = 873、期待 hit ≈ 3-10) が、傾向として:

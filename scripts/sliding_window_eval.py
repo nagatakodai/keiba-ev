@@ -294,6 +294,35 @@ def main() -> int:
     print(f"complete races (payout + odds): {n_complete}")
     print()
 
+    # ==== 単勝 ROI β sweep on W4 model (Phase 18 verification) ====
+    print("=== 単勝 ROI by β on W4 model (n=149) ===", flush=True)
+    print(f"{'β':>5} {'top-1 hit':>10} {'tansho ROI':>11} {'hits':>5}", flush=True)
+    print("-" * 35, flush=True)
+    beta_grid_sb = [round(b, 2) for b in np.arange(0.0, 1.01, 0.1)]
+    for beta in beta_grid_sb:
+        col_sb = f"sb_{int(beta*100):03d}"
+        valid[col_sb] = (
+            valid.groupby("race_id", sort=False, group_keys=False)
+            .apply(lambda g, b=beta: _blend(g, b), include_groups=False)
+        )
+        top_hits = 0
+        stake = 0
+        payout = 0
+        wins = 0
+        for _rid, g in valid.groupby("race_id", sort=False):
+            top_idx = g[col_sb].idxmax()
+            top_row = g.loc[top_idx]
+            stake += 100
+            if top_row["target_top1"] == 1:
+                top_hits += 1
+                wo = float(top_row["win_odds"]) if top_row["win_odds"] > 0 else 0.0
+                payout += int(100 * wo)
+                wins += 1
+        roi = payout / stake if stake else 0
+        n_r = valid["race_id"].nunique()
+        print(f"{beta:>5.2f} {top_hits/n_r*100:>9.1f}% {roi*100:>10.1f}% {wins:>5}", flush=True)
+    print()
+
     plan_codes = ("A", "B", "C", "G", "H1", "H2")
     stake = {c: 0 for c in plan_codes}
     payout = {c: 0 for c in plan_codes}
