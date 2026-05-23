@@ -323,6 +323,51 @@ def main() -> int:
         print(f"{beta:>5.2f} {top_hits/n_r*100:>9.1f}% {roi*100:>10.1f}% {wins:>5}", flush=True)
     print()
 
+    # ==== 単勝 confidence-based bet filter @ β=0.78 ====
+    # 「モデル top horse の予測 prob が高いほど実際当たりやすいか」を確認。
+    # 当たりやすいなら confidence 下限で skip 戦略 (race を打たない) が有効。
+    print("=== 単勝 ROI by top-1 confidence bin @ β=0.78 (n=149) ===", flush=True)
+    print(f"{'bin':>15} {'n races':>8} {'hit rate':>9} {'ROI':>8} {'avg odds':>10}", flush=True)
+    print("-" * 55, flush=True)
+    valid["sb_078"] = (
+        valid.groupby("race_id", sort=False, group_keys=False)
+        .apply(lambda g: _blend(g, 0.78), include_groups=False)
+    )
+    # 各 race の top-1 row を集める
+    race_picks: list[tuple[str, float, bool, float]] = []
+    for rid, g in valid.groupby("race_id", sort=False):
+        top_idx = g["sb_078"].idxmax()
+        top = g.loc[top_idx]
+        race_picks.append((
+            rid,
+            float(top["sb_078"]),
+            bool(top["target_top1"] == 1),
+            float(top["win_odds"]) if top["win_odds"] > 0 else 0.0,
+        ))
+    bins = [
+        ("< 0.15",  0.00, 0.15),
+        ("0.15-0.25", 0.15, 0.25),
+        ("0.25-0.35", 0.25, 0.35),
+        ("0.35-0.45", 0.35, 0.45),
+        ("≥ 0.45",   0.45, 1.01),
+    ]
+    for label, lo, hi in bins:
+        bucket = [p for p in race_picks if lo <= p[1] < hi]
+        if not bucket:
+            print(f"{label:>15} {'0':>8} — — —", flush=True)
+            continue
+        n_b = len(bucket)
+        hits_b = sum(1 for p in bucket if p[2])
+        stake_b = n_b * 100
+        payout_b = sum(int(100 * p[3]) for p in bucket if p[2])
+        roi_b = payout_b / stake_b if stake_b else 0
+        avg_odds_b = sum(p[3] for p in bucket) / n_b
+        print(
+            f"{label:>15} {n_b:>8} {hits_b/n_b*100:>8.1f}% {roi_b*100:>7.1f}% {avg_odds_b:>9.2f}",
+            flush=True,
+        )
+    print()
+
     plan_codes = ("A", "B", "C", "G", "H1", "H2")
     stake = {c: 0 for c in plan_codes}
     payout = {c: 0 for c in plan_codes}
