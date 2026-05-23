@@ -1,5 +1,25 @@
 # keiba-ev — 中央競馬 EV 分析プロジェクト
 
+## netkeiba IP 規制対応
+
+netkeiba は `race.netkeiba.com` と `nar.netkeiba.com` の特定 IP に対し、短時間で大量 request すると **CloudFront 経由で HTTP 400 を返す** (= empty body `<html><head></head><body></body></html>`)。本リポジトリでは:
+
+- `src.scrape.fetch_html` が空 HTML を検出して `NetkeibaBlocked` 例外を投げる
+- `src.bulk_fetch` および `scripts/fetch_trifecta_odds_holdout.py` は空 HTML を保存しない (= ゴミファイルを作らない)
+- `src.auto_watch` が両ドメイン block 検出時に明確なエラーメッセージを出す
+
+**block 中の運用:**
+1. **数時間〜1日待つ** — netkeiba の rate-limit は時間で解除される
+2. **VPN / 別 IP** — 別ネットから繋ぐと即解除されることが多い
+3. **オフライン解析は継続可能** — `data/raw/` のキャッシュ済 HTML、`data/datasets/all.parquet`、`data/cache/` (trifecta odds / aptitudes) は全て手元にある:
+   - `make holdout` / `cv_*` / `sliding_window_eval` は全て scrape 不要
+   - 過去 race の `python -m src.analyze --html data/raw/<rid>-shutuba.html.gz` も可能
+   - LLM 再評価 (`claude -p`) は web search だけなので netkeiba block 関係なし
+
+**保存基準 (GCS/BigQuery 移行)** — 現状 raw HTML ~2.3GB / parquet <1MB なのでローカル維持で十分。**数百 GB を超える前に GCS bucket + BigQuery テーブルに移行**する想定 (新規スクリプトを書いて parquet を bq load → SQL で集計、raw HTML は GCS にミラー)。
+
+
+
 このリポジトリは、中央競馬 (JRA) の 3 連単について **EV (期待値) > 1** の買い目を netkeiba の実オッズから抽出するためのツール群を提供する。Claude (または人間) がこのリポジトリで作業するときは、以下の流儀を厳守すること。
 
 ## 目的と前提

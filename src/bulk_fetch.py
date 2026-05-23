@@ -142,6 +142,11 @@ def _worker_loop(
                         page.goto(target.url, wait_until="domcontentloaded", timeout=timeout_ms)
                         page.wait_for_timeout(settle_ms)
                         html = page.content()
+                        # netkeiba CloudFront 400 で空 HTML が返ることがある。
+                        # 保存すると後で「raw HTML はあるが parse 不能」のゴミになるので skip。
+                        stripped = html.strip()
+                        if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+                            raise RuntimeError("empty body (likely CloudFront 400 / rate-limit)")
                         _gzip_write(target.out_path, html)
                         stats.fetched += 1
                         if polite_sleep_ms > 0:

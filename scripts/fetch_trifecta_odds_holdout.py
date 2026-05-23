@@ -102,11 +102,20 @@ def main() -> int:
                 continue
             try:
                 htmls: list[str] = []
+                blocked = False
                 for jiku in range(1, n_h + 1):
                     url = odds_get_form_url(rid, "b8", jiku=jiku)
                     page.goto(url, wait_until="domcontentloaded", timeout=args.timeout_ms)
                     page.wait_for_timeout(args.settle_ms)
-                    htmls.append(page.content())
+                    html = page.content()
+                    # CloudFront 400 検出 — 1 jiku でも block されたら race ごと skip
+                    stripped = html.strip()
+                    if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+                        blocked = True
+                        break
+                    htmls.append(html)
+                if blocked:
+                    raise RuntimeError(f"netkeiba blocked at jiku iteration (CloudFront 400)")
                 triplets = parse_trifecta_multi(htmls)
                 data = {
                     "race_id": rid,
