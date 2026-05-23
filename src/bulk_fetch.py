@@ -235,6 +235,15 @@ def collect_race_ids(
                         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                         page.wait_for_timeout(settle_ms)
                         html = page.content()
+                        # netkeiba block 検出: 空 body (CloudFront 400) なら
+                        # 「+0 race」を silent に出すのではなく明示エラー化
+                        stripped = html.strip()
+                        if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+                            console.print(
+                                f"[red]{d} {'NAR' if is_nar else 'JRA'}: empty body "
+                                f"(CloudFront 400, IP block 中の可能性)[/red]"
+                            )
+                            continue
                         races = parse_race_list(html, d)
                         for r in races:
                             rid = r["race_id"]
