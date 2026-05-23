@@ -241,3 +241,46 @@ def test_estimate_probs_default_blend_matches_constant():
     import inspect
     sig = inspect.signature(estimate_probs)
     assert sig.parameters["market_blend"].default == BLEND_DEFAULT
+
+
+def test_lgbm_predict_reads_temperature_from_metadata(monkeypatch):
+    """_lgbm_predict が metadata の softmax_temperature を優先して読むこと。
+
+    metadata に T=2.0 を仕込むと softmax 出力が大きく flatten される、
+    metadata なしの場合は LGBM_TEMPERATURE=0.4 で sharpen される。
+    """
+    from src import ev as ev_mod
+
+    # ダミーモデル: predict が 5 馬の固定 score を返す
+    class DummyBooster:
+        def predict(self, rows):
+            return [1.0, 0.5, 0.2, 0.0, -0.5][: len(rows)]
+
+    horses = [
+        type("H", (), {"number": i + 1, "absent": False})() for i in range(5)
+    ]
+    from dataclasses import asdict
+    from src.features import FeatureVec
+    feats = {i + 1: FeatureVec(number=i + 1) for i in range(5)}
+
+    # T=0.4 (fallback)
+    monkeypatch.setattr(ev_mod, "_LGBM_MODEL", DummyBooster())
+    monkeypatch.setattr(ev_mod, "_LGBM_META", {"feature_cols": list(asdict(FeatureVec(number=0)).keys())})
+    probs_fallback = ev_mod._lgbm_predict(horses, feats)
+    assert probs_fallback is not None
+    # T=0.4 で top horse の prob が大きくなる (sharpened)
+    p_top_T04 = max(probs_fallback.values())
+
+    # T=2.0 (metadata override)
+    monkeypatch.setattr(ev_mod, "_LGBM_META", {
+        "feature_cols": list(asdict(FeatureVec(number=0)).keys()),
+        "softmax_temperature": 2.0,
+    })
+    probs_T2 = ev_mod._lgbm_predict(horses, feats)
+    assert probs_T2 is not None
+    p_top_T2 = max(probs_T2.values())
+
+    # T=2.0 (flatter) は T=0.4 (sharper) より top horse prob が小さい
+    assert p_top_T2 < p_top_T04, (
+        f"T=2.0 should be flatter: got T=0.4 → {p_top_T04:.3f}, T=2.0 → {p_top_T2:.3f}"
+    )
