@@ -27,6 +27,7 @@ def main(
     order: str = typer.Argument(..., help="1-2-3 着の馬番をカンマ区切り (例: 5,2,7)"),
     payout: int = typer.Option(0, "--payout", help="3 連単払戻金額"),
     note: str = typer.Option("", "--note", help="自由記述 (取消・除外等)"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="既存 result file がある場合も上書きする"),
 ):
     """レース結果を保存し、prediction との突き合わせを表示。"""
     parts = [p.strip() for p in order.split(",")]
@@ -41,6 +42,22 @@ def main(
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"{race_id}.json"
+    if out_path.exists() and not overwrite:
+        # 自動 fetch (process_pending) や手動 record で既に保存済の result を
+        # 誤って上書きするのを防ぐ。意図的な上書きは --overwrite で明示する。
+        try:
+            existing = json.loads(out_path.read_text(encoding="utf-8"))
+            existing_order = existing.get("finish_order")
+            existing_payout = existing.get("trifecta_payout")
+        except Exception:
+            existing_order, existing_payout = None, None
+        console.print(
+            f"[red]エラー: 既存 result file あり ({out_path})[/red]\n"
+            f"  既存: finish_order={existing_order} payout={existing_payout}\n"
+            f"  新規: finish_order={finish_order} payout={payout}\n"
+            f"  上書きするなら --overwrite を渡してください。"
+        )
+        raise typer.Exit(2)
     data = {
         "race_id": race_id,
         "finish_order": finish_order,
