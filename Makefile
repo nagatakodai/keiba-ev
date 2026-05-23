@@ -116,14 +116,17 @@ backtest:
 #   make bulk-fetch SINCE=20260101 UNTIL=20260521 WORKERS=5  # 本実行
 BULK_SINCE ?= 20260101
 BULK_UNTIL ?= 20260521
-WORKERS ?= 5
+# scrape 並列数。過去 5 workers + polite=500ms で netkeiba block を誘発したので
+# default は 3 workers + polite 1000ms に下げて再発防止。必要なら override OK。
+WORKERS ?= 3
+POLITE_MS ?= 1000
 RIDS_FILE ?=
 bulk-enum:
 	$(PY) -m src.bulk_fetch --since $(BULK_SINCE) --until $(BULK_UNTIL) --enum-only
 
 bulk-fetch:
 	$(PY) -m src.bulk_fetch --since $(BULK_SINCE) --until $(BULK_UNTIL) \
-		--workers $(WORKERS) \
+		--workers $(WORKERS) --polite-ms $(POLITE_MS) \
 		$(if $(RIDS_FILE),--rids-file $(RIDS_FILE),)
 
 # --- 学習データセット構築 (data/datasets/all.parquet) ---

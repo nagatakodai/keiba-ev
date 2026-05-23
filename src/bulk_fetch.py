@@ -117,8 +117,13 @@ def _worker_loop(
     settle_ms: int,
     timeout_ms: int,
     polite_sleep_ms: int,
+    block_cooldown_sec: int = 300,
 ) -> None:
-    """1 worker thread。自分の Playwright browser を持って queue から target を取り処理。"""
+    """1 worker thread。自分の Playwright browser を持って queue から target を取り処理。
+
+    連続 block (3 件連続で空 HTML) を検出したら本 worker を cooldown sleep して
+    backoff、netkeiba 規制が落ち着くのを待つ。
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -129,6 +134,7 @@ def _worker_loop(
             viewport={"width": 1280, "height": 1800},
         )
         page = ctx.new_page()
+        consecutive_blocks = 0
         try:
             while True:
                 target = queue.get()
@@ -146,7 +152,10 @@ def _worker_loop(
                         # 保存すると後で「raw HTML はあるが parse 不能」のゴミになるので skip。
                         stripped = html.strip()
                         if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+                            consecutive_blocks += 1
                             raise RuntimeError("empty body (likely CloudFront 400 / rate-limit)")
+                        # 成功したら counter reset
+                        consecutive_blocks = 0
                         _gzip_write(target.out_path, html)
                         stats.fetched += 1
                         if polite_sleep_ms > 0:
@@ -160,6 +169,10 @@ def _worker_loop(
                         "error": f"{type(ex).__name__}: {str(ex)[:300]}",
                         "ts": int(time.time()),
                     })
+                    # 連続 3 件 block されたら cooldown (默 5 分)
+                    if consecutive_blocks >= 3 and block_cooldown_sec > 0:
+                        page.wait_for_timeout(block_cooldown_sec * 1000)
+                        consecutive_blocks = 0  # cooldown 後リセット (1 回試行で抜けるか確認)
                 finally:
                     progress.update(task_id, advance=1)
                     queue.task_done()
@@ -242,10 +255,11 @@ def main(
     until: str = typer.Option(..., "--until", help="YYYYMMDD (含む)"),
     jra: bool = typer.Option(True, "--jra/--no-jra"),
     nar: bool = typer.Option(True, "--nar/--no-nar"),
-    workers: int = typer.Option(5, "--workers", help="並列 Playwright browser 数"),
+    workers: int = typer.Option(3, "--workers", help="並列 Playwright browser 数 (規制回避なら 2-3)"),
     settle_ms: int = typer.Option(2000, "--settle-ms"),
     timeout_ms: int = typer.Option(45_000, "--timeout-ms"),
-    polite_ms: int = typer.Option(500, "--polite-ms", help="fetch 間の sleep (ms)"),
+    polite_ms: int = typer.Option(1000, "--polite-ms", help="fetch 間の sleep (ms)。規制リスク低減のため default 1000"),
+    block_cooldown_sec: int = typer.Option(300, "--block-cooldown", help="連続 3 件 block 時の worker cooldown (秒)"),
     enum_only: bool = typer.Option(False, "--enum-only", help="race_id 列挙だけして終了"),
     rids_file: Path | None = typer.Option(None, "--rids-file", help="既存 race_id リストファイルを読む (列挙スキップ)"),
 ):
@@ -309,7 +323,10 @@ def main(
         task_id = progress.add_task("fetching", total=total)
         with ThreadPoolExecutor(max_workers=workers) as exe:
             futures = [
-                exe.submit(_worker_loop, queue, stats, progress, task_id, settle_ms, timeout_ms, polite_ms)
+                exe.submit(
+                    _worker_loop, queue, stats, progress, task_id,
+                    settle_ms, timeout_ms, polite_ms, block_cooldown_sec,
+                )
                 for _ in range(workers)
             ]
             for f in as_completed(futures):
