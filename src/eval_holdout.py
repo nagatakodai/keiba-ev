@@ -29,6 +29,7 @@ from rich.table import Table
 from .ev import (
     DEFAULT_LAMBDA_2,
     DEFAULT_LAMBDA_3,
+    LGBM_TEMPERATURE,
     PXO_CHUANA,
     PXO_FLOOR,
     PXO_HONSEN,
@@ -78,8 +79,11 @@ def main(
     meta_path: Path = typer.Option(MODELS_DIR / "lgbm_metadata.json", "--meta"),
     stake_per_race: int = typer.Option(100, "--stake", help="1 レースあたりの単勝賭け金"),
     temperature: float = typer.Option(
-        1.0, "--temperature", "-T",
-        help="LGBM softmax の温度 (T<1 で sharpening, T>1 で flattening, holdout で T=0.4 が log loss 最小)",
+        LGBM_TEMPERATURE, "--temperature", "-T",
+        help=(
+            "LGBM softmax の温度 (T<1 で sharpening, T>1 で flattening, "
+            "既定 = src.ev.LGBM_TEMPERATURE = production と同じ値)"
+        ),
     ),
 ):
     if not input_path.exists():
