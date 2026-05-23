@@ -324,13 +324,14 @@ def _save_evidence_to_snapshot(
         plan_g = ev_mod.plan_aptitude_ev(adjusted, aptitude_top_horses)
     else:
         plan_g = []
-    # Plan H1 は pure LGBM (β=0) 用の plan_rows_hit がある場合はそちらから生成
+    # Plan H1 / H2 は β=0 (pure LGBM) 用の plan_rows_hit がある場合はそちらから生成
     if plan_rows_hit is not None:
         adjusted_hit = ev_mod.apply_evidence(plan_rows_hit, evidence_by_key, cuts)
         plan_h1 = ev_mod.plan_hit_pure(adjusted_hit, target=3)
+        plan_h2 = ev_mod.plan_hit_safe(adjusted_hit, target=3)
     else:
         plan_h1 = ev_mod.plan_hit_pure(adjusted, target=3)
-    plan_h2 = ev_mod.plan_hit_safe(adjusted, target=3)
+        plan_h2 = ev_mod.plan_hit_safe(adjusted, target=3)
     plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
     snap["evidence"] = evidence
     snap["evidence_rows"] = [
@@ -476,14 +477,14 @@ def _save_prediction_snapshot(
     plan_b = ev_mod.plan_max_ev(plan_rows)
     plan_c = ev_mod.plan_wide(plan_rows)
     # H1/H2 ("当て枠") も min_prob/ev_max のキャップは尊重する。
-    # Plan H1 は holdout で +EV を出した pure LGBM β=0 の plan_rows_hit を使う
-    # (無ければ既定の plan_rows にフォールバック)。Plan H2 は EV ≥1.0 フィルタを
-    # 通すので default β のままで OK。
+    # Plan H1 / H2 は両方とも holdout で β=0 (BLEND_HIT_PURE) + T=0.4 が +EV を
+    # 出した (H1 ROI 101% / H2 ROI 132%)。plan_rows_hit があればそちらを使う。
     if plan_rows_hit is not None:
         plan_h1 = ev_mod.plan_hit_pure(plan_rows_hit, target=3)
+        plan_h2 = ev_mod.plan_hit_safe(plan_rows_hit, target=3)
     else:
         plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=3)
-    plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=3)
+        plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=3)
     # Plan G: 適性ゲート → EV 足切り (適性指数 top N 頭の集合で P×O≥1.02)。
     # holdout で market-only (β=1.0) が +EV (ROI 108.1%) → plan_rows_apt 優先。
     # apt_top が空 = aptitudes が空 = past_runs 未取得などの場合は空リスト。
@@ -948,22 +949,31 @@ def _print_plans(
     h1_rows = plan_rows_hit if plan_rows_hit is not None else rows
     # Plan G は market-only (β=1.0) 用の別 rows がある場合はそちらを使う
     g_rows = plan_rows_apt if plan_rows_apt is not None else rows
+    # holdout n=291 race の評価結果を Plan title に付記:
+    #   +EV = ROI ≥ 100% (長期黒字), -EV = ROI < 控除 77.5% (長期赤字),
+    #   small N = 0-3 hits でノイズ支配
     ev_plans = [
-        ("Plan A — 5点バランス (推奨)", ev_mod.plan_balanced(rows), ev_budget),
-        ("Plan B — 最高EV (集中 1-3点)", ev_mod.plan_max_ev(rows), ev_budget),
         (
-            f"Plan C — 広め (保険型 ≤{ev_mod.PLAN_C_MAX_POINTS}点)",
+            "Plan A — 5点バランス (holdout -EV 54%, small N=1)",
+            ev_mod.plan_balanced(rows), ev_budget,
+        ),
+        (
+            "Plan B — 最高EV (集中 1-3点) (holdout 0 hits / 291, 楽観バイアス疑)",
+            ev_mod.plan_max_ev(rows), ev_budget,
+        ),
+        (
+            f"Plan C — 広め (保険型 ≤{ev_mod.PLAN_C_MAX_POINTS}点) (holdout -EV 57%)",
             ev_mod.plan_wide(rows),
             ev_budget,
         ),
         (
-            "Plan H1 — 当て枠 / 確率最優先 (β=0, holdout +EV)",
+            "Plan H1 — 当て枠 / 確率最優先 (β=0, holdout +EV 101%)",
             ev_mod.plan_hit_pure(h1_rows, target=hit_points),
             hit_budget,
         ),
         (
-            "Plan H2 — 当て枠 / 確率優先 + P×O ≥ 1.0",
-            ev_mod.plan_hit_safe(rows, target=hit_points),
+            "Plan H2 — 当て枠 / 確率+EV≥1 (β=0+T=0.4, holdout +EV 132%) ★",
+            ev_mod.plan_hit_safe(h1_rows, target=hit_points),
             hit_budget,
         ),
     ]
@@ -972,7 +982,7 @@ def _print_plans(
         ev_plans.insert(
             3,
             (
-                f"Plan G — 適性ゲート (top {top_n} 頭, β=1.0 holdout +EV)",
+                f"Plan G — 適性ゲート top{top_n} (β=1.0, holdout +EV 108%) ★",
                 ev_mod.plan_aptitude_ev(g_rows, aptitude_top_horses),
                 ev_budget,
             ),
