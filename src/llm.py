@@ -329,12 +329,19 @@ def evaluate_refresh_stream(
                 yield ("result", ev.get("result", "") or "")
             elif etype == "error":
                 yield ("error", ev.get("message", "unknown error"))
+    except Exception as e:  # noqa: BLE001 - 想定外でも error として伝える
+        yield ("error", f"stream parse error: {e}")
     finally:
+        # evaluate_stream と同じ finally 処理: wait + non-zero exit の stderr 報告
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             yield ("error", "claude timeout")
+        if proc.returncode not in (0, None):
+            err = (proc.stderr.read() if proc.stderr else "")[:600]
+            if err:
+                yield ("error", f"claude exit {proc.returncode}: {err}")
 
 
 _WEATHER_LABEL = {100: "晴", 200: "曇", 300: "雨", 400: "雪", 500: "霧"}
