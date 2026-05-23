@@ -121,13 +121,17 @@ production model + β=0.78 + T=0.45 で W3 valid (n=291) の **top-1 単勝**の
 | confidence ≥0.35 | 115 | 57.4% | 85.7% (favorite-heavy) |
 | confidence 0.15-0.25 | 75 | 25.3% | 86.7% |
 
-**汎用な actionable filter** = `0.25 ≤ top-1 model prob < 0.35` (n=101, ROI 105.7%):
-- モデルが中等度に確信する race だけに絞ると +EV になる
-- 過信 (≥0.35) は favorite-heavy で odds 低、controlled では break-even
-- 過少 (<0.25) は不確実すぎて当たらない
-- この band は本セッションの分析が後付け discovery なので overfit リスク残るが、複数の意味ある cell に同パターン (中等度 confidence で peak ROI) が出ているため signal が強い
+**confidence 0.25-0.35 band も sliding-window で再現せず:**
+- W3 (n=101): 105.7% ROI (in-sample 発見)
+- W4 (n=68, 新規モデル): **86.9% ROI** (再現しない)
+- **combined (n=169): 98.1% ROI** — break-even 未満
 
-**NAR ダート bias 注意**: validation set は時系列後半 = NAR ダート に偏る (芝 0 race)。"Sprint" finding は実質「NAR Sprint ダート」。JRA 芝 への transfer は別途検証必要。
+→ Plan G β=1.0 と同じパターン: in-sample で +EV に見えた bin discovery が
+sliding-window で破綻。N=291 程度の post-hoc bin 切り分けは overfit と判断。
+
+**NAR ダート bias 注意**: validation set は時系列後半 = NAR ダート に偏る (芝 0 race)。"Sprint" finding は実質「NAR Sprint ダート」。JRA 芝 への transfer は別途検証必要。Sprint も sliding-window 同 race set なので bin の robustness 検証不能。
+
+**結論**: bin selection を上から見つけて適用する戦略は本データでは効かない。**confidence band で race を選別するのではなく、常に β=0.78 で top-1 単勝を打ち続けるほうが robust**。レース蓄積後に再 sweep して band を再確認する。
 
 ### Plan B の経験的弱さ (holdout 観察)
 
