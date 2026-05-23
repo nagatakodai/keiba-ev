@@ -32,7 +32,7 @@ import pandas as pd  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 from src.parse import parse_trifecta_multi  # noqa: E402
-from src.scrape import UA, odds_get_form_url  # noqa: E402
+from src.scrape import UA, _is_empty_block_html, odds_get_form_url  # noqa: E402
 
 CACHE_DIR = ROOT / "data" / "cache" / "trifecta_odds"
 
@@ -109,8 +109,7 @@ def main() -> int:
                     page.wait_for_timeout(args.settle_ms)
                     html = page.content()
                     # CloudFront 400 検出 — 1 jiku でも block されたら race ごと skip
-                    stripped = html.strip()
-                    if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+                    if _is_empty_block_html(html):
                         blocked = True
                         break
                     htmls.append(html)

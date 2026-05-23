@@ -46,6 +46,7 @@ from .parse import parse_race_list
 from .scrape import (
     NAR_HOST,
     UA,
+    _is_empty_block_html,
     race_list_url,
     result_url,
     shutuba_past_url,
@@ -158,8 +159,7 @@ def _worker_loop(
                         html = page.content()
                         # netkeiba CloudFront 400 で空 HTML が返ることがある。
                         # 保存すると後で「raw HTML はあるが parse 不能」のゴミになるので skip。
-                        stripped = html.strip()
-                        if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+                        if _is_empty_block_html(html):
                             consecutive_blocks += 1
                             raise RuntimeError("empty body (likely CloudFront 400 / rate-limit)")
                         # 成功したら counter reset
@@ -237,8 +237,7 @@ def collect_race_ids(
                         html = page.content()
                         # netkeiba block 検出: 空 body (CloudFront 400) なら
                         # 「+0 race」を silent に出すのではなく明示エラー化
-                        stripped = html.strip()
-                        if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+                        if _is_empty_block_html(html):
                             console.print(
                                 f"[red]{d} {'NAR' if is_nar else 'JRA'}: empty body "
                                 f"(CloudFront 400, IP block 中の可能性)[/red]"

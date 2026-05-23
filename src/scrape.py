@@ -92,8 +92,7 @@ def fetch_html(url: str, *, timeout_ms: int = 60_000, settle_ms: int = 4_000) ->
         html = page.content()
         browser.close()
     # 空 body 検出: netkeiba の CloudFront 400 は <body></body> 形式 (~40 字)
-    stripped = html.strip()
-    if len(stripped) < 80 and "<body></body>" in stripped.replace(" ", ""):
+    if _is_empty_block_html(html):
         raise NetkeibaBlocked(
             f"netkeiba returned empty body for {url} "
             f"(likely CloudFront 400; possibly IP rate-limited after recent heavy scraping)"
@@ -173,6 +172,12 @@ def race_list_url(date_yyyymmdd: str, *, nar: bool = False) -> str:
     return f"https://{host}/top/race_list.html?kaisai_date={date_yyyymmdd}"
 
 
+def _is_empty_block_html(html: str) -> bool:
+    """CloudFront 400 で返る空 HTML を検出する共通判定。"""
+    stripped = html.strip()
+    return len(stripped) < 80 and "<body></body>" in stripped.replace(" ", "")
+
+
 def fetch_trifecta_full(
     race_id: str,
     *,
@@ -184,6 +189,9 @@ def fetch_trifecta_full(
 
     呼び出し側で `parse_trifecta_html_list` に渡して TrifectaOdds に変換する。
     n_horses は出走頭数 (取消含まず)。1..n_horses 全てに対して fetch する。
+
+    途中で netkeiba CloudFront 400 を検出したら `NetkeibaBlocked` を投げる
+    (partial 取得して silent に空オッズで進むのを防ぐ)。
     """
     htmls: list[str] = []
     with sync_playwright() as p:
@@ -197,12 +205,20 @@ def fetch_trifecta_full(
             viewport={"width": 1280, "height": 1800},
         )
         page = ctx.new_page()
-        for jiku in range(1, n_horses + 1):
-            url = odds_get_form_url(race_id, "b8", jiku=jiku)
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(settle_ms)
-            htmls.append(page.content())
-        browser.close()
+        try:
+            for jiku in range(1, n_horses + 1):
+                url = odds_get_form_url(race_id, "b8", jiku=jiku)
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_timeout(settle_ms)
+                content = page.content()
+                if _is_empty_block_html(content):
+                    raise NetkeibaBlocked(
+                        f"empty body at jiku={jiku} of race {race_id} "
+                        f"(CloudFront 400 / rate-limit)"
+                    )
+                htmls.append(content)
+        finally:
+            browser.close()
     return htmls
 
 
@@ -233,11 +249,17 @@ def fetch_odds_simple(
             viewport={"width": 1280, "height": 1800},
         )
         page = ctx.new_page()
-        url = odds_get_form_url(race_id, type_)
-        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        page.wait_for_timeout(settle_ms)
-        html = page.content()
-        browser.close()
+        try:
+            url = odds_get_form_url(race_id, type_)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(settle_ms)
+            html = page.content()
+            if _is_empty_block_html(html):
+                raise NetkeibaBlocked(
+                    f"empty body for {type_} odds of race {race_id} (CloudFront 400)"
+                )
+        finally:
+            browser.close()
     return html
 
 
@@ -269,12 +291,19 @@ def fetch_odds_per_jiku(
             viewport={"width": 1280, "height": 1800},
         )
         page = ctx.new_page()
-        for jiku in range(1, n_horses + 1):
-            url = odds_get_form_url(race_id, type_, jiku=jiku)
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(settle_ms)
-            htmls.append(page.content())
-        browser.close()
+        try:
+            for jiku in range(1, n_horses + 1):
+                url = odds_get_form_url(race_id, type_, jiku=jiku)
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_timeout(settle_ms)
+                content = page.content()
+                if _is_empty_block_html(content):
+                    raise NetkeibaBlocked(
+                        f"empty body at jiku={jiku} of race {race_id} type={type_} (CloudFront 400)"
+                    )
+                htmls.append(content)
+        finally:
+            browser.close()
     return htmls
 
 
