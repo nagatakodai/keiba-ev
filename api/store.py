@@ -63,15 +63,32 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
     return items if limit is None else items[:limit]
 
 
+def _safe_race_id(race_id: str) -> str | None:
+    """race_id を path-safe な文字に絞って validate する。
+    `..` を含むパス traversal、絶対パス、空文字を全て弾く。
+    JRA/NAR の race_id は数字 + ハイフン (`-` 正規化形式) のみなので、
+    `[A-Za-z0-9_-]+` 以外はリジェクト。"""
+    import re
+    if not race_id:
+        return None
+    # 厳格に英数字とハイフン / アンダースコアのみ
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", race_id):
+        return None
+    return race_id
+
+
 def get_prediction(race_id: str) -> dict[str, Any] | None:
-    path = PRED_DIR / f"{race_id}.json"
+    safe = _safe_race_id(race_id)
+    if safe is None:
+        return None
+    path = PRED_DIR / f"{safe}.json"
     if not path.exists():
         return None
     try:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    result_path = RESULT_DIR / f"{race_id}.json"
+    result_path = RESULT_DIR / f"{safe}.json"
     if result_path.exists():
         try:
             d["result"] = json.loads(result_path.read_text(encoding="utf-8"))
