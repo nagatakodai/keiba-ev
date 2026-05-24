@@ -196,6 +196,18 @@ class Job:
         idx = since
         while True:
             snapshot = list(self.lines)
+            # SSE 切断 → 再接続時、要求 idx より前の seq が deque eviction で
+            # 消えている場合がある (lines は maxlen=4000)。
+            # silent に skip すると consumer は欠落に気付けないので警告を流す。
+            if snapshot and snapshot[0]["seq"] > idx:
+                dropped = snapshot[0]["seq"] - idx
+                yield {
+                    "seq": idx,
+                    "ts": time.time(),
+                    "stream": "system",
+                    "text": f"[dropped {dropped} old lines (buffer overflow, seq {idx}..{snapshot[0]['seq']-1})]",
+                }
+                idx = snapshot[0]["seq"]
             new = [e for e in snapshot if e["seq"] >= idx]
             for e in new:
                 yield e
