@@ -101,10 +101,15 @@ def fetch_html(url: str, *, timeout_ms: int = 60_000, settle_ms: int = 4_000) ->
 
 
 def cache_html(html: str, race_id: str, root: Path, suffix: str = "") -> Path:
-    """HTML を data/raw/<race_id><suffix>.html にキャッシュ。"""
-    out = root / "data/raw" / f"{race_id}{suffix}.html"
+    """HTML を data/raw/<race_id><suffix>.html.gz に gzip キャッシュ。
+    bulk_fetch も gz 保存しており、harvest_past_rids / priors の
+    `*-shutuba.html.gz` glob と整合させる (plain `.html` だと silent に拾われない)。
+    """
+    import gzip
+    out = root / "data/raw" / f"{race_id}{suffix}.html.gz"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(html, encoding="utf-8")
+    with gzip.open(out, "wt", encoding="utf-8") as f:
+        f.write(html)
     return out
 
 
