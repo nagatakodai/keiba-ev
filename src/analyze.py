@@ -1358,10 +1358,11 @@ def _print_llm_refresh_evaluation(
         _print_evidence_adjusted(
             rows, evidence,
             hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
+            aptitude_top_horses=aptitude_top_horses,
         )
         if race_id and not no_cache:
             _save_evidence_to_snapshot(
-                race_id, rows, evidence,
+                race_id, rows, evidence, aptitude_top_horses,
             )
 
 
