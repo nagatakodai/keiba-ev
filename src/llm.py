@@ -34,6 +34,18 @@ def is_available() -> bool:
     return shutil.which("claude") is not None
 
 
+def _claude_env() -> dict[str, str]:
+    """claude CLI subprocess 用の env。ANTHROPIC_API_KEY を強制除外して
+    Claude Pro/Max subscription 経由認証に倒す。
+    .env / OS env に API key が残っていても claude CLI が課金 API に走らないようにする。
+    """
+    import os
+    env = os.environ.copy()
+    for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        env.pop(k, None)
+    return env
+
+
 def parse_evidence(text: str) -> dict:
     """LLM 出力末尾の ```json ... ``` ブロックから evidence dict を抽出。"""
     import re
@@ -87,6 +99,7 @@ def evaluate_stream(
         cmd, cwd=str(ROOT),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1,
+        env=_claude_env(),
     )
     assert proc.stdout is not None
 
@@ -303,6 +316,7 @@ def evaluate_refresh_stream(
         cmd, cwd=str(ROOT),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1,
+        env=_claude_env(),
     )
     assert proc.stdout is not None
 
