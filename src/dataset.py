@@ -112,7 +112,10 @@ def build_dataframe(race_ids: list[str]) -> pd.DataFrame:
                 "race_no": rd.race.race_number,
                 "distance": rd.race.distance,
                 "surface": rd.race.surface,
-                "going": rd.race.weather_text,
+                # going = 馬場状態 (良/稍重/重/不良)。weather_text ("晴 / 良" 等の combined)
+                # を入れていた旧実装は race_class_diagnostic.py の Going bin が
+                # 天気で分割される歪みを生んでいた。track_condition だけを取る。
+                "going": (rd.race.weather.track_condition if rd.race.weather else ""),
                 "horse_number": h.number,
                 "n_horses": len([x for x in rd.race.horses if not x.absent]),
                 # ラベル (3 着以内のみ確定、それ以外 None = 4 着以下 or 未確定)
