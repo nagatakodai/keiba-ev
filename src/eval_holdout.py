@@ -27,6 +27,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .ev import (
+    BLEND_DEFAULT,
     DEFAULT_LAMBDA_2,
     DEFAULT_LAMBDA_3,
     LGBM_TEMPERATURE,
@@ -232,6 +233,11 @@ def main(
         "blend_b095": 0.95,
         "blend_b10": 1.0,
     }
+    # production の BLEND_DEFAULT (0.78) を grid に必ず含める。
+    # この行が無いと "production setting" 表示が grid 内の近い値 (β=0.80) を
+    # 拾ってしまい、BLEND_DEFAULT を変更しても holdout が気付かない silent drift になる。
+    prod_key = f"blend_b{int(round(BLEND_DEFAULT * 100)):03d}"
+    blend_cols.setdefault(prod_key, BLEND_DEFAULT)
     for col, beta in blend_cols.items():
         valid[col] = (
             valid.groupby("race_id", sort=False, group_keys=False)
@@ -313,11 +319,12 @@ def main(
         f"ROI={best['tansho_roi']*100:.1f}% "
         f"(Δ vs Market only: {(best['tansho_roi']-market_row['tansho_roi'])*100:+.2f} pt)"
     )
-    # production の単勝 EV table は BLEND_DEFAULT=0.78 を使う
-    prod = next((r for r in rows if r["label"].startswith("Loglinear blend β=0.80")), None)
+    # production の単勝 EV table は BLEND_DEFAULT を使う
+    prod_label_prefix = f"Loglinear blend β={BLEND_DEFAULT:.2f}"
+    prod = next((r for r in rows if r["label"].startswith(prod_label_prefix)), None)
     if prod:
         console.print(
-            f"production setting (β≈0.78): ROI={prod['tansho_roi']*100:.1f}% "
+            f"production setting (β={BLEND_DEFAULT}): ROI={prod['tansho_roi']*100:.1f}% "
             f"(Δ vs Market only: {(prod['tansho_roi']-market_row['tansho_roi'])*100:+.2f} pt)"
         )
     console.print(
@@ -463,10 +470,10 @@ def main(
         f"top-10={best_t['topk'][10]*100:.2f}% "
         f"(Δ vs Market only: {(best_t['topk'][10]-market_t['topk'][10])*100:+.2f} pt)"
     )
-    prod_t = next((r for r in trifecta_rows if r["label"].startswith("Loglinear blend β=0.80")), None)
+    prod_t = next((r for r in trifecta_rows if r["label"].startswith(prod_label_prefix)), None)
     if prod_t:
         console.print(
-            f"production setting (β≈0.78): top-10 hit={prod_t['topk'][10]*100:.2f}%, "
+            f"production setting (β={BLEND_DEFAULT}): top-10 hit={prod_t['topk'][10]*100:.2f}%, "
             f"Δ vs Market only {(prod_t['topk'][10]-market_t['topk'][10])*100:+.2f} pt"
         )
     console.print(
