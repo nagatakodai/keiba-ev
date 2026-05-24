@@ -200,6 +200,9 @@ export type WatchAutoStatus = {
     aptitude_top?: number | null;
     with_exacta?: boolean;
     with_trio?: boolean;
+    // race detection を行う JST 時間帯 (HH:MM-HH:MM)。
+    // backend (api/main.py:WatchAutoStartRequest) の default は "09:00-23:45"。
+    active_hours?: string;
   };
   job: JobInfo | null;
 };
@@ -356,6 +359,7 @@ export const api = {
     aptitude_top?: number | null;
     with_exacta?: boolean;
     with_trio?: boolean;
+    active_hours?: string;
   }) =>
     jsonFetch<{ running: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,
