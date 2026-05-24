@@ -128,6 +128,12 @@ def evaluate_stream(
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
+            # kill 後に reap しないと zombie 化 + proc.returncode が None のまま
+            # 残り、下行の stderr 報告判定が抜ける。SIGKILL は即効なので短 timeout で。
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             yield ("error", "claude timeout")
         if proc.returncode not in (0, None):
             err = (proc.stderr.read() if proc.stderr else "")[:600]
