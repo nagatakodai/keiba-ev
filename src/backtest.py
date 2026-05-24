@@ -297,6 +297,11 @@ def _resolve_netkeiba_rid(normalized_rid: str, raw_dir) -> str | None:
 def evaluate_race(case: RaceCase, model: ModelFn) -> RaceMetrics:
     """1 レース 1 モデルの指標を計算。"""
     rows = model(case)
+    return _evaluate_from_rows(case, rows)
+
+
+def _evaluate_from_rows(case: RaceCase, rows: list) -> RaceMetrics:
+    """既に model(case) で取った rows から指標計算 (model を 2 度呼ばないため)。"""
     actual_p = 0.0
     actual_odds = 0.0
     rank = 0
@@ -466,9 +471,12 @@ def run_models(
         }
 
         for case in cases:
-            m = evaluate_race(case, model_fn)
-            per_race.append(m)
+            # model_fn を 1 回だけ呼んで rows と metrics の両方に再利用。
+            # 旧実装は evaluate_race 内で 1 回 + 直後 model_fn(case) で 2 回呼んでおり、
+            # make_rerun_model (raw HTML 再 parse) で実時間 2 倍になっていた。
             evaluated_rows = model_fn(case)
+            m = _evaluate_from_rows(case, evaluated_rows)
+            per_race.append(m)
             for r in evaluated_rows:
                 target = 1.0 if r.key == case.finish else 0.0
                 rows_for_ece.append((r.prob, target))
