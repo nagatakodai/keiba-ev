@@ -7,6 +7,9 @@ type LogEntry = { seq: number; ts: number; stream: string; text: string };
 
 // 親側で `key={url}` を渡してマウントし直す前提。
 // このコンポーネント自体は url を 1 つだけ subscribe する。
+// 一時的な切断後は exponential backoff で auto-reconnect し、受信済 seq の
+// 続きから (?since=N) を渡す。これで watch-auto のような long-running stream で
+// ネットワーク瞬断後にユーザーが reload しなくてもログが復帰する。
 export function LogStream({
   url,
   emptyHint = "(まだログがありません)",
@@ -24,24 +27,54 @@ export function LogStream({
 
   useEffect(() => {
     if (!url) return;
-    const es = new EventSource(url);
-    es.addEventListener("log", (ev) => {
-      try {
-        const data = JSON.parse((ev as MessageEvent).data) as LogEntry;
-        setLines((prev) => [...prev, data]);
-      } catch {
-        // ignore
-      }
-    });
-    es.addEventListener("end", () => {
-      setStatus("ended");
-      es.close();
-    });
-    es.onerror = () => {
-      setStatus("error");
-      es.close();
+    const lastSeqRef = { current: -1 };
+    let retry = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let closed = false;
+    let es: EventSource | null = null;
+
+    const connect = () => {
+      if (closed) return;
+      // 受信済 seq の続きから再開 (server 側 runner.py が ?since= を理解する)。
+      const sep = url.includes("?") ? "&" : "?";
+      const fullUrl =
+        lastSeqRef.current >= 0
+          ? `${url}${sep}since=${lastSeqRef.current + 1}`
+          : url;
+      es = new EventSource(fullUrl);
+      es.addEventListener("log", (ev) => {
+        try {
+          const data = JSON.parse((ev as MessageEvent).data) as LogEntry;
+          lastSeqRef.current = Math.max(lastSeqRef.current, data.seq);
+          retry = 0; // 受信成功で backoff リセット
+          setStatus("open");
+          setLines((prev) => [...prev, data]);
+        } catch {
+          // ignore
+        }
+      });
+      es.addEventListener("end", () => {
+        closed = true;
+        setStatus("ended");
+        es?.close();
+      });
+      es.onerror = () => {
+        es?.close();
+        if (closed) return;
+        // exponential backoff: 1s, 2s, 4s, 8s, 最大 30s
+        retry = Math.min(retry + 1, 5);
+        const delay = Math.min(1000 * 2 ** (retry - 1), 30000);
+        setStatus("error");
+        timer = setTimeout(connect, delay);
+      };
     };
-    return () => es.close();
+    connect();
+
+    return () => {
+      closed = true;
+      if (timer) clearTimeout(timer);
+      es?.close();
+    };
   }, [url]);
 
   useEffect(() => {
