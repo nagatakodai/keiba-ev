@@ -447,7 +447,11 @@ class WatchAutoManager:
             cmd=cmd,
         )
         await self.job.start()
-        _save_watch_state({"should_run": True, "config": self._config})
+        # spawn 失敗 (status="failed") で should_run=True を persist してしまうと
+        # 次回 lifespan startup の resume_if_needed が同じ broken cmd を起動し
+        # 続ける無限ループになる。spawn が成功 (running/pending) の時のみ persist。
+        if self.job.status in ("pending", "running"):
+            _save_watch_state({"should_run": True, "config": self._config})
         return self.job
 
     async def stop(self) -> None:
