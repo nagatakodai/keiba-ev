@@ -236,7 +236,9 @@ export default async function DashboardPage() {
   );
   // 最新 (全期間, 最新 10)
   const latestPreds = preds.items.slice(0, 10);
-  // 最新の的中: raceHitMap に entry があって any plan が hit したもの
+  // 最新の的中: raceHitMap に entry があって any plan が hit したもの。
+  // RaceRow 内の anyHit (line 100-109) と plan セットを一致させる
+  // (Plan G/F のみ的中したレースが latest hits に出ない不整合の修正)。
   const latestHits = preds.items
     .filter((p) => {
       const h = raceHitMap.get(p.race_id);
@@ -245,8 +247,10 @@ export default async function DashboardPage() {
         (h.plan_a_hit ||
           h.plan_b_hit ||
           h.plan_c_hit ||
+          h.plan_g_hit ||
           h.plan_h1_hit ||
-          h.plan_h2_hit)
+          h.plan_h2_hit ||
+          h.plan_f_hit)
       );
     })
     .slice(0, 10);
