@@ -248,7 +248,8 @@ def main() -> int:
             elif plan_name == "C":
                 picks = plan_wide(ev_rows)
             else:
-                picks = []
+                # 将来 Plan B 等を追加した時に silent 0 picks にならないよう明示 error。
+                raise ValueError(f"unknown plan_name: {plan_name!r}")
             n_pts = len(picks)
             if n_pts == 0:
                 continue
