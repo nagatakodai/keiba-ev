@@ -136,6 +136,18 @@ def schedule(
     entries = _load_pending()
     for e in entries:
         if e.race_id == race_id:
+            # 既存 entry が "failed" (max_attempts 到達) なら再 schedule を
+            # 「ユーザーによる手動 retry リクエスト」と解釈して pending に戻す。
+            # auto_watch は同じ race を re-analyze しないので自動 trigger されないが、
+            # 手動 `python -m src.fetch_result schedule` で IP block 解除後の救済が可能になる。
+            if e.status == "failed":
+                e.status = "pending"
+                e.attempts = 0
+                e.last_error = ""
+                e.due_at = int(race_start_at) + delay_sec
+                e.next_attempt_at = int(time.time())
+                e.scheduled_at = int(time.time())
+                _save_pending(entries)
             return e
     due_at = int(race_start_at) + delay_sec
     new = Pending(
