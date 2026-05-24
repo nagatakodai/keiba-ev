@@ -161,7 +161,7 @@ def main(
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
-            feats=feats, lgbm_info=lgbm_info,
+            feats=feats, lgbm_info=lgbm_info, hit_points=hit_points,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -206,7 +206,7 @@ def main(
             )
             if not no_cache:
                 _save_evidence_to_snapshot(
-                    race_id, plan_rows, evidence, apt_top,
+                    race_id, plan_rows, evidence, apt_top, hit_points=hit_points,
                 )
 
     if refresh:
@@ -294,6 +294,7 @@ def _save_evidence_to_snapshot(
     plan_rows,
     evidence: dict,
     aptitude_top_horses: list[int] | None = None,
+    hit_points: int = 3,
 ) -> None:
     snap_path = ROOT / "data" / "predictions" / f"{race_id}.json"
     if not snap_path.exists():
@@ -314,8 +315,9 @@ def _save_evidence_to_snapshot(
     else:
         plan_g = []
     # Plan H1 / H2: Phase 22 で β=0 が overfit と判明 → default β
-    plan_h1 = ev_mod.plan_hit_pure(adjusted, target=3)
-    plan_h2 = ev_mod.plan_hit_safe(adjusted, target=3)
+    # target は CLI --hit-points と一致させて CLI 表示 / calibration を揃える。
+    plan_h1 = ev_mod.plan_hit_pure(adjusted, target=hit_points)
+    plan_h2 = ev_mod.plan_hit_safe(adjusted, target=hit_points)
     plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
     snap["evidence"] = evidence
     snap["evidence_rows"] = [
@@ -459,14 +461,17 @@ def _save_prediction_snapshot(
     market_signals: dict[int, MarketSignal] | None = None,
     feats: dict | None = None,
     lgbm_info: dict | None = None,
+    hit_points: int = 3,
 ) -> None:
     plan_a = ev_mod.plan_balanced(plan_rows)
     plan_b = ev_mod.plan_max_ev(plan_rows)
     plan_c = ev_mod.plan_wide(plan_rows)
     # H1/H2 ("当て枠") も min_prob/ev_max のキャップは尊重する。
     # 5-fold CV で β=0 は overfit と判明 → default β を使う。
-    plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=3)
-    plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=3)
+    # target は CLI --hit-points と一致させて snapshot / calibration が
+    # CLI 表示と乖離しないようにする (旧実装は 3 hardcode で乖離していた)。
+    plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=hit_points)
+    plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=hit_points)
     # Plan G: 適性ゲート → EV 足切り (適性指数 top N 頭の集合で P×O≥1.02)。
     # Phase 23 の sliding-window で β=1.0 +EV 主張が破綻 → default β を使う。
     if aptitude_top_horses:
@@ -1169,7 +1174,7 @@ def _refresh_and_reevaluate(
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
-            feats=feats2, lgbm_info=lgbm_info2,
+            feats=feats2, lgbm_info=lgbm_info2, hit_points=hit_points,
         )
 
     _print_top(rows2, n=show)
@@ -1362,7 +1367,7 @@ def _print_llm_refresh_evaluation(
         )
         if race_id and not no_cache:
             _save_evidence_to_snapshot(
-                race_id, rows, evidence, aptitude_top_horses,
+                race_id, rows, evidence, aptitude_top_horses, hit_points=hit_points,
             )
 
 
