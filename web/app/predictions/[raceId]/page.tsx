@@ -448,7 +448,7 @@ function AptitudeCard({
         <span className="flex items-center gap-2">
           <span>適性指数</span>
           <span className="text-xs text-(--color-muted) font-normal">
-            各馬の相対適性 0-100 (同レース内 max=100) · 総合 = 8 因子重み付け平均
+            各馬の相対適性 0-100 (同レース内 max=100) · 総合 = 9 因子重み付け平均
           </span>
         </span>
       }
