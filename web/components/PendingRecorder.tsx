@@ -86,7 +86,7 @@ function RecorderRow({
   };
 
   const inputCls =
-    "w-12 text-center bg-white border border-(--color-line) px-1 py-1 text-sm focus:outline-none focus:border-(--color-accent) tabnum";
+    "w-14 text-center bg-white border border-(--color-line) px-1 py-1 text-sm focus:outline-none focus:border-(--color-accent) tabnum";
 
   const internalId = looksLikeInternalRaceId(item.race_id);
 
@@ -140,7 +140,7 @@ function RecorderRow({
               value={a}
               onChange={(e) => setA(e.target.value)}
               inputMode="numeric"
-              maxLength={1}
+              maxLength={2}
             />
             <span className="text-(--color-muted)">-</span>
             <input
@@ -149,7 +149,7 @@ function RecorderRow({
               value={b}
               onChange={(e) => setB(e.target.value)}
               inputMode="numeric"
-              maxLength={1}
+              maxLength={2}
             />
             <span className="text-(--color-muted)">-</span>
             <input
@@ -158,7 +158,7 @@ function RecorderRow({
               value={c}
               onChange={(e) => setC(e.target.value)}
               inputMode="numeric"
-              maxLength={1}
+              maxLength={2}
             />
           </div>
           <input
