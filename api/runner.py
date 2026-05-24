@@ -341,6 +341,18 @@ class WatchAutoManager:
     def __init__(self) -> None:
         self.job: Job | None = None
         self._config: dict[str, Any] = {}
+        # start/stop/resume の concurrent 呼び出しで Job が二重 spawn → 孤児化
+        # するのを防ぐ。POST /api/watch-auto/start を 2 ブラウザから同時クリックで
+        # 起こる: POST_A が `await self.job.start()` で suspend している間に
+        # POST_B が `self.running` check (status=pending のまま False) を通過し、
+        # self.job を上書きするので POST_A の subprocess が stop() でも倒せない。
+        self._lock: asyncio.Lock | None = None
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        # lazy 初期化: import 時に running event loop が無くても OK にする。
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     @property
     def running(self) -> bool:
@@ -364,8 +376,32 @@ class WatchAutoManager:
         with_trio: bool = False,
         active_hours: str = "09:00-23:45",
     ) -> Job:
-        if self.running:
-            return self.job  # type: ignore[return-value]
+        async with self._ensure_lock():
+            return await self._start_locked(
+                window=window, tolerance=tolerance, interval_sec=interval_sec,
+                ev_max=ev_max, min_prob=min_prob, market_blend=market_blend,
+                aptitude_top=aptitude_top, with_exacta=with_exacta,
+                with_trio=with_trio, active_hours=active_hours,
+            )
+
+    async def _start_locked(
+        self,
+        *,
+        window: int,
+        tolerance: int,
+        interval_sec: int,
+        ev_max: float | None,
+        min_prob: float | None,
+        market_blend: float | None,
+        aptitude_top: int | None,
+        with_exacta: bool,
+        with_trio: bool,
+        active_hours: str,
+    ) -> Job:
+        # self.job が既に "running" なら早期 return。pending (spawn 中) も
+        # 二重 spawn 防止のため return する。
+        if self.job is not None and self.job.status in ("pending", "running"):
+            return self.job
 
         # Python ラッパで while ループを回す (api/_watch_loop.py)。
         # bash を挟むと SIGKILL 時に孫プロセスが孤児化するため。
@@ -415,9 +451,10 @@ class WatchAutoManager:
         return self.job
 
     async def stop(self) -> None:
-        if self.job:
-            await self.job.cancel()
-        _save_watch_state({"should_run": False, "config": self._config})
+        async with self._ensure_lock():
+            if self.job:
+                await self.job.cancel()
+            _save_watch_state({"should_run": False, "config": self._config})
 
     async def resume_if_needed(self) -> Job | None:
         """lifespan startup から呼ぶ。should_run=true なら前回の config で再起動。"""
