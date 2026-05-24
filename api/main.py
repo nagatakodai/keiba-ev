@@ -302,14 +302,19 @@ def api_pending_delete(race_id: str) -> dict[str, Any]:
     auto-prune (24h) より早くキューから消したい場合に使う。
     返り値: removed (削除された件数, 0/1)、total (削除後の総件数)。
     """
-    from src.fetch_result import _load_pending, _save_pending
-    entries = _load_pending()
-    before = len(entries)
-    entries = [e for e in entries if e.race_id != race_id]
-    removed = before - len(entries)
-    if removed > 0:
-        _save_pending(entries)
-    return {"removed": removed, "race_id": race_id, "total": len(entries)}
+    from src.fetch_result import _load_pending, _pending_lock, _save_pending
+    # auto_watch loop の process_pending と同じ file lock 下で read/mutate/save。
+    # lock 無しだと auto_watch が _load → 削除分が auto_watch の旧 entries
+    # save で復活する lost update が起こる。
+    with _pending_lock():
+        entries = _load_pending()
+        before = len(entries)
+        entries = [e for e in entries if e.race_id != race_id]
+        removed = before - len(entries)
+        if removed > 0:
+            _save_pending(entries)
+        total = len(entries)
+    return {"removed": removed, "race_id": race_id, "total": total}
 
 
 @app.get("/api/pending")

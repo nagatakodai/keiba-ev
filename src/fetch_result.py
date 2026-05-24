@@ -95,6 +95,18 @@ def save_result(race_id: str, payload: dict, *, note: str = "") -> Path:
 
 
 # --- 永続 pending キュー ---
+#
+# 複数 process (auto_watch loop / api server / 手動 CLI) から同じ file を
+# read/mutate/save するため、file lock + atomic write で:
+#   - lost update (auto_watch が _load → 別 process が DELETE/save → auto_watch が
+#     旧 entries で _save → DELETE 消失) を防ぐ
+#   - partial write (中断 / disk full で 0 byte / 半端 JSON が残り、_load_pending が
+#     JSONDecodeError 経由で全 pending 消失する) を防ぐ
+#
+# 使い方: read/mutate/save の sequence は `with _pending_lock():` で wrap する。
+# 単発 _load_pending (read-only) は lock 無しでも safety net (broken JSON → []) で
+# 動くが、UI 表示時の一時的な不整合を防ぐため lock を取るのが望ましい。
+
 
 def _load_pending() -> list[Pending]:
     if not PENDING_FILE.exists():
@@ -113,11 +125,42 @@ def _load_pending() -> list[Pending]:
 
 
 def _save_pending(entries: list[Pending]) -> None:
+    """atomic rename で書き込む。同一 dir の tmp に write → os.replace で
+    POSIX 上 atomic な rename になる (truncate→write 中の中断で破損しない)。
+    """
+    import os
     PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PENDING_FILE.write_text(
-        json.dumps({"races": [asdict(e) for e in entries]}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    payload = json.dumps({"races": [asdict(e) for e in entries]}, ensure_ascii=False, indent=2)
+    tmp = PENDING_FILE.with_suffix(PENDING_FILE.suffix + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, PENDING_FILE)
+
+
+_PENDING_LOCK_FILE = PENDING_FILE.with_suffix(PENDING_FILE.suffix + ".lock")
+
+
+def _pending_lock():
+    """process-safe lock context manager (fcntl.flock)。
+    auto_watch loop / api server / 手動 CLI が同じ pending file を
+    read/mutate/save する race を防ぐ。Windows 非対応 (本 repo は Linux 限定)。
+    """
+    import fcntl
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        f = open(_PENDING_LOCK_FILE, "w")
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            finally:
+                f.close()
+
+    return _cm()
 
 
 def schedule(
@@ -133,34 +176,37 @@ def schedule(
         return Pending(
             race_id=race_id, url="", due_at=0, next_attempt_at=0, status="success",
         )
-    entries = _load_pending()
-    for e in entries:
-        if e.race_id == race_id:
-            # 既存 entry が "failed" (max_attempts 到達) なら再 schedule を
-            # 「ユーザーによる手動 retry リクエスト」と解釈して pending に戻す。
-            # auto_watch は同じ race を re-analyze しないので自動 trigger されないが、
-            # 手動 `python -m src.fetch_result schedule` で IP block 解除後の救済が可能になる。
-            if e.status == "failed":
-                e.status = "pending"
-                e.attempts = 0
-                e.last_error = ""
-                e.due_at = int(race_start_at) + delay_sec
-                e.next_attempt_at = int(time.time())
-                e.scheduled_at = int(time.time())
-                _save_pending(entries)
-            return e
-    due_at = int(race_start_at) + delay_sec
-    new = Pending(
-        race_id=race_id,
-        url=racecard_url,
-        due_at=due_at,
-        next_attempt_at=due_at,
-        max_attempts=max_attempts,
-        retry_interval_sec=retry_interval_sec,
-    )
-    entries.append(new)
-    _save_pending(entries)
-    return new
+    # read/mutate/save を file lock で序列化 (auto_watch / api server 同時走行で
+    # lost update が起こらないようにする)。
+    with _pending_lock():
+        entries = _load_pending()
+        for e in entries:
+            if e.race_id == race_id:
+                # 既存 entry が "failed" (max_attempts 到達) なら再 schedule を
+                # 「ユーザーによる手動 retry リクエスト」と解釈して pending に戻す。
+                # auto_watch は同じ race を re-analyze しないので自動 trigger されないが、
+                # 手動 `python -m src.fetch_result schedule` で IP block 解除後の救済が可能になる。
+                if e.status == "failed":
+                    e.status = "pending"
+                    e.attempts = 0
+                    e.last_error = ""
+                    e.due_at = int(race_start_at) + delay_sec
+                    e.next_attempt_at = int(time.time())
+                    e.scheduled_at = int(time.time())
+                    _save_pending(entries)
+                return e
+        due_at = int(race_start_at) + delay_sec
+        new = Pending(
+            race_id=race_id,
+            url=racecard_url,
+            due_at=due_at,
+            next_attempt_at=due_at,
+            max_attempts=max_attempts,
+            retry_interval_sec=retry_interval_sec,
+        )
+        entries.append(new)
+        _save_pending(entries)
+        return new
 
 
 def process_pending(
@@ -169,64 +215,80 @@ def process_pending(
 ) -> dict:
     if now_ts is None:
         now_ts = int(time.time())
-    entries = _load_pending()
     summary: dict[str, Any] = {
         "checked": 0, "success": [], "failed": [],
         "still_pending": 0, "not_due": 0, "pruned": 0,
     }
 
-    cutoff = now_ts - TERMINAL_RETENTION_SEC
-    before_prune = len(entries)
-    entries = [
-        e for e in entries
-        if not (e.status in ("success", "failed") and e.scheduled_at < cutoff)
-    ]
-    summary["pruned"] = before_prune - len(entries)
-
-    due_idx = sorted(
-        (i for i, e in enumerate(entries) if e.status == "pending" and now_ts >= e.next_attempt_at),
-        key=lambda i: entries[i].next_attempt_at,
-    )
-    summary["not_due"] = sum(
-        1 for e in entries if e.status == "pending" and now_ts < e.next_attempt_at
-    )
-
-    if not due_idx:
+    # Phase 1: lock 取得して prune + due_idx 決定。fetch 自体は lock 外で行う
+    # (HTTP 数秒で lock 抱え込むと UI/API が hang する)。
+    with _pending_lock():
+        entries = _load_pending()
+        cutoff = now_ts - TERMINAL_RETENTION_SEC
+        before_prune = len(entries)
+        entries = [
+            e for e in entries
+            if not (e.status in ("success", "failed") and e.scheduled_at < cutoff)
+        ]
+        summary["pruned"] = before_prune - len(entries)
+        due_idx = sorted(
+            (i for i, e in enumerate(entries) if e.status == "pending" and now_ts >= e.next_attempt_at),
+            key=lambda i: entries[i].next_attempt_at,
+        )
+        summary["not_due"] = sum(
+            1 for e in entries if e.status == "pending" and now_ts < e.next_attempt_at
+        )
+        if not due_idx:
+            if summary["pruned"] > 0:
+                _save_pending(entries)
+            return summary
+        # 処理対象 race_id をスナップショット。
+        target_ids = [entries[i].race_id for i in due_idx[:max_per_tick]]
+        target_urls = {entries[i].race_id: entries[i].url for i in due_idx[:max_per_tick]}
+        # prune だけ先に反映 (失敗してもいい変更なので)
         if summary["pruned"] > 0:
             _save_pending(entries)
-        return summary
 
-    changed = summary["pruned"] > 0
-    for i in due_idx[:max_per_tick]:
-        e = entries[i]
-        summary["checked"] += 1
-        fetch_url = result_url_from_racecard(e.url)
-        result, reason = fetch_result_with_reason(fetch_url)
-        e.last_error = reason
-        e.attempts += 1
+    # Phase 2: lock 外で fetch を実行 (各 race 数秒)。
+    fetched: dict[str, tuple[dict | None, str]] = {}
+    for rid in target_ids:
+        fetch_url = result_url_from_racecard(target_urls[rid])
+        fetched[rid] = fetch_result_with_reason(fetch_url)
 
-        if result and result.get("finish_order"):
-            try:
-                save_result(e.race_id, result)
-                e.status = "success"
-                e.last_error = ""
-                summary["success"].append(e.race_id)
-            except Exception as ex:
-                e.last_error = f"save error: {ex}"
+    # Phase 3: lock 取り直して結果反映 (read again — 別 process の変更を取り込む)。
+    with _pending_lock():
+        entries = _load_pending()
+        by_id = {e.race_id: e for e in entries}
+        changed = False
+        for rid in target_ids:
+            e = by_id.get(rid)
+            if e is None or e.status != "pending":
+                # 別 process が DELETE / 状態変更した — skip
+                continue
+            summary["checked"] += 1
+            result, reason = fetched[rid]
+            e.last_error = reason
+            e.attempts += 1
+            if result and result.get("finish_order"):
+                try:
+                    save_result(e.race_id, result)
+                    e.status = "success"
+                    e.last_error = ""
+                    summary["success"].append(e.race_id)
+                except Exception as ex:
+                    e.last_error = f"save error: {ex}"
+            if e.status != "success":
+                if e.attempts >= e.max_attempts:
+                    e.status = "failed"
+                    summary["failed"].append(e.race_id)
+                else:
+                    e.next_attempt_at = now_ts + e.retry_interval_sec
+                    summary["still_pending"] += 1
+            changed = True
 
-        if e.status != "success":
-            if e.attempts >= e.max_attempts:
-                e.status = "failed"
-                summary["failed"].append(e.race_id)
-            else:
-                e.next_attempt_at = now_ts + e.retry_interval_sec
-                summary["still_pending"] += 1
-        changed = True
-
-    summary["still_pending"] += max(0, len(due_idx) - max_per_tick)
-
-    if changed:
-        _save_pending(entries)
+        summary["still_pending"] += max(0, len(due_idx) - max_per_tick)
+        if changed:
+            _save_pending(entries)
     return summary
 
 
