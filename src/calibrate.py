@@ -47,7 +47,7 @@ def main(
         lambda: {"prob_sum": 0.0, "hits": 0, "rows": 0}
     )
     plan_stats: dict[str, dict] = defaultdict(
-        lambda: {"hits": 0, "payouts": 0, "races": 0, "total_points": 0}
+        lambda: {"hits": 0, "payouts": 0, "races": 0, "participated_races": 0, "total_points": 0}
     )
     per_race_records: list[dict] = []
 
@@ -91,6 +91,8 @@ def main(
                 continue
             plan_stats[plan_name]["races"] += 1
             plan_stats[plan_name]["total_points"] += len(key_list)
+            if key_list:
+                plan_stats[plan_name]["participated_races"] += 1
             keys_set = {tuple(k) for k in key_list}
             hit = finish_tuple in keys_set
             race_plan_results[plan_name] = hit
@@ -165,6 +167,7 @@ def _print_plan_table(plan_stats: dict[str, dict], point_cost: int) -> None:
     tbl = Table(title=f"Plan 別 ROI (1点 ¥{point_cost})", show_lines=False)
     tbl.add_column("Plan", style="bold")
     tbl.add_column("races", justify="right")
+    tbl.add_column("打席", justify="right")
     tbl.add_column("hits", justify="right")
     tbl.add_column("hit 率", justify="right")
     tbl.add_column("総点数", justify="right")
@@ -175,7 +178,10 @@ def _print_plan_table(plan_stats: dict[str, dict], point_cost: int) -> None:
         s = plan_stats[name]
         if s["races"] == 0:
             continue
-        rate = s["hits"] / s["races"] if s["races"] else 0.0
+        # hit 率 は participated_races (picks > 0 のレース) で割る (api/store と同じ)。
+        # Plan G/H1/H2 は picks 0 で見送りになる race が多く、races で割ると過小化する。
+        participated = s["participated_races"]
+        rate = s["hits"] / participated if participated else 0.0
         stake = s["total_points"] * point_cost
         payout = s["payouts"]
         roi = (payout / stake) if stake > 0 else 0.0
@@ -188,6 +194,7 @@ def _print_plan_table(plan_stats: dict[str, dict], point_cost: int) -> None:
         tbl.add_row(
             name,
             str(s["races"]),
+            str(participated),
             str(s["hits"]),
             f"{rate*100:.1f}%",
             str(s["total_points"]),
