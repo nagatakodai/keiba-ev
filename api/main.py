@@ -36,6 +36,9 @@ from starlette.responses import JSONResponse
 
 from .runner import JobRegistry, WatchAutoManager, build_analyze_cmd, shutdown_all_jobs
 from .store import (
+    PRED_DIR,
+    RESULT_DIR,
+    _safe_race_id,
     compute_calibration,
     get_prediction,
     list_auto_watch_history,
@@ -110,6 +113,55 @@ def api_prediction(race_id: str) -> dict[str, Any]:
 @app.get("/api/calibrate")
 def api_calibrate(point_cost: int = 100) -> dict[str, Any]:
     return compute_calibration(point_cost=point_cost)
+
+
+# --- record (Web UI PendingRecorder からの手動着順入力) ---
+
+class RecordRequest(BaseModel):
+    race_id: str
+    finish_order: list[int] = Field(..., min_length=3, max_length=3)
+    trifecta_payout: int = 0
+    note: str | None = None
+
+
+@app.post("/api/record")
+def api_record(req: RecordRequest) -> dict[str, Any]:
+    """data/results/<race_id>.json に手動で着順を保存。
+    src/record.py CLI と同じ振る舞い (既存 file 上書き禁止、prediction との突合)。
+    """
+    import datetime as dt
+
+    safe = _safe_race_id(req.race_id)
+    if safe is None:
+        raise HTTPException(400, "invalid race_id")
+    if any(n < 1 or n > 18 for n in req.finish_order):
+        raise HTTPException(400, "finish_order must contain 馬番 1..18")
+    if len(set(req.finish_order)) != 3:
+        raise HTTPException(400, "finish_order must be 3 unique 馬番")
+    if req.trifecta_payout < 0:
+        raise HTTPException(400, "trifecta_payout must be non-negative")
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RESULT_DIR / f"{safe}.json"
+    if out_path.exists():
+        # CLI 同様、誤上書き防止。意図的な訂正は UI からは不可 (CLI で --overwrite)。
+        raise HTTPException(409, f"result already recorded: {safe}")
+    payload = {
+        "race_id": safe,
+        "finish_order": req.finish_order,
+        "trifecta_payout": int(req.trifecta_payout),
+        "note": req.note or "",
+        "recorded_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "source": "manual",
+    }
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    pred_path = PRED_DIR / f"{safe}.json"
+    return {
+        "saved": True,
+        "race_id": safe,
+        "finish_order": req.finish_order,
+        "trifecta_payout": int(req.trifecta_payout),
+        "matched": pred_path.exists(),
+    }
 
 
 # --- analyze jobs ---
