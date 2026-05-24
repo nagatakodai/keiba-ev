@@ -86,7 +86,10 @@ def main() -> int:
     X = valid[feature_cols].astype("float64").fillna(0.0)
     valid["score"] = booster.predict(X.values, num_iteration=booster.best_iteration)
 
-    T = LGBM_TEMPERATURE
+    # production と同じ booster を load しているので production T (META の
+    # softmax_temperature) を使う。LGBM_TEMPERATURE constant を直接使うと
+    # META 側で T が再 tune された時 (e.g. T=0.45) に評価結果が乖離する。
+    T = float(meta.get("softmax_temperature") or LGBM_TEMPERATURE)
     def _race_softmax(s: pd.Series) -> pd.Series:
         scaled = s / T
         m = scaled.max()

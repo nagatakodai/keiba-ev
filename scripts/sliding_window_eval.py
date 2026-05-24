@@ -195,7 +195,11 @@ def main() -> int:
             best_T_w4 = T_test
             marker = " ←"
         print(f"{T_test:>5.2f}{marker} {ll_mean:>9.4f} {top1_hits/n_r*100:>9.1f}%", flush=True)
-    print(f"W4 best T = {best_T_w4} (production T = {LGBM_TEMPERATURE})", flush=True)
+    # 注: LGBM_TEMPERATURE constant は default 値で、実際の production T は
+    # data/models/lgbm_metadata.json の softmax_temperature を見る (再 tune 時に
+    # constant と乖離する)。ここでは W4 (本スクリプトで再訓練した booster) の
+    # 評価のため LGBM_TEMPERATURE constant を baseline として使う。
+    print(f"W4 best T = {best_T_w4} (constant LGBM_TEMPERATURE = {LGBM_TEMPERATURE})", flush=True)
     print()
 
     T = LGBM_TEMPERATURE
@@ -319,24 +323,25 @@ def main() -> int:
         print(f"{beta:>5.2f} {top_hits/n_r*100:>9.1f}% {roi*100:>10.1f}% {wins:>5}", flush=True)
     print()
 
-    # ==== 単勝 confidence-based bet filter @ β=0.78 ====
+    # ==== 単勝 confidence-based bet filter @ β=BLEND_DEFAULT ====
     # 「モデル top horse の予測 prob が高いほど実際当たりやすいか」を確認。
     # 当たりやすいなら confidence 下限で skip 戦略 (race を打たない) が有効。
-    print("=== 単勝 ROI by top-1 confidence bin @ β=0.78 (n=149) ===", flush=True)
+    # 旧実装は 0.78 literal で BLEND_DEFAULT 変更時に silent drift する pattern。
+    print(f"=== 単勝 ROI by top-1 confidence bin @ β={BLEND_DEFAULT} (n=149) ===", flush=True)
     print(f"{'bin':>15} {'n races':>8} {'hit rate':>9} {'ROI':>8} {'avg odds':>10}", flush=True)
     print("-" * 55, flush=True)
-    valid["sb_078"] = (
+    valid["sb_prod"] = (
         valid.groupby("race_id", sort=False, group_keys=False)
-        .apply(lambda g: _blend(g, 0.78), include_groups=False)
+        .apply(lambda g: _blend(g, BLEND_DEFAULT), include_groups=False)
     )
     # 各 race の top-1 row を集める
     race_picks: list[tuple[str, float, bool, float]] = []
     for rid, g in valid.groupby("race_id", sort=False):
-        top_idx = g["sb_078"].idxmax()
+        top_idx = g["sb_prod"].idxmax()
         top = g.loc[top_idx]
         race_picks.append((
             rid,
-            float(top["sb_078"]),
+            float(top["sb_prod"]),
             bool(top["target_top1"] == 1),
             float(top["win_odds"]) if top["win_odds"] > 0 else 0.0,
         ))
