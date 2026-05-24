@@ -47,7 +47,9 @@ export default function WatchAutoPage() {
   const [intervalSec, setIntervalSec] = useState("60");
   const [evMax, setEvMax] = useState("");
   const [minProb, setMinProb] = useState("2.0");
-  const [marketBlend, setMarketBlend] = useState("0.9");
+  // 空 = backend BLEND_DEFAULT (=0.78) を使う。CLAUDE.md の production 設定。
+  // 過去 "0.9" を default にしていたが CLI / make watch-auto と挙動が乖離していた。
+  const [marketBlend, setMarketBlend] = useState("");
   const [aptitudeTop, setAptitudeTop] = useState("6");
   const [withExacta, setWithExacta] = useState(false);
   const [withTrio, setWithTrio] = useState(false);

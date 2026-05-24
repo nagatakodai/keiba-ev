@@ -12,7 +12,8 @@ export default function AnalyzePage() {
   const [noLlm, setNoLlm] = useState(false);
   const [evMax, setEvMax] = useState("");
   const [minProb, setMinProb] = useState("2.0");
-  const [marketBlend, setMarketBlend] = useState("0.9");
+  // 空 = backend BLEND_DEFAULT (=0.78) を使う。CLAUDE.md の production 設定。
+  const [marketBlend, setMarketBlend] = useState("");
   const [aptitudeTop, setAptitudeTop] = useState("6");
   const [withExacta, setWithExacta] = useState(false);
   const [withTrio, setWithTrio] = useState(false);
