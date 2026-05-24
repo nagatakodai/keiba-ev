@@ -166,17 +166,13 @@ def main() -> int:
     t_grid = (0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.5, 2.0)
     best_T_w4 = 1.0
     best_ll = float("inf")
+    def _race_softmax_T(s: pd.Series, t: float) -> pd.Series:
+        scaled = s / t
+        m = scaled.max()
+        ex = np.exp(scaled - m)
+        return ex / ex.sum()
     for T_test in t_grid:
         col = f"lp_T{T_test}"
-        valid[col] = valid.groupby("race_id", sort=False)["score"].transform(
-            lambda s, t=T_test: (lambda ex: ex / ex.sum())(np.exp((s - s.max()) / t - (s.max() / t - s.max() / t)))
-        )
-        # Simpler softmax
-        def _race_softmax_T(s: pd.Series, t: float) -> pd.Series:
-            scaled = s / t
-            m = scaled.max()
-            ex = np.exp(scaled - m)
-            return ex / ex.sum()
         valid[col] = valid.groupby("race_id", sort=False)["score"].transform(
             lambda s, t=T_test: _race_softmax_T(s, t)
         )
