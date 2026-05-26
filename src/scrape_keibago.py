@@ -23,8 +23,8 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 
-from .models import BetOdds, TrifectaOdds
-from .parse import VENUE_CODE, is_nar_race_id
+from .models import BetOdds, Horse, Race, RaceData, TrifectaOdds
+from .parse import VENUE_CODE, _split_race_id, is_nar_race_id
 
 _BASE = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -162,6 +162,20 @@ def parse_trifecta(html: str) -> list[TrifectaOdds]:
     ]
 
 
+def parse_horse_list(html: str) -> list[tuple[int, str, float]]:
+    """単複ページ → [(馬番, 馬名, 単勝)]。cache 出馬表が無い時の出走馬ソース。"""
+    out: list[tuple[int, str, float]] = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL):
+        c = _cells(row)
+        if len(c) < 4 or not c[1].isdigit():
+            continue
+        tan = _f(c[3])
+        if tan is None or tan <= 0:
+            continue
+        out.append((int(c[1]), c[2], tan))
+    return out
+
+
 def _to_bets(items: list[tuple[int, float]], bet_type: str) -> list[BetOdds]:
     items = sorted(items, key=lambda kv: kv[1])
     return [
@@ -262,12 +276,185 @@ def check_consistency(other_bets: dict, trifecta: list) -> dict:
     }
 
 
+def build_keibago_racedata(netkeiba_rid: str, horses: list[tuple[int, str, float]]) -> RaceData:
+    """cache 出馬表が無い場合の RaceData (keiba.go.jp 単複の馬リスト由来)。
+
+    keiba.go.jp は馬柱 (past_runs) を持たないので past_runs は空 = 市場ブレンド主導の
+    確率になる (cache に netkeiba 馬柱があれば analyze_keibago 側でそちらを使う)。
+    """
+    venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
+    horse_rows = [Horse(number=n, name=nm, win_odds=od) for n, nm, od in horses]
+    race = Race(
+        cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
+        venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
+        venue_name=venue, race_class="", distance=0, horses=horse_rows,
+    )
+    return RaceData(race=race, trifecta=[], other_bets={})
+
+
+def _tag_snapshot_source(race_id: str, source: str) -> None:
+    import json
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "data" / "predictions" / f"{race_id}.json"
+    if not p.exists():
+        return
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        d["odds_source"] = source
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
+                    with_llm: bool = True) -> dict:
+    """NAR race を keiba.go.jp の全6券種オッズで解析 (netkeiba/oddspark の上位互換)。
+
+    出馬表/馬柱は data/raw の netkeiba cache があれば使い (確率モデルが効く)、無ければ
+    keiba.go.jp 単複の馬リストで市場ブレンド主導の確率を出す。**check_consistency で
+    ワイド>馬連 等を検知したら pair/trio 系を drop** (誤オッズより見送り)。
+    save_snapshot=True で data/predictions/<race_id>.json を保存。
+    """
+    import gzip
+    from pathlib import Path
+
+    from . import ev as ev_mod
+    from . import portfolio as pf
+    from .parse import parse_past_runs, parse_shutuba
+
+    loc = find_keibago_race(netkeiba_rid)
+    if loc is None:
+        raise KeibagoError(f"keiba.go.jp で {netkeiba_rid} の開催が見つからない (当日 NAR/場名)")
+    res = fetch_keibago_bets(loc)
+    other = res["other_bets"]
+    trifecta = res["trifecta"]
+    cons = res["consistency"]
+    if not other.get("win"):
+        raise KeibagoError("keiba.go.jp オッズが空")
+    # 安全ゲート: ワイド>馬連 等の異常を検知したら pair/trio を捨てる (誤オッズを出さない)
+    if not cons["ok"]:
+        for bt in ("quinella", "wide", "exacta", "trio"):
+            other[bt] = []
+
+    root = Path(__file__).resolve().parents[1]
+    sh = root / "data" / "raw" / f"{netkeiba_rid}-shutuba.html.gz"
+    used_cache = False
+    if sh.exists():
+        rd = parse_shutuba(gzip.open(sh, "rt", encoding="utf-8").read(), race_id=netkeiba_rid)
+        past = root / "data" / "raw" / f"{netkeiba_rid}-past.html.gz"
+        if past.exists():
+            runs = parse_past_runs(gzip.open(past, "rt", encoding="utf-8").read())
+            for h in rd.race.horses:
+                h.past_runs = runs.get(h.number, [])
+        used_cache = True
+    else:
+        rd = build_keibago_racedata(netkeiba_rid, parse_horse_list(_get(_odds_url(loc, _EP["tanfuku"]))))
+
+    if start_at and not rd.race.start_at:
+        rd.race.start_at = start_at
+        rd.race.close_at = start_at
+
+    rd.other_bets = {bt: v for bt, v in other.items() if v}
+    rd.trifecta = trifecta
+
+    win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
+    s = sum(1.0 / o for o in win_odds.values()) or 1.0
+    mwp = {n: (1.0 / o) / s for n, o in win_odds.items()}
+    probs = ev_mod.estimate_probs(rd, market_blend=0.78, market_win_override=mwp)
+    tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
+              for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
+    tri_table = ev_mod.build_table(rd, probs) if rd.trifecta else []
+    cands = [
+        {"bet_type": r.bet_type, "key": list(r.key), "odds": r.odds,
+         "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
+        for tbl in tables.values() for r in tbl
+    ]
+    cands += [
+        {"bet_type": "trifecta", "key": list(r.key), "odds": r.odds,
+         "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
+        for r in tri_table
+    ]
+    bundle = pf.build_bundle(cands, probs)
+    bundle["source"] = "keibago"
+    tables["trifecta"] = tri_table
+
+    if save_snapshot:
+        from . import analyze as az_mod
+        from .aptitude import compute_aptitudes
+        from .features import build_features
+        race_id = f"{rd.race.cup_id}-{rd.race.schedule_index}-{rd.race.race_number}"
+        has_past = any(h.past_runs for h in rd.race.horses)
+        feats = build_features(rd) if (used_cache or has_past) else None
+        aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
+        apt_top = az_mod._aptitude_top_horses(aptitudes, n=6) if aptitudes else None
+        plan_rows = ev_mod.apply_caps(tri_table)
+        snap_bet_tables = {k: v for k, v in tables.items() if k in ("win", "place") and v}
+        try:
+            from .market_signal import compute_market_signals
+            market_signals = compute_market_signals(rd)
+        except Exception:  # noqa: BLE001
+            market_signals = None
+        best_times = az_mod._serialize_best_times(rd, feats) if feats else []
+        try:
+            az_mod._save_prediction_snapshot(
+                race_id, rd, tri_table, plan_rows, aptitudes, snap_bet_tables, apt_top,
+                market_signals, feats=feats, lgbm_info=ev_mod.lgbm_status(),
+                hit_points=3, probs=probs,
+            )
+            _tag_snapshot_source(race_id, "keibago")
+        except Exception as ex:  # noqa: BLE001
+            print(f"[analyze_keibago] snapshot 保存失敗: {ex}")
+        if with_llm:
+            from . import llm as llm_mod
+            try:
+                initial = az_mod._print_llm_evaluation(
+                    rd, plan_rows, model="opus", probs=probs, aptitudes=aptitudes,
+                    aptitude_top_horses=apt_top, market_signals=market_signals,
+                    horse_best_times=best_times,
+                )
+                evidence = llm_mod.parse_evidence(initial)
+                if evidence:
+                    az_mod._save_evidence_to_snapshot(race_id, plan_rows, evidence, apt_top, hit_points=3)
+            except Exception as ex:  # noqa: BLE001
+                print(f"[analyze_keibago] LLM evidence 失敗: {ex}")
+            try:
+                az_mod._validate_and_update_bundle(
+                    race_id, rd, probs, tri_table, snap_bet_tables,
+                    aptitudes=aptitudes, market_signals=market_signals,
+                    horse_best_times=best_times, model="opus",
+                )
+            except Exception as ex:  # noqa: BLE001
+                print(f"[analyze_keibago] bundle 検証失敗: {ex}")
+
+    return {"rd": rd, "probs": probs, "loc": loc, "used_cache": used_cache,
+            "tables": tables, "bundle": bundle, "consistency": cons}
+
+
 def _main() -> None:
     import sys
-    if len(sys.argv) < 2:
-        print("usage: python -m src.scrape_keibago <netkeiba_nar_race_id>")
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not args:
+        print("usage: python -m src.scrape_keibago <netkeiba_nar_race_id> "
+              "[--snapshot] [--start-at=UNIX] [--no-llm]")
         raise SystemExit(2)
-    rid = sys.argv[1]
+    rid = args[0]
+    save = "--snapshot" in sys.argv
+    start_at = 0
+    for a in sys.argv:
+        if a.startswith("--start-at="):
+            start_at = int(a.split("=", 1)[1] or 0)
+    if save:
+        try:
+            res = analyze_keibago(rid, save_snapshot=True, start_at=start_at,
+                                  with_llm="--no-llm" not in sys.argv)
+        except KeibagoError as ex:
+            print(f"keiba.go.jp 解析不能 ({rid}): {ex}")
+            raise SystemExit(1)
+        loc, c = res["loc"], res["consistency"]
+        print(f"=== keiba.go.jp {loc.venue} {loc.race_no}R snapshot 保存 "
+              f"({'cache 出馬表' if res['used_cache'] else '馬リストのみ'}) "
+              f"ok={c['ok']} bundle脚={len(res['bundle'].get('legs', []))} ===")
+        return
     loc = find_keibago_race(rid)
     if not loc:
         print(f"keiba.go.jp で {rid} を解決できません (当日開催 NAR か / 場名照合を確認)")

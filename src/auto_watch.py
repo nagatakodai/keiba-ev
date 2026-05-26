@@ -190,6 +190,15 @@ def _dispatch_analyze(url: str, extra_args: list[str]) -> int:
     return proc.returncode
 
 
+def _dispatch_keibago(netkeiba_rid: str, start_at: int = 0) -> int:
+    """netkeiba block 中の NAR: keiba.go.jp の全6券種オッズで解析し snapshot を保存。"""
+    cmd = [sys.executable, "-m", "src.scrape_keibago", netkeiba_rid,
+           "--snapshot", f"--start-at={start_at}"]
+    console.print(f"[bold cyan]→ keiba.go.jp analyze:[/bold cyan] {netkeiba_rid}")
+    proc = subprocess.run(cmd, cwd=ROOT)
+    return proc.returncode
+
+
 def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0) -> int:
     """netkeiba block 中の NAR: oddspark オッズで解析し snapshot を保存。"""
     cmd = [sys.executable, "-m", "src.scrape_oddspark", netkeiba_rid,
@@ -197,6 +206,20 @@ def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0) -> int:
     console.print(f"[bold cyan]→ oddspark analyze:[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
+
+
+def _dispatch_nar_fallback(netkeiba_rid: str, start_at: int = 0) -> int:
+    """NAR フォールバック: keiba.go.jp (全6券種・組合せ明示) を優先、失敗時 oddspark。
+
+    keiba.go.jp は馬連/ワイド/馬単/3連複/3連単 を組合せ明示で取れるので oddspark
+    (単複/3連単のみ + グリッド誤オッズ回避で他を無効) より優れる。当日 NAR で
+    keiba.go.jp が解決できない (場名/開催) 場合のみ oddspark に落ちる。
+    """
+    rc = _dispatch_keibago(netkeiba_rid, start_at)
+    if rc != 0:
+        console.print("[yellow]keiba.go.jp 不可 → oddspark にフォールバック[/yellow]")
+        rc = _dispatch_oddspark(netkeiba_rid, start_at)
+    return rc
 
 
 def _drain_pending(*, label: str = "") -> None:
@@ -311,8 +334,8 @@ def main(
             continue
         started_at = int(time.time())
         if race.get("source") == "oddspark":
-            # netkeiba block 中の NAR: oddspark のオッズで解析 + snapshot 保存
-            rc = _dispatch_oddspark(race["netkeiba_race_id"], race.get("start_at", 0))
+            # netkeiba block 中の NAR: keiba.go.jp (全6券種) 優先・oddspark フォールバック
+            rc = _dispatch_nar_fallback(race["netkeiba_race_id"], race.get("start_at", 0))
         else:
             rc = _dispatch_analyze(race["url"], extra)
         finished_at = int(time.time())
