@@ -228,7 +228,9 @@ def parse_shutuba(html: str, *, race_id: str | None = None) -> RaceData:
     subhead = _text(soup, ".RaceData01") + " " + _text(soup, ".RaceData02")
     distance, surface, direction = _parse_distance_surface(subhead)
     weather_text = _parse_weather_text(subhead)
-    start_at = _parse_start_at(subhead, race_id=rid)
+    # title に "YYYY年M月D日" が入る。JRA は subhead に日付が無く race_id からも
+    # 暦日を復元できないため、date 源として title を併せて渡す (NAR は race_id 優先)。
+    start_at = _parse_start_at(f"{subhead} {title}", race_id=rid)
     race_class = _parse_race_class(subhead, soup)
 
     horses = _parse_horse_table(soup)
@@ -930,7 +932,10 @@ def _extract_race_id_from_dom(soup: BeautifulSoup) -> str | None:
 
 _DISTANCE_RE = re.compile(r"(芝|ダ|ダート|障)\s*(\d{3,5})\s*m", re.IGNORECASE)
 _DIRECTION_RE = re.compile(r"(右|左|直線)")
-_START_RE = re.compile(r"発走\s*[:：]?\s*(\d{1,2}):(\d{2})")
+# netkeiba の shutuba/result は "20:50発走" (時刻が先) 表記。race_list や旧ページの
+# "発走 20:50" 表記にも備えて両方を試す (_parse_start_at 参照)。
+_START_RE = re.compile(r"(\d{1,2}):(\d{2})\s*発走")
+_START_RE_ALT = re.compile(r"発走\s*[:：]?\s*(\d{1,2}):(\d{2})")
 _DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 
 
@@ -958,7 +963,7 @@ def _parse_weather_text(text: str) -> str:
 
 
 def _parse_start_at(text: str, *, race_id: str = "") -> int:
-    sm = _START_RE.search(text)
+    sm = _START_RE.search(text) or _START_RE_ALT.search(text)
     if not sm:
         return 0
     h, mi = int(sm.group(1)), int(sm.group(2))

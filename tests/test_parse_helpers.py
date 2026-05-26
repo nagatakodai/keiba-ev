@@ -1,7 +1,40 @@
 """parse.py の odds dict → BetOdds 変換ヘルパのテスト。"""
 from __future__ import annotations
 
-from src.parse import _exacta_dict_to_bets, _pair_dict_to_bets, _tanfuku_to_bets, _trio_dict_to_bets
+from datetime import datetime
+
+from src.parse import (
+    _exacta_dict_to_bets,
+    _pair_dict_to_bets,
+    _parse_start_at,
+    _tanfuku_to_bets,
+    _trio_dict_to_bets,
+)
+
+
+def test_parse_start_at_time_before_hassou():
+    """netkeiba 現行表記 'HH:MM発走' (時刻が先) を拾えること。
+
+    旧 regex は '発走 HH:MM' 前提で現行表記に当たらず start_at=0 → 締切/発走が
+    UI で '—' になるバグの回帰防止。
+    """
+    ts = _parse_start_at("20:50発走 / ダ1400m (右)", race_id="202654052411")  # NAR 高知 5/24
+    assert datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") == "2026-05-24 20:50"
+
+
+def test_parse_start_at_legacy_order_still_works():
+    ts = _parse_start_at("発走 20:50 / ダ1400m", race_id="202654052411")
+    assert datetime.fromtimestamp(ts).strftime("%H:%M") == "20:50"
+
+
+def test_parse_start_at_jra_date_from_title():
+    # JRA は race_id から暦日を復元できないので title の 'YYYY年M月D日' を使う
+    ts = _parse_start_at("09:45発走 / ダ1700m  2026年4月11日 福島1R", race_id="202603010101")
+    assert datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") == "2026-04-11 09:45"
+
+
+def test_parse_start_at_no_time_returns_zero():
+    assert _parse_start_at("ダ1400m (右)", race_id="202654052411") == 0
 
 
 def test_pair_dict_to_bets_popularity_by_odds_asc():

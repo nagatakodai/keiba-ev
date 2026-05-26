@@ -65,6 +65,7 @@ def estimate_probs(
     lambda_2: float = DEFAULT_LAMBDA_2,
     lambda_3: float = DEFAULT_LAMBDA_3,
     use_show_bias: bool = True,
+    market_win_override: dict[int, float] | None = None,
 ) -> Probabilities:
     """Layer 1 特徴量 (features.py) + 市場ブレンド + Discounted Harville で Probabilities を作る。
 
@@ -100,10 +101,11 @@ def estimate_probs(
     feats = build_features(rd)
     fundamental_win = _fundamental_win_probs(horses, feats)
 
-    # 市場ブレンド
+    # 市場ブレンド。market_win_override があれば trifecta より優先 (oddspark 単勝
+    # フォールバック等、3連単オッズが無い経路で単勝オッズから市場率を渡す用途)。
     win = fundamental_win
-    if market_blend > 0 and rd.trifecta:
-        market_raw = market_win_probs(rd.trifecta)
+    if market_blend > 0 and (market_win_override or rd.trifecta):
+        market_raw = market_win_override or market_win_probs(rd.trifecta)
         if market_raw:
             market = market_raw
             try:

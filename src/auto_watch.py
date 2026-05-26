@@ -1,8 +1,10 @@
-"""netkeiba の開催一覧を polling し、締切 (= 発走) 5±N 分以内のレースを自動解析する。
+"""netkeiba の開催一覧を polling し、発走 window〜window+tolerance 分前のレースを自動解析する。
+
+検出帯は片側 (+のみ): 発走まで window 分以上のリードを必ず確保する。
 
 使い方:
     python -m src.auto_watch                # 1 巡
-    python -m src.auto_watch --window 5 --tolerance 2
+    python -m src.auto_watch --window 5 --tolerance 2   # 発走 5〜7 分前で検出
 
 通常は Makefile の `watch-auto` ターゲットから無限ループで叩く。
 """
@@ -22,6 +24,7 @@ from .fetch_result import process_pending, schedule as schedule_result_fetch
 from .parse import _split_race_id, parse_race_list
 from .scrape import NetkeibaBlocked, fetch_html, race_list_url
 from .scrape_alt import fetch_race_list_keibalab
+from .scrape_oddspark import fetch_race_list_oddspark
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE_FILE = ROOT / "data/cache/auto_watch_analyzed.txt"
@@ -101,32 +104,47 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
         except Exception as ex:
             console.print(f"[yellow]race_list fetch failed (nar={is_nar}): {ex}[/yellow]")
     if blocked_count >= 2:
-        # 両ドメイン block → keibalab.jp に fallback。race_id + 発走時刻が取れれば
-        # watch-auto は当該 race の analyze を試みる (analyze 内部で netkeiba odds
-        # fetch が失敗すれば skip される)。
+        # 両ドメイン block → **oddspark** で NAR を discovery + analyze 続行 (odds も取れる)。
+        # oddspark に無い JRA 等は keibalab で race 発見のみ試みる (analyze は netkeiba 依存)。
         console.print(
-            "[bold yellow]netkeiba 両ドメイン block → keibalab.jp に fallback します。"
-            "発走時刻まで分かれば watch は続行できますが live odds 取得は不可なので "
-            "analyze 段階で失敗する可能性があります。[/bold yellow]"
+            "[bold yellow]netkeiba 両ドメイン block → oddspark (NAR) / keibalab に fallback します。"
+            "[/bold yellow]"
         )
         try:
-            alt = fetch_race_list_keibalab(today)
-            console.print(f"[cyan]keibalab fallback: {len(alt)} races detected[/cyan]")
-            for a in alt:
+            ops = fetch_race_list_oddspark(today)
+            console.print(f"[cyan]oddspark fallback: {len(ops)} NAR races detected[/cyan]")
+            for a in ops:
                 races.append({
-                    "race_id": a.race_id,
-                    "url": a.url,
-                    "start_at": a.start_at,
-                    "venue": a.venue or "?",  # keibalab simple parser では未取得
-                    "race_no": a.race_no,
+                    "race_id": a["netkeiba_race_id"],
+                    "url": a["url"],
+                    "start_at": a["start_at"],
+                    "venue": a["venue"],
+                    "race_no": a["race_no"],
+                    "source": "oddspark",
                 })
-        except Exception as ex:
-            console.print(f"[red]keibalab fallback も失敗: {ex}[/red]")
+        except Exception as ex:  # noqa: BLE001
+            console.print(f"[red]oddspark fallback 失敗: {ex}[/red]")
+        # oddspark で見つからない場合に備え keibalab も (race 発見のみ)
+        if not races:
+            try:
+                alt = fetch_race_list_keibalab(today)
+                console.print(f"[cyan]keibalab fallback: {len(alt)} races detected[/cyan]")
+                for a in alt:
+                    races.append({
+                        "race_id": a.race_id, "url": a.url, "start_at": a.start_at,
+                        "venue": a.venue or "?", "race_no": a.race_no,
+                    })
+            except Exception as ex:  # noqa: BLE001
+                console.print(f"[red]keibalab fallback も失敗: {ex}[/red]")
+        if not races:
             console.print(
                 "[bold red]race discovery 不能。数時間-1日待つか、別 IP/VPN から再試行してください。[/bold red]"
             )
 
-    low_sec = (window_min - tolerance_min) * 60
+    # 検出帯は「発走まで window〜window+tolerance 分」の片側 (+のみ)。
+    # かつての ± の下側 (window-tolerance, 発走に近い側) は使わない。これにより
+    # 必ず window 分以上のリードを確保し、締切間際に解析が走るのを防ぐ。
+    low_sec = window_min * 60
     high_sec = (window_min + tolerance_min) * 60
 
     out: list[dict] = []
@@ -147,6 +165,7 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
             "delta_sec": delta,
             "venue": r["venue"],
             "race_no": r["race_no"],
+            "source": r.get("source", "netkeiba"),
         })
     out.sort(key=lambda x: x["start_at"])
     return out
@@ -167,6 +186,15 @@ def _normalize_race_id(netkeiba_rid: str) -> str:
 def _dispatch_analyze(url: str, extra_args: list[str]) -> int:
     cmd = [sys.executable, "-m", "src.analyze", url, "--llm-model", "opus", *extra_args]
     console.print(f"[bold cyan]→ analyze:[/bold cyan] {url}")
+    proc = subprocess.run(cmd, cwd=ROOT)
+    return proc.returncode
+
+
+def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0) -> int:
+    """netkeiba block 中の NAR: oddspark オッズで解析し snapshot を保存。"""
+    cmd = [sys.executable, "-m", "src.scrape_oddspark", netkeiba_rid,
+           "--snapshot", f"--start-at={start_at}"]
+    console.print(f"[bold cyan]→ oddspark analyze:[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
@@ -201,13 +229,16 @@ def _in_active_hours(now: datetime, active_hours: str) -> bool:
     now_min = now.hour * 60 + now.minute
     start_min = sh * 60 + sm
     end_min = eh * 60 + em
-    return start_min <= now_min <= end_min
+    if start_min <= end_min:
+        return start_min <= now_min <= end_min
+    # 日跨ぎ範囲 (例 "22:00-01:00"): start 以降 または end 以前なら active。
+    return now_min >= start_min or now_min <= end_min
 
 
 @app.command()
 def main(
-    window_min: int = typer.Option(5, "--window", help="発走までの目標時間 (分)"),
-    tolerance_min: int = typer.Option(2, "--tolerance", help="目標時間の前後許容 (分)"),
+    window_min: int = typer.Option(5, "--window", help="発走までの目標リード時間 (分)"),
+    tolerance_min: int = typer.Option(2, "--tolerance", help="window からの + 側許容 (分)。発走 window〜window+tolerance 分前で検出"),
     ev_max: float = typer.Option(None, "--ev-max"),
     min_prob: float = typer.Option(None, "--min-prob"),
     market_blend: float = typer.Option(None, "--market-blend"),
@@ -235,7 +266,7 @@ def main(
         return
 
     console.print(
-        f"[dim]{now_str}[/dim] 発走 {window_min}±{tolerance_min} 分のレースを検索中..."
+        f"[dim]{now_str}[/dim] 発走 {window_min}〜{window_min + tolerance_min} 分前のレースを検索中..."
     )
     try:
         due = _list_due_races(window_min, tolerance_min, now_ts)
@@ -279,7 +310,11 @@ def main(
             console.print(f"  [dim]dry-run: {race['url']}[/dim]")
             continue
         started_at = int(time.time())
-        rc = _dispatch_analyze(race["url"], extra)
+        if race.get("source") == "oddspark":
+            # netkeiba block 中の NAR: oddspark のオッズで解析 + snapshot 保存
+            rc = _dispatch_oddspark(race["netkeiba_race_id"], race.get("start_at", 0))
+        else:
+            rc = _dispatch_analyze(race["url"], extra)
         finished_at = int(time.time())
         if rc == 0:
             _mark_analyzed(rid)
