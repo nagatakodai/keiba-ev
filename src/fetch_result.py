@@ -274,8 +274,8 @@ def process_pending(
     for rid in target_ids:
         url = target_urls[rid]
         result, reason = fetch_result_with_reason(result_url_from_racecard(url))
-        # netkeiba block で未取得 + NAR レースなら keiba.go.jp で確定結果を取得して
-        # loop を閉じる (predict は keiba.go.jp 自給なので result も自給して block 中も完結)。
+        # netkeiba block で未取得なら公式で確定結果を fallback 取得して loop を閉じる:
+        # NAR → keiba.go.jp、JRA → JRA 公式 (accessS)。predict も公式自給なので block 中も完結。
         if result is None and _is_block_failure(reason):
             nk = extract_race_id(url)
             if nk and is_nar_race_id(nk):
@@ -288,6 +288,16 @@ def process_pending(
                         _log(f"keiba.go.jp result fallback ok: {nk} {kr['finish_order']}", url)
                 except Exception as ex:  # noqa: BLE001
                     _log(f"keiba.go.jp result fallback failed: {ex}", url)
+            elif nk:   # JRA (場 01-10)
+                try:
+                    from .scrape_jra import fetch_jra_result
+                    jr = fetch_jra_result(nk)
+                    if jr and jr.get("finish_order"):
+                        result, reason = ({"finish_order": jr["finish_order"],
+                                           "payout": jr.get("payout", 0)}, "")
+                        _log(f"JRA result fallback ok: {nk} {jr['finish_order']}", url)
+                except Exception as ex:  # noqa: BLE001
+                    _log(f"JRA result fallback failed: {ex}", url)
         fetched[rid] = (result, reason)
 
     # Phase 3: lock 取り直して結果反映 (read again — 別 process の変更を取り込む)。

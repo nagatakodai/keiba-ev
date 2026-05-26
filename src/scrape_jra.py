@@ -323,6 +323,78 @@ def check_consistency(other_bets: dict, trifecta: list) -> dict:
     }
 
 
+def parse_jra_result(html: str) -> dict:
+    """結果ページ → {finish_order, payout(3連単)}。
+
+    着順は td.place(着順) + td.num(馬番)、3連単配当は li.tierce 内の 組番 + 円。
+    accessS 段2 はレース別ページなので tierce はそのレースの確定配当 (組番一致で確認)。
+    """
+    finish: dict[int, int] = {}
+    for m in re.finditer(
+        r'<td class="place"[^>]*>(.*?)</td>.*?<td class="num"[^>]*>(.*?)</td>',
+        html, re.DOTALL,
+    ):
+        pl = re.sub(r"<[^>]+>", " ", m.group(1)).strip()
+        nu = re.sub(r"<[^>]+>", " ", m.group(2)).strip()
+        if pl in ("1", "2", "3") and nu.isdigit():
+            finish.setdefault(int(pl), int(nu))
+    order = [finish[p] for p in (1, 2, 3) if p in finish]
+    payout = 0
+    tm = re.search(r'class="[^"]*tierce[^"]*"(.*?)</(?:li|tr|td)>', html, re.DOTALL)
+    if tm:
+        seg = re.sub(r"<[^>]+>", " ", tm.group(1))
+        combo = re.search(r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)", seg)
+        yen = re.search(r"([\d,]{2,})\s*円", seg)
+        if combo and yen and len(order) >= 3 and \
+                [int(combo.group(i)) for i in (1, 2, 3)] == order[:3]:
+            payout = int(yen.group(1).replace(",", ""))
+    return {"finish_order": order, "payout": payout}
+
+
+def fetch_jra_result(netkeiba_rid: str) -> dict | None:
+    """netkeiba JRA race_id → JRA 公式の確定結果 {finish_order, payout} (accessS walk)。
+
+    netkeiba block 中でも JRA の結果を取得できる (result fetch の fallback)。直近開催のみ。
+    1-2-3 が揃う (len>=3) 確定結果のみ返す。
+    """
+    if len(netkeiba_rid) < 12 or netkeiba_rid[4:6] not in {f"{i:02d}" for i in range(1, 11)}:
+        return None
+    year, venue, kai, day, rr = (netkeiba_rid[:4], netkeiba_rid[4:6],
+                                 netkeiba_rid[6:8], netkeiba_rid[8:10], netkeiba_rid[10:12])
+    try:
+        top = _post("accessS.html", _RESULT_ENTRY)
+    except Exception:  # noqa: BLE001
+        return None
+    # 段1/段2 の結果トークンは doAction('accessS',...) 形式とは限らないので raw 抽出する。
+    kaisai_tok = None
+    for tok in re.findall(r"pw01srl1[0-9A-Za-z/]+", top):
+        m = re.match(r"pw01srl1(\d{3})(\d{4})(\d{2})(\d{2})\d{8}/", tok)
+        if m and f"{int(m.group(1)):02d}" == venue and m.group(2) == year \
+                and m.group(3) == kai and m.group(4) == day:
+            kaisai_tok = tok
+            break
+    if not kaisai_tok:
+        return None
+    try:
+        rl = _post("accessS.html", kaisai_tok)
+    except Exception:  # noqa: BLE001
+        return None
+    race_tok = None
+    for tok in re.findall(r"pw01sde1[0-9A-Za-z/]+", rl):
+        m = re.match(r"pw01sde1(\d{3})(\d{4})(\d{2})(\d{2})(\d{2})\d{8}", tok)
+        if m and f"{int(m.group(5)):02d}" == rr:
+            race_tok = tok
+            break
+    if not race_tok:
+        return None
+    try:
+        page = _post("accessS.html", race_tok)
+    except Exception:  # noqa: BLE001
+        return None
+    res = parse_jra_result(page)
+    return res if len(res["finish_order"]) >= 3 else None
+
+
 def _main() -> None:
     import sys
     if len(sys.argv) < 2:

@@ -92,3 +92,16 @@ def test_consistency_flags_wide_gt_quinella():
     other = {"quinella": jra.parse_quinella(_QUINELLA), "wide": bad}
     c = jra.check_consistency(other, [])
     assert c["wide_gt_quinella"] == 1 and c["ok"] is False
+
+
+def test_parse_jra_result():
+    html = (
+        '<tr><td class="place">1</td><td class="num">16</td></tr>'
+        '<tr><td class="place">2</td><td class="num">12</td></tr>'
+        '<tr><td class="place">3</td><td class="num">18</td></tr>'
+        '<li class="tierce"><span>3連単</span>'
+        '<div class="num">16-12-18</div><div class="yen">30,330円</div></li>'
+    )
+    r = jra.parse_jra_result(html)
+    assert r["finish_order"] == [16, 12, 18]
+    assert r["payout"] == 30330
