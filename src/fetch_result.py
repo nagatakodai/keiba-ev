@@ -28,6 +28,16 @@ DEFAULT_RETRY_INTERVAL_SEC = 120
 DEFAULT_MAX_ATTEMPTS = 8
 MAX_PROCESS_PER_TICK = 3
 TERMINAL_RETENTION_SEC = 24 * 3600
+# netkeiba block 中の result fetch は attempt を消費せず、この間隔で再試行し続ける
+# (block 解除後に取得 → block 中に走った race の結果/calibration を取りこぼさない)。
+BLOCK_RETRY_INTERVAL_SEC = 15 * 60
+
+
+def _is_block_failure(reason: str) -> bool:
+    """fetch 失敗理由が netkeiba の IP block (空 body / CloudFront 400) かを判定。"""
+    return bool(reason) and (
+        "NetkeibaBlocked" in reason or "empty body" in reason or "CloudFront" in reason
+    )
 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -268,8 +278,8 @@ def process_pending(
             summary["checked"] += 1
             result, reason = fetched[rid]
             e.last_error = reason
-            e.attempts += 1
             if result and result.get("finish_order"):
+                e.attempts += 1
                 try:
                     save_result(e.race_id, result)
                     e.status = "success"
@@ -277,7 +287,14 @@ def process_pending(
                     summary["success"].append(e.race_id)
                 except Exception as ex:
                     e.last_error = f"save error: {ex}"
-            if e.status != "success":
+            elif _is_block_failure(reason):
+                # netkeiba block 中は attempt を消費せず長め間隔で再試行 → 解除後に
+                # 取得できる (block 中の race を terminal failed にして取りこぼさない)。
+                e.next_attempt_at = now_ts + max(e.retry_interval_sec, BLOCK_RETRY_INTERVAL_SEC)
+                summary["still_pending"] += 1
+            else:
+                e.attempts += 1
+            if e.status not in ("success",) and not _is_block_failure(reason):
                 if e.attempts >= e.max_attempts:
                     e.status = "failed"
                     summary["failed"].append(e.race_id)
