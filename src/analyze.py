@@ -26,6 +26,7 @@ from rich.table import Table
 
 from . import ev as ev_mod
 from . import llm as llm_mod
+from . import portfolio as pf_mod
 from .aptitude import AptitudeIndex, compute_aptitudes
 from .ev import PXO_FLOOR
 from .features import build_features
@@ -161,7 +162,7 @@ def main(
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
-            feats=feats, lgbm_info=lgbm_info, hit_points=hit_points,
+            feats=feats, lgbm_info=lgbm_info, hit_points=hit_points, probs=probs,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -208,6 +209,13 @@ def main(
                 _save_evidence_to_snapshot(
                     race_id, plan_rows, evidence, apt_top, hit_points=hit_points,
                 )
+        # 「Claude 総合オススメ」まとめ買い束を claude -p で web 検証し、cut を反映して再保存。
+        if not no_cache:
+            _validate_and_update_bundle(
+                race_id, rd, probs, rows, bet_tables,
+                aptitudes=aptitudes, market_signals=market_signals,
+                horse_best_times=best_times_for_llm, model=llm_model,
+            )
 
     if refresh:
         if not url:
@@ -450,6 +458,81 @@ def _serialize_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> list[dict]:
     return items
 
 
+def _validate_and_update_bundle(
+    race_id: str,
+    rd,
+    probs,
+    rows,
+    bet_tables,
+    *,
+    aptitudes=None,
+    market_signals=None,
+    horse_best_times=None,
+    model: str = "opus",
+) -> None:
+    """「Claude 総合オススメ」束を claude -p で web 検証 → cut 反映 → snapshot 更新。
+
+    モデルのみで作った束 (build_bundle) を claude に提示し、取消/不安材料を web 検索で
+    裏取りさせて cut すべき脚を JSON で受け取る。cut 馬券を候補から除いて束を再構築し、
+    `llm_review` を添えて recommended_bundle を上書きする。検証不能/見送り時は no-op。
+    """
+    cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
+    bundle = pf_mod.build_bundle(cands, probs)
+    if not bundle.get("legs"):
+        return  # 見送り (+EV 束なし) — 検証対象なし
+    if not llm_mod.is_available():
+        return
+
+    console.rule("[bold]Claude 総合オススメ 検証 (claude -p, web 調査)[/bold]")
+    chunks: list[str] = []
+    review: dict = {}
+    try:
+        for etype, payload in llm_mod.validate_bundle_stream(
+            rd, bundle, model=model,
+            aptitudes=aptitudes, market_signals=market_signals,
+            horse_best_times=horse_best_times,
+        ):
+            if etype == "tool_use":
+                console.print(f"[dim]🔍 {payload.get('name', '')}[/dim]")
+            elif etype == "text":
+                chunks.append(payload)
+                console.print(payload, end="")
+            elif etype == "result":
+                if payload:
+                    chunks.append(payload)
+            elif etype == "error":
+                console.print(f"[red]bundle 検証エラー: {payload}[/red]")
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[yellow]bundle 検証失敗: {ex}[/yellow]")
+        return
+
+    review = llm_mod.parse_bundle_review("".join(chunks))
+    cuts = set(review.get("cuts", []))
+    if cuts:
+        filtered = [
+            c for c in cands
+            if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) not in cuts
+        ]
+        bundle = pf_mod.build_bundle(filtered, probs)
+        console.print(f"[cyan]LLM cut {len(cuts)} 脚 → 再構築: {len(bundle.get('legs', []))} 脚[/cyan]")
+    bundle["llm_review"] = {"validated": True, **review}
+    _update_snapshot_bundle(race_id, bundle)
+
+
+def _update_snapshot_bundle(race_id: str, bundle: dict) -> None:
+    """既存 snapshot JSON の recommended_bundle だけ差し替える。"""
+    path = ROOT / "data" / "predictions" / f"{race_id}.json"
+    if not path.exists():
+        return
+    try:
+        snap = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    snap["recommended_bundle"] = bundle
+    path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    console.print("[dim]recommended_bundle 更新 (LLM 検証反映)[/dim]")
+
+
 def _save_prediction_snapshot(
     race_id: str,
     rd,
@@ -462,6 +545,7 @@ def _save_prediction_snapshot(
     feats: dict | None = None,
     lgbm_info: dict | None = None,
     hit_points: int = 3,
+    probs=None,
 ) -> None:
     plan_a = ev_mod.plan_balanced(plan_rows)
     plan_b = ev_mod.plan_max_ev(plan_rows)
@@ -479,6 +563,16 @@ def _save_prediction_snapshot(
     else:
         plan_g = []
     plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
+    # 「Claude 総合オススメ」= 全 bet type 横断の joint Kelly 最適まとめ買い束。
+    # レースの完全な top-3 結果分布の上で束全体の E[log(資金)] を最大化する
+    # (相関を考慮した成長率最適配分)。probs が無い古い呼び出しでは省略。
+    recommended_bundle = None
+    if probs is not None:
+        try:
+            cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
+            recommended_bundle = pf_mod.build_bundle(cands, probs)
+        except Exception as ex:  # noqa: BLE001
+            console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
     snapshot = {
         "race_id": race_id,
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -524,6 +618,7 @@ def _save_prediction_snapshot(
         "plan_h1_keys": [list(r.key) for r in plan_h1],
         "plan_h2_keys": [list(r.key) for r in plan_h2],
         "plan_f_keys": [list(r.key) for r in plan_f],
+        "recommended_bundle": recommended_bundle,
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1174,7 +1269,7 @@ def _refresh_and_reevaluate(
     if not no_cache:
         _save_prediction_snapshot(
             race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
-            feats=feats2, lgbm_info=lgbm_info2, hit_points=hit_points,
+            feats=feats2, lgbm_info=lgbm_info2, hit_points=hit_points, probs=probs2,
         )
 
     _print_top(rows2, n=show)

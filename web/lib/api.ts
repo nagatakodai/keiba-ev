@@ -127,6 +127,49 @@ export type BetEvRow = {
   tier: string;
 };
 
+// joint Kelly「まとめ買い」最適束の 1 脚。
+export type BundleLeg = {
+  bet_type: string;     // win/place/quinella/wide/exacta/trio/trifecta
+  key: number[];
+  odds: number;
+  prob: number;
+  px_o: number;
+  tier: string;
+  kelly: number;        // full-Kelly fraction f* (0-1)
+  fraction: number;     // ¥丸め後の実効配分 (stake/bankroll)
+  stake: number;        // ¥ (stake_unit 単位)
+  payout_if_hit: number; // この脚が的中したときの払戻 (odds × stake)。≥ total_stake ならトリガミ無し
+};
+
+// 全 bet type 横断の joint (同時) Kelly 最適まとめ買い束。
+// レースの完全な top-3 結果分布上で束全体の E[log(資金)] を最大化した配分。
+export type RecommendedBundle = {
+  objective: string;            // "joint_kelly"
+  bankroll: number;             // ¥10,000
+  kelly_fraction: number;       // 1.0 = full Kelly
+  pxo_floor: number;
+  legs: BundleLeg[];
+  total_stake: number;          // ¥
+  total_fraction: number;       // Σ fraction (資金に対する束全体の比率)
+  bundle_hit_prob: number;      // P(1 脚以上当たる)
+  expected_return: number;      // gross multiplier (モデル期待値, 楽観バイアス込み)
+  expected_log_growth: number;  // E[log W]
+  n_candidates: number;
+  n_outcomes: number;
+  // トリガミ防止: 全脚のうち最小の (payout_if_hit / total_stake)。≥1.0 なら
+  // どの単独的中でも収支マイナスにならない。dropped_torigami は除去した脚数。
+  min_payout_ratio?: number;
+  dropped_torigami?: number;
+  // claude -p による web 調査検証 (取消/不安材料を裏取りして cut)。未検証なら欠落。
+  llm_review?: {
+    validated: boolean;
+    cuts?: string[];
+    notes?: Record<string, string>;
+    summary?: string;
+    confidence?: string;
+  };
+};
+
 export type PredictionDetail = {
   race_id: string;
   saved_at: string;
@@ -166,6 +209,9 @@ export type PredictionDetail = {
   plan_h2_keys?: number[][];
   // 最終買い目 Plan F: A/B/C/G/H1/H2 を union dedup・EV 降順
   plan_f_keys?: number[][];
+  // Claude 総合オススメ: 全 bet type 横断の joint Kelly 最適まとめ買い束。
+  // 古いスナップショットには欠落 (frontend は近似 Kelly ランキングに fallback)。
+  recommended_bundle?: RecommendedBundle | null;
   evidence?: { evidence_by_key?: Record<string, { count: number; reasons?: string[] }>; cuts?: string[]; final_plan?: unknown };
   evidence_rows?: PredictionRow[];
   evidence_plan_a_keys?: number[][];

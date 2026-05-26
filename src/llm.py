@@ -182,6 +182,168 @@ def evaluate(
     return final.strip()
 
 
+def leg_id(leg: dict) -> str:
+    """bundle leg を一意識別する文字列 'bet_type:key' (例 'wide:3-7')。"""
+    return f"{leg['bet_type']}:{'-'.join(str(k) for k in leg['key'])}"
+
+
+def build_bundle_validation_prompt(
+    rd: RaceData,
+    bundle: dict,
+    *,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+) -> str:
+    """「Claude 総合オススメ」まとめ買い束を web 検索で厳密に検証させる prompt。"""
+    r = rd.race
+    legs = bundle.get("legs", [])
+    horse_name = {h.number: h.name for h in r.horses}
+    # 束に絡む馬番
+    involved = sorted({n for leg in legs for n in leg["key"]})
+
+    lines = [
+        f"# レース: {r.venue_name} {r.race_number}R ({r.race_class}) "
+        f"{r.surface}{r.distance}m {r.weather_text}",
+        "",
+        "## 検証対象の「まとめ買い」束 (joint Kelly + トリガミ防止済)",
+        f"投資総額 ¥{bundle.get('total_stake', 0):,} / 束の的中率(1点以上) "
+        f"{bundle.get('bundle_hit_prob', 0) * 100:.1f}%",
+        "",
+        "| id | 種別 | 買い目 | オッズ | 推定P | 配分¥ | 的中時払戻¥ |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for leg in legs:
+        names = " / ".join(horse_name.get(n, f"#{n}") for n in leg["key"])
+        lines.append(
+            f"| {leg_id(leg)} | {leg['bet_type']} | {'-'.join(map(str, leg['key']))} "
+            f"({names}) | {leg['odds']:.1f} | {leg['prob']*100:.1f}% | "
+            f"¥{leg['stake']:,} | ¥{leg['payout_if_hit']:,} |"
+        )
+
+    # 絡む馬の事前指数 (検索で裏取りする出発点)
+    lines += ["", "## 束に絡む馬 (事前データ)"]
+    apt = aptitudes or {}
+    sig = market_signals or {}
+    bt = {t.get("number"): t for t in (horse_best_times or [])}
+    for n in involved:
+        bits = [f"{n} {horse_name.get(n, '?')}"]
+        a = apt.get(n)
+        if a is not None:
+            bits.append(f"適性総合{getattr(a, 'total', 0):.0f}")
+        s = sig.get(n)
+        if s is not None:
+            bits.append(f"市場={getattr(s, 'interpretation', '')}")
+        if n in bt:
+            bits.append(f"持時計{bt[n].get('best_time_sec', 0):.1f}s")
+        lines.append("- " + " / ".join(bits))
+
+    lines += [
+        "",
+        "## 指示 (厳密に)",
+        "CLAUDE.md の検索ルールに従い、上記の束に絡む馬について **web 検索で裏取り** せよ:",
+        "1. 直近5走の着順・距離/コース/馬場適性、騎手の当該コース成績",
+        "2. **取消・除外・体調不安・大幅馬体重増減** (該当馬が絡む脚は全て cut)",
+        "3. 当日の馬場状態と各馬の適性",
+        "検索は P×O 上位/配分上位の脚を優先、合計最大6クエリ。確証なき脚は cut しない",
+        "(モデルの +EV を尊重) が、**明確なマイナス根拠がある脚は cut** する。",
+        "",
+        "最後に必ず以下の JSON を ```json ... ``` で出力 (cuts は cut する leg の id 配列):",
+        "```json",
+        '{"cuts": ["wide:3-7"], "notes": {"wide:3-7": "理由"}, '
+        '"summary": "総評", "confidence": "high|mid|low"}',
+        "```",
+    ]
+    return "\n".join(lines)
+
+
+def validate_bundle_stream(
+    rd: RaceData,
+    bundle: dict,
+    *,
+    model: str = "opus",
+    timeout: int = 420,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+) -> Iterator[tuple[str, Any]]:
+    """bundle 検証を stream-json で。evaluate_stream と同じ event 形式を yield。"""
+    if not is_available():
+        yield ("error", "claude CLI が見つかりません")
+        return
+    if not bundle.get("legs"):
+        yield ("result", "")  # 検証対象なし (見送り)
+        return
+    prompt = build_bundle_validation_prompt(
+        rd, bundle, aptitudes=aptitudes,
+        market_signals=market_signals, horse_best_times=horse_best_times,
+    )
+    cmd = [
+        "claude", "-p", prompt,
+        "--model", model,
+        "--output-format", "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--permission-mode", "bypassPermissions",
+        "--allowedTools", ",".join(ALLOWED_TOOLS),
+        "--disallowedTools", DISALLOWED_TOOLS,
+    ]
+    proc = subprocess.Popen(
+        cmd, cwd=str(ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=_claude_env(),
+    )
+    assert proc.stdout is not None
+    try:
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = ev.get("type")
+            if etype == "assistant":
+                for block in ev.get("message", {}).get("content", []) or []:
+                    if block.get("type") == "tool_use":
+                        yield ("tool_use", {"name": block.get("name", ""), "input": block.get("input", {})})
+                    elif block.get("type") == "text" and block.get("text"):
+                        yield ("text", block["text"])
+            elif etype == "result":
+                yield ("result", ev.get("result", "") or "")
+            elif etype == "error":
+                yield ("error", ev.get("message", "unknown error"))
+    except Exception as e:  # noqa: BLE001
+        yield ("error", f"stream parse error: {e}")
+    finally:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            yield ("error", "claude timeout")
+
+
+def parse_bundle_review(text: str) -> dict:
+    """検証出力の JSON ブロックを {cuts,notes,summary,confidence} に正規化。"""
+    raw = parse_evidence(text)  # 同じ ```json``` 抽出ロジックを流用
+    if not isinstance(raw, dict):
+        return {}
+    cuts = raw.get("cuts") or []
+    if not isinstance(cuts, list):
+        cuts = []
+    return {
+        "cuts": [str(c) for c in cuts],
+        "notes": raw.get("notes") if isinstance(raw.get("notes"), dict) else {},
+        "summary": str(raw.get("summary", "")),
+        "confidence": str(raw.get("confidence", "")),
+    }
+
+
 def build_refresh_prompt(
     rd: RaceData,
     rows: list[EvRow],

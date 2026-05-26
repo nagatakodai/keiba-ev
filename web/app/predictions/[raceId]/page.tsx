@@ -3,11 +3,13 @@ import Link from "next/link";
 import {
   api,
   type BetEvRow,
+  type BundleLeg,
   type HorseAptitude,
   type HorseBestTime,
   type MarketSignal,
   type PredictionDetail,
   type PredictionRow,
+  type RecommendedBundle,
 } from "@/lib/api";
 import {
   Badge,
@@ -109,6 +111,8 @@ export default async function PredictionDetailPage({
           </div>
         }
       />
+
+      <TopRecommendationCard d={d} finish={finish} />
 
       {d.result && (() => {
         const hits: Array<{ plan: PlanLetter; keys: number[][] | undefined }> = [
@@ -300,6 +304,369 @@ function hitTier(d: PredictionDetail, finish?: number[]): string | null {
   const target = finish.join("-");
   const r = d.rows.find((r) => fmtKey(r.key) === target);
   return r ? tierLabel(r.tier) : null;
+}
+
+// ===== Claude 総合オススメ (全 bet type 横断 / Kelly 効率順) =====
+// CLAUDE.md の方針に沿う「効率」= Kelly 資金成長率 f* = (P×O − 1) / (O − 1)。
+// 純 P×O 順だと高オッズの 3 連単 (楽観バイアスの罠) が上位を占めるが、Kelly は
+// 低オッズで堅い +EV (単勝/複勝/ワイド) を上位に、宝くじ型を下位に並べる。
+const TOP_REC_BUDGET = 10_000; // 予算 ¥10,000 (CLAUDE.md)
+const TOP_REC_PXO_FLOOR = 1.02; // Plan 入りフロアと同値
+
+const BET_TYPE_TONE: Record<string, BadgeTone> = {
+  win: "good",
+  place: "good",
+  quinella: "info",
+  wide: "info",
+  exacta: "warn",
+  trio: "warn",
+  trifecta: "magenta",
+};
+
+function betLabel(bt: string): string {
+  return bt === "trifecta" ? "3連単" : (BET_TYPE_JP[bt] ?? bt);
+}
+
+type EffCandidate = {
+  betType: string;
+  key: number[];
+  prob: number;
+  odds: number;
+  pxo: number;
+  tier: string;
+  kelly: number;
+  hit: boolean;
+};
+
+// bet type ごとの finish 的中判定 (既存の placeHits/wideHits/finishKeyForBetType を流用)。
+function betHits(betType: string, key: number[], finish?: number[]): boolean {
+  if (!finish) return false;
+  if (betType === "place") return placeHits(key, finish);
+  if (betType === "wide") return wideHits(key, finish);
+  if (betType === "trifecta") {
+    if (finish.length < 3) return false;
+    return key.join("-") === finish.slice(0, 3).join("-");
+  }
+  const fk = finishKeyForBetType(betType, finish);
+  return fk != null && fk === key.join("-");
+}
+
+// 1/4 Kelly を ¥100 単位に丸めた配分目安。
+function quarterKelly(kelly: number): number {
+  return Math.round((TOP_REC_BUDGET * kelly) / 4 / 100) * 100;
+}
+
+function collectEfficientCandidates(d: PredictionDetail, finish?: number[]): EffCandidate[] {
+  const out: EffCandidate[] = [];
+  const seen = new Set<string>();
+  const push = (
+    betType: string,
+    key: number[],
+    prob: number,
+    odds: number,
+    pxo: number,
+    tier: string,
+  ) => {
+    if (!(odds > 1) || pxo < TOP_REC_PXO_FLOOR) return;
+    const kelly = (pxo - 1) / (odds - 1);
+    if (kelly <= 0) return;
+    const id = `${betType}:${key.join("-")}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push({ betType, key, prob, odds, pxo, tier, kelly, hit: betHits(betType, key, finish) });
+  };
+  // 3 連単: LLM 補強後があれば優先
+  const triRows = d.evidence_rows ?? d.rows;
+  for (const r of triRows) push("trifecta", r.key, r.prob, r.odds, r.px_o, r.tier);
+  // その他 bet type (単勝/複勝/馬連/ワイド/馬単/3 連複)
+  for (const [bt, rows] of Object.entries(d.bet_tables ?? {})) {
+    for (const r of rows) push(bt, r.key, r.prob, r.odds, r.px_o, r.tier);
+  }
+  out.sort((a, b) => b.kelly - a.kelly);
+  return out;
+}
+
+function TopRecTable({ cands }: { cands: EffCandidate[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm tabnum table-zebra">
+        <thead className="text-left text-(--color-muted) text-xs">
+          <tr className="border-b border-(--color-line)">
+            <th className="py-2 pr-3 text-right">#</th>
+            <th className="py-2 pr-3">種別</th>
+            <th className="py-2 pr-3">買い目</th>
+            <th className="py-2 pr-3 text-right">推定 P</th>
+            <th className="py-2 pr-3 text-right">オッズ</th>
+            <th className="py-2 pr-3 text-right">P×O</th>
+            <th className="py-2 pr-3 text-right">Kelly</th>
+            <th className="py-2 pr-3 text-right">¼K 配分</th>
+            <th className="py-2 pr-3">帯</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cands.map((c, i) => {
+            const k = c.key.join("-");
+            const qk = quarterKelly(c.kelly);
+            return (
+              <tr
+                key={`${c.betType}:${k}`}
+                className={`border-b border-(--color-line)/60 ${c.hit ? "bg-emerald-500/5" : ""}`}
+              >
+                <td className="py-1.5 pr-3 text-right text-(--color-muted)">{i + 1}</td>
+                <td className="py-1.5 pr-3">
+                  <Badge tone={BET_TYPE_TONE[c.betType] ?? "muted"}>{betLabel(c.betType)}</Badge>
+                </td>
+                <td className="py-1.5 pr-3 font-medium mono">
+                  {k}
+                  {c.hit && <span className="ml-2 text-(--color-good)">●</span>}
+                </td>
+                <td className="py-1.5 pr-3 text-right">{fmtPct(c.prob, 2)}</td>
+                <td className="py-1.5 pr-3 text-right">{c.odds.toFixed(1)}</td>
+                <td className="py-1.5 pr-3 text-right">
+                  <Badge tone={pxoTone(c.pxo)}>{c.pxo.toFixed(2)}</Badge>
+                </td>
+                <td className="py-1.5 pr-3 text-right">{(c.kelly * 100).toFixed(1)}%</td>
+                <td className="py-1.5 pr-3 text-right text-(--color-muted)">
+                  {qk >= 100 ? `¥${qk.toLocaleString()}` : "—"}
+                </td>
+                <td className="py-1.5 pr-3">
+                  <Badge tone={tierTone(c.tier)}>{tierLabel(c.tier)}</Badge>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TopRecommendationCard({
+  d,
+  finish,
+}: {
+  d: PredictionDetail;
+  finish?: number[];
+}) {
+  // 厳密版 (backend joint Kelly) があればそれを描画。無い古い snapshot は
+  // frontend 近似 Kelly ランキングに fallback。
+  if (d.recommended_bundle) {
+    return <BundleCard bundle={d.recommended_bundle} finish={finish} />;
+  }
+  const cands = collectEfficientCandidates(d, finish);
+  const top = cands.slice(0, 8);
+  const best = top[0];
+  const usedEvidence = !!d.evidence_rows;
+  return (
+    <Card
+      tone={best ? "alert" : "default"}
+      title={
+        <span className="flex items-center gap-2">
+          <span className="text-(--color-highlight) font-black">Claude 総合オススメ</span>
+          <span className="text-xs text-(--color-muted) font-normal">
+            全 bet type 横断 · Kelly 効率順 f*=(P×O−1)/(O−1) · P×O≥
+            {TOP_REC_PXO_FLOOR.toFixed(2)} で足切り · 独立サイジング(近似){usedEvidence ? " · LLM 補強反映" : ""}
+          </span>
+        </span>
+      }
+    >
+      {top.length === 0 ? (
+        <p className="text-sm text-(--color-muted)">
+          +EV (P×O≥{TOP_REC_PXO_FLOOR.toFixed(2)}) の効率的な買い目なし。
+          <span className="font-bold text-(--color-foreground)">見送り推奨</span>。
+        </p>
+      ) : (
+        <>
+          {best && (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+              <Stat
+                label="本命 (最効率)"
+                value={
+                  <span className="flex items-center gap-1.5">
+                    <Badge tone={BET_TYPE_TONE[best.betType] ?? "muted"}>
+                      {betLabel(best.betType)}
+                    </Badge>
+                    <span className="mono font-bold">{best.key.join("-")}</span>
+                  </span>
+                }
+              />
+              <Stat label="推定的中率" value={fmtPct(best.prob, 2)} />
+              <Stat label="オッズ" value={best.odds.toFixed(1)} />
+              <Stat label="EV (P×O)" value={best.pxo.toFixed(2)} />
+              <Stat
+                label="Kelly → ¼K 配分"
+                value={
+                  <span>
+                    {(best.kelly * 100).toFixed(1)}%
+                    <span className="text-(--color-muted) text-xs ml-1">
+                      / {quarterKelly(best.kelly) >= 100 ? `¥${quarterKelly(best.kelly).toLocaleString()}` : "<¥100"}
+                    </span>
+                  </span>
+                }
+              />
+            </div>
+          )}
+          <TopRecTable cands={top} />
+          <p className="mt-3 text-xs text-(--color-muted)">
+            効率 = Kelly 資金成長率 f*。低オッズで堅い +EV ほど上位、高オッズの 3 連単は
+            EV が高く見えても f* が小さく下位になる (CLAUDE.md: robust に +EV と確認できたのは
+            単勝 β=0.78 のみ)。¼K = ¥{TOP_REC_BUDGET.toLocaleString()} に対する 1/4 Kelly
+            配分目安 (¥100 単位)。各行は独立サイジングでありポートフォリオ合算ではない。
+          </p>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function BundleLegsTable({ legs, finish }: { legs: BundleLeg[]; finish?: number[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm tabnum table-zebra">
+        <thead className="text-left text-(--color-muted) text-xs">
+          <tr className="border-b border-(--color-line)">
+            <th className="py-2 pr-3">種別</th>
+            <th className="py-2 pr-3">買い目</th>
+            <th className="py-2 pr-3 text-right">オッズ</th>
+            <th className="py-2 pr-3 text-right">推定 P</th>
+            <th className="py-2 pr-3 text-right">P×O</th>
+            <th className="py-2 pr-3 text-right">Kelly</th>
+            <th className="py-2 pr-3 text-right">配分</th>
+            <th className="py-2 pr-3 text-right">的中時 払戻</th>
+            <th className="py-2 pr-3">帯</th>
+          </tr>
+        </thead>
+        <tbody>
+          {legs.map((l) => {
+            const k = l.key.join("-");
+            const hit = betHits(l.bet_type, l.key, finish);
+            return (
+              <tr
+                key={`${l.bet_type}:${k}`}
+                className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+              >
+                <td className="py-1.5 pr-3">
+                  <Badge tone={BET_TYPE_TONE[l.bet_type] ?? "muted"}>{betLabel(l.bet_type)}</Badge>
+                </td>
+                <td className="py-1.5 pr-3 font-medium mono">
+                  {k}
+                  {hit && <span className="ml-2 text-(--color-good)">●</span>}
+                </td>
+                <td className="py-1.5 pr-3 text-right">{l.odds.toFixed(1)}</td>
+                <td className="py-1.5 pr-3 text-right">{fmtPct(l.prob, 2)}</td>
+                <td className="py-1.5 pr-3 text-right">
+                  <Badge tone={pxoTone(l.px_o)}>{l.px_o.toFixed(2)}</Badge>
+                </td>
+                <td className="py-1.5 pr-3 text-right">{(l.kelly * 100).toFixed(1)}%</td>
+                <td className="py-1.5 pr-3 text-right font-bold">¥{l.stake.toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right text-(--color-good)">¥{l.payout_if_hit.toLocaleString()}</td>
+                <td className="py-1.5 pr-3">
+                  <Badge tone={tierTone(l.tier)}>{tierLabel(l.tier)}</Badge>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// 厳密版「総合オススメ」: backend で完全 top-3 分布上に joint Kelly 最適化した
+// まとめ買い束 (相関考慮・独立 Kelly の単純和ではない)。
+function BundleCard({
+  bundle,
+  finish,
+}: {
+  bundle: RecommendedBundle;
+  finish?: number[];
+}) {
+  const legs = bundle.legs ?? [];
+  const half = Math.round(bundle.total_stake / 2 / 100) * 100;
+  const nTypes = new Set(legs.map((l) => l.bet_type)).size;
+  const bundleHit = finish ? legs.some((l) => betHits(l.bet_type, l.key, finish)) : false;
+  return (
+    <Card
+      tone={legs.length ? "alert" : "default"}
+      title={
+        <span className="flex items-center gap-2">
+          <span className="text-(--color-highlight) font-black">Claude 総合オススメ — まとめ買い</span>
+          <span className="text-xs text-(--color-muted) font-normal">
+            全 bet type 横断 · joint (同時) Kelly 最適配分
+            {legs.length > 0 && ` · 完全 top-3 分布 ${bundle.n_outcomes} 通りで E[log 資金] 最大化`}
+          </span>
+          {bundle.llm_review?.validated && (
+            <Badge tone="magenta">claude -p 検証済{bundle.llm_review.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
+          )}
+          {finish && legs.length > 0 &&
+            (bundleHit ? <Badge tone="good">束 的中</Badge> : <Badge tone="bad">束 不的中</Badge>)}
+        </span>
+      }
+    >
+      {legs.length === 0 ? (
+        <p className="text-sm text-(--color-muted)">
+          +EV (P×O≥{bundle.pxo_floor.toFixed(2)}) のまとめ買いなし。
+          <span className="font-bold text-(--color-foreground)">見送り推奨</span> (市場効率的)。
+        </p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <Stat
+              label="まとめ買い総額 (full Kelly)"
+              value={
+                <span>
+                  ¥{bundle.total_stake.toLocaleString()}
+                  <span className="text-(--color-muted) text-xs ml-1">
+                    / ¥{bundle.bankroll.toLocaleString()} ({(bundle.total_fraction * 100).toFixed(0)}%)
+                  </span>
+                </span>
+              }
+            />
+            <Stat label="½ Kelly (保守・推奨)" value={`¥${half.toLocaleString()}`} />
+            <Stat label="束の的中率 (1点以上)" value={fmtPct(bundle.bundle_hit_prob, 1)} />
+            <Stat
+              label="最小 払戻/投資 (トリガミ無)"
+              value={
+                bundle.min_payout_ratio != null ? (
+                  <span className={bundle.min_payout_ratio >= 1 ? "text-(--color-good)" : "text-(--color-bad)"}>
+                    ×{bundle.min_payout_ratio.toFixed(2)}
+                  </span>
+                ) : "—"
+              }
+            />
+          </div>
+          <BundleLegsTable legs={legs} finish={finish} />
+          {bundle.llm_review?.validated && (bundle.llm_review.summary || (bundle.llm_review.cuts?.length ?? 0) > 0) && (
+            <div className="mt-3 rounded-md border border-(--color-magenta)/30 bg-(--color-magenta)/5 p-3 text-xs">
+              <span className="font-bold text-(--color-magenta)">claude -p 調査:</span>{" "}
+              {bundle.llm_review.summary || "—"}
+              {(bundle.llm_review.cuts?.length ?? 0) > 0 && (
+                <span className="ml-1 text-(--color-bad)">
+                  / cut {bundle.llm_review.cuts!.length} 脚: {bundle.llm_review.cuts!.join(", ")}
+                </span>
+              )}
+            </div>
+          )}
+          <p className="mt-3 text-xs text-(--color-muted)">
+            {legs.length} 点 · {nTypes} 種。束全体で{" "}
+            <span className="font-bold text-(--color-foreground)">
+              E[log(資金)]={bundle.expected_log_growth.toFixed(3)}
+            </span>{" "}
+            を最大化した成長率最適配分 (相関・排他性を考慮、独立 Kelly の単純和ではない)。
+            <span className="text-(--color-good)">
+              {" "}トリガミ防止済: 各脚の的中時払戻 ≥ 投資総額 ¥{bundle.total_stake.toLocaleString()}
+              {bundle.dropped_torigami ? ` (トリガミ脚 ${bundle.dropped_torigami} 本を除外)` : ""}
+            </span>
+            。モデル期待回収 ×{bundle.expected_return.toFixed(2)}{" "}
+            <span className="text-(--color-warn)">(確率モデルの楽観バイアス込み・参考値)</span>。
+            full Kelly は攻め過ぎになりやすく、確率推定が楽観な本モデルでは
+            <span className="font-bold"> ½ Kelly (各 stake 半額)</span> が実運用の推奨。
+            候補 {bundle.n_candidates} 点から選択。
+          </p>
+        </>
+      )}
+    </Card>
+  );
 }
 
 function PlansCard({
