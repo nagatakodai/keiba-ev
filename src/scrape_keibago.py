@@ -122,6 +122,8 @@ def _parse_combo(html: str, bet_type: str, *, ordered: bool, length: int) -> lis
         nums = tuple(int(x) for x in combo.split("-"))
         if len(nums) != length or len(set(nums)) != length:
             continue
+        if not all(1 <= n <= 30 for n in nums):
+            continue  # 馬番域外 (例: 日付 2026-05-26) を弾く
         od = _f(_html.unescape(re.sub(r"<[^>]+>", " ", odds_cell)))
         if od is None or od < 1.0:
             continue
@@ -159,6 +161,8 @@ def parse_trifecta(html: str) -> list[TrifectaOdds]:
         nums = tuple(int(x) for x in combo.split("-"))
         if len(nums) != 3 or len(set(nums)) != 3:
             continue
+        if not all(1 <= n <= 30 for n in nums):
+            continue  # 馬番域外 (例: 日付 2026-05-26) を弾く
         od = _f(_html.unescape(re.sub(r"<[^>]+>", " ", odds_cell)))
         if od is None or od < 1.0:
             continue
@@ -207,14 +211,19 @@ def parse_deba_table(html: str) -> list[tuple[int, str, str]]:
     各馬は `<td rowspan="5" class="horseNum">N</td>` に続く
     `<a class="horseName" href="../DataRoom/HorseMarkInfo?k_lineageLoginCode=CODE">名</a>`。
     CODE で競走成績 (HorseMarkInfo) を引いて馬柱 (past_runs) を構築する。
+
+    **馬ブロック単位で探す**: 取消等でリンクが無い馬があっても、その馬の馬番を
+    **次の馬の CODE と誤ってペアにしない** (= 馬柱を別馬に付ける最悪の取り違えを防ぐ)。
+    リンクが無い馬は code 空で残す (馬は落とさない)。
     """
     out: list[tuple[int, str, str]] = []
-    for m in re.finditer(
-        r'class="horseNum"[^>]*>\s*(\d+)\s*</td>.*?'
-        r'k_lineageLoginCode=(\d+)"[^>]*>\s*([^<]+?)\s*</a>',
-        html, re.DOTALL,
-    ):
-        out.append((int(m.group(1)), m.group(3).strip(), m.group(2)))
+    marks = list(re.finditer(r'class="horseNum"[^>]*>\s*(\d+)\s*</td>', html))
+    for i, m in enumerate(marks):
+        num = int(m.group(1))
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(html)
+        block = html[m.end():end]   # この馬のブロック内だけを探索
+        lm = re.search(r'k_lineageLoginCode=(\d+)"[^>]*>\s*([^<]+?)\s*</a>', block)
+        out.append((num, lm.group(2).strip() if lm else "", lm.group(1) if lm else ""))
     return out
 
 

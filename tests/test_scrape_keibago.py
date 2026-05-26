@@ -157,6 +157,34 @@ def test_parse_deba_table_horse_ids():
                  (2, "シアトルプリンセス", "30062400996")]
 
 
+def test_parse_deba_table_missing_link_no_mispair():
+    """リンク無し馬 (取消等) があっても、その馬番を次の馬の ID と誤ペアにしない。
+
+    馬柱を別馬に付ける最悪の取り違え回帰防止。リンク無し馬は code 空で残す。
+    """
+    html = (
+        '<td rowspan="5" class="horseNum">1</td>'
+        '<a class="horseName" href="x?k_lineageLoginCode=111">ホースA</a>'
+        '<td rowspan="5" class="horseNum">2</td>'   # 取消 = リンク無し
+        '<td rowspan="5" class="horseNum">3</td>'
+        '<a class="horseName" href="x?k_lineageLoginCode=333">ホースC</a>'
+    )
+    assert kg.parse_deba_table(html) == [
+        (1, "ホースA", "111"),
+        (2, "", ""),          # 次の馬の ID を借りない
+        (3, "ホースC", "333"),  # 落とさない
+    ]
+
+
+def test_parse_combo_rejects_date_like():
+    """日付 (2026-05-26) 等の馬番域外の組番を弾く (誤った組/オッズを作らない)。"""
+    html = "<td>2026-05-26</td><td>5.0</td><td>1-2-3</td><td>10.0</td>"
+    tri = {t.label: t.odds for t in kg.parse_trifecta(html)}
+    assert tri == {"1-2-3": 10.0}        # 2026-05-26 は採用されない
+    q = {b.label: b.odds for b in kg._parse_combo(html, "trio", ordered=False, length=3)}
+    assert q == {"1-2-3": 10.0}
+
+
 def test_parse_horse_history_fields():
     runs = kg.parse_horse_history(_HISTORY)
     assert len(runs) == 2
