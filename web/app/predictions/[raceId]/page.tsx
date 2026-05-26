@@ -585,18 +585,29 @@ function BundleCard({
   const half = Math.round(bundle.total_stake / 2 / 100) * 100;
   const nTypes = new Set(legs.map((l) => l.bet_type)).size;
   const bundleHit = finish ? legs.some((l) => betHits(l.bet_type, l.key, finish)) : false;
+  // 束はまずモデル (portfolio.build_bundle) のみで生成され、その後 claude -p の web 調査で
+  // 検証される。検証が済むまでは「Claude のオススメ」ではなく「モデル提案」として扱い、
+  // Claude branding を付けない (検証前に Claude が裏取りしたかのような誤認を防ぐ)。
+  const validated = bundle.llm_review?.validated === true;
+  // トリガミ防止マージン (保存オッズからの下振れ緩衝)。古い snapshot は未保存 → 1 扱い。
+  const margin = bundle.torigami_margin ?? 1;
+  const driftPct = margin > 1 ? Math.round((1 - 1 / margin) * 100) : 0;
   return (
     <Card
       tone={legs.length ? "alert" : "default"}
       title={
         <span className="flex items-center gap-2">
-          <span className="text-(--color-highlight) font-black">Claude 総合オススメ — まとめ買い</span>
+          <span className="text-(--color-highlight) font-black">
+            {validated ? "Claude 総合オススメ" : "総合オススメ (モデル)"} — まとめ買い
+          </span>
           <span className="text-xs text-(--color-muted) font-normal">
             全 bet type 横断 · joint (同時) Kelly 最適配分
             {legs.length > 0 && ` · 完全 top-3 分布 ${bundle.n_outcomes} 通りで E[log 資金] 最大化`}
           </span>
-          {bundle.llm_review?.validated && (
-            <Badge tone="magenta">claude -p 検証済{bundle.llm_review.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
+          {validated ? (
+            <Badge tone="magenta">claude -p 検証済{bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
+          ) : (
+            legs.length > 0 && <Badge tone="warn">Claude 検証前 (モデルのみ)</Badge>
           )}
           {finish && legs.length > 0 &&
             (bundleHit ? <Badge tone="good">束 的中</Badge> : <Badge tone="bad">束 不的中</Badge>)}
@@ -625,10 +636,18 @@ function BundleCard({
             <Stat label="½ Kelly (保守・推奨)" value={`¥${half.toLocaleString()}`} />
             <Stat label="束の的中率 (1点以上)" value={fmtPct(bundle.bundle_hit_prob, 1)} />
             <Stat
-              label="最小 払戻/投資 (トリガミ無)"
+              label={margin > 1 ? `最小 払戻/投資 (目標 ≥×${margin.toFixed(2)})` : "最小 払戻/投資 (トリガミ無)"}
               value={
                 bundle.min_payout_ratio != null ? (
-                  <span className={bundle.min_payout_ratio >= 1 ? "text-(--color-good)" : "text-(--color-bad)"}>
+                  <span
+                    className={
+                      bundle.min_payout_ratio >= margin - 1e-9
+                        ? "text-(--color-good)"
+                        : bundle.min_payout_ratio >= 1
+                          ? "text-(--color-warn)"
+                          : "text-(--color-bad)"
+                    }
+                  >
                     ×{bundle.min_payout_ratio.toFixed(2)}
                   </span>
                 ) : "—"
@@ -655,7 +674,8 @@ function BundleCard({
             を最大化した成長率最適配分 (相関・排他性を考慮、独立 Kelly の単純和ではない)。
             <span className="text-(--color-good)">
               {" "}トリガミ防止済: 各脚の的中時払戻 ≥ 投資総額 ¥{bundle.total_stake.toLocaleString()}
-              {bundle.dropped_torigami ? ` (トリガミ脚 ${bundle.dropped_torigami} 本を除外)` : ""}
+              {margin > 1 ? ` ×${margin.toFixed(2)} (実オッズ ${driftPct}% 下振れまで吸収)` : ""}
+              {bundle.dropped_torigami ? ` / トリガミ脚 ${bundle.dropped_torigami} 本を除外` : ""}
             </span>
             。モデル期待回収 ×{bundle.expected_return.toFixed(2)}{" "}
             <span className="text-(--color-warn)">(確率モデルの楽観バイアス込み・参考値)</span>。

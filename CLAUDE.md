@@ -92,9 +92,10 @@ snapshot に保存される主要フィールド:
 - `bet_tables`: 単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複 の EV top 30
 - `bet_tables_g`: 各 bet type の Plan G picks
 - `recommended_bundle`: 「Claude 総合オススメ」= 全 bet type 横断の **joint (同時) Kelly 最適まとめ買い束** (`src/portfolio.py`)。レースの完全な top-3 結果分布 (全 ordered triple, Σp=1) 上で束全体の E[log(資金)] を最大化した成長率最適配分。独立 Kelly の単純和ではなく相関・排他性を考慮。+EV (P×O≥1.02) が無ければ legs 空 = 見送り。
-  - **トリガミ防止**: `odds×stake < 投資総額` の脚 (= 単独的中でも収支マイナス) を除去 → 残脚で再最適化を収束まで繰り返す。`min_payout_ratio ≥ 1` を保証 (どの的中 outcome でもトリガミにならない)。`dropped_torigami` に除外数。
-  - **claude -p 検証** (`llm.validate_bundle_stream`, `analyze._validate_and_update_bundle`): 束の絡む馬を web 検索で裏取り (取消/体調/適性) し、明確なマイナス根拠のある脚を cut → 再構築。`llm_review` (summary/confidence/cuts/notes) を添えて recommended_bundle を上書き。`--no-llm` 時はモデルのみ。
-  - frontend (履歴詳細ページ最上部) は full Kelly を表示しつつ ½ Kelly を実運用推奨として併記 (楽観バイアス対策)、的中時払戻・min_payout_ratio・検証バッジ/調査メモも表示。古い snapshot は欠落 → 近似 Kelly ランキングに fallback。`scripts/backfill_bundle.py` で後付け (start_at/close_at も再パース補正)
+  - **トリガミ防止 (安全マージン付き)**: `odds×stake < 投資総額 × TORIGAMI_MARGIN` の脚を除去 → 残脚で再最適化を収束まで繰り返す。`min_payout_ratio ≥ TORIGAMI_MARGIN` を保証。**margin=1.10** (`src/portfolio.py`) は「束を組んだ時点のオッズ」からの**下振れ緩衝**: 締切直前ドリフトや複勝/ワイドのレンジ幅で実払戻が下振れしても、~9% までは収支マイナスにならない (margin=1 では保存オッズでしかトリガミ無を保証できず、実オッズ乖離でトリガミ化していた)。`dropped_torigami` に除外数、`torigami_margin` も snapshot に保存。
+    - **レンジ型 bet の下限採用**: 複勝 (`fuku_min`) に加え**ワイド (`parse_pair_odds` b4) もレンジ "5.0 - 7.2" 表示なら下限を採用** (実払戻 ≥ 下限で確定 → トリガミ保証が崩れない)。margin と二段構えで「オッズ乖離 → トリガミ」を防ぐ。
+  - **claude -p 検証** (`llm.validate_bundle_stream`, `analyze._validate_and_update_bundle`): 束の絡む馬を web 検索で裏取り (取消/体調/適性) し、明確なマイナス根拠のある脚を cut → 再構築。`llm_review` (summary/confidence/cuts/notes) を添えて recommended_bundle を上書き。`--no-llm` 時はモデルのみ。**束はまずモデルのみで生成・保存され、その後 claude -p が検証する**ので、検証前は frontend で「総合オススメ (モデル)」+「Claude 検証前」バッジ表示とし、検証済 (`llm_review.validated`) で初めて「Claude 総合オススメ」+ magenta バッジに切替 (検証前に Claude が裏取りしたかのような誤認を防ぐ)。
+  - frontend (履歴詳細ページ最上部) は full Kelly を表示しつつ ½ Kelly を実運用推奨として併記 (楽観バイアス対策)、的中時払戻・min_payout_ratio (目標 ≥×margin で色分け)・検証バッジ/調査メモも表示。古い snapshot は欠落 → 近似 Kelly ランキングに fallback。`scripts/backfill_bundle.py` で後付け (start_at/close_at も再パース補正)
 
 ## 確率モデルの保守化 (このプロジェクトで最も重要)
 

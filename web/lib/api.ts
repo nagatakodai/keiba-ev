@@ -156,10 +156,12 @@ export type RecommendedBundle = {
   expected_log_growth: number;  // E[log W]
   n_candidates: number;
   n_outcomes: number;
-  // トリガミ防止: 全脚のうち最小の (payout_if_hit / total_stake)。≥1.0 なら
-  // どの単独的中でも収支マイナスにならない。dropped_torigami は除去した脚数。
+  // トリガミ防止: 全脚のうち最小の (payout_if_hit / total_stake)。≥ torigami_margin なら
+  // 実オッズが ~(1−1/margin) 下振れしても収支マイナスにならない。dropped_torigami は除去脚数。
   min_payout_ratio?: number;
   dropped_torigami?: number;
+  torigami_margin?: number;     // 払戻/投資 の下限 (1.10 = 9% 下振れ緩衝)。古い snapshot は欠落
+
   // claude -p による web 調査検証 (取消/不安材料を裏取りして cut)。未検証なら欠落。
   llm_review?: {
     validated: boolean;

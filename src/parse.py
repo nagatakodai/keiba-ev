@@ -499,8 +499,13 @@ def parse_pair_odds(html: str, type_: str) -> dict[tuple[int, int], float]:
     """
     if type_ not in ("b3", "b4", "b5"):
         raise ValueError(f"unsupported pair odds type: {type_}")
+    # ワイド (b4) は払戻が 3 着目で変動するため netkeiba は "5.0 - 7.2" のレンジ表示に
+    # なることがある。第 2 数値 (上限) を任意でも捕捉し、複勝 (fuku_min) と同様に
+    # **下限を採用** する (実払戻 ≥ 下限で確定 → トリガミ防止の保証が崩れない)。
+    # 馬連 (b3) / 馬単 (b5) は単一値なので第 2 group は不一致 → 従来どおり point odds。
     pat = re.compile(
-        rf'cart-item="a\d+-\d+-\d+_{type_}_c\d+_(\d+)_(\d+)"[^>]*>\s*([\d,\.]+)'
+        rf'cart-item="a\d+-\d+-\d+_{type_}_c\d+_(\d+)_(\d+)"[^>]*>'
+        r'\s*([\d,\.]+)(?:\s*[-–~〜]\s*([\d,\.]+))?'
     )
     out: dict[tuple[int, int], float] = {}
     for m in pat.finditer(html):
@@ -508,6 +513,10 @@ def parse_pair_odds(html: str, type_: str) -> dict[tuple[int, int], float]:
         if a == b:
             continue
         odds = _to_float(m.group(3))
+        if m.group(4):  # レンジ表示 → 下限採用 (保守)
+            hi = _to_float(m.group(4))
+            if hi > 0:
+                odds = min(odds, hi)
         if odds <= 0:
             continue
         key = (a, b) if type_ == "b5" else (min(a, b), max(a, b))

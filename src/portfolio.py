@@ -38,6 +38,12 @@ from .models import Probabilities
 # 1 − Σf の予備をわずかに残し、全外し outcome で log(0) = −∞ になるのを防ぐ。
 _MAX_TOTAL_FRACTION = 0.9999
 
+# トリガミ防止の安全マージン。束を組んだ時点のオッズは実払戻 (締切直前 / レンジ型
+# bet の確定値) から下振れし得る。各脚の payout が「投資総額 × このマージン」以上で
+# あることを要求すると、オッズが ~(1−1/margin) ぶん下振れしても収支マイナスにならない。
+# 1.10 → オッズ 9% 下振れまで吸収。複勝/ワイドのレンジ下限採用 (parse 側) と二段構え。
+TORIGAMI_MARGIN = 1.10
+
 
 def enumerate_outcomes(
     probs: Probabilities, *, eps: float = 1e-9
@@ -172,6 +178,7 @@ def build_bundle(
     min_stake: int = 100,
     stake_unit: int = 100,
     avoid_torigami: bool = True,
+    torigami_margin: float = TORIGAMI_MARGIN,
 ) -> dict:
     """候補 bet 群から joint Kelly 最適「まとめ買い」束を構築。
 
@@ -179,9 +186,11 @@ def build_bundle(
     返り値は snapshot 直列化済 dict (frontend がそのまま描画)。
 
     avoid_torigami=True のとき「トリガミ防止」フィルタを適用する。束を丸ごと買った
-    ときの投資総額 S に対し、payout(= odds×stake) < S の脚 (= 単独的中でも収支マイナス)
-    を除去 → 残った脚で再最適化、を収束まで繰り返す。payout は加算なので「全脚が単独で
-    S を回収できる」なら **どの的中 outcome でもトリガミにならない** ことが保証される。
+    ときの投資総額 S に対し、payout(= odds×stake) < S × torigami_margin の脚を除去
+    → 残った脚で再最適化、を収束まで繰り返す。payout は加算なので「全脚が単独で
+    S × margin を回収できる」なら **どの的中 outcome でも payout ≥ S × margin** が
+    保証される。margin>1 はオッズ下振れ (締切直前のドリフト / 複勝・ワイドのレンジ幅) に
+    対する緩衝で、保存オッズから ~(1−1/margin) 下振れしても収支マイナスにならない。
     """
     # +EV (P×O ≥ floor) かつ odds>1 の候補のみ。個別 Kelly 降順で max_legs に絞る
     # (最適化コスト上限。f_b=0 が許されるので pool に入れても害はない)。
@@ -245,10 +254,11 @@ def build_bundle(
         if not avoid_torigami or not kept_local:
             f_active, stakes_active = f_opt, stakes
             break
-        # トリガミ脚: payout (odds×stake) < 投資総額 S → 単独的中でも収支マイナス
+        # トリガミ脚: payout (odds×stake) < 投資総額 S × margin → 下振れで収支マイナス化
+        thresh = S * torigami_margin
         offenders = [
             i for i in kept_local
-            if pool[active[i]]["odds"] * stakes[i] < S - 1e-9
+            if pool[active[i]]["odds"] * stakes[i] < thresh - 1e-9
         ]
         if not offenders:
             f_active, stakes_active = f_opt, stakes
@@ -295,6 +305,7 @@ def build_bundle(
     base["total_stake"] = int(total_stake)
     base["total_fraction"] = float(frac_round.sum()) if len(frac_round) else 0.0
     base["dropped_torigami"] = n_dropped_torigami
+    base["torigami_margin"] = float(torigami_margin)
     return base
 
 

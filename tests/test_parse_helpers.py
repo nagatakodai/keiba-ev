@@ -9,7 +9,22 @@ from src.parse import (
     _parse_start_at,
     _tanfuku_to_bets,
     _trio_dict_to_bets,
+    parse_pair_odds,
 )
+
+
+def test_parse_pair_odds_wide_range_uses_lower_bound():
+    """ワイド (b4) がレンジ "5.0 - 7.2" 表示なら下限を採用 (保守)。"""
+    html = '<td cart-item="a1-1-1_b4_c1_3_7" class="x">5.0 - 7.2</td>'
+    out = parse_pair_odds(html, "b4")
+    assert out[(3, 7)] == 5.0
+
+
+def test_parse_pair_odds_single_value_unchanged():
+    """単一値 (馬連 b3 等) は従来どおり point odds。"""
+    html = '<td cart-item="a1-1-1_b3_c1_2_5">12.3</td>'
+    out = parse_pair_odds(html, "b3")
+    assert out[(2, 5)] == 12.3
 
 
 def test_parse_start_at_time_before_hassou():

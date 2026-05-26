@@ -36,6 +36,33 @@ def test_bundle_no_torigami_invariant():
         assert b["min_payout_ratio"] >= 1.0 - 1e-9
 
 
+def test_bundle_torigami_margin_enforced():
+    """torigami_margin>1 なら全脚 payout ≥ 投資総額 × margin (オッズ下振れ緩衝)。
+
+    レンジ型 bet (ワイド/複勝) の確定オッズや締切直前ドリフトで保存オッズから
+    下振れしても収支マイナスにならないことを保証する。
+    """
+    win = {1: 0.4, 2: 0.25, 3: 0.2, 4: 0.1, 5: 0.05}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    cands = [
+        {"bet_type": "win", "key": [1], "odds": 3.0, "prob": 0.4, "px_o": 1.20, "tier": "honsen"},
+        {"bet_type": "win", "key": [2], "odds": 5.0, "prob": 0.25, "px_o": 1.25, "tier": "chuana"},
+        {"bet_type": "win", "key": [3], "odds": 7.0, "prob": 0.2, "px_o": 1.40, "tier": "chuana"},
+    ]
+    margin = 1.10
+    b = pf.build_bundle(cands, probs, torigami_margin=margin)
+    assert b["torigami_margin"] == margin
+    if b["legs"]:
+        S = b["total_stake"]
+        for leg in b["legs"]:
+            assert leg["odds"] * leg["stake"] >= S * margin - 1e-6, leg
+        assert b["min_payout_ratio"] >= margin - 1e-9
+    # マージンを上げると脚数は増えない (より厳しい除去のみ)
+    n_lo = len(pf.build_bundle(cands, probs, torigami_margin=1.0)["legs"])
+    n_hi = len(pf.build_bundle(cands, probs, torigami_margin=1.5)["legs"])
+    assert n_hi <= n_lo
+
+
 def test_bundle_total_never_exceeds_bankroll():
     """多脚でも丸め誤差で総額が bankroll を超えない (floor 丸め)。
 
