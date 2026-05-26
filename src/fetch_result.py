@@ -31,6 +31,10 @@ TERMINAL_RETENTION_SEC = 24 * 3600
 # netkeiba block 中の result fetch は attempt を消費せず、この間隔で再試行し続ける
 # (block 解除後に取得 → block 中に走った race の結果/calibration を取りこぼさない)。
 BLOCK_RETRY_INTERVAL_SEC = 15 * 60
+# block-pending は attempt を消費しないので、長期/恒久 block では pending が単調増大し
+# due_idx を食い潰す。scheduled_at からこの age を超えた pending は諦めて failed 化する
+# (開催終了で結果ページが永遠に block 風レスポンスを返すケース等の上限)。
+MAX_PENDING_AGE_SEC = 3 * 24 * 3600
 
 
 def _is_block_failure(reason: str) -> bool:
@@ -234,6 +238,12 @@ def process_pending(
     # (HTTP 数秒で lock 抱え込むと UI/API が hang する)。
     with _pending_lock():
         entries = _load_pending()
+        # 長期 block 等で滞留した pending を failed 化 (単調増大・due_idx 食い潰し防止)。
+        stale_cutoff = now_ts - MAX_PENDING_AGE_SEC
+        for e in entries:
+            if e.status == "pending" and e.scheduled_at < stale_cutoff:
+                e.status = "failed"
+                e.last_error = e.last_error or f"gave up after {MAX_PENDING_AGE_SEC // 3600}h pending"
         cutoff = now_ts - TERMINAL_RETENTION_SEC
         before_prune = len(entries)
         entries = [
@@ -279,22 +289,27 @@ def process_pending(
             result, reason = fetched[rid]
             e.last_error = reason
             if result and result.get("finish_order"):
-                e.attempts += 1
                 try:
                     save_result(e.race_id, result)
+                    e.attempts += 1
                     e.status = "success"
                     e.last_error = ""
                     summary["success"].append(e.race_id)
                 except Exception as ex:
+                    # 結果は確定済 = 再 fetch すれば取れる。save の一時エラー (disk full /
+                    # I/O 等) で terminal failed にすると取りこぼすので、attempt を消費せず
+                    # backoff して pending を維持する (block 失敗と同じ扱い)。
                     e.last_error = f"save error: {ex}"
+                    e.next_attempt_at = now_ts + max(e.retry_interval_sec, BLOCK_RETRY_INTERVAL_SEC)
+                    summary["still_pending"] += 1
             elif _is_block_failure(reason):
                 # netkeiba block 中は attempt を消費せず長め間隔で再試行 → 解除後に
                 # 取得できる (block 中の race を terminal failed にして取りこぼさない)。
                 e.next_attempt_at = now_ts + max(e.retry_interval_sec, BLOCK_RETRY_INTERVAL_SEC)
                 summary["still_pending"] += 1
             else:
+                # 通常の取得失敗 (結果未確定 / パース失敗等) — attempt 消費して max で failed。
                 e.attempts += 1
-            if e.status not in ("success",) and not _is_block_failure(reason):
                 if e.attempts >= e.max_attempts:
                     e.status = "failed"
                     summary["failed"].append(e.race_id)
