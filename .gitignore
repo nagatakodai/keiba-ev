@@ -12,6 +12,7 @@ data/probs/
 .env
 .idea/
 .vscode/
+.claude/
 node_modules/
 logs/
 # Next.js (web/)
