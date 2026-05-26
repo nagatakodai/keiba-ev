@@ -168,6 +168,28 @@ def test_parse_horse_history_fields():
     assert runs[1].finish_pos is None             # 着順 5 は None (3着内のみ int)
 
 
+def test_parse_horse_history_jra_layout_row():
+    """1頭の履歴に混在する JRA 行 (距離='芝2000'・列数多い) を列ずれなく取れる。
+
+    固定 index だと距離='曇'・タイム=着差 を誤採用していた回帰の防止 (値パターン錨)。
+    """
+    jra_row = (
+        "<table><tr>"
+        "<td>2024/06/30</td><td>Ｊ函館</td><td>6</td><td>３歳未勝利</td>"
+        "<td>芝2000</td><td>曇</td><td>良</td><td>16</td><td>4</td><td>7</td>"
+        "<td>14</td><td>10</td><td>2:03.0</td><td>1.3</td><td>36.9</td>"
+        "<td>464</td><td>高杉吏</td><td>52.0</td><td>西園正</td><td>0</td><td>サラトガ</td>"
+        "</tr></table>"
+    )
+    runs = kg.parse_horse_history(jra_row)
+    assert len(runs) == 1
+    r = runs[0]
+    assert r.surface == "芝" and r.distance == 2000   # '芝2000' を正しく分解
+    assert r.going == "良" and r.field_size == 16
+    assert r.finish_pos is None                        # 着順 10 (3着外)
+    assert abs(r.winner_time_sec - 123.0) < 1e-6       # 2:03.0、着差 1.3 を誤採用しない
+
+
 def test_time_sec_and_date_key():
     assert abs(kg._time_sec("1:27.4") - 87.4) < 1e-9
     assert abs(kg._time_sec("41.9") - 41.9) < 1e-9

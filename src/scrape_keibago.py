@@ -31,6 +31,12 @@ _DATAROOM = "https://www.keiba.go.jp/KeibaWeb/DataRoom"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 _DATE_RE = re.compile(r"20\d\d[./]\d{1,2}[./]\d{1,2}")
+# 競走成績の行は NAR / JRA で列レイアウトが違う (JRA 履歴は距離が surface 付き・列数も多い)。
+# 固定 index でなく値パターンで錨を打つ: タイム (M:SS.D / SS.D, 40秒以上) と
+# 距離 (surface 任意 + 800-4000) を見つけ、着順/人気/馬番はタイム直前から相対で読む。
+_GOING_SET = {"良", "稍重", "重", "不良"}
+_TIME_CELL_RE = re.compile(r"(?:\d+:)?\d{1,2}\.\d\s*$")
+_DIST_CELL_RE = re.compile(r"(芝|ダ|障)?\s*(\d{3,4})\s*$")
 
 # 券種 → keiba.go.jp エンドポイント。
 _EP = {
@@ -215,12 +221,15 @@ def parse_deba_table(html: str) -> list[tuple[int, str, str]]:
 def parse_horse_history(html: str, *, limit: int = 12) -> list[PastRun]:
     """競走成績 (HorseMarkInfo) → [PastRun] (新しい順)。
 
-    成績表 = 日付が最も多く並ぶ <table>。空セル除去後の論理列:
-    0 年月日 / 1 競馬場 / 2 R / 3 競走名 / 4 格組 / 5 距離 / 6 天候 / 7 馬場 /
-    8 頭数 / 9 枠 / 10 馬番 / 11 人気 / 12 着順 / 13 タイム / (14 着差)。
-    タイムは馬の自走時計なので own (winner_time_sec=own, time_diff_sec=0)。着順は
-    netkeiba 馬柱と同じく 1/2/3 のみ int・他は None。surface は NAR 基本ダート
-    (行内に芝/障があればそれを採用)。
+    成績表 = 日付が最も多く並ぶ <table>。**1頭の履歴に NAR 行と JRA 行が混在し列
+    レイアウトが異なる** (JRA 履歴は距離が "芝2000" 形式で列数も多い) ため、固定 index
+    でなく**値パターンで錨**を打つ:
+      - タイム = M:SS.D / SS.D 形式かつ 40 秒以上のセル (着差 <10 や 上3F と区別、
+        かつタイムは着差/上3Fより前にあるので左から最初の一致)。
+      - 距離+馬場 = surface(芝/ダ/障)任意 + 3-4桁(800-4000) のセル。surface 無しは NAR=ダ。
+      - 着順/人気/馬番 = タイム直前から相対 (…馬番, 人気, 着順, タイム)。
+      - 頭数 = 馬場セルの直後。
+    タイムは馬の自走時計 (winner_time_sec=own, time_diff_sec=0)。着順は 1/2/3 のみ int。
     """
     tables = re.findall(r"<table[^>]*>(.*?)</table>", html, re.DOTALL)
     best = max(tables, key=lambda x: len(_DATE_RE.findall(x)), default="")
@@ -230,24 +239,42 @@ def parse_horse_history(html: str, *, limit: int = 12) -> list[PastRun]:
     for row in re.findall(r"<tr[^>]*>(.*?)</tr>", best, re.DOTALL):
         raw = [_html.unescape(re.sub(r"<[^>]+>", " ", x)).strip()
                for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, re.DOTALL)]
-        c = [x for x in raw if x]   # 空セル (spacer) を除去 → 論理列
-        if len(c) < 14 or not _DATE_RE.match(c[0]):
+        c = [x for x in raw if x]   # 空セル (spacer) を除去
+        if len(c) < 10 or not _DATE_RE.match(c[0]):
             continue
-        surf = next((s for s in ("芝", "障") if s in row), "ダ")
-        fin = int(c[12]) if c[12] in ("1", "2", "3") else None
+        # タイム錨 (レース時計): 左から最初の time 形式かつ ≥40 秒
+        ti = next((i for i in range(2, len(c))
+                   if _TIME_CELL_RE.match(c[i]) and _time_sec(c[i]) >= 40.0), None)
+        if ti is None or ti < 4:
+            continue
+        # 距離+surface (タイムより前のセルから)
+        dm = next((m for cell in c[2:ti]
+                   if (m := _DIST_CELL_RE.match(cell)) and 800 <= int(m.group(2)) <= 4000), None)
+        if dm is None:
+            continue
+        surface = {"芝": "芝", "ダ": "ダ", "障": "障"}.get(dm.group(1) or "", "ダ")
+        # 馬場 (距離の後 / タイムの前) と頭数 (馬場の直後)
+        going, field_size = "", 0
+        for i in range(2, ti):
+            if c[i] in _GOING_SET:
+                going = c[i]
+                if i + 1 < len(c) and c[i + 1].isdigit():
+                    field_size = int(c[i + 1])
+                break
+        fin = int(c[ti - 1]) if c[ti - 1] in ("1", "2", "3") else None
         out.append(PastRun(
             date=c[0].replace("/", "."),
             venue=c[1],
             race_no=int(c[2]) if c[2].isdigit() else 0,
-            race_class=c[3],
-            surface=surf,
-            distance=int(re.sub(r"\D", "", c[5]) or 0),
-            going=c[7],
-            field_size=int(re.sub(r"\D", "", c[8]) or 0),
-            horse_number=int(re.sub(r"\D", "", c[10]) or 0),
-            popularity=int(c[11]) if c[11].isdigit() else 0,
+            race_class=c[3] if len(c) > 3 else "",
+            surface=surface,
+            distance=int(dm.group(2)),
+            going=going,
+            field_size=field_size,
+            horse_number=int(c[ti - 3]) if c[ti - 3].isdigit() else 0,
+            popularity=int(c[ti - 2]) if c[ti - 2].isdigit() else 0,
             finish_pos=fin,
-            winner_time_sec=_time_sec(c[13]),
+            winner_time_sec=_time_sec(c[ti]),
             time_diff_sec=0.0,
         ))
         if len(out) >= limit:
