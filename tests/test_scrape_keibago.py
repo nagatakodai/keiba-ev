@@ -239,6 +239,30 @@ def test_parse_keibago_result_finish_and_payout():
     assert r["payout"] == 6030     # 8-3-6 の配当を正しく選ぶ (2-7-1 を拾わない)
 
 
+def test_parse_finish_order_skips_decoy_table():
+    """着順/馬番ヘッダを持つ表が先行しても、1-2-3 が揃う本物の表を選ぶ。"""
+    html = (
+        "<table><tr><th>着順</th><th>馬番</th></tr>"
+        "<tr><td>1</td><td>99</td></tr></table>"           # decoy (1着のみ)
+        "<table><tr><th>着順</th><th>枠</th><th>馬番</th></tr>"
+        "<tr><td>1</td><td>5</td><td>8</td></tr>"
+        "<tr><td>2</td><td>2</td><td>3</td></tr>"
+        "<tr><td>3</td><td>4</td><td>6</td></tr></table>"
+    )
+    assert kg._parse_finish_order(html) == [8, 3, 6]
+
+
+def test_parse_result_dead_heat_incomplete_len():
+    """同着で 1-2-3 が揃わない場合は finish_order が len<3 (fetch 側で None 化される)。"""
+    html = (
+        "<table><tr><th>着順</th><th>枠</th><th>馬番</th></tr>"
+        "<tr><td>1</td><td>5</td><td>8</td></tr>"
+        "<tr><td>2</td><td>2</td><td>3</td></tr>"
+        "<tr><td>2</td><td>4</td><td>6</td></tr></table>"   # 2着同着・3着なし
+    )
+    assert len(kg.parse_keibago_result(html, "")["finish_order"]) < 3
+
+
 def test_time_sec_and_date_key():
     assert abs(kg._time_sec("1:27.4") - 87.4) < 1e-9
     assert abs(kg._time_sec("41.9") - 41.9) < 1e-9

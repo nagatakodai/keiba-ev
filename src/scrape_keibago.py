@@ -613,7 +613,13 @@ def parse_keibago_result(racemark_html: str, refund_html: str = "") -> dict:
 
 
 def _parse_finish_order(html: str) -> list[int]:
-    """着順表 (ヘッダに 着順/馬番) → 着順 1,2,3 の馬番リスト。"""
+    """着順表 (ヘッダに 着順/馬番) → 着順 1,2,3 の馬番リスト。
+
+    着順/馬番ヘッダを持つ表が複数ある (印/予想表が先行する) ことがあるので、**最初の
+    1つでなく 1-2-3 が揃う表を優先**して選ぶ (先行する decoy 表の誤採用を防ぐ)。
+    揃う表が無ければ最も着順エントリの多い表に fallback。
+    """
+    best: dict[int, int] = {}
     for tbl in re.findall(r"<table[^>]*>(.*?)</table>", html, re.DOTALL):
         rows = re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.DOTALL)
         if not rows:
@@ -629,10 +635,12 @@ def _parse_finish_order(html: str) -> list[int]:
             c = [x for x in (re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
                              for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", r, re.DOTALL)) if x]
             if len(c) > max(ci, ui) and c[ci] in ("1", "2", "3") and c[ui].isdigit():
-                order[int(c[ci])] = int(c[ui])
-        if order:
-            return [order[p] for p in sorted(order) if p in order]
-    return []
+                order.setdefault(int(c[ci]), int(c[ui]))  # 同着は先勝ち
+        if {1, 2, 3} <= set(order):
+            return [order[1], order[2], order[3]]   # 1-2-3 完全な表を即採用
+        if len(order) > len(best):
+            best = order
+    return [best[p] for p in sorted(best)] if best else []
 
 
 def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
@@ -650,7 +658,9 @@ def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
     except Exception:  # noqa: BLE001
         return None
     res = parse_keibago_result(rm, rf)
-    return res if res["finish_order"] else None
+    # 3連単として有効なのは 1-2-3 が揃う (len>=3) 確定結果のみ。同着等で着順が
+    # 揃わない / 未確定は None を返し、不完全な結果を save しない (loop は pending 維持)。
+    return res if len(res["finish_order"]) >= 3 else None
 
 
 def _main() -> None:
