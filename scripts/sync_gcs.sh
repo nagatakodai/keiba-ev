@@ -8,13 +8,13 @@
 #   - data/cache の *.log (実行ログ) は価値が無いので除外。raw HTML / parquet /
 #     snapshots / calibration / odds・aptitude・rids cache はミラー対象。
 #   - バケットは東京リージョン STANDARD (asia-northeast1)、別途 gcloud で作成済:
-#       gs://keiba-ev-data-788  (keiba シグネチャ "788")
+#       gs://keiba-race-data-788  (レースデータ: 過去レース + 今後解析する分。"788" は keiba シグネチャ)
 #
 # 使い方: ./scripts/sync_gcs.sh            (手動)
 #         fetch_year_2026.sh の最終 step から自動呼び出し
 set -uo pipefail
 cd "$(dirname "$0")/.."
-BUCKET="${KEIBA_GCS_BUCKET:-gs://keiba-ev-data-788}"
+BUCKET="${KEIBA_GCS_BUCKET:-gs://keiba-race-data-788}"
 GS="gsutil -m -q"
 
 echo "[$(date '+%F %T')] GCS sync 開始 → $BUCKET"
