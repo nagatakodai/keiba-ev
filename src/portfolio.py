@@ -243,7 +243,9 @@ def build_bundle(
     while active:
         H = H_full[active]
         f_opt = _optimize(p, H)
-        f = f_opt * float(kelly_fraction)
+        # kelly_fraction>1 でスケール後に Σf>cap になり得るので必ず再射影する
+        # (再射影しないと floor 丸めでも総額が bankroll を超える)。≤1 では no-op。
+        f = _project(f_opt * float(kelly_fraction))
         # floor で stake_unit に丸める。round だと per-leg 切り上げの累積で総額が
         # bankroll を超える (¥10,100 等) ことがあるため、floor で Σstake ≤ Σf×bankroll
         # ≤ bankroll を保証する。

@@ -80,6 +80,21 @@ def test_bundle_total_never_exceeds_bankroll():
     assert b["total_stake"] <= 10_000
 
 
+def test_bundle_kelly_fraction_gt1_respects_bankroll():
+    """kelly_fraction>1 でも総額 ≤ bankroll (スケール後の再射影で cap を守る)。"""
+    win = {i: 1.0 / 6 for i in range(1, 7)}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    p_win = 1.0 / 6
+    cands = [
+        {"bet_type": "win", "key": [i], "odds": 9.0, "prob": p_win,
+         "px_o": p_win * 9.0, "tier": "chuana"}
+        for i in range(1, 5)
+    ]
+    b = pf.build_bundle(cands, probs, bankroll=10_000, kelly_fraction=2.0,
+                        avoid_torigami=False)
+    assert b["total_stake"] <= 10_000
+
+
 def test_bundle_torigami_filter_does_not_add_legs():
     """avoid_torigami=True は False より脚数を増やさない (除去のみ)。"""
     probs = _uniform_probs(8)
