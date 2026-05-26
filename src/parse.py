@@ -58,6 +58,7 @@ def fetch_and_parse(
     *,
     with_past_runs: bool = True,
     with_other_bets: bool = True,
+    with_pair_bets: bool = False,
     with_exacta: bool = False,
     with_trio: bool = False,
 ) -> RaceData:
@@ -69,7 +70,13 @@ def fetch_and_parse(
     with_past_runs=True で馬柱 (shutuba_past.html) も取得して各 Horse に注入。
     Layer 1 特徴量を使う場合に必須。失敗時は warning のみで past_runs=[] のまま続行。
 
-    with_other_bets=True で 単複 (b1) / 馬連 (b3) / ワイド (b4) を追加 fetch (各 1 page = 計 3 page)。
+    with_other_bets=True で 単複 (b1) を追加 fetch (信頼できる単一馬オッズ)。
+    with_pair_bets=True で 馬連 (b3) / ワイド (b4) も fetch するが **既定 False で無効**:
+      netkeiba の odds_get_form.html (b3/b4) は jiku 巡回しても実オッズでない合成/不完全値を
+      返すことを実機で確認した (12頭 NAR で ワイド > 馬連 が 20/26 ペア、馬連 < 単勝 が 9/27、
+      ワイドが 918.0/k の機械的パターン)。組合せ単位の実オッズ照合に通らないため、
+      oddspark の pair/grid と同じく production では採用しない (`誤オッズは賭け金が動く最悪のバグ`)。
+      信頼できるのは 単複 (b1) と 3 連単 (b8, 組合せ明示) のみ。
     with_exacta=True で 馬単 (b5) を jiku iteration で全取得 (= n_horses page 増、重い)。
     with_trio=True で 3 連複 (b6) を jiku iteration で全取得 (= n_horses page 増、重い)。
     取得失敗時は warning のみで rd.other_bets[type] は空のまま続行。
@@ -110,7 +117,9 @@ def fetch_and_parse(
         except Exception as ex:  # noqa: BLE001
             import sys
             print(f"[fetch_and_parse] win/place fetch/parse failed: {ex}", file=sys.stderr)
-    if with_other_bets and n_horses >= 2:
+    if with_pair_bets and with_other_bets and n_horses >= 2:
+        # 既定では到達しない (with_pair_bets=False)。netkeiba の b3/b4 が誤オッズを返すため
+        # 無効化済 (docstring 参照)。実オッズが取れる解法が確立したら flag を有効化する。
         for type_, name in (("b3", "quinella"), ("b4", "wide")):
             try:
                 html = fetch_odds_simple(race_id, type_)

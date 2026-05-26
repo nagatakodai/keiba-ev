@@ -81,7 +81,10 @@ EV (回収率) = 的中率 × 平均オッズ ÷ 点数
 
 1. **適性指数 (`src/aptitude.py`)**: 各馬の 9 因子 (能力 / 距離適性 / 末脚 / コース / 馬場 / 状態 / 騎手 / ペース fit / 重賞実績) を 0-100 でレース内正規化。総合は重み付け平均。
 2. **確率モデル (`src/ev.py:estimate_probs`)**: Layer 1 特徴量 + 市場ブレンド + Discounted Harville で win/place2/place3 確率を出す。Plackett-Luce 連鎖で 3 連単・3 連複・馬連・ワイド・馬単・単勝・複勝 すべての確率を導出。
-3. **複数 bet type の EV**: 単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複 / 3 連単 を同じ確率モデルで EV table 化。控除率の低い bet type (単複 20%、馬連 22.5%) は +EV が残りやすい。
+3. **複数 bet type の EV**: 単勝 / 複勝 / 3 連単 を同じ確率モデルで EV table 化。控除率の低い bet type は +EV が残りやすいが、**馬連/ワイド/馬単/3連複 は実オッズが取れないため無効**:
+   - **netkeiba**: `odds_get_form.html` の b3 (馬連) / b4 (ワイド) は jiku 巡回しても**実オッズでない合成/不完全値**を返す (実機確認: 12頭 NAR で ワイド>馬連 20/26 ペア、馬連<単勝 9/27、ワイドが 918.0/k の機械的パターン)。`fetch_and_parse(with_pair_bets=False)` で既定無効 (`誤オッズは賭け金が動く最悪のバグ`)。
+   - **oddspark**: グリッドの位置推定で誤オッズ (別記)。
+   - → 信頼できるのは **単複 (b1, 単一馬明示) + 3連単 (b8, 組合せ明示)** のみ。実オッズ照合に通る解法が確立したら復活させる。
 4. **Plan G (適性ゲート → EV 足切り)**: 適性総合 top N 頭 (デフォルト 6) の集合内で生成される買い目のみ → P×O ≥ 1.02 で足切り。EV-first の Plan A/B/C と並列で提案される、競馬独自の「適性で選んで EV で確認」戦略。
 5. **検索 MCP 補強**: LLM (`claude -p`) が適性指数 + Plan G を受け取って、検索で根拠を検証 / 補強根拠数で再ランク。
 
@@ -89,11 +92,11 @@ snapshot に保存される主要フィールド:
 - `horse_aptitude`: 各馬の指数 + 内訳 (total 降順)
 - `aptitude_top_horses`: Plan G の集合
 - `plan_a_keys` / `plan_b_keys` / `plan_c_keys` / `plan_g_keys` / `plan_h1_keys` / `plan_h2_keys` / `plan_f_keys` (3 連単)
-- `bet_tables`: 単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複 の EV top 30
+- `bet_tables`: 単勝 / 複勝 の EV top 30 (馬連/ワイド/馬単/3連複 は実オッズが取れず無効 = 空。`build_all_bet_tables` は `rd.other_bets` の非空 type のみ出す)
 - `bet_tables_g`: 各 bet type の Plan G picks
 - `recommended_bundle`: 「Claude 総合オススメ」= 全 bet type 横断の **joint (同時) Kelly 最適まとめ買い束** (`src/portfolio.py`)。レースの完全な top-3 結果分布 (全 ordered triple, Σp=1) 上で束全体の E[log(資金)] を最大化した成長率最適配分。独立 Kelly の単純和ではなく相関・排他性を考慮。+EV (P×O≥1.02) が無ければ legs 空 = 見送り。
-  - **トリガミ防止 (安全マージン付き)**: `odds×stake < 投資総額 × TORIGAMI_MARGIN` の脚を除去 → 残脚で再最適化を収束まで繰り返す。`min_payout_ratio ≥ TORIGAMI_MARGIN` を保証。**margin=1.10** (`src/portfolio.py`) は「束を組んだ時点のオッズ」からの**下振れ緩衝**: 締切直前ドリフトや複勝/ワイドのレンジ幅で実払戻が下振れしても、~9% までは収支マイナスにならない (margin=1 では保存オッズでしかトリガミ無を保証できず、実オッズ乖離でトリガミ化していた)。`dropped_torigami` に除外数、`torigami_margin` も snapshot に保存。
-    - **レンジ型 bet の下限採用**: 複勝 (`fuku_min`) に加え**ワイド (`parse_pair_odds` b4) もレンジ "5.0 - 7.2" 表示なら下限を採用** (実払戻 ≥ 下限で確定 → トリガミ保証が崩れない)。margin と二段構えで「オッズ乖離 → トリガミ」を防ぐ。
+  - **トリガミ防止 (安全マージン付き)**: `odds×stake < 投資総額 × TORIGAMI_MARGIN` の脚を除去 → 残脚で再最適化を収束まで繰り返す。`min_payout_ratio ≥ TORIGAMI_MARGIN` を保証。**margin=1.10** (`src/portfolio.py`) は「束を組んだ時点のオッズ」からの**下振れ緩衝**: 締切直前ドリフトや複勝のレンジ幅で実払戻が下振れしても、~9% までは収支マイナスにならない (margin=1 では保存オッズでしかトリガミ無を保証できず、実オッズ乖離でトリガミ化していた)。`dropped_torigami` に除外数、`torigami_margin` も snapshot に保存。
+    - **レンジ型 bet の下限採用**: 複勝は `fuku_min` (下限) を採用 (実払戻 ≥ 下限で確定 → トリガミ保証が崩れない)。これと margin の二段構えで「オッズ乖離 → トリガミ」を防ぐ。束に乗るのは現状 単勝/複勝/3連単 のみ (馬連/ワイド等は誤オッズで無効、上記参照)。
   - **claude -p 検証** (`llm.validate_bundle_stream`, `analyze._validate_and_update_bundle`): 束の絡む馬を web 検索で裏取り (取消/体調/適性) し、明確なマイナス根拠のある脚を cut → 再構築。`llm_review` (summary/confidence/cuts/notes) を添えて recommended_bundle を上書き。`--no-llm` 時はモデルのみ。**束はまずモデルのみで生成・保存され、その後 claude -p が検証する**ので、検証前は frontend で「総合オススメ (モデル)」+「Claude 検証前」バッジ表示とし、検証済 (`llm_review.validated`) で初めて「Claude 総合オススメ」+ magenta バッジに切替 (検証前に Claude が裏取りしたかのような誤認を防ぐ)。
   - frontend (履歴詳細ページ最上部) は full Kelly を表示しつつ ½ Kelly を実運用推奨として併記 (楽観バイアス対策)、的中時払戻・min_payout_ratio (目標 ≥×margin で色分け)・検証バッジ/調査メモも表示。古い snapshot は欠落 → 近似 Kelly ランキングに fallback。`scripts/backfill_bundle.py` で後付け (start_at/close_at も再パース補正)
 
