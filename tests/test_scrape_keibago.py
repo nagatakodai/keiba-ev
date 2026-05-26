@@ -218,6 +218,27 @@ def test_parse_horse_history_jra_layout_row():
     assert abs(r.winner_time_sec - 123.0) < 1e-6       # 2:03.0、着差 1.3 を誤採用しない
 
 
+def test_parse_keibago_result_finish_and_payout():
+    """着順表から finish_order、RefundMoneyList から組番一致の3連単配当を取る。
+
+    RefundMoneyList は当日全レース集約なので、finish の組番でマッチして別レースの
+    配当を拾わないこと (combo マッチ) を検証。
+    """
+    racemark = (
+        "<table><tr><th>着順</th><th>枠</th><th>馬番</th><th>馬名</th></tr>"
+        "<tr><td>1</td><td>5</td><td>8</td><td>エイト</td></tr>"
+        "<tr><td>2</td><td>2</td><td>3</td><td>スリー</td></tr>"
+        "<tr><td>3</td><td>4</td><td>6</td><td>シックス</td></tr></table>"
+    )
+    refund = (
+        "<td>三連単</td><td>2-7-1</td><td>2,130円</td>"   # 別レース (組番不一致)
+        "<td>三連単</td><td>8-3-6</td><td>6,030円</td>"   # 当該レース (finish と一致)
+    )
+    r = kg.parse_keibago_result(racemark, refund)
+    assert r["finish_order"] == [8, 3, 6]
+    assert r["payout"] == 6030     # 8-3-6 の配当を正しく選ぶ (2-7-1 を拾わない)
+
+
 def test_time_sec_and_date_key():
     assert abs(kg._time_sec("1:27.4") - 87.4) < 1e-9
     assert abs(kg._time_sec("41.9") - 41.9) < 1e-9

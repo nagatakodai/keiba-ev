@@ -16,7 +16,7 @@ from typing import Any
 import typer
 from rich.console import Console
 
-from .parse import parse_result
+from .parse import is_nar_race_id, parse_result
 from .scrape import extract_race_id, fetch_html, result_url
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -272,8 +272,23 @@ def process_pending(
     # Phase 2: lock 外で fetch を実行 (各 race 数秒)。
     fetched: dict[str, tuple[dict | None, str]] = {}
     for rid in target_ids:
-        fetch_url = result_url_from_racecard(target_urls[rid])
-        fetched[rid] = fetch_result_with_reason(fetch_url)
+        url = target_urls[rid]
+        result, reason = fetch_result_with_reason(result_url_from_racecard(url))
+        # netkeiba block で未取得 + NAR レースなら keiba.go.jp で確定結果を取得して
+        # loop を閉じる (predict は keiba.go.jp 自給なので result も自給して block 中も完結)。
+        if result is None and _is_block_failure(reason):
+            nk = extract_race_id(url)
+            if nk and is_nar_race_id(nk):
+                try:
+                    from .scrape_keibago import fetch_keibago_result
+                    kr = fetch_keibago_result(nk)
+                    if kr and kr.get("finish_order"):
+                        result, reason = ({"finish_order": kr["finish_order"],
+                                           "payout": kr.get("payout", 0)}, "")
+                        _log(f"keiba.go.jp result fallback ok: {nk} {kr['finish_order']}", url)
+                except Exception as ex:  # noqa: BLE001
+                    _log(f"keiba.go.jp result fallback failed: {ex}", url)
+        fetched[rid] = (result, reason)
 
     # Phase 3: lock 取り直して結果反映 (read again — 別 process の変更を取り込む)。
     with _pending_lock():

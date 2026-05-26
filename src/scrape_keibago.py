@@ -590,6 +590,69 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
             "tables": tables, "bundle": bundle, "consistency": cons}
 
 
+def parse_keibago_result(racemark_html: str, refund_html: str = "") -> dict:
+    """結果ページ → {finish_order, payout(3連単)}。
+
+    finish_order は RaceMarkTable (レース別の着順表) から (着順→馬番)。
+    3連単配当は RefundMoneyList (当日全レース集約) から **finish_order の組番に一致する
+    三連単行** を引く (combo マッチで別レースの配当を拾わない)。
+    """
+    finish = _parse_finish_order(racemark_html)
+    payout = 0
+    if finish and len(finish) >= 3 and refund_html:
+        combo = "-".join(str(x) for x in finish[:3])
+        cells = [c for c in (
+            re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
+            for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", refund_html, re.DOTALL)
+        ) if c]
+        for i, c in enumerate(cells):
+            if c in ("三連単", "３連単", "3連単") and i + 2 < len(cells) and cells[i + 1] == combo:
+                payout = int(re.sub(r"\D", "", cells[i + 2]) or 0)
+                break
+    return {"finish_order": finish, "payout": payout}
+
+
+def _parse_finish_order(html: str) -> list[int]:
+    """着順表 (ヘッダに 着順/馬番) → 着順 1,2,3 の馬番リスト。"""
+    for tbl in re.findall(r"<table[^>]*>(.*?)</table>", html, re.DOTALL):
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.DOTALL)
+        if not rows:
+            continue
+        head = [re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
+                for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", rows[0], re.DOTALL)]
+        head = [h for h in head if h]
+        if "着順" not in head or "馬番" not in head:
+            continue
+        ci, ui = head.index("着順"), head.index("馬番")
+        order: dict[int, int] = {}
+        for r in rows[1:]:
+            c = [x for x in (re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
+                             for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", r, re.DOTALL)) if x]
+            if len(c) > max(ci, ui) and c[ci] in ("1", "2", "3") and c[ui].isdigit():
+                order[int(c[ci])] = int(c[ui])
+        if order:
+            return [order[p] for p in sorted(order) if p in order]
+    return []
+
+
+def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
+    """netkeiba NAR race_id → keiba.go.jp の確定結果 {finish_order, payout}。
+
+    netkeiba block 中でも NAR の結果を取得できる (result fetch の fallback)。当日確定
+    レースのみ (find_keibago_race が TodayRaceInfo ベース)。未確定/未解決は None。
+    """
+    loc = find_keibago_race(netkeiba_rid)
+    if loc is None:
+        return None
+    try:
+        rm = _get(_odds_url(loc, "RaceMarkTable"))
+        rf = _get(_odds_url(loc, "RefundMoneyList"))
+    except Exception:  # noqa: BLE001
+        return None
+    res = parse_keibago_result(rm, rf)
+    return res if res["finish_order"] else None
+
+
 def _main() -> None:
     import sys
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -611,9 +674,11 @@ def _main() -> None:
             print(f"keiba.go.jp 解析不能 ({rid}): {ex}")
             raise SystemExit(1)
         loc, c = res["loc"], res["consistency"]
+        has_past = any(h.past_runs for h in res["rd"].race.horses)
+        src = ("cache 出馬表+馬柱" if res["used_cache"]
+               else "公式出馬表+馬柱" if has_past else "馬リストのみ(市場主導)")
         print(f"=== keiba.go.jp {loc.venue} {loc.race_no}R snapshot 保存 "
-              f"({'cache 出馬表' if res['used_cache'] else '馬リストのみ'}) "
-              f"ok={c['ok']} bundle脚={len(res['bundle'].get('legs', []))} ===")
+              f"({src}) ok={c['ok']} bundle脚={len(res['bundle'].get('legs', []))} ===")
         return
     loc = find_keibago_race(rid)
     if not loc:
