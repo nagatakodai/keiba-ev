@@ -486,6 +486,8 @@ def _validate_and_update_bundle(
     console.rule("[bold]Claude 総合オススメ 検証 (claude -p, web 調査)[/bold]")
     chunks: list[str] = []
     review: dict = {}
+    saw_error = False
+    saw_result = False
     try:
         for etype, payload in llm_mod.validate_bundle_stream(
             rd, bundle, model=model,
@@ -498,12 +500,21 @@ def _validate_and_update_bundle(
                 chunks.append(payload)
                 console.print(payload, end="")
             elif etype == "result":
+                saw_result = True
                 if payload:
                     chunks.append(payload)
             elif etype == "error":
+                saw_error = True
                 console.print(f"[red]bundle 検証エラー: {payload}[/red]")
     except Exception as ex:  # noqa: BLE001
         console.print(f"[yellow]bundle 検証失敗: {ex}[/yellow]")
+        return
+
+    # claude が error を出した / 完了 (result) しなかった場合は検証成立とみなさない。
+    # ここで validated=True にすると frontend が「claude -p 検証済」バッジを誤表示する
+    # (= モデル束を Claude が裏取りしたかのような誤認)。no-op で未検証のまま残す。
+    if saw_error or not saw_result:
+        console.print("[yellow]bundle 検証が完了しなかったため未検証のまま (モデル束を維持)[/yellow]")
         return
 
     review = llm_mod.parse_bundle_review("".join(chunks))

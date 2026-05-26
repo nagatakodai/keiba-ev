@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -14,6 +15,85 @@ from .ev import PXO_FLOOR, plan_balanced, plan_max_ev, plan_wide
 from .models import EvRow, Probabilities, RaceData
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _start_kill_timer(proc: "subprocess.Popen", timeout: int):
+    """timeout 秒で proc.kill() する watchdog を起動。
+
+    `for line in proc.stdout` は claude がストール (出力も exit もしない) すると
+    無限ブロックし、finally の proc.wait(timeout) に到達しない (= analyze/watch-auto が
+    永久ハング)。timer で強制 kill して stdout に EOF を出し、loop を抜けさせる。
+    返り値 (timer, timed_out)。timed_out[0] は timeout 発火フラグ。
+    """
+    timed_out = [False]
+
+    def _kill() -> None:
+        timed_out[0] = True
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    timer = threading.Timer(timeout, _kill)
+    timer.daemon = True
+    timer.start()
+    return timer, timed_out
+
+
+def _finalize_claude_proc(proc, timer, timed_out) -> list[tuple[str, Any]]:
+    """read loop 後の後始末 (watchdog 解除 + reap)。yield すべき error 一覧を返す。"""
+    timer.cancel()
+    errs: list[tuple[str, Any]] = []
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    if timed_out[0]:
+        errs.append(("error", "claude timeout"))
+    elif proc.returncode not in (0, None):
+        err = (proc.stderr.read() if proc.stderr else "")[:600]
+        if err:
+            errs.append(("error", f"claude exit {proc.returncode}: {err}"))
+    return errs
+
+
+def _balanced_json(text: str, start: int) -> dict | None:
+    """start 以降で最初に json.loads できる brace-balanced {...} を返す (無ければ None)。
+
+    ```json フェンスが閉じていない / 閉じ } の後に散文がある ケースでも拾えるよう、
+    文字列リテラル内の波括弧を無視して深さ 0 に戻る位置まで balance する。
+    """
+    i = text.find("{", start)
+    while i != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for j in range(i, len(text)):
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[i:j + 1])
+                    except json.JSONDecodeError:
+                        break  # この { からは無効 → 次の { を試す
+        i = text.find("{", i + 1)
+    return None
 
 ALLOWED_TOOLS = [
     "mcp__brave-search__brave_web_search",
@@ -47,17 +127,22 @@ def _claude_env() -> dict[str, str]:
 
 
 def parse_evidence(text: str) -> dict:
-    """LLM 出力末尾の ```json ... ``` ブロックから evidence dict を抽出。"""
+    """LLM 出力の ```json ... ``` ブロック (または JSON オブジェクト) を robust に抽出。"""
     import re
     if not text:
         return {}
+    # 1) 正規の ```json {...} ``` を後ろ優先で
     matches = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if not matches:
-        return {}
-    try:
-        return json.loads(matches[-1])
-    except json.JSONDecodeError:
-        return {}
+    for m in reversed(matches):
+        try:
+            return json.loads(m)
+        except json.JSONDecodeError:
+            continue
+    # 2) フォールバック: ```json フェンス以降 (閉じ欠落 / 散文混在) を brace-balance。
+    #    フェンスが無ければ全文の最初に成立する {...} を拾う。
+    fence = re.search(r"```json", text, re.IGNORECASE)
+    obj = _balanced_json(text, fence.end() if fence else 0)
+    return obj if obj is not None else {}
 
 
 def evaluate_stream(
@@ -102,6 +187,7 @@ def evaluate_stream(
         env=_claude_env(),
     )
     assert proc.stdout is not None
+    timer, timed_out = _start_kill_timer(proc, timeout)
 
     final_text = ""
     try:
@@ -137,21 +223,8 @@ def evaluate_stream(
     except Exception as e:
         yield ("error", f"stream parse error: {e}")
     finally:
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            # kill 後に reap しないと zombie 化 + proc.returncode が None のまま
-            # 残り、下行の stderr 報告判定が抜ける。SIGKILL は即効なので短 timeout で。
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-            yield ("error", "claude timeout")
-        if proc.returncode not in (0, None):
-            err = (proc.stderr.read() if proc.stderr else "")[:600]
-            if err:
-                yield ("error", f"claude exit {proc.returncode}: {err}")
+        for ev in _finalize_claude_proc(proc, timer, timed_out):
+            yield ev
 
 
 def evaluate(
@@ -294,6 +367,7 @@ def validate_bundle_stream(
         text=True, bufsize=1, env=_claude_env(),
     )
     assert proc.stdout is not None
+    timer, timed_out = _start_kill_timer(proc, timeout)
     try:
         for raw in proc.stdout:
             line = raw.strip()
@@ -317,15 +391,8 @@ def validate_bundle_stream(
     except Exception as e:  # noqa: BLE001
         yield ("error", f"stream parse error: {e}")
     finally:
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-            yield ("error", "claude timeout")
+        for ev in _finalize_claude_proc(proc, timer, timed_out):
+            yield ev
 
 
 def parse_bundle_review(text: str) -> dict:
@@ -481,6 +548,7 @@ def evaluate_refresh_stream(
         env=_claude_env(),
     )
     assert proc.stdout is not None
+    timer, timed_out = _start_kill_timer(proc, timeout)
 
     try:
         for raw in proc.stdout:
@@ -514,16 +582,8 @@ def evaluate_refresh_stream(
     except Exception as e:  # noqa: BLE001 - 想定外でも error として伝える
         yield ("error", f"stream parse error: {e}")
     finally:
-        # evaluate_stream と同じ finally 処理: wait + non-zero exit の stderr 報告
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            yield ("error", "claude timeout")
-        if proc.returncode not in (0, None):
-            err = (proc.stderr.read() if proc.stderr else "")[:600]
-            if err:
-                yield ("error", f"claude exit {proc.returncode}: {err}")
+        for ev in _finalize_claude_proc(proc, timer, timed_out):
+            yield ev
 
 
 _WEATHER_LABEL = {100: "晴", 200: "曇", 300: "雨", 400: "雪", 500: "霧"}
