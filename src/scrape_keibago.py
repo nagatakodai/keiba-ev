@@ -23,12 +23,14 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 
-from .models import BetOdds, Horse, Race, RaceData, TrifectaOdds
+from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
 from .parse import VENUE_CODE, _split_race_id, is_nar_race_id
 
 _BASE = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
+_DATAROOM = "https://www.keiba.go.jp/KeibaWeb/DataRoom"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+_DATE_RE = re.compile(r"20\d\d[./]\d{1,2}[./]\d{1,2}")
 
 # 券種 → keiba.go.jp エンドポイント。
 _EP = {
@@ -176,6 +178,93 @@ def parse_horse_list(html: str) -> list[tuple[int, str, float]]:
     return out
 
 
+def _time_sec(s: str) -> float:
+    """'1:27.4' / '41.9' → 秒。"""
+    m = re.match(r"(?:(\d+):)?(\d+(?:\.\d+)?)\s*$", s.strip())
+    if not m:
+        return 0.0
+    return (int(m.group(1)) if m.group(1) else 0) * 60 + float(m.group(2))
+
+
+def _date_key(s: str) -> tuple[int, int, int]:
+    """'YYYY.M.D' / 'YYYY/M/D' → (y,m,d)。文字列比較の非ゼロ詰めバグ回避 (タプル比較)。"""
+    parts = re.split(r"[./]", s.strip())
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except (IndexError, ValueError):
+        return (0, 0, 0)
+
+
+def parse_deba_table(html: str) -> list[tuple[int, str, str]]:
+    """出馬表 (DebaTable) → [(馬番, 馬名, k_lineageLoginCode)]。
+
+    各馬は `<td rowspan="5" class="horseNum">N</td>` に続く
+    `<a class="horseName" href="../DataRoom/HorseMarkInfo?k_lineageLoginCode=CODE">名</a>`。
+    CODE で競走成績 (HorseMarkInfo) を引いて馬柱 (past_runs) を構築する。
+    """
+    out: list[tuple[int, str, str]] = []
+    for m in re.finditer(
+        r'class="horseNum"[^>]*>\s*(\d+)\s*</td>.*?'
+        r'k_lineageLoginCode=(\d+)"[^>]*>\s*([^<]+?)\s*</a>',
+        html, re.DOTALL,
+    ):
+        out.append((int(m.group(1)), m.group(3).strip(), m.group(2)))
+    return out
+
+
+def parse_horse_history(html: str, *, limit: int = 12) -> list[PastRun]:
+    """競走成績 (HorseMarkInfo) → [PastRun] (新しい順)。
+
+    成績表 = 日付が最も多く並ぶ <table>。空セル除去後の論理列:
+    0 年月日 / 1 競馬場 / 2 R / 3 競走名 / 4 格組 / 5 距離 / 6 天候 / 7 馬場 /
+    8 頭数 / 9 枠 / 10 馬番 / 11 人気 / 12 着順 / 13 タイム / (14 着差)。
+    タイムは馬の自走時計なので own (winner_time_sec=own, time_diff_sec=0)。着順は
+    netkeiba 馬柱と同じく 1/2/3 のみ int・他は None。surface は NAR 基本ダート
+    (行内に芝/障があればそれを採用)。
+    """
+    tables = re.findall(r"<table[^>]*>(.*?)</table>", html, re.DOTALL)
+    best = max(tables, key=lambda x: len(_DATE_RE.findall(x)), default="")
+    if len(_DATE_RE.findall(best)) < 1:
+        return []
+    out: list[PastRun] = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", best, re.DOTALL):
+        raw = [_html.unescape(re.sub(r"<[^>]+>", " ", x)).strip()
+               for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, re.DOTALL)]
+        c = [x for x in raw if x]   # 空セル (spacer) を除去 → 論理列
+        if len(c) < 14 or not _DATE_RE.match(c[0]):
+            continue
+        surf = next((s for s in ("芝", "障") if s in row), "ダ")
+        fin = int(c[12]) if c[12] in ("1", "2", "3") else None
+        out.append(PastRun(
+            date=c[0].replace("/", "."),
+            venue=c[1],
+            race_no=int(c[2]) if c[2].isdigit() else 0,
+            race_class=c[3],
+            surface=surf,
+            distance=int(re.sub(r"\D", "", c[5]) or 0),
+            going=c[7],
+            field_size=int(re.sub(r"\D", "", c[8]) or 0),
+            horse_number=int(re.sub(r"\D", "", c[10]) or 0),
+            popularity=int(c[11]) if c[11].isdigit() else 0,
+            finish_pos=fin,
+            winner_time_sec=_time_sec(c[13]),
+            time_diff_sec=0.0,
+        ))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def fetch_horse_past_runs(lineage_code: str) -> list[PastRun]:
+    if not lineage_code:
+        return []
+    try:
+        return parse_horse_history(
+            _get(f"{_DATAROOM}/HorseMarkInfo?k_lineageLoginCode={lineage_code}"))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _to_bets(items: list[tuple[int, float]], bet_type: str) -> list[BetOdds]:
     items = sorted(items, key=lambda kv: kv[1])
     return [
@@ -276,14 +365,36 @@ def check_consistency(other_bets: dict, trifecta: list) -> dict:
     }
 
 
-def build_keibago_racedata(netkeiba_rid: str, horses: list[tuple[int, str, float]]) -> RaceData:
-    """cache 出馬表が無い場合の RaceData (keiba.go.jp 単複の馬リスト由来)。
+def build_keibago_racedata(
+    netkeiba_rid: str,
+    deba: list[tuple[int, str, str]],
+    win_odds: dict[int, float],
+    *,
+    fetch_past: bool = True,
+) -> RaceData:
+    """cache 出馬表が無い場合の RaceData を keiba.go.jp の出馬表(DebaTable)から構築。
 
-    keiba.go.jp は馬柱 (past_runs) を持たないので past_runs は空 = 市場ブレンド主導の
-    確率になる (cache に netkeiba 馬柱があれば analyze_keibago 側でそちらを使う)。
+    deba = [(馬番, 馬名, k_lineageLoginCode)]。fetch_past=True で各馬の HorseMarkInfo
+    (競走成績) から **馬柱 (past_runs) を取得**して付与 → build_features が効き、
+    estimate_probs が市場主導でなくモデルの edge を反映できる (= netkeiba/oddspark 非依存)。
+    leakage 防止: HorseMarkInfo は対象 race 自身も含むので **対象 race 日付以降を除外** +
+    直近5走に制限 (netkeiba 馬柱の窓に合わせる)。live (発走前) では対象 race は未走で no-op。
     """
     venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
-    horse_rows = [Horse(number=n, name=nm, win_odds=od) for n, nm, od in horses]
+    horse_rows = [Horse(number=n, name=nm, win_odds=win_odds.get(n, 0.0))
+                  for n, nm, _ln in deba]
+    if fetch_past:
+        race_date = (f"{netkeiba_rid[:4]}.{netkeiba_rid[6:8]}.{netkeiba_rid[8:10]}"
+                     if is_nar_race_id(netkeiba_rid) else "")
+        ln_by_num = {n: ln for n, _nm, ln in deba}
+        for h in horse_rows:
+            ln = ln_by_num.get(h.number, "")
+            if ln:
+                runs = fetch_horse_past_runs(ln)
+                if race_date:
+                    rk = _date_key(race_date)
+                    runs = [r for r in runs if _date_key(r.date) < rk]
+                h.past_runs = runs[:5]
     race = Race(
         cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
         venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
@@ -348,7 +459,16 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
                 h.past_runs = runs.get(h.number, [])
         used_cache = True
     else:
-        rd = build_keibago_racedata(netkeiba_rid, parse_horse_list(_get(_odds_url(loc, _EP["tanfuku"]))))
+        win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
+        deba = parse_deba_table(_get(_odds_url(loc, "DebaTable")))
+        if deba:
+            # 出馬表 + HorseMarkInfo の馬柱で確率モデルをフル稼働 (公式自給)
+            rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True)
+        else:
+            # DebaTable 取れず → 単複の馬リストのみ (past_runs なし=市場ブレンド主導)
+            hl = parse_horse_list(_get(_odds_url(loc, _EP["tanfuku"])))
+            rd = build_keibago_racedata(
+                netkeiba_rid, [(n, nm, "") for n, nm, _od in hl], win_odds, fetch_past=False)
 
     if start_at and not rd.race.start_at:
         rd.race.start_at = start_at

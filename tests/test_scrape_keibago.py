@@ -119,3 +119,57 @@ def test_consistency_flags_wide_gt_quinella():
     c = kg.check_consistency(other, [])
     assert c["wide_gt_quinella"] == 1
     assert c["ok"] is False
+
+
+# 出馬表: 馬番 (horseNum) + 競走馬ID (k_lineageLoginCode) + 馬名
+_DEBA = """
+<tr class="tBorder">
+<td rowspan="5" class="courseNum course_01">1</td>
+<td rowspan="5" class="horseNum">1</td>
+<td colspan="3"><a class="horseName" href="../DataRoom/HorseMarkInfo?k_lineageLoginCode=30006401886">ワイドマルガリータ</a></td>
+</tr>
+<tr class="tBorder">
+<td rowspan="5" class="courseNum course_02">2</td>
+<td rowspan="5" class="horseNum">2</td>
+<td colspan="3"><a class="horseName" href="../DataRoom/HorseMarkInfo?k_lineageLoginCode=30062400996">シアトルプリンセス</a></td>
+</tr>
+"""
+
+# 競走成績 (spacer 空セルを挟んだ実構造を模す): 論理列で date/距離/馬場/着順/タイム
+_HISTORY = """
+<table>
+<tr><th>年月日</th><th>競馬場</th><th>R</th><th>競走名</th><th>格組</th><th>距離</th>
+    <th>天候</th><th>馬場</th><th>頭数</th><th>枠</th><th>馬番</th><th>人気</th>
+    <th>着順</th><th>タイム</th><th>差</th></tr>
+<tr><td>2026/05/11</td><td>盛岡</td><td>5</td><td>Ｃ２四組</td><td></td><td>Ｃ２四組</td><td>1400</td>
+    <td>晴</td><td></td><td>良</td><td>9</td><td>7</td><td></td><td>7</td><td>3</td>
+    <td>2</td><td>1:27.4</td><td>0.2</td></tr>
+<tr><td>2026/04/20</td><td>水沢</td><td>5</td><td>Ｃ２五組</td><td></td><td>Ｃ２五組</td><td>1300</td>
+    <td>晴</td><td></td><td>良</td><td>11</td><td>8</td><td></td><td>10</td><td>8</td>
+    <td>5</td><td>1:26.2</td><td>1.0</td></tr>
+</table>
+"""
+
+
+def test_parse_deba_table_horse_ids():
+    d = kg.parse_deba_table(_DEBA)
+    assert d == [(1, "ワイドマルガリータ", "30006401886"),
+                 (2, "シアトルプリンセス", "30062400996")]
+
+
+def test_parse_horse_history_fields():
+    runs = kg.parse_horse_history(_HISTORY)
+    assert len(runs) == 2
+    r = runs[0]
+    assert r.date == "2026.05.11" and r.venue == "盛岡"
+    assert r.distance == 1400 and r.going == "良" and r.field_size == 9
+    assert r.finish_pos == 2                      # 1/2/3 は int
+    assert abs(r.winner_time_sec - 87.4) < 1e-6   # 1:27.4 → 87.4s
+    assert runs[1].finish_pos is None             # 着順 5 は None (3着内のみ int)
+
+
+def test_time_sec_and_date_key():
+    assert abs(kg._time_sec("1:27.4") - 87.4) < 1e-9
+    assert abs(kg._time_sec("41.9") - 41.9) < 1e-9
+    # 非ゼロ詰めでも正しく順序付く (leakage 比較の回帰防止)
+    assert kg._date_key("2026.5.2") < kg._date_key("2026.05.26")

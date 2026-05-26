@@ -49,7 +49,15 @@ oddspark のオッズ表構造 (採用 = 組合せが HTML に明示・実オッ
   - **leakage 防止 (重要)**: HorseDetail は「過去 race を解析する」と対象 race 自身の結果も履歴に含む (= 予測対象の着順が特徴量に漏れる)。`build_oddspark_racedata` は **対象 race 日付以降の run を除外** + **直近5走に制限** (netkeiba 馬柱の窓に合わせる)。live (発走前) では対象 race は未走なので no-op。
   - **整合検証**: cached 馬柱がある race で netkeiba 由来 speed_idx と oddspark 由来 speed_idx を照合 → leakage 修正後は **~2% 以内で一致** (修正前は ~12% 系統ズレ)。これでモデルの学習分布 (netkeiba 馬柱) と oddspark 馬柱が整合する。
 
-**NAR オッズ第一源 = keiba.go.jp (`src/scrape_keibago.py`)**: netkeiba は NAR の馬連/ワイドが壊れ (上記)、oddspark はグリッド誤オッズで馬連/ワイド/馬単/3連複が無効。**keiba.go.jp は全6券種を組合せ明示で取れる**ので、誤オッズ無しで馬連/ワイド/馬単/3連複/3連単すべてを復活できる。`find_keibago_race` は netkeiba NAR race_id → 場名(`VENUE_CODE`) → babaCode を `TodayRaceInfoTop` から**動的照合**(別 namespace の babaCode 誤りで別場を取らない安全策)。`analyze_keibago` は cache 出馬表 (馬柱) があれば確率モデルを効かせ、無ければ単複の馬リスト+市場ブレンド主導。**安全ゲート**: `check_consistency` で「ワイド>馬連」等を検知したら pair/trio 系を drop (誤オッズより見送り)。`python -m src.scrape_keibago <netkeiba_nar_rid> [--snapshot]`。TodayRaceInfo なので当日向け。
+**NAR は keiba.go.jp で完全自給 (`src/scrape_keibago.py`)**: オッズ・出馬表・馬柱すべてを地方競馬公式の静的 HTML から取得し、netkeiba/oddspark 非依存で確率モデルをフル稼働できる。
+- **オッズ (全6券種, 組合せ明示)**: netkeiba は NAR の馬連/ワイドが壊れ、oddspark はグリッド誤オッズで馬連/ワイド/馬単/3連複が無効。keiba.go.jp は全6券種が組合せ明示 (`<td>6-7-11</td>`) なので誤オッズ無しで馬連/ワイド/馬単/3連複/3連単すべてを復活できる。
+- **出馬表 (`DebaTable`)**: 馬番/馬名 + 各馬の競走馬 ID (`k_lineageLoginCode`) を取得 (`parse_deba_table`)。
+- **馬柱 (`DataRoom/HorseMarkInfo?k_lineageLoginCode=<ID>`)**: 競走成績 (日付/競馬場/距離/馬場/頭数/着順/タイム) を `parse_horse_history` でパース → `PastRun` 構築。netkeiba 馬柱 (5走) より長い履歴。**leakage 防止**: 対象 race 日付以降を除外 (`_date_key` でタプル比較) + 直近5走に制限。live (発走前) では no-op。
+- `find_keibago_race`: netkeiba NAR race_id → 場名(`VENUE_CODE`) → babaCode を `TodayRaceInfoTop` から**動的照合** (別 namespace の babaCode 誤りで別場を取らない安全策)。
+- `analyze_keibago`: cache 出馬表があればそれを優先、無ければ DebaTable + HorseMarkInfo で出馬表+馬柱を構築 (公式自給) → `build_features`/`aptitude`/`estimate_probs` が edge を反映。DebaTable も取れなければ単複の馬リスト+市場ブレンド主導に degrade。
+- **安全ゲート**: `check_consistency` で「ワイド>馬連」等を検知したら pair/trio 系を drop (誤オッズより見送り)。
+- `python -m src.scrape_keibago <netkeiba_nar_rid> [--snapshot]`。TodayRaceInfo なので当日向け。
+- **JRA は非対応** (keiba.go.jp は NAR のみ)。JRA は netkeiba 主体 (block 時 VPN/別IP)、公式 `accessO.html` POST チェーン (Shift_JIS) は実現性中・JRA 開催日に要実機検証。
 
 **watch-auto への統合 (block 中も自動継続)**: netkeiba 両ドメイン block 時、`auto_watch._list_due_races` は **oddspark で NAR race discovery** (`fetch_race_list_oddspark`: KaisaiRaceList→OneDayRaceList で当日全 NAR の race_id + 発走時刻) に fallback し、該当レースは `source="oddspark"` を付けて `_dispatch_nar_fallback` で dispatch する → **keiba.go.jp を優先** (`_dispatch_keibago`: `python -m src.scrape_keibago <rid> --snapshot --start-at=<unix>`、全6券種)、keiba.go.jp が解決できない場のみ **oddspark にフォールバック** (`_dispatch_oddspark`、単複/3連単)。トリガミ防止束を含む snapshot を保存 (`odds_source="keibago"`/`"oddspark"`, 発走時刻も補完)。これで規制中でも NAR の watch-auto が止まらず EV picks を出し続ける (keibalab は当日一覧が JS 化で discovery 不能なため最終 fallback)。claude 調査 (3連単 plan の検索補強 + 総合オススメ束の web 検証) も netkeiba 経路と同じ関数で実行され、履歴・snapshot も同形式で作られる。
 
