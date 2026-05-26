@@ -972,7 +972,9 @@ function placeHits(key: number[], finish?: number[]): boolean {
 
 // ワイド専用: 「該当 key (2 馬) が finish の top3 のうち 2 頭を含むか」を判定。
 function wideHits(key: number[], finish?: number[]): boolean {
-  if (!finish || finish.length < 3) return false;
+  // key.length ガード必須: 空 key だと [].every(...) が true を返し誤的中になる
+  // (backend _bet_hits は len(key)==2 を強制。frontend も揃える)。
+  if (!finish || finish.length < 3 || key.length !== 2) return false;
   const top3 = new Set(finish.slice(0, 3));
   return key.every((k) => top3.has(k));
 }

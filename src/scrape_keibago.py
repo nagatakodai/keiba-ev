@@ -544,7 +544,11 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
         apt_top = az_mod._aptitude_top_horses(aptitudes, n=6) if aptitudes else None
         plan_rows = ev_mod.apply_caps(tri_table)
-        snap_bet_tables = {k: v for k, v in tables.items() if k in ("win", "place") and v}
+        # keiba.go.jp の馬連/ワイド/馬単/3連複は組合せ明示で信頼できる (consistency NG 時は
+        # 既に [] に落としてある) ので、束だけでなく EV table も snapshot に載せる
+        # (単複のみだった oddspark の制限は流用しない。netkeiba 経路と同じく全券種表示)。
+        snap_bet_tables = {k: v for k, v in tables.items()
+                           if k in ("win", "place", "quinella", "wide", "exacta", "trio") and v}
         try:
             from .market_signal import compute_market_signals
             market_signals = compute_market_signals(rd)
