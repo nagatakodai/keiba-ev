@@ -21,7 +21,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from .models import BetOdds, TrifectaOdds
+from .models import BetOdds, Horse, Race, RaceData, TrifectaOdds
+from .parse import _split_race_id
 
 _BASE = "https://www.jra.go.jp/JRADB"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -395,19 +396,176 @@ def fetch_jra_result(netkeiba_rid: str) -> dict | None:
     return res if len(res["finish_order"]) >= 3 else None
 
 
+def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds]) -> RaceData:
+    """cache 出馬表が無い場合の RaceData (JRA 単勝の馬番リスト由来、past_runs なし)。
+
+    JRA 公式の馬柱 (accessU) パースは未実装なので past_runs は空 = 市場ブレンド主導。
+    cache に netkeiba 馬柱があれば analyze_jra 側でそちらを使う (確率モデルがフル稼働)。
+    """
+    venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
+    horses = [Horse(number=b.key[0], name="", win_odds=b.odds) for b in win_bets]
+    race = Race(cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
+                venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
+                venue_name=venue, race_class="", distance=0, horses=horses)
+    return RaceData(race=race, trifecta=[], other_bets={})
+
+
+def _tag_snapshot_source(race_id: str, source: str) -> None:
+    import json
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "data" / "predictions" / f"{race_id}.json"
+    if not p.exists():
+        return
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        d["odds_source"] = source
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
+                with_llm: bool = True) -> dict:
+    """JRA race を JRA 公式の全券種オッズで解析 (netkeiba 非依存)。
+
+    出馬表/馬柱は data/raw の netkeiba cache があれば使い (確率モデルが効く)、無ければ
+    単勝の馬番リストで市場ブレンド主導。consistency NG 時は pair/trio を drop。
+    """
+    import gzip
+    from pathlib import Path
+
+    from . import ev as ev_mod
+    from . import portfolio as pf
+    from .parse import parse_past_runs, parse_shutuba
+
+    loc = find_jra_race(netkeiba_rid)
+    if loc is None:
+        raise JraError(f"JRA で {netkeiba_rid} の開催が見つからない (直近開催 JRA か)")
+    res = fetch_jra_bets(loc)
+    other, trifecta, cons = res["other_bets"], res["trifecta"], res["consistency"]
+    if not other.get("win"):
+        raise JraError("JRA オッズが空")
+    if not cons["ok"]:
+        for bt in ("quinella", "wide", "exacta", "trio"):
+            other[bt] = []
+
+    root = Path(__file__).resolve().parents[1]
+    sh = root / "data" / "raw" / f"{netkeiba_rid}-shutuba.html.gz"
+    used_cache = False
+    if sh.exists():
+        rd = parse_shutuba(gzip.open(sh, "rt", encoding="utf-8").read(), race_id=netkeiba_rid)
+        past = root / "data" / "raw" / f"{netkeiba_rid}-past.html.gz"
+        if past.exists():
+            runs = parse_past_runs(gzip.open(past, "rt", encoding="utf-8").read())
+            for h in rd.race.horses:
+                h.past_runs = runs.get(h.number, [])
+        used_cache = True
+    else:
+        rd = build_jra_racedata(netkeiba_rid, other["win"])
+
+    if start_at and not rd.race.start_at:
+        rd.race.start_at = start_at
+        rd.race.close_at = start_at
+
+    rd.other_bets = {bt: v for bt, v in other.items() if v}
+    rd.trifecta = trifecta
+
+    win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
+    s = sum(1.0 / o for o in win_odds.values()) or 1.0
+    mwp = {n: (1.0 / o) / s for n, o in win_odds.items()}
+    probs = ev_mod.estimate_probs(rd, market_blend=0.78, market_win_override=mwp)
+    tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
+              for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
+    tri_table = ev_mod.build_table(rd, probs) if rd.trifecta else []
+    cands = [{"bet_type": r.bet_type, "key": list(r.key), "odds": r.odds,
+              "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
+             for tbl in tables.values() for r in tbl]
+    cands += [{"bet_type": "trifecta", "key": list(r.key), "odds": r.odds,
+               "prob": r.prob, "px_o": r.px_o, "tier": r.tier} for r in tri_table]
+    bundle = pf.build_bundle(cands, probs)
+    bundle["source"] = "jra"
+    tables["trifecta"] = tri_table
+
+    if save_snapshot:
+        from . import analyze as az_mod
+        from .aptitude import compute_aptitudes
+        from .features import build_features
+        race_id = f"{rd.race.cup_id}-{rd.race.schedule_index}-{rd.race.race_number}"
+        has_past = any(h.past_runs for h in rd.race.horses)
+        feats = build_features(rd) if (used_cache or has_past) else None
+        aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
+        apt_top = az_mod._aptitude_top_horses(aptitudes, n=6) if aptitudes else None
+        plan_rows = ev_mod.apply_caps(tri_table)
+        snap_bet_tables = {k: v for k, v in tables.items()
+                           if k in ("win", "place", "quinella", "wide", "exacta", "trio") and v}
+        try:
+            from .market_signal import compute_market_signals
+            market_signals = compute_market_signals(rd)
+        except Exception:  # noqa: BLE001
+            market_signals = None
+        best_times = az_mod._serialize_best_times(rd, feats) if feats else []
+        try:
+            az_mod._save_prediction_snapshot(
+                race_id, rd, tri_table, plan_rows, aptitudes, snap_bet_tables, apt_top,
+                market_signals, feats=feats, lgbm_info=ev_mod.lgbm_status(),
+                hit_points=3, probs=probs)
+            _tag_snapshot_source(race_id, "jra")
+        except Exception as ex:  # noqa: BLE001
+            print(f"[analyze_jra] snapshot 保存失敗: {ex}")
+        if with_llm:
+            from . import llm as llm_mod
+            try:
+                initial = az_mod._print_llm_evaluation(
+                    rd, plan_rows, model="opus", probs=probs, aptitudes=aptitudes,
+                    aptitude_top_horses=apt_top, market_signals=market_signals,
+                    horse_best_times=best_times)
+                evidence = llm_mod.parse_evidence(initial)
+                if evidence:
+                    az_mod._save_evidence_to_snapshot(race_id, plan_rows, evidence, apt_top, hit_points=3)
+            except Exception as ex:  # noqa: BLE001
+                print(f"[analyze_jra] LLM evidence 失敗: {ex}")
+            try:
+                az_mod._validate_and_update_bundle(
+                    race_id, rd, probs, tri_table, snap_bet_tables,
+                    aptitudes=aptitudes, market_signals=market_signals,
+                    horse_best_times=best_times, model="opus")
+            except Exception as ex:  # noqa: BLE001
+                print(f"[analyze_jra] bundle 検証失敗: {ex}")
+
+    return {"rd": rd, "probs": probs, "loc": loc, "used_cache": used_cache,
+            "tables": tables, "bundle": bundle, "consistency": cons}
+
+
 def _main() -> None:
     import sys
-    if len(sys.argv) < 2:
-        print("usage: python -m src.scrape_jra <netkeiba_jra_race_id>")
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not args and "--discover" not in sys.argv:
+        print("usage: python -m src.scrape_jra <netkeiba_jra_race_id> [--snapshot] [--start-at=UNIX] [--no-llm]")
         print("       python -m src.scrape_jra --discover")
         raise SystemExit(2)
-    if sys.argv[1] == "--discover":
+    if "--discover" in sys.argv:
         for r in discover_jra_races()[:40]:
             print(f"  {r['netkeiba_rid']} 場{r['venue']} {r['race_no']}R ({r['date']})")
         return
-    loc = find_jra_race(sys.argv[1])
+    if "--snapshot" in sys.argv:
+        start_at = 0
+        for a in sys.argv:
+            if a.startswith("--start-at="):
+                start_at = int(a.split("=", 1)[1] or 0)
+        try:
+            res = analyze_jra(args[0], save_snapshot=True, start_at=start_at,
+                              with_llm="--no-llm" not in sys.argv)
+        except JraError as ex:
+            print(f"JRA 解析不能 ({args[0]}): {ex}")
+            raise SystemExit(1)
+        loc, c = res["loc"], res["consistency"]
+        src = "cache 出馬表+馬柱" if res["used_cache"] else "馬リストのみ(市場主導)"
+        print(f"=== JRA 場{loc.venue} {loc.race_no}R snapshot 保存 ({src}) "
+              f"ok={c['ok']} bundle脚={len(res['bundle'].get('legs', []))} ===")
+        return
+    loc = find_jra_race(args[0])
     if not loc:
-        print(f"JRA で {sys.argv[1]} を解決できません (直近開催 JRA か / venue+kai+day+R)")
+        print(f"JRA で {args[0]} を解決できません (直近開催 JRA か / venue+kai+day+R)")
         raise SystemExit(1)
     print(f"=== JRA 場{loc.venue} {loc.race_no}R ({loc.date}) 券種 {list(loc.odds_tokens)} ===")
     res = fetch_jra_bets(loc)
