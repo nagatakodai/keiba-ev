@@ -51,8 +51,30 @@ export default function WatchAutoPage() {
   // 過去 "0.9" を default にしていたが CLI / make watch-auto と挙動が乖離していた。
   const [marketBlend, setMarketBlend] = useState("");
   const [aptitudeTop, setAptitudeTop] = useState("6");
+  const [activeHours, setActiveHours] = useState("09:00-23:45");
   const [withExacta, setWithExacta] = useState(false);
   const [withTrio, setWithTrio] = useState(false);
+
+  // 前回使った設定 (backend に persist 済 status.config) を form の default に流し込む。
+  // status は 5s 間隔で polling されるので、ユーザ編集を上書きしないよう初回 config 到着時に
+  // 1 度だけ適用する。config が null (停止中・API 未応答) のときは上の hardcode default のまま。
+  // React 公式の「レンダー中に前回値から state 調整」パターン (条件 guard で無限ループ防止)。
+  // 初回 config 到着時に 1 度だけ form を前回値で埋める。
+  const [prefilled, setPrefilled] = useState(false);
+  if (!prefilled && status?.config) {
+    const c = status.config;
+    setPrefilled(true);
+    if (c.window != null) setWindowMin(String(c.window));
+    if (c.tolerance != null) setTolerance(String(c.tolerance));
+    if (c.interval_sec != null) setIntervalSec(String(c.interval_sec));
+    setEvMax(c.ev_max != null ? String(c.ev_max) : "");
+    setMinProb(c.min_prob != null ? String(c.min_prob) : "");
+    setMarketBlend(c.market_blend != null ? String(c.market_blend) : "");
+    if (c.aptitude_top != null) setAptitudeTop(String(c.aptitude_top));
+    if (c.active_hours != null) setActiveHours(String(c.active_hours));
+    if (c.with_exacta != null) setWithExacta(!!c.with_exacta);
+    if (c.with_trio != null) setWithTrio(!!c.with_trio);
+  }
 
   const refreshHistory = async () => {
     try {
@@ -93,6 +115,7 @@ export default function WatchAutoPage() {
         min_prob: minProb === "" ? null : parseFloat(minProb),
         market_blend: marketBlend === "" ? null : parseFloat(marketBlend),
         aptitude_top: aptitudeTop === "" ? null : parseInt(aptitudeTop, 10),
+        active_hours: activeHours.trim() || "09:00-23:45",
         with_exacta: withExacta,
         with_trio: withTrio,
       });
@@ -172,8 +195,12 @@ export default function WatchAutoPage() {
           tone={running ? "good" : "default"}
         />
         <Stat
-          label="窓"
-          value={status?.config?.window ? `${status.config.window}±${status.config.tolerance} 分` : "—"}
+          label="窓 (発走まで)"
+          value={
+            status?.config?.window != null
+              ? `${status.config.window}〜${status.config.window + (status.config.tolerance ?? 0)} 分前`
+              : "—"
+          }
         />
         <Stat
           label="polling 間隔"
@@ -226,7 +253,7 @@ export default function WatchAutoPage() {
                 disabled={running}
               />
               <Input
-                label="TOLERANCE (±分)"
+                label="TOLERANCE (+分のみ / 発走 window〜window+tol 分前)"
                 value={tolerance}
                 onChange={(e) => setTolerance(e.target.value)}
                 disabled={running}
@@ -265,6 +292,13 @@ export default function WatchAutoPage() {
                 onChange={(e) => setAptitudeTop(e.target.value)}
                 disabled={running}
               />
+              <Input
+                label="稼働時間帯 (JST HH:MM-HH:MM)"
+                placeholder="09:00-23:45"
+                value={activeHours}
+                onChange={(e) => setActiveHours(e.target.value)}
+                disabled={running}
+              />
             </div>
             <div className="mt-3 flex items-center gap-4 text-sm flex-wrap">
               <label className="inline-flex items-center gap-2 cursor-pointer">
@@ -296,7 +330,7 @@ export default function WatchAutoPage() {
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: ${status?.config?.window}±${status?.config?.tolerance} 分 / ${status?.config?.interval_sec}s`
+              ? `稼働中: 発走${status?.config?.window}〜${(status?.config?.window ?? 0) + (status?.config?.tolerance ?? 0)}分前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}`
               : "停止中。タイトルをクリックして設定を展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>

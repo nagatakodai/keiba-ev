@@ -340,7 +340,10 @@ class WatchAutoManager:
 
     def __init__(self) -> None:
         self.job: Job | None = None
-        self._config: dict[str, Any] = {}
+        # 前回使った設定を persist 済 state file から復元しておく。停止中 / API 再起動後
+        # でも status.config に「前回値」が乗るので、frontend がそれを form の default に
+        # 使える (watch-auto 設定パネルの prefill)。
+        self._config: dict[str, Any] = _load_watch_state().get("config") or {}
         # start/stop/resume の concurrent 呼び出しで Job が二重 spawn → 孤児化
         # するのを防ぐ。POST /api/watch-auto/start を 2 ブラウザから同時クリックで
         # 起こる: POST_A が `await self.job.start()` で suspend している間に

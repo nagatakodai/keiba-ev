@@ -272,7 +272,7 @@ export default async function DashboardPage() {
           value={watch?.running ? "稼働中" : "停止"}
           hint={
             watch?.running
-              ? `${watch.config.window}±${watch.config.tolerance} 分 / ${watch.config.interval_sec}s`
+              ? `発走${watch.config.window}〜${(watch.config.window ?? 0) + (watch.config.tolerance ?? 0)}分前 / ${watch.config.interval_sec}s`
               : "—"
           }
           tone={watch?.running ? "good" : "default"}
