@@ -4,6 +4,15 @@ from __future__ import annotations
 from src import scrape_oddspark as op
 
 
+def test_date_key_handles_non_zero_padded():
+    """leakage 除外の日付比較が非ゼロ詰めでも正しく順序付く (文字列比較の罠の回帰防止)。"""
+    # '2026.5.2' は文字列比較だと '2026.05.26' より大きく判定され正当な過去走を誤除外する
+    assert op._date_key("2026.5.2") < op._date_key("2026.05.26")
+    assert op._date_key("2026/5/2") == (2026, 5, 2)
+    assert op._date_key("2026.5.30") > op._date_key("2026.5.3")
+    assert op._date_key("garbage") == (0, 0, 0)
+
+
 # 単複テーブルの最小 HTML (実構造を模倣): [枠, 馬番, 馬名, 単勝, 複勝 "min - max"]
 # 末尾2行は別テーブル混入を模した「馬名が数字のみ」の spurious 行 → 除外されること。
 _TANFUKU_HTML = """

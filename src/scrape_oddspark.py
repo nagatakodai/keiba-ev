@@ -260,6 +260,20 @@ def fetch_horse_past_runs(lineage_nb: str) -> list[PastRun]:
         return []
 
 
+def _date_key(s: str) -> tuple[int, int, int]:
+    """'YYYY.M.D' / 'YYYY.MM.DD' / 'YYYY/M/D' → (y, m, d) タプル。
+
+    leakage 除外の日付比較は **文字列比較だと非ゼロ詰め日付で破綻**する
+    ('2026.5.2' < '2026.05.26' が False になり正当な過去走を誤除外)。
+    数値タプルで比較するため正規化する。パース不能は (0,0,0)。
+    """
+    parts = re.split(r"[./]", s.strip())
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except (IndexError, ValueError):
+        return (0, 0, 0)
+
+
 def parse_tanfuku(html: str) -> list[OddsparkHorse]:
     """単複 (betType=1) ページの table → [OddsparkHorse]。
 
@@ -497,7 +511,12 @@ def fetch_oddspark_trifecta(
     """
     combos: dict[tuple[int, int, int], float] = {}
     for a in sorted(valid):
-        html = _get(_odds_url(loc, 8) + f"&horseNb={a}")
+        # 1 軸の fetch/parse 失敗 (transient 5xx / 取消馬の空ページ等) で全軸を捨てない。
+        # find_oddspark_race / fetch_race_list_oddspark と同じく per-iteration で握る。
+        try:
+            html = _get(_odds_url(loc, 8) + f"&horseNb={a}")
+        except Exception:  # noqa: BLE001
+            continue
         for key, od in parse_triple_list(html, ordered=True):
             if od > 0 and len(set(key)) == 3 and all(x in valid for x in key):
                 combos[key] = od  # type: ignore[assignment]
@@ -600,7 +619,8 @@ def build_oddspark_racedata(
             if ln:
                 runs = fetch_horse_past_runs(ln)
                 if race_date:
-                    runs = [r for r in runs if r.date < race_date]
+                    rk = _date_key(race_date)
+                    runs = [r for r in runs if _date_key(r.date) < rk]
                 h.past_runs = runs[:5]
     race = Race(
         cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
