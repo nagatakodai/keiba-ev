@@ -318,6 +318,7 @@ def main(
         finished_at = int(time.time())
         if rc == 0:
             _mark_analyzed(rid)
+            analyzed.add(rid)  # 同 tick 内の重複 rid (oddspark+netkeiba 両経路等) を二重 dispatch しない
             try:
                 p = schedule_result_fetch(rid, race["url"], race["start_at"])
                 if p.status == "pending":
