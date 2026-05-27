@@ -34,18 +34,21 @@ ROOT = Path(__file__).resolve().parents[1]
 _SHOT_DIR = ROOT / "data" / "cache"
 
 _BASE = "https://www.oddspark.com"
-# ↓↓↓ 要実機調整: ログイン/投票ページ URL とセレクタ (ログイン後に DevTools で確認) ↓↓↓
-_LOGIN_URL = f"{_BASE}/member/login.do"   # 要確認 (会員ログイン)
+# ログイン: 実機HTML確認済 (2026-05)。フォーム name=loginForm、隠し _csrf/SSO_* は
+# フォーム送信で自動付与。送信は <a id="btn-login" href="javascript:formSubmit()"> をclick。
+_LOGIN_URL = f"{_BASE}/user/my/Index.do"
+# ↓↓↓ vote_* / cart 系は **要実機調整** (投票ページHTML未確認)。login は確定済。 ↓↓↓
 SELECTORS = {
-    "login_id": 'input[name="loginId"]',          # 要確認
-    "login_password": 'input[name="password"]',    # 要確認
-    "login_submit": 'button[type="submit"]',        # 要確認
-    "vote_pin": 'input[name="ansyoNo"]',            # 投票暗証 (要る場合)
+    "login_id": 'input[name="SSO_ACCOUNTID"]',       # 確定
+    "login_password": 'input[name="SSO_PASSWORD"]',  # 確定
+    "login_submit": '#btn-login',                    # 確定 (JSリンク formSubmit())
+    "logged_in_marker": "text=ログアウト",            # ログイン成功判定 (要確認)
+    "vote_pin": 'input[name="ansyoNo"]',             # 投票暗証 (要る場合・要確認)
     # 投票フォーム (1 買い目ぶん) — 要確認
     "bet_type_select": 'select[name="shikibetsu"]',
-    "umaban_input": 'input[name="umaban"]',         # 組番入力 (式別で形式が変わる)
-    "amount_input": 'input[name="kingaku"]',        # 金額 (100円単位)
-    "add_to_cart": 'button.add-cart',               # カート投入
+    "umaban_input": 'input[name="umaban"]',          # 組番入力 (式別で形式が変わる)
+    "amount_input": 'input[name="kingaku"]',         # 金額 (100円単位)
+    "add_to_cart": 'button.add-cart',                # カート投入
     # 購入確定は **使わない** (人が押す)。参考までに置くがコードからは押さない。
     "confirm_purchase": 'button.kakutei',
 }
@@ -171,18 +174,26 @@ def fill_cart(
 
 
 def _login(page, creds: dict) -> None:
-    """要実機調整: ログインフォームのセレクタは SELECTORS を実機で確認して直す。"""
+    """ログイン (login セレクタは実機確認済)。送信は JS formSubmit() なので #btn-login click。"""
     page.goto(_LOGIN_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(1000)
     try:
         page.fill(SELECTORS["login_id"], creds["id"])
         page.fill(SELECTORS["login_password"], creds["password"])
-        page.click(SELECTORS["login_submit"])
-        page.wait_for_timeout(2500)
+        page.click(SELECTORS["login_submit"])   # <a id=btn-login> → formSubmit() → LoginPc.jsp
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:  # noqa: BLE001
+            page.wait_for_timeout(3000)
     except Exception as ex:  # noqa: BLE001
         _shot(page, "login_failed")
         raise OddsparkBetError(
-            f"ログイン失敗 (SELECTORS を実機で確認・調整してください): {ex}") from ex
+            f"ログイン送信に失敗 (login セレクタ確認): {ex}") from ex
+    # ログイン成否判定: ログインフォームがまだ見える = 失敗 (ID/PW 誤り or ロック)
+    if page.locator(SELECTORS["login_id"]).count() > 0:
+        _shot(page, "login_failed")
+        raise OddsparkBetError(
+            "ログイン後もログインフォームが残存 — ID/PW 誤り・ロック・要セレクタ確認")
 
 
 def _vote_url(loc) -> str:
