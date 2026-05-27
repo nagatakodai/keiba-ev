@@ -470,33 +470,32 @@ def _validate_and_update_bundle(
     horse_best_times=None,
     model: str = "opus",
 ) -> None:
-    """「Claude 総合オススメ」束を claude -p で web 検証 → cut 反映 → snapshot 更新。
+    """claude -p (web 検索なし) にモデル出力を全部見せて最終「買い目」を選定させ、
+    その picks で recommended_bundle を再構築して snapshot 更新。
 
-    モデルのみで作った束 (build_bundle) を claude に提示し、取消/不安材料を web 検索で
-    裏取りさせて cut すべき脚を JSON で受け取る。cut 馬券を候補から除いて束を再構築し、
-    `llm_review` を添えて recommended_bundle を上書きする。検証不能/見送り時は no-op。
+    モデルの全 +EV 候補 (全 bet type) + joint Kelly 束を claude に提示し、claude は
+    数値判断のみ (検索なし) で買う leg を picks として返す。picks の候補だけで joint
+    Kelly を再計算 (トリガミ防止込み) して束を置換する。検証不能/見送り時は no-op
+    (モデル束を維持)。
     """
     cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
     bundle = pf_mod.build_bundle(cands, probs)
     if not bundle.get("legs"):
-        return  # 見送り (+EV 束なし) — 検証対象なし
+        return  # 見送り (+EV 束なし) — 選定対象なし
     if not llm_mod.is_available():
         return
 
-    console.rule("[bold]Claude 総合オススメ 検証 (claude -p, web 調査)[/bold]")
+    console.rule("[bold]Claude 総合オススメ 選定 (claude -p, 検索なし・モデル出力判断)[/bold]")
     chunks: list[str] = []
-    review: dict = {}
     saw_error = False
     saw_result = False
     try:
-        for etype, payload in llm_mod.validate_bundle_stream(
-            rd, bundle, model=model,
+        for etype, payload in llm_mod.select_bundle_stream(
+            rd, bundle, cands, model=model,
             aptitudes=aptitudes, market_signals=market_signals,
             horse_best_times=horse_best_times,
         ):
-            if etype == "tool_use":
-                console.print(f"[dim]🔍 {payload.get('name', '')}[/dim]")
-            elif etype == "text":
+            if etype == "text":
                 chunks.append(payload)
                 console.print(payload, end="")
             elif etype == "result":
@@ -505,28 +504,32 @@ def _validate_and_update_bundle(
                     chunks.append(payload)
             elif etype == "error":
                 saw_error = True
-                console.print(f"[red]bundle 検証エラー: {payload}[/red]")
+                console.print(f"[red]bundle 選定エラー: {payload}[/red]")
     except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]bundle 検証失敗: {ex}[/yellow]")
+        console.print(f"[yellow]bundle 選定失敗: {ex}[/yellow]")
         return
 
-    # claude が error を出した / 完了 (result) しなかった場合は検証成立とみなさない。
-    # ここで validated=True にすると frontend が「claude -p 検証済」バッジを誤表示する
-    # (= モデル束を Claude が裏取りしたかのような誤認)。no-op で未検証のまま残す。
     if saw_error or not saw_result:
-        console.print("[yellow]bundle 検証が完了しなかったため未検証のまま (モデル束を維持)[/yellow]")
+        console.print("[yellow]選定が完了しなかったため未選定のまま (モデル束を維持)[/yellow]")
         return
 
     review = llm_mod.parse_bundle_review("".join(chunks))
-    cuts = set(review.get("cuts", []))
-    if cuts:
-        filtered = [
+    picks = review.get("picks")
+    if picks:
+        pick_set = set(picks)
+        selected = [
             c for c in cands
-            if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) not in cuts
+            if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) in pick_set
         ]
-        bundle = pf_mod.build_bundle(filtered, probs)
-        console.print(f"[cyan]LLM cut {len(cuts)} 脚 → 再構築: {len(bundle.get('legs', []))} 脚[/cyan]")
-    bundle["llm_review"] = {"validated": True, **review}
+        if selected:
+            bundle = pf_mod.build_bundle(selected, probs)   # picks のみで joint Kelly 再計算
+            console.print(f"[cyan]claude 選定 {len(picks)} 点 → 束再構築: {len(bundle.get('legs', []))} 脚[/cyan]")
+    elif review.get("cuts"):   # 後方互換: cuts のみ返した場合
+        cut_set = set(review["cuts"])
+        kept = [c for c in cands
+                if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) not in cut_set]
+        bundle = pf_mod.build_bundle(kept, probs)
+    bundle["llm_review"] = {"validated": True, "mode": "selection", **review}
     _update_snapshot_bundle(race_id, bundle)
 
 

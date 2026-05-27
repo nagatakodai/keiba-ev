@@ -260,79 +260,80 @@ def leg_id(leg: dict) -> str:
     return f"{leg['bet_type']}:{'-'.join(str(k) for k in leg['key'])}"
 
 
-def build_bundle_validation_prompt(
+def build_bundle_selection_prompt(
     rd: RaceData,
     bundle: dict,
+    candidates: list[dict],
     *,
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
+    max_candidates: int = 40,
 ) -> str:
-    """「Claude 総合オススメ」まとめ買い束を web 検索で厳密に検証させる prompt。"""
+    """モデル出力 (全 bet type の +EV 候補 + joint Kelly 束) を提示し、**web 検索せず**
+    数値判断のみで最終「買い目」を選ばせる prompt。出力 picks (= 買う leg id 配列)。"""
     r = rd.race
     legs = bundle.get("legs", [])
     horse_name = {h.number: h.name for h in r.horses}
-    # 束に絡む馬番
-    involved = sorted({n for leg in legs for n in leg["key"]})
+    # 候補は P×O 降順で上位 max_candidates 件 (= モデルの +EV 出力)
+    pool = sorted(candidates, key=lambda c: c.get("px_o", 0.0), reverse=True)[:max_candidates]
+    bundle_ids = {leg_id(leg) for leg in legs}
 
     lines = [
         f"# レース: {r.venue_name} {r.race_number}R ({r.race_class}) "
         f"{r.surface}{r.distance}m {r.weather_text}",
         "",
-        "## 検証対象の「まとめ買い」束 (joint Kelly + トリガミ防止済)",
-        f"投資総額 ¥{bundle.get('total_stake', 0):,} / 束の的中率(1点以上) "
-        f"{bundle.get('bundle_hit_prob', 0) * 100:.1f}%",
+        "あなたは確率モデルの出力を最終判断する馬券選定者です。**web 検索は使わず**、"
+        "下記モデル出力の数値 (推定P・オッズ・P×O・Kelly・適性) のみで判断してください。",
         "",
-        "| id | 種別 | 買い目 | オッズ | 推定P | 配分¥ | 的中時払戻¥ |",
-        "|---|---|---|---|---|---|---|",
+        "## モデルの joint Kelly 束 (モデル推奨・配分付き) ★が束採用",
+        f"投資総額 ¥{bundle.get('total_stake', 0):,} / 束の的中率(1点以上) "
+        f"{bundle.get('bundle_hit_prob', 0) * 100:.1f}% / min払戻比 "
+        f"{bundle.get('min_payout_ratio', 0):.2f}",
+        "",
+        "## モデルの +EV 候補 (P×O 降順, 全 bet type 横断)",
+        "| id | 種別 | 買い目 | オッズ | 推定P | P×O | Kelly | 束 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
-    for leg in legs:
-        names = " / ".join(horse_name.get(n, f"#{n}") for n in leg["key"])
+    apt = aptitudes or {}
+    for c in pool:
+        key = list(c["key"])
+        names = " / ".join(horse_name.get(n, f"#{n}") for n in key)
+        kelly = (c["px_o"] - 1.0) / (c["odds"] - 1.0) if c["odds"] > 1 else 0.0
         lines.append(
-            f"| {leg_id(leg)} | {leg['bet_type']} | {'-'.join(map(str, leg['key']))} "
-            f"({names}) | {leg['odds']:.1f} | {leg['prob']*100:.1f}% | "
-            f"¥{leg['stake']:,} | ¥{leg['payout_if_hit']:,} |"
+            f"| {leg_id(c)} | {c['bet_type']} | {'-'.join(map(str, key))} ({names}) "
+            f"| {c['odds']:.1f} | {c['prob']*100:.1f}% | {c['px_o']:.2f} | "
+            f"{kelly*100:.1f}% | {'★' if leg_id(c) in bundle_ids else ''} |"
         )
 
-    # 絡む馬の事前指数 (検索で裏取りする出発点)
-    lines += ["", "## 束に絡む馬 (事前データ)"]
-    apt = aptitudes or {}
-    sig = market_signals or {}
-    bt = {t.get("number"): t for t in (horse_best_times or [])}
-    for n in involved:
-        bits = [f"{n} {horse_name.get(n, '?')}"]
-        a = apt.get(n)
+    lines += ["", "## 出走馬の適性 (参考)"]
+    for h in r.horses:
+        a = apt.get(h.number)
         if a is not None:
-            bits.append(f"適性総合{getattr(a, 'total', 0):.0f}")
-        s = sig.get(n)
-        if s is not None:
-            bits.append(f"市場={getattr(s, 'interpretation', '')}")
-        if n in bt:
-            bits.append(f"持時計{bt[n].get('best_time_sec', 0):.1f}s")
-        lines.append("- " + " / ".join(bits))
+            lines.append(f"- {h.number} {h.name or '?'}: 適性総合{getattr(a, 'total', 0):.0f}")
 
     lines += [
         "",
-        "## 指示 (厳密に)",
-        "CLAUDE.md の検索ルールに従い、上記の束に絡む馬について **web 検索で裏取り** せよ:",
-        "1. 直近5走の着順・距離/コース/馬場適性、騎手の当該コース成績",
-        "2. **取消・除外・体調不安・大幅馬体重増減** (該当馬が絡む脚は全て cut)",
-        "3. 当日の馬場状態と各馬の適性",
-        "検索は P×O 上位/配分上位の脚を優先、合計最大6クエリ。確証なき脚は cut しない",
-        "(モデルの +EV を尊重) が、**明確なマイナス根拠がある脚は cut** する。",
+        "## 指示",
+        "1. モデルの +EV 候補をすべて見て、**実際に買う買い目 (picks)** を選ぶ。",
+        "2. 基本はモデルの joint Kelly 束 (★) を尊重しつつ、P×O が薄い/Kelly が極小/適性が"
+        "   低い脚は外し、確率・P×O・適性が噛み合う堅い脚を残す。点数は絞ってよい。",
+        "3. **web 検索・外部情報は使わない** (モデル出力の数値判断のみ)。",
+        "4. picks は上表の id をそのまま使う。トリガミ防止のため最終配分は別途モデルが再計算する。",
         "",
-        "最後に必ず以下の JSON を ```json ... ``` で出力 (cuts は cut する leg の id 配列):",
+        "最後に必ず以下の JSON を ```json ... ``` で出力:",
         "```json",
-        '{"cuts": ["wide:3-7"], "notes": {"wide:3-7": "理由"}, '
-        '"summary": "総評", "confidence": "high|mid|low"}',
+        '{"picks": ["win:7", "wide:2-11"], "notes": {"win:7": "理由"}, '
+        '"summary": "選定の総評", "confidence": "high|mid|low"}',
         "```",
     ]
     return "\n".join(lines)
 
 
-def validate_bundle_stream(
+def select_bundle_stream(
     rd: RaceData,
     bundle: dict,
+    candidates: list[dict],
     *,
     model: str = "opus",
     timeout: int = 420,
@@ -340,15 +341,16 @@ def validate_bundle_stream(
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
 ) -> Iterator[tuple[str, Any]]:
-    """bundle 検証を stream-json で。evaluate_stream と同じ event 形式を yield。"""
+    """モデル出力から最終買い目を選ばせる stream-json。**web 検索なし** (ツール無効)。
+    evaluate_stream と同じ event 形式を yield。"""
     if not is_available():
         yield ("error", "claude CLI が見つかりません")
         return
     if not bundle.get("legs"):
-        yield ("result", "")  # 検証対象なし (見送り)
+        yield ("result", "")  # 候補なし (見送り)
         return
-    prompt = build_bundle_validation_prompt(
-        rd, bundle, aptitudes=aptitudes,
+    prompt = build_bundle_selection_prompt(
+        rd, bundle, candidates, aptitudes=aptitudes,
         market_signals=market_signals, horse_best_times=horse_best_times,
     )
     cmd = [
@@ -358,8 +360,8 @@ def validate_bundle_stream(
         "--verbose",
         "--no-session-persistence",
         "--permission-mode", "bypassPermissions",
-        "--allowedTools", ",".join(ALLOWED_TOOLS),
-        "--disallowedTools", DISALLOWED_TOOLS,
+        "--allowedTools", "",   # web 検索を含む全ツール無効 (モデル出力の数値判断のみ)
+        "--disallowedTools", DISALLOWED_TOOLS + "," + ",".join(ALLOWED_TOOLS),
     ]
     proc = subprocess.Popen(
         cmd, cwd=str(ROOT),
@@ -396,15 +398,18 @@ def validate_bundle_stream(
 
 
 def parse_bundle_review(text: str) -> dict:
-    """検証出力の JSON ブロックを {cuts,notes,summary,confidence} に正規化。"""
+    """選定出力の JSON ブロックを {picks,cuts,notes,summary,confidence} に正規化。
+
+    新方式は picks (買う leg id 配列)。後方互換で cuts も拾う。
+    """
     raw = parse_evidence(text)  # 同じ ```json``` 抽出ロジックを流用
     if not isinstance(raw, dict):
         return {}
-    cuts = raw.get("cuts") or []
-    if not isinstance(cuts, list):
-        cuts = []
+    picks = raw.get("picks")
+    cuts = raw.get("cuts")
     return {
-        "cuts": [str(c) for c in cuts],
+        "picks": [str(p) for p in picks] if isinstance(picks, list) else None,
+        "cuts": [str(c) for c in cuts] if isinstance(cuts, list) else [],
         "notes": raw.get("notes") if isinstance(raw.get("notes"), dict) else {},
         "summary": str(raw.get("summary", "")),
         "confidence": str(raw.get("confidence", "")),
