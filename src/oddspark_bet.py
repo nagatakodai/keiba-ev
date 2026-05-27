@@ -72,6 +72,10 @@ _BET_TYPE_CODE = {
     "win": "1", "place": "2", "quinella": "5", "exacta": "6",
     "wide": "7", "trio": "8", "trifecta": "9",
 }
+# 馬単/3連単 (順序付き) の自動投入可否。裏目/マルチ (全順列化) サブオプションを確実に
+# OFF にできると実機検証できたら True にする (それまで fail-safe で見送り)。
+# 順不同 (単複/馬連/ワイド/3連複) はこのオプションが無いので常に投入可 (実機確認済)。
+_ORDERED_BETS_VERIFIED = False
 # 当方 bet_type → オッズパーク式別の表示値/コード (要確認)。
 _SHIKIBETSU = {
     "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
@@ -287,6 +291,14 @@ def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
     順序 (実機準拠): 金額入力 → レースチェック → 賭式選択 → 馬番選択 → セット。
     """
     import re as _re
+    # 馬単/3連単 (順序付き) は 裏目/マルチ サブオプション (全順列化) の制御が未検証。
+    # オンだと「選択した着順を入替えた全組合せ」になり 順列数×stake で過剰投入になる
+    # (順不同の 馬連/ワイド/3連複 にはこの sub-option は無い)。実機 DOM で裏目/マルチ
+    # を確実に OFF にできると確認できるまで、自動投入は fail-safe で見送る (手動投入は可)。
+    if leg.bet_type in ("exacta", "trifecta") and not _ORDERED_BETS_VERIFIED:
+        raise OddsparkBetError(
+            f"{leg.bet_type} は裏目/マルチ(全順列)制御が未検証のため自動投入を見送り — "
+            "手動で投入してください")
     try:
         # 1) 金額 (100円単位。"00円" 接尾なので stake//100 を入力)
         page.fill(SELECTORS["amount_input"], str(leg.stake // 100))

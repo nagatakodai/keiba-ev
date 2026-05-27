@@ -156,3 +156,11 @@ def test_add_race_failed_leg_not_counted(monkeypatch):
     st, ok = sess.add_race("202650052709",
                            [ob.CartLeg("wide", [4, 10], 600), ob.CartLeg("wide", [3, 10], 600)])
     assert ok == 1 and sess._session_staked == 600   # 失敗脚 600 は露出に含めない
+
+
+def test_ordered_bets_skipped_until_verified():
+    """馬単/3連単 は裏目/マルチ未検証の間 fail-safe で見送る (page に触れる前に raise)。"""
+    assert ob._ORDERED_BETS_VERIFIED is False   # 既定は fail-safe
+    for bt in ("exacta", "trifecta"):
+        with pytest.raises(ob.OddsparkBetError, match="見送り"):
+            ob._add_leg_to_cart(None, ob.CartLeg(bt, [1, 2, 3], 100), "20260527_51_9")
