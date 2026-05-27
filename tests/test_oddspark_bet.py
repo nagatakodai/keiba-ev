@@ -58,3 +58,65 @@ def test_to_netkeiba_rid_accepts_both_forms():
     assert ob._to_netkeiba_rid("2026500527-527-9") == "202650052709"
     with pytest.raises(ob.OddsparkBetError, match="形式不正"):
         ob._to_netkeiba_rid("nope")
+
+
+# --- 常駐 daemon の queue 処理 状態遷移 (_process_bet_queue_once) ---
+
+class _FakeSession:
+    """BettingSession の add_race だけ差し替えるフェイク (ブラウザ不要)。"""
+    def __init__(self, behavior):
+        self.behavior = behavior   # rid -> "ok" / "dup" / OddsparkBetError / Exception
+        self.calls = []
+
+    def add_race(self, rid, legs, label=""):
+        self.calls.append(rid)
+        b = self.behavior.get(rid, "ok")
+        if isinstance(b, type) and issubclass(b, Exception):
+            raise b("boom")
+        if b == "dup":
+            return ("dup", 0)
+        return ("ok", len(legs))
+
+
+def _put_req(qdir, rid):
+    qdir.mkdir(parents=True, exist_ok=True)
+    (qdir / f"{rid}.req").write_text("{}", encoding="utf-8")
+
+
+def test_queue_success_and_terminal_error_mark_done(tmp_path, monkeypatch):
+    qdir = tmp_path / "q"
+    monkeypatch.setattr(ob, "QUEUE_DIR", qdir)
+    monkeypatch.setattr(ob, "_legs_from_snapshot",
+                        lambda rid: ([ob.CartLeg("win", [1], 100)], "X"))
+    for rid in ("202650052701", "202650052702", "202650052703"):
+        _put_req(qdir, rid)
+    sess = _FakeSession({
+        "202650052701": "ok",
+        "202650052702": "dup",
+        "202650052703": ob.OddsparkBetError,   # 締切等 = 確定エラー
+    })
+    ob._process_bet_queue_once(sess, {})
+    # 成功/dup/確定エラー すべて .done (再投入されない)
+    for rid in ("202650052701", "202650052702", "202650052703"):
+        assert (qdir / f"{rid}.done").exists(), rid
+        assert not (qdir / f"{rid}.req").exists(), rid
+
+
+def test_queue_transient_error_retries_then_gives_up(tmp_path, monkeypatch):
+    qdir = tmp_path / "q"
+    monkeypatch.setattr(ob, "QUEUE_DIR", qdir)
+    monkeypatch.setattr(ob, "_legs_from_snapshot",
+                        lambda rid: ([ob.CartLeg("win", [1], 100)], "X"))
+    rid = "202650052705"
+    _put_req(qdir, rid)
+    sess = _FakeSession({rid: RuntimeError})   # 一過性 glitch を模す
+    attempts: dict = {}
+    # 1,2 回目: .req 残置で再試行継続
+    ob._process_bet_queue_once(sess, attempts, max_attempts=3)
+    assert (qdir / f"{rid}.req").exists() and attempts[rid] == 1
+    ob._process_bet_queue_once(sess, attempts, max_attempts=3)
+    assert (qdir / f"{rid}.req").exists() and attempts[rid] == 2
+    # 3 回目: 上限到達 → .done
+    ob._process_bet_queue_once(sess, attempts, max_attempts=3)
+    assert (qdir / f"{rid}.done").exists() and not (qdir / f"{rid}.req").exists()
+    assert sess.calls.count(rid) == 3

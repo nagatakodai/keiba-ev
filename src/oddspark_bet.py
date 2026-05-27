@@ -495,36 +495,43 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
     print("[oddspark_bet] watch-auto を --bet-oddspark で回すと発走前レースが積まれます。")
     print("[oddspark_bet] **購入確定は常に人が目視で押します** (自動では絶対に押しません)。"
           " Ctrl-C で終了。")
-    max_attempts = 3                      # 一過性エラー (ブラウザ glitch 等) の再試行上限
     attempts: dict[str, int] = {}
     try:
         while True:
-            for req in sorted(QUEUE_DIR.glob("*.req")):
-                rid = req.stem
-                terminal = True   # 処理確定 (.done に落とす) か。一過性失敗のみ False で .req 残置
-                try:
-                    legs, label = _legs_from_snapshot(rid)
-                    status, _ok = sess.add_race(rid, legs, label=label)
-                    if status == "dup":
-                        print(f"[oddspark_bet] {rid} は投入済 (skip)")
-                except OddsparkBetError as ex:
-                    # 締切/未発売/joCode 無し/束無し = 確定的に投票不可 → 再試行しない
-                    print(f"[oddspark_bet] {rid} skip: {ex}")
-                except Exception as ex:  # noqa: BLE001 — ブラウザ/通信 glitch は一過性とみなす
-                    attempts[rid] = attempts.get(rid, 0) + 1
-                    terminal = attempts[rid] >= max_attempts
-                    note = "上限到達→打ち切り" if terminal else f"再試行 {attempts[rid]}/{max_attempts}"
-                    print(f"[oddspark_bet] {rid} 失敗 ({note}): {ex}")
-                if terminal:
-                    try:
-                        req.rename(req.with_suffix(".done"))   # 再投入防止
-                    except Exception:  # noqa: BLE001
-                        pass
+            _process_bet_queue_once(sess, attempts)
             time.sleep(poll_sec)
     except KeyboardInterrupt:
         print("\n[oddspark_bet] 終了 (Ctrl-C)。ブラウザを閉じます。")
     finally:
         sess.close()
+
+
+def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None:
+    """queue を1巡: 各 <rid>.req の snapshot 束をカート投入し、処理確定なら .done に rename。
+
+    - 成功 / dup / 確定エラー (OddsparkBetError: 締切・joCode無し・束無し) → .done
+    - 一過性エラー (ブラウザ/通信 glitch 等) → max_attempts まで .req 残置で再試行、超過で .done
+    """
+    for req in sorted(QUEUE_DIR.glob("*.req")):
+        rid = req.stem
+        terminal = True   # 処理確定 (.done に落とす) か。一過性失敗のみ False で .req 残置
+        try:
+            legs, label = _legs_from_snapshot(rid)
+            status, _ok = sess.add_race(rid, legs, label=label)
+            if status == "dup":
+                print(f"[oddspark_bet] {rid} は投入済 (skip)")
+        except OddsparkBetError as ex:
+            print(f"[oddspark_bet] {rid} skip: {ex}")
+        except Exception as ex:  # noqa: BLE001 — ブラウザ/通信 glitch は一過性とみなす
+            attempts[rid] = attempts.get(rid, 0) + 1
+            terminal = attempts[rid] >= max_attempts
+            note = "上限到達→打ち切り" if terminal else f"再試行 {attempts[rid]}/{max_attempts}"
+            print(f"[oddspark_bet] {rid} 失敗 ({note}): {ex}")
+        if terminal:
+            try:
+                req.rename(req.with_suffix(".done"))   # 再投入防止
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _to_netkeiba_rid(arg: str) -> str:
