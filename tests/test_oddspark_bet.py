@@ -31,3 +31,10 @@ def test_fill_cart_rejects_over_limit():
 def test_shikibetsu_covers_all_bet_types():
     for bt in ("win", "place", "quinella", "wide", "exacta", "trio", "trifecta"):
         assert bt in ob._SHIKIBETSU
+
+
+def test_vote_jo_code_maps_venue():
+    # netkeiba rid → 場名 → 投票 joCode (オッズ側 opTrackCd とは別 namespace)
+    assert ob._vote_jo_code("202650052705") == "51"   # 園田(netkeiba50) → vote 51
+    assert ob._vote_jo_code("202635052601") == "11"   # 盛岡(netkeiba35) → vote 11
+    assert ob._vote_jo_code("202699052601") is None    # 未対応コード → None

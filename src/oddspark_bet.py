@@ -61,7 +61,23 @@ _SHIKIBETSU = {
     "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
     "exacta": "馬単", "trio": "3連複", "trifecta": "3連単",
 }
-# ↑↑↑ ここまで要実機調整 ↑↑↑
+# 投票システムの joCode (VoteKeibaTop の #joListHidden, 実機確認済)。
+# **オッズ取得側 (scrape_oddspark の opTrackCd) とは別 namespace** なので場名で対応づける。
+VOTE_JO_CODE = {
+    "門別": "06", "帯広": "03", "盛岡": "11", "水沢": "12",
+    "浦和": "31", "船橋": "32", "大井": "33", "川崎": "34",
+    "金沢": "41", "笠松": "42", "名古屋": "43", "園田": "51",
+    "姫路": "52", "高知": "55", "佐賀": "61",
+    # JRA (オッズパークは通常 NAR のみだが list に存在): 札幌04 函館91 福島92 新潟93
+    # 東京94 中山95 京都96 阪神97 小倉98 中京44
+}
+# ↑↑↑ ここまで要実機調整 (joCode/login は確定、bet 入力は placeholder) ↑↑↑
+
+
+def _vote_jo_code(netkeiba_rid: str) -> str | None:
+    """netkeiba race_id → 場名 (VENUE_CODE) → 投票 joCode。"""
+    from .parse import VENUE_CODE
+    return VOTE_JO_CODE.get(VENUE_CODE.get(netkeiba_rid[4:6], ""))
 
 
 class OddsparkBetError(RuntimeError):
@@ -156,22 +172,40 @@ def fill_cart(
                 _login(page, creds)
             _shot(page, "1_after_login")
 
-            # 2) 対象 race の投票ページへ (要確認: 投票 URL の組み立て)
-            vote_url = _vote_url(loc)
-            page.goto(vote_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(1500)
-            _shot(page, "2_vote_page")
+            # 2) 投票TOP → 競馬場選択 (selectJo)。確定値。
+            page.goto(_VOTE_TOP_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
+            _shot(page, "2_vote_top")
+            jo = _vote_jo_code(netkeiba_rid)
+            kaisai_bi = netkeiba_rid[:4] + netkeiba_rid[6:8] + netkeiba_rid[8:10]  # YYYYMMDD
+            if not jo:
+                raise OddsparkBetError(f"投票 joCode 不明 (場名未対応): {netkeiba_rid}")
+            try:
+                page.evaluate(f"selectJo('{kaisai_bi}', '{jo}')")  # サイトの JS 関数
+                page.wait_for_timeout(2500)
+                _shot(page, "3_jo_selected")
+                print(f"  競馬場選択: joCode={jo} kaisaiBi={kaisai_bi} ({loc.venue})")
+            except Exception as ex:  # noqa: BLE001
+                _shot(page, "jo_select_failed")
+                raise OddsparkBetError(f"競馬場選択 (selectJo) 失敗: {ex}") from ex
 
-            # 3) 各買い目をカート投入
-            for i, leg in enumerate(legs, 1):
-                _add_leg_to_cart(page, leg)
-                _shot(page, f"3_cart_{i}_{leg.bet_type}")
-                print(f"  + カート投入: {_SHIKIBETSU.get(leg.bet_type, leg.bet_type)} "
-                      f"{'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
+            # 3) レース選択 → 式別/組番/金額入力 → カート投入 — **要実機HTML (次段階)**。
+            #    投票システムは JS SPA で買い目を strVoteData に符号化し #gotobuy→VoteConfirm.do
+            #    (=購入手続) に進む。確定 (#gotobuy/VoteConfirm) は **絶対に踏まない**。
+            #    レース選択後の式別/馬番入力フォーム HTML を貰えればここを実装する。
+            try:
+                for i, leg in enumerate(legs, 1):
+                    _add_leg_to_cart(page, leg)
+                    _shot(page, f"4_cart_{i}_{leg.bet_type}")
+                    print(f"  + カート投入: {_SHIKIBETSU.get(leg.bet_type, leg.bet_type)} "
+                          f"{'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
+                _shot(page, "5_cart_filled")
+                print("[oddspark_bet] カート投入完了。**購入確定は押していません**。")
+            except OddsparkBetError as ex:
+                print(f"[oddspark_bet] {ex}")
+                print("[oddspark_bet] (レース選択〜買い目入力は未実装 = 投票画面HTML待ち)")
 
-            _shot(page, "4_cart_filled")
-            print("[oddspark_bet] カート投入完了。**購入確定は押していません** — "
-                  "ブラウザで内容を確認し、人が確定してください。Enter で終了 (ブラウザを閉じる)。")
+            print("[oddspark_bet] ブラウザは開いたまま。内容確認後、人が確定。Enter で終了。")
             input()
         finally:
             browser.close()
