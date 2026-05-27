@@ -81,6 +81,13 @@ def _f(s: str) -> float | None:
     return float(m.group(0)) if m else None
 
 
+def _min_odds(s: str) -> float | None:
+    """セル内の全数値の最小を返す。ワイドは "min - max" のレンジ表示なので
+    **常に下限を採用** (HTML の min/max の並び順に依存しない保証)。"""
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s.replace(",", ""))]
+    return min(nums) if nums else None
+
+
 # ---------------------------------------------------------------- parsers ----
 
 def parse_tanfuku(html: str) -> tuple[list[BetOdds], list[BetOdds]]:
@@ -124,7 +131,8 @@ def _parse_combo(html: str, bet_type: str, *, ordered: bool, length: int) -> lis
             continue
         if not all(1 <= n <= 30 for n in nums):
             continue  # 馬番域外 (例: 日付 2026-05-26) を弾く
-        od = _f(_html.unescape(re.sub(r"<[^>]+>", " ", odds_cell)))
+        cell = _html.unescape(re.sub(r"<[^>]+>", " ", odds_cell))
+        od = _min_odds(cell) if bet_type == "wide" else _f(cell)  # ワイドは常に下限
         if od is None or od < 1.0:
             continue
         key = nums if ordered else tuple(sorted(nums))

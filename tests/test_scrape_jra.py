@@ -105,3 +105,10 @@ def test_parse_jra_result():
     r = jra.parse_jra_result(html)
     assert r["finish_order"] == [16, 12, 18]
     assert r["payout"] == 30330
+
+
+def test_parse_wide_always_lower_bound_even_if_reversed():
+    """JRA ワイドは span が max,min の順でも常に下限。"""
+    h=('<caption>1</caption><tbody><tr><th scope="row">2</th>'
+       '<td class="odds"><span class="max">7.2</span>-<span class="min">5.0</span></td></tr></tbody>')
+    assert jra.parse_wide(h)[0].odds == 5.0

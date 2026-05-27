@@ -268,3 +268,8 @@ def test_time_sec_and_date_key():
     assert abs(kg._time_sec("41.9") - 41.9) < 1e-9
     # 非ゼロ詰めでも正しく順序付く (leakage 比較の回帰防止)
     assert kg._date_key("2026.5.2") < kg._date_key("2026.05.26")
+
+
+def test_parse_wide_always_lower_bound_even_if_reversed():
+    """ワイドは max が先に来ても常に下限を採用 (順序非依存)。"""
+    assert kg.parse_wide("<td>1-2</td><td>7.2 - 5.0</td>")[0].odds == 5.0

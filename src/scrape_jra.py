@@ -71,6 +71,12 @@ def _f(s: str) -> float | None:
     return float(m.group(0)) if m else None
 
 
+def _min_odds(s: str) -> float | None:
+    """セル内の全数値の最小。ワイド (min/max span) は **常に下限を採用**。"""
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", s.replace(",", ""))]
+    return min(nums) if nums else None
+
+
 # ----------------------------------------------------------------- parsers --
 # 馬連/ワイド/馬単 共通: <caption>軸</caption> ... <th scope="row">相手</th><td>odds</td>
 _CAP_BLOCK_RE = re.compile(r"<caption>(.*?)</caption>(.*?)(?=<caption>|</table>|$)", re.DOTALL)
@@ -111,7 +117,8 @@ def _parse_pair(html: str, bet_type: str, *, ordered: bool) -> list[BetOdds]:
             p = int(partner)
             if p == axis:
                 continue
-            od = _f(re.sub(r"<[^>]+>", " ", odds_cell))   # ワイドは "min - max" の先頭=min
+            cell = re.sub(r"<[^>]+>", " ", odds_cell)
+            od = _min_odds(cell) if bet_type == "wide" else _f(cell)  # ワイドは常に下限
             if od is None or od < 1.0:
                 continue
             key = (axis, p) if ordered else tuple(sorted((axis, p)))
