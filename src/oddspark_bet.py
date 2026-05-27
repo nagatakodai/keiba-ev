@@ -37,6 +37,10 @@ _BASE = "https://www.oddspark.com"
 # ログイン: 実機HTML確認済 (2026-05)。フォーム name=loginForm、隠し _csrf/SSO_* は
 # フォーム送信で自動付与。送信は <a id="btn-login" href="javascript:formSubmit()"> をclick。
 _LOGIN_URL = f"{_BASE}/user/my/Index.do"
+# 投票エントリ (マイページの「投票する」リンク先, 実機確認済)。通常は別窓で開くが
+# Playwright は直接 goto で良い。ここから 開催→レース→券種→買い目入力→カート と進む
+# (その先の画面 HTML は未確認 = _vote_url 以降は要実機調整)。
+_VOTE_TOP_URL = f"{_BASE}/keiba/auth/VoteKeibaTop.do?gamenId=P901&gamenKoumokuId=topVote"
 # ↓↓↓ vote_* / cart 系は **要実機調整** (投票ページHTML未確認)。login は確定済。 ↓↓↓
 SELECTORS = {
     "login_id": 'input[name="SSO_ACCOUNTID"]',       # 確定
@@ -197,9 +201,10 @@ def _login(page, creds: dict) -> None:
 
 
 def _vote_url(loc) -> str:
-    """要実機調整: 投票ページ URL。オッズ URL と同じ loc から組む想定 (実機で確認)。"""
-    return (f"{_BASE}/keiba/VoteRaceList.do?raceDy={loc.race_dy}"
-            f"&opTrackCd={loc.op_track_cd}&sponsorCd={loc.sponsor_cd}&raceNb={loc.race_nb}")
+    """投票エントリ (VoteKeibaTop, 確定値)。**ここから 開催→レース→券種 への遷移と
+    買い目入力フォームは未確認** = `_add_leg_to_cart` と合わせて要実機調整。
+    一旦この TOP へ遷移し、続きのナビゲーション/フォーム HTML を貰って詰める。"""
+    return _VOTE_TOP_URL
 
 
 def _add_leg_to_cart(page, leg: CartLeg) -> None:
