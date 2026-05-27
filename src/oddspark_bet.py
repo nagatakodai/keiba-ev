@@ -376,6 +376,7 @@ class BettingSession:
         self.browser = None
         self.ctx = None
         self._added: set[str] = set()   # 投入済 netkeiba_rid (二重投入防止)
+        self._session_staked = 0        # 本セッションで #buylist に投入した累計 (未確定含む)
 
     def start(self, *, clear_existing: bool = False) -> None:
         from playwright.sync_api import sync_playwright
@@ -445,20 +446,27 @@ class BettingSession:
             self._goto_matome()
             _select_only_race(self.page, race_val)   # 再失敗なら締切/未発売 → 上に伝播
         ok = 0
+        staked = 0   # 実際に セット まで通った脚の合計 (累計露出の正確な加算用)
         for i, leg in enumerate(legs, 1):
             try:
                 _add_leg_to_cart(self.page, leg, race_val)
                 print(f"  + [{label or netkeiba_rid}] {leg.bet_type} "
                       f"{'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
                 ok += 1
+                staked += leg.stake
             except Exception as ex:  # noqa: BLE001
                 _shot(self.page, f"bet_{netkeiba_rid}_{i}_FAILED")
                 print(f"  ! [{label or netkeiba_rid}] 脚{i} "
                       f"({leg.bet_type} {leg.key}) スキップ: {ex}")
         _shot(self.page, f"bet_{netkeiba_rid}_filled")
         self._added.add(netkeiba_rid)
+        self._session_staked += staked
         print(f"[oddspark_bet] {label or netkeiba_rid}: {ok}/{len(legs)} 点 カート投入。"
-              "**購入確定は人が押す**")
+              f"**購入確定は人が押す** (本セッション投入累計 ¥{self._session_staked:,} 未確定含む)")
+        if self._session_staked > self.max_total_stake:
+            print(f"[oddspark_bet] ⚠ 累計 ¥{self._session_staked:,} が per-race 上限 "
+                  f"¥{self.max_total_stake:,} 超。**購入確定は #buylist 全体を一括購入する**ので、"
+                  "レースごとに確定/クリアして溜め過ぎに注意。")
         return ("ok", ok)
 
     def close(self) -> None:

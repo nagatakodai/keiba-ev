@@ -120,3 +120,39 @@ def test_queue_transient_error_retries_then_gives_up(tmp_path, monkeypatch):
     ob._process_bet_queue_once(sess, attempts, max_attempts=3)
     assert (qdir / f"{rid}.done").exists() and not (qdir / f"{rid}.req").exists()
     assert sess.calls.count(rid) == 3
+
+
+# --- BettingSession.add_race の累計露出トラッキング (helper を no-op 化, ブラウザ不要) ---
+
+def test_add_race_tracks_session_staked(monkeypatch):
+    monkeypatch.setattr(ob, "_race_meta", lambda r: "20260527_51_9")
+    monkeypatch.setattr(ob, "_select_only_race", lambda p, rv: None)
+    monkeypatch.setattr(ob, "_add_leg_to_cart", lambda p, leg, rv: None)   # 全脚成功
+    monkeypatch.setattr(ob, "_shot", lambda p, n: None)
+    sess = ob.BettingSession(headful=False, manual_login=True)
+    sess.page = object()
+    st, ok = sess.add_race("202650052709",
+                           [ob.CartLeg("wide", [4, 10], 600), ob.CartLeg("win", [7], 400)])
+    assert (st, ok) == ("ok", 2) and sess._session_staked == 1000
+    sess.add_race("202650052710", [ob.CartLeg("win", [1], 500)])
+    assert sess._session_staked == 1500
+    # dup は再加算しない
+    assert sess.add_race("202650052709", [ob.CartLeg("win", [7], 400)]) == ("dup", 0)
+    assert sess._session_staked == 1500
+
+
+def test_add_race_failed_leg_not_counted(monkeypatch):
+    monkeypatch.setattr(ob, "_race_meta", lambda r: "20260527_51_9")
+    monkeypatch.setattr(ob, "_select_only_race", lambda p, rv: None)
+    monkeypatch.setattr(ob, "_shot", lambda p, n: None)
+
+    def fake_add(p, leg, rv):
+        if list(leg.key) == [3, 10]:
+            raise ob.OddsparkBetError("boom")   # 1脚だけ失敗
+
+    monkeypatch.setattr(ob, "_add_leg_to_cart", fake_add)
+    sess = ob.BettingSession(headful=False, manual_login=True)
+    sess.page = object()
+    st, ok = sess.add_race("202650052709",
+                           [ob.CartLeg("wide", [4, 10], 600), ob.CartLeg("wide", [3, 10], 600)])
+    assert ok == 1 and sess._session_staked == 600   # 失敗脚 600 は露出に含めない
