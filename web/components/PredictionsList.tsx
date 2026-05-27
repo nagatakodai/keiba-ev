@@ -1,5 +1,10 @@
 import Link from "next/link";
 import { type CalibrationReport, type PredictionSummary } from "@/lib/api";
+
+const BET_LABELS: Record<string, string> = {
+  win: "単勝", place: "複勝", quinella: "馬連", wide: "ワイド",
+  exacta: "馬単", trio: "3連複", trifecta: "3連単",
+};
 import {
   Badge,
   Card,
@@ -118,7 +123,8 @@ export function PredictionsList({
                 const hit = showHits ? raceHitMap?.get(p.race_id) : undefined;
                 const anyHit = !!(
                   hit &&
-                  (hit.plan_a_hit ||
+                  (hit.bundle_hit ||   // 総合オススメ束 (ワイド/馬連等を含む) の的中も的中扱い
+                    hit.plan_a_hit ||
                     hit.plan_b_hit ||
                     hit.plan_c_hit ||
                     hit.plan_g_hit ||
@@ -173,6 +179,13 @@ export function PredictionsList({
                             </span>
                           </span>
                           <span className="text-(--color-muted)">·</span>
+                          {hit.bundle_hit && (
+                            <Badge tone="good">
+                              束的中{(hit.bundle_hit_bet_types?.length ?? 0) > 0
+                                ? ` (${hit.bundle_hit_bet_types!.map((bt) => BET_LABELS[bt] ?? bt).join("/")})`
+                                : ""}
+                            </Badge>
+                          )}
                           <PlanHitTag plan="F" hit={!!hit.plan_f_hit} />
                           <PlanHitTag plan="A" hit={hit.plan_a_hit} />
                           <PlanHitTag plan="B" hit={hit.plan_b_hit} />

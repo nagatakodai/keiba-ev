@@ -279,6 +279,17 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             race_payout = payout if hit else 0
             plan_stats[plan_name]["per_race"].append((race_stake, race_payout))
 
+        # 束 (recommended_bundle = 実際に買う総合オススメ) の的中。3連単プランだけでなく
+        # ワイド/馬連/馬単/3連複/単複 も含む全 bet type を考慮 (履歴ラベルが「ワイド当たり
+        # でも不的中」になるのを防ぐ)。bet-type-aware 判定は portfolio._bet_hits を流用。
+        from src.portfolio import _bet_hits
+        a3, b3, c3 = (list(finish_tuple) + [0, 0, 0])[:3]
+        bundle_legs = (pred.get("recommended_bundle") or {}).get("legs") or []
+        bundle_hit_legs = [
+            leg for leg in bundle_legs
+            if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])), a3, b3, c3)
+        ]
+
         races.append(
             {
                 "race_id": race_id,
@@ -286,6 +297,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "finish": list(finish_tuple),
                 "winning_tier": winning_tier,
                 "payout": payout,
+                "bundle_hit": bool(bundle_hit_legs),
+                "bundle_hit_bet_types": sorted({leg["bet_type"] for leg in bundle_hit_legs}),
                 "plan_a_hit": race_plan_hits.get("Plan A", False),
                 "plan_b_hit": race_plan_hits.get("Plan B", False),
                 "plan_c_hit": race_plan_hits.get("Plan C", False),

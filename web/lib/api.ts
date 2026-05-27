@@ -343,6 +343,10 @@ export type CalibrationRaceItem = {
   finish: number[];
   winning_tier: string | null;
   payout: number;
+  // 束 (recommended_bundle = 実際に買う総合オススメ) の的中。3連単プランだけでなく
+  // ワイド/馬連/馬単/3連複/単複 も含む全 bet type を考慮 (backend 2026-05-27 以降)。
+  bundle_hit?: boolean;
+  bundle_hit_bet_types?: string[];
   plan_a_hit: boolean;
   plan_b_hit: boolean;
   plan_c_hit: boolean;
