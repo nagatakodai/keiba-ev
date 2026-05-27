@@ -29,6 +29,7 @@ from .scrape_oddspark import fetch_race_list_oddspark
 ROOT = Path(__file__).resolve().parents[1]
 CACHE_FILE = ROOT / "data/cache/auto_watch_analyzed.txt"
 HISTORY_FILE = ROOT / "data/cache/auto_watch_history.jsonl"
+BET_QUEUE_DIR = ROOT / "data/cache/oddspark_bet_queue"   # = oddspark_bet.QUEUE_DIR
 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -50,6 +51,42 @@ def _append_history(record: dict) -> None:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
+    """snapshot に束(legs)があれば oddspark 常駐 betting セッションの queue に投入する。
+
+    `--bet-oddspark` 時のみ呼ぶ。`oddspark_bet --session` daemon が <rid>.req を拾って
+    カート投入する (購入確定は人)。NAR (投票 joCode がある場) のみ・束が非空のみ・
+    未投入のみ enqueue。**賭金は動かない** (カート投入手前まで)。
+    """
+    # JRA / 未対応場は oddspark で投票できない → enqueue しない
+    from .oddspark_bet import _vote_jo_code
+    if _vote_jo_code(netkeiba_rid) is None:
+        return False
+    snap = ROOT / "data/predictions" / f"{race_id}.json"
+    if not snap.exists():
+        return False
+    try:
+        d = json.loads(snap.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    legs = [l for l in ((d.get("recommended_bundle") or {}).get("legs") or [])
+            if int(l.get("stake", 0)) > 0]
+    if not legs:
+        return False   # 見送り (束が空) は投入しない
+    BET_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    req = BET_QUEUE_DIR / f"{netkeiba_rid}.req"
+    if req.exists() or (BET_QUEUE_DIR / f"{netkeiba_rid}.done").exists():
+        return False   # 既に投入/処理済
+    tmp = req.with_suffix(".tmp")
+    tmp.write_text(json.dumps({
+        "netkeiba_rid": netkeiba_rid, "race_id": race_id, "legs": len(legs),
+        "total_stake": sum(int(l.get("stake", 0)) for l in legs),
+        "enqueued_at": int(time.time()),
+    }, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(req)   # atomic
+    return True
 
 
 # 失敗 race の再試行 cooldown (秒)。
@@ -272,6 +309,11 @@ def main(
         "09:00-23:45", "--active-hours",
         help="race detection を行う JST 時間帯。JRA 土日 ~9:50-17:00、NAR ナイター ~21:00、ばんえい 等の遅レースを含めて広めに。",
     ),
+    bet_oddspark: bool = typer.Option(
+        False, "--bet-oddspark",
+        help="束(legs)が出た発走前 NAR レースを oddspark betting queue に投入する。別途 "
+             "`python -m src.oddspark_bet --session` を起動しログインしておくこと (購入確定は人)。",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """1 巡だけ実行。"""
@@ -342,6 +384,14 @@ def main(
         if rc == 0:
             _mark_analyzed(rid)
             analyzed.add(rid)  # 同 tick 内の重複 rid (oddspark+netkeiba 両経路等) を二重 dispatch しない
+            if bet_oddspark:
+                try:
+                    if _enqueue_oddspark_bet(rid, race.get("netkeiba_race_id", rid)):
+                        console.print(
+                            f"  [magenta]→ oddspark betting queue に投入:[/magenta] {rid} "
+                            "(--session daemon がカート投入。確定は人)")
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[red]oddspark enqueue 失敗: {e}[/red]")
             try:
                 p = schedule_result_fetch(rid, race["url"], race["start_at"])
                 if p.status == "pending":

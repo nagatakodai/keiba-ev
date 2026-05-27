@@ -25,6 +25,7 @@ from __future__ import annotations
 import gzip  # noqa: F401  (将来 cache 参照用)
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -32,6 +33,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _SHOT_DIR = ROOT / "data" / "cache"
+# watch-auto → 常駐 betting セッション の受け渡しキュー。watch-auto が <netkeiba_rid>.req を
+# 置き、--session daemon が拾って snapshot の束をカート投入する (処理後 .done に rename)。
+QUEUE_DIR = ROOT / "data" / "cache" / "oddspark_bet_queue"
 
 _BASE = "https://www.oddspark.com"
 # ログイン: 実機HTML確認済 (2026-05)。フォーム name=loginForm、隠し _csrf/SSO_* は
@@ -57,6 +61,9 @@ SELECTORS = {
     "delete_selected": '#choice a',                  # 選択項目削除 (誤りの訂正)
     "delete_all": '#all a',                          # 全買い目削除 (開始時クリア用)
     "horse_cell": '#horseArea td[name="horse{pos}"] a',  # pos=1/2/3 (着順列), text=馬番
+    # 馬番グリッドのリセット (各脚の前に押して累積/トグルを防ぐ)。実機 DOM 確認済:
+    # <a id="reset">リセット</a> (div.control 内なので 馬番/枠番 のみクリア)。
+    "umaban_reset": '#reset',
     # 購入手続は **絶対に押さない** (人が #buylist 確認後に押す)。
     "confirm_purchase": '#gotobuy',
 }
@@ -148,8 +155,6 @@ def fill_cart(
     manual_login=True なら認証情報を使わず人がログインを手で済ませる (最も安全)。
     max_total_stake で合計賭金にハードリミット (誤入力の暴走防止)。
     """
-    from playwright.sync_api import sync_playwright
-
     from .scrape_oddspark import find_oddspark_race
 
     total = sum(l.stake for l in legs)
@@ -160,62 +165,30 @@ def fill_cart(
     loc = find_oddspark_race(netkeiba_rid)
     if loc is None:
         raise OddsparkBetError(f"オッズパークで {netkeiba_rid} の開催が見つからない")
-    creds = None if manual_login else _creds()
 
     _SHOT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[oddspark_bet] {loc.venue} {loc.race_nb}R / {len(legs)}点 合計¥{total:,} "
           f"→ カート投入手前まで (確定は人)")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headful,
-                                    args=["--no-sandbox", "--disable-dev-shm-usage"])
-        ctx = browser.new_context(locale="ja-JP", viewport={"width": 1280, "height": 1800})
-        page = ctx.new_page()
+    sess = BettingSession(headful=headful, manual_login=manual_login,
+                          max_total_stake=max_total_stake)
+    try:
+        sess.start(clear_existing=True)
+        sess.add_race(netkeiba_rid, legs, label=f"{loc.venue} {loc.race_nb}R")
+        _shot(sess.page, "5_cart_filled")
+        print("[oddspark_bet] **購入確定は押していません**。右の買い目一覧 (#buylist) を\n"
+              "  目視確認 (組数/組番/金額・順不同の馬番) してから人が確定。")
+    except Exception as ex:  # noqa: BLE001 — ブラウザは残して調査可能に
+        if sess.page is not None:
+            _shot(sess.page, "error")
+        print(f"[oddspark_bet] 中断: {ex}")
+    finally:
+        print("[oddspark_bet] ブラウザは開いたまま。確認後 Enter で閉じる。")
         try:
-            # 1) ログイン (manual_login なら人が手で)
-            if manual_login:
-                page.goto(_BASE, wait_until="domcontentloaded")
-                print("[oddspark_bet] headful ブラウザでログインを済ませて Enter ...")
-                input()
-            else:
-                _login(page, creds)
-            _shot(page, "1_after_login")
-
-            # 2) 投票TOP → 競馬場選択 (selectJo)。確定値。
-            page.goto(_VOTE_TOP_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
-            _shot(page, "2_vote_top")
-            jo = _vote_jo_code(netkeiba_rid)
-            if not jo:
-                raise OddsparkBetError(f"投票 joCode 不明 (場名未対応): {netkeiba_rid}")
-            kaisai_bi = netkeiba_rid[:4] + netkeiba_rid[6:8] + netkeiba_rid[8:10]  # YYYYMMDD
-            race_no = str(int(netkeiba_rid[10:12]))                                # 非ゼロ詰め
-            race_val = f"{kaisai_bi}_{jo}_{race_no}"   # レース選択 checkbox の value
-
-            # 2b) レースまとめ投票画面へ
-            try:
-                page.click(SELECTORS["matome_link"])
-                page.wait_for_timeout(2500)
-            except Exception:  # noqa: BLE001
-                page.wait_for_timeout(1000)   # 既にまとめ画面のことも
-            _shot(page, "3_matome")
-
-            # 支払方法を OPコイン に (口座は OPコイン残) — 一度だけ
-            _select_payment_opcoin(page)
-
-            # 3) 各買い目を セット (=カート投入手前)。**確定 (#gotobuy) は押さない**。
-            for i, leg in enumerate(legs, 1):
-                _add_leg_to_cart(page, leg, race_val)
-                _shot(page, f"4_set_{i}_{leg.bet_type}")
-                print(f"  + セット: {leg.bet_type} {'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
-            _shot(page, "5_cart_filled")
-            print("[oddspark_bet] セット完了。**購入確定 (#gotobuy/VoteConfirm) は押していません**。\n"
-                  "  → 右の買い目一覧 (#buylist) が意図通りか **必ず目視確認**。特にワイド/3連複/3連単の\n"
-                  "    馬番選択は着順列の挙動が bet type で異なるため、組番が正しいか確認してから人が確定。")
-            print("[oddspark_bet] ブラウザは開いたまま。Enter で終了。")
             input()
-        finally:
-            browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        sess.close()
 
 
 def _login(page, creds: dict) -> None:
@@ -249,12 +222,43 @@ def _select_payment_opcoin(page) -> None:
         pass   # 既選択/不可視でも続行 (人が最終確認)
 
 
+def _reset_umaban(page) -> None:
+    """馬番グリッドの選択をクリア (**各脚の前に必須**)。
+
+    まとめ画面のグリッドは セット しても 馬番選択が残るため、リセットしないと次脚の
+    click が累積し、共有馬番の再 click はトグル OFF になって組番が壊れる
+    (実機: 馬連が「フォーメーション3通り」化、ワイドが重複/欠落)。
+    id 不明なので候補を順に試す (実機確認後 SELECTORS['umaban_reset'] を確定)。
+    """
+    for sel in (SELECTORS.get("umaban_reset"),
+                'input[type="button"][value="リセット"]', 'input[value="リセット"]',
+                'button:has-text("リセット")', 'a:has-text("リセット")',
+                '#horseArea ~ * :text-is("リセット")', ':text-is("リセット")'):
+        if not sel:
+            continue
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                loc.first.click()
+                page.wait_for_timeout(200)
+                return
+        except Exception:  # noqa: BLE001
+            continue
+    # フォールバック: 選択済セル (class に on/selected 等) を JS で全 click 解除
+    try:
+        page.evaluate(
+            "document.querySelectorAll('#horseArea td a.on, #horseArea td a.selected,"
+            " #horseArea td.on a, #horseArea td.selected a').forEach(function(a){a.click();});")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _select_umaban(page, leg: CartLeg) -> None:
     """馬番選択: 着順列 (horse1=1着, horse2=2着, horse3=3着) の該当馬番セルを click。
 
     単勝/複勝(1頭)=1着列のみ。馬単/3連単(順序)=key 順に 1/2/3着列。
-    **馬連/ワイド/3連複 (順不同) は box 選択で着順列の意味が異なり得る** → key を先頭列から
-    順に置くが、組番が正しいかは #buylist で要目視 (確定前)。
+    馬連/ワイド/3連複 (順不同) は key を先頭列から順に置く (1 組 = 各列1頭ずつ)。
+    **呼び出し前に _reset_umaban で必ずグリッドをクリアすること** (累積防止)。
     """
     import re as _re
     for i, num in enumerate(leg.key):
@@ -265,6 +269,16 @@ def _select_umaban(page, leg: CartLeg) -> None:
             raise OddsparkBetError(f"馬番セル不在: horse{pos}={num} (頭数/締切確認)")
         cell.first.click()
         page.wait_for_timeout(200)
+    # 検証: 選択済セル (a.on) 数が馬番数と一致するか (リセット漏れ/クリック漏れ/
+    # 共有馬番のトグル OFF を捕捉)。一致しないと セット で組番が壊れるので中止。
+    try:
+        on = page.locator("#horseArea td a.on").count()
+    except Exception:  # noqa: BLE001
+        on = -1
+    if on >= 0 and on != len(leg.key):
+        raise OddsparkBetError(
+            f"馬番選択数 不一致: 選択 {on} 頭 ≠ 期待 {len(leg.key)} 頭 "
+            f"({leg.bet_type} {leg.key}) — リセット/トグル要確認")
 
 
 def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
@@ -287,7 +301,8 @@ def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
             "document.querySelectorAll('input[name=betTypeSelect]:checked')"
             ".forEach(function(c){c.checked=false;});")
         page.check(SELECTORS["bet_type_checkbox"].format(code=_BET_TYPE_CODE[leg.bet_type]))
-        # 4) 馬番選択
+        # 4) 馬番選択 — **前脚の選択が残るので必ずリセットしてから** (累積/トグル防止)
+        _reset_umaban(page)
         _select_umaban(page, leg)
         # 5) セット (#buylist へ積む)
         page.click(SELECTORS["set_button"])
@@ -301,14 +316,236 @@ def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
         ) from ex
 
 
-def _main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if not args:
-        print("usage: ODDSPARK_ID=.. ODDSPARK_PASSWORD=.. "
-              "python -m src.oddspark_bet <netkeiba_nar_race_id> [--headless] [--manual-login]")
-        raise SystemExit(2)
-    rid = args[0]
+def _race_meta(netkeiba_rid: str) -> str:
+    """netkeiba rid → レース選択 checkbox value (YYYYMMDD_joCode_raceNo非ゼロ詰め)。"""
+    jo = _vote_jo_code(netkeiba_rid)
+    if not jo:
+        raise OddsparkBetError(f"投票 joCode 不明 (場名未対応/JRA): {netkeiba_rid}")
+    kaisai_bi = netkeiba_rid[:4] + netkeiba_rid[6:8] + netkeiba_rid[8:10]   # YYYYMMDD
+    race_no = str(int(netkeiba_rid[10:12]))                                # 非ゼロ詰め
+    return f"{kaisai_bi}_{jo}_{race_no}"
+
+
+def _select_only_race(page, race_val: str) -> None:
+    """対象レースのみチェック。**他レースのチェックは外す** (複数レース同時セットの誤発注防止)。
+
+    まとめ画面は当日全レースの checkbox を持つので、レースをまたいでカート投入するとき
+    前レースのチェックが残ると セット が両方に効いてしまう。対象以外を uncheck してから
+    対象を check する (どちらも実 click で oddspark の内部状態を更新)。
+    """
+    boxes = page.locator('input[type="checkbox"]')
     try:
+        n = boxes.count()
+    except Exception:  # noqa: BLE001
+        n = 0
+    for i in range(n):
+        b = boxes.nth(i)
+        try:
+            val = b.get_attribute("value") or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if re.fullmatch(r"\d{8}_\d+_\d+", val) and val != race_val:
+            try:
+                if b.is_checked():
+                    b.uncheck()
+            except Exception:  # noqa: BLE001
+                pass
+    tgt = page.locator(SELECTORS["race_checkbox"].format(race_val=race_val))
+    if tgt.count() == 0:
+        raise OddsparkBetError(f"レース checkbox 不在: {race_val} (締切/未発売?)")
+    if not tgt.first.is_checked():
+        tgt.first.check()
+
+
+class BettingSession:
+    """ログイン済みの持続ブラウザ。`start()` で1回ログイン (人手) → まとめ画面で待機し、
+    `add_race()` を呼ぶたびに当該レースの束をカート投入する。**購入確定は決して押さない**。
+
+    watch-auto の常駐連携 (`run_session`) と one-shot (`fill_cart`) で共用する。
+    """
+
+    def __init__(self, *, headful: bool = True, manual_login: bool = True,
+                 max_total_stake: int = 10_000) -> None:
+        self.headful = headful
+        self.manual_login = manual_login
+        self.max_total_stake = max_total_stake
+        self.page = None
+        self._pw = None
+        self.browser = None
+        self.ctx = None
+        self._added: set[str] = set()   # 投入済 netkeiba_rid (二重投入防止)
+
+    def start(self, *, clear_existing: bool = False) -> None:
+        from playwright.sync_api import sync_playwright
+        _SHOT_DIR.mkdir(parents=True, exist_ok=True)
+        self._pw = sync_playwright().start()
+        self.browser = self._pw.chromium.launch(
+            headless=not self.headful, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        self.ctx = self.browser.new_context(
+            locale="ja-JP", viewport={"width": 1280, "height": 1800})
+        self.page = self.ctx.new_page()
+        # 削除/セット時の confirm() を自動承認 (購入確定 #gotobuy は押さないので安全)。
+        self.page.on("dialog", lambda d: d.accept())
+        # 1) ログイン
+        if self.manual_login:
+            self.page.goto(_BASE, wait_until="domcontentloaded")
+            print("[oddspark_bet] headful ブラウザでログインを済ませて Enter ...")
+            input()
+        else:
+            _login(self.page, _creds())
+        _shot(self.page, "1_after_login")
+        # 2) まとめ投票画面へ + 支払 OPコイン
+        self._goto_matome()
+        _shot(self.page, "3_matome")
+        if clear_existing:
+            try:
+                da = self.page.locator(SELECTORS["delete_all"])
+                if da.count() > 0:
+                    da.first.click()
+                    self.page.wait_for_timeout(500)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _goto_matome(self) -> None:
+        self.page.goto(_VOTE_TOP_URL, wait_until="domcontentloaded")
+        self.page.wait_for_timeout(1500)
+        try:
+            self.page.click(SELECTORS["matome_link"])
+            self.page.wait_for_timeout(2000)
+        except Exception:  # noqa: BLE001
+            self.page.wait_for_timeout(800)   # 既にまとめ画面のことも
+        _select_payment_opcoin(self.page)
+
+    def add_race(self, netkeiba_rid: str, legs: list[CartLeg],
+                 label: str = "") -> tuple[str, int]:
+        """1 レースの束をカート投入。戻り値 (status, ok点数)。status: ok/dup。"""
+        if netkeiba_rid in self._added:
+            return ("dup", 0)
+        total = sum(l.stake for l in legs)
+        if total > self.max_total_stake:
+            raise OddsparkBetError(
+                f"レース合計 ¥{total:,} > 上限 ¥{self.max_total_stake:,} — 投入しない")
+        race_val = _race_meta(netkeiba_rid)
+        # 対象レースのみ選択 (画面状態がズレていれば まとめ を開き直して再試行)。
+        try:
+            _select_only_race(self.page, race_val)
+        except OddsparkBetError:
+            self._goto_matome()
+            _select_only_race(self.page, race_val)   # 再失敗なら締切/未発売 → 上に伝播
+        ok = 0
+        for i, leg in enumerate(legs, 1):
+            try:
+                _add_leg_to_cart(self.page, leg, race_val)
+                print(f"  + [{label or netkeiba_rid}] {leg.bet_type} "
+                      f"{'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
+                ok += 1
+            except Exception as ex:  # noqa: BLE001
+                _shot(self.page, f"bet_{netkeiba_rid}_{i}_FAILED")
+                print(f"  ! [{label or netkeiba_rid}] 脚{i} "
+                      f"({leg.bet_type} {leg.key}) スキップ: {ex}")
+        _shot(self.page, f"bet_{netkeiba_rid}_filled")
+        self._added.add(netkeiba_rid)
+        print(f"[oddspark_bet] {label or netkeiba_rid}: {ok}/{len(legs)} 点 カート投入。"
+              "**購入確定は人が押す**")
+        return ("ok", ok)
+
+    def close(self) -> None:
+        try:
+            if self.browser is not None:
+                self.browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self._pw is not None:
+                self._pw.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def run_session(*, headful: bool = True, manual_login: bool = True,
+                max_total_stake: int = 10_000, poll_sec: int = 5,
+                clear_existing: bool = False) -> None:
+    """常駐 betting セッション: 起動時に人がログイン → queue (`QUEUE_DIR`) を監視し、
+    watch-auto が積んだ <netkeiba_rid>.req の snapshot 束を同じブラウザにカート投入し続ける。
+    **購入確定は常に人が押す** (自動では絶対に押さない)。Ctrl-C で終了。
+    """
+    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    sess = BettingSession(headful=headful, manual_login=manual_login,
+                          max_total_stake=max_total_stake)
+    print("[oddspark_bet] 常駐セッション開始 (B案 半自動)。")
+    try:
+        sess.start(clear_existing=clear_existing)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[oddspark_bet] セッション開始失敗: {ex}")
+        sess.close()
+        return
+    print(f"[oddspark_bet] ログイン完了。queue 監視開始: {QUEUE_DIR}")
+    print("[oddspark_bet] watch-auto を --bet-oddspark で回すと発走前レースが積まれます。")
+    print("[oddspark_bet] **購入確定は常に人が目視で押します** (自動では絶対に押しません)。"
+          " Ctrl-C で終了。")
+    try:
+        while True:
+            for req in sorted(QUEUE_DIR.glob("*.req")):
+                rid = req.stem
+                try:
+                    legs, label = _legs_from_snapshot(rid)
+                    status, _ok = sess.add_race(rid, legs, label=label)
+                    if status == "dup":
+                        print(f"[oddspark_bet] {rid} は投入済 (skip)")
+                except OddsparkBetError as ex:
+                    print(f"[oddspark_bet] {rid} skip: {ex}")
+                except Exception as ex:  # noqa: BLE001
+                    print(f"[oddspark_bet] {rid} 失敗: {ex}")
+                try:
+                    req.rename(req.with_suffix(".done"))   # 再投入防止
+                except Exception:  # noqa: BLE001
+                    pass
+            time.sleep(poll_sec)
+    except KeyboardInterrupt:
+        print("\n[oddspark_bet] 終了 (Ctrl-C)。ブラウザを閉じます。")
+    finally:
+        sess.close()
+
+
+def _to_netkeiba_rid(arg: str) -> str:
+    """入力を netkeiba rid (12桁 YYYYVVMMDDRR) に正規化。
+    内部 race_id (`<cup10>-<si>-<rn>`, 例 2026500527-527-9) も受ける。
+    """
+    a = arg.strip()
+    if re.fullmatch(r"\d{12}", a):                       # netkeiba rid そのまま
+        return a
+    m = re.fullmatch(r"(\d{10})-(\d+)-(\d+)", a)          # 内部 race_id cup-si-rn
+    if m:
+        cup, _si, rn = m.group(1), m.group(2), int(m.group(3))
+        return f"{cup}{rn:02d}"
+    raise OddsparkBetError(
+        f"race_id 形式不正: {arg!r} (netkeiba rid 12桁 か 内部 race_id <cup>-<si>-<rn>)")
+
+
+def _main() -> None:
+    argv = sys.argv[1:]
+    # 常駐セッション (watch-auto --bet-oddspark と連携): 起動時に人がログイン → queue 監視。
+    if "--session" in argv:
+        poll = 5
+        for a in argv:
+            if a.startswith("--poll="):
+                poll = max(1, int(a.split("=", 1)[1]))
+        run_session(
+            headful="--headless" not in argv,
+            manual_login="--auto-login" not in argv,   # 既定は人がログイン
+            poll_sec=poll,
+            clear_existing="--clear" in argv,
+        )
+        return
+    args = [a for a in argv if not a.startswith("-")]
+    if not args:
+        print("usage:\n"
+              "  one-shot: python -m src.oddspark_bet <netkeiba_nar_race_id|race_id> "
+              "[--headless] [--manual-login]\n"
+              "  常駐    : python -m src.oddspark_bet --session [--auto-login] [--poll=5] [--clear]")
+        raise SystemExit(2)
+    try:
+        rid = _to_netkeiba_rid(args[0])
         legs, label = _legs_from_snapshot(rid)
         print(f"[oddspark_bet] {label}: snapshot から {len(legs)} 点")
         fill_cart(rid, legs,

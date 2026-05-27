@@ -50,3 +50,50 @@ def test_window_band_is_plus_only():
     assert not in_band(5)
     # window+tolerance より遠い (早すぎ) も除外
     assert not in_band(15.1)
+
+
+# --- oddspark betting queue 連携 (--bet-oddspark) ---
+import json
+
+from src import auto_watch as aw
+
+
+def _write_snapshot(root, race_id, legs):
+    pred = root / "data" / "predictions"
+    pred.mkdir(parents=True, exist_ok=True)
+    (pred / f"{race_id}.json").write_text(json.dumps({
+        "race_id": race_id,
+        "recommended_bundle": {"legs": legs},
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_enqueue_oddspark_bet_writes_req(tmp_path, monkeypatch):
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    _write_snapshot(tmp_path, "2026500527-527-9",
+                    [{"bet_type": "wide", "key": [4, 10], "stake": 600},
+                     {"bet_type": "win", "key": [7], "stake": 0}])  # stake0 は除外
+    assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is True
+    req = tmp_path / "queue" / "202650052709.req"
+    assert req.exists()
+    d = json.loads(req.read_text())
+    assert d["legs"] == 1 and d["total_stake"] == 600
+    # 二重投入は False (既存 req)
+    assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is False
+
+
+def test_enqueue_skips_empty_bundle(tmp_path, monkeypatch):
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    _write_snapshot(tmp_path, "2026500527-527-5", [])   # 見送り
+    assert aw._enqueue_oddspark_bet("2026500527-527-5", "202650052705") is False
+    assert not (tmp_path / "queue" / "202650052705.req").exists()
+
+
+def test_enqueue_skips_jra(tmp_path, monkeypatch):
+    """JRA (投票 joCode 無し) は oddspark で投票不可 → enqueue しない。"""
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    _write_snapshot(tmp_path, "2026940527-527-9",
+                    [{"bet_type": "win", "key": [1], "stake": 500}])
+    assert aw._enqueue_oddspark_bet("2026940527-527-9", "202694052709") is False
