@@ -37,24 +37,33 @@ _BASE = "https://www.oddspark.com"
 # ログイン: 実機HTML確認済 (2026-05)。フォーム name=loginForm、隠し _csrf/SSO_* は
 # フォーム送信で自動付与。送信は <a id="btn-login" href="javascript:formSubmit()"> をclick。
 _LOGIN_URL = f"{_BASE}/user/my/Index.do"
-# 投票エントリ (マイページの「投票する」リンク先, 実機確認済)。通常は別窓で開くが
-# Playwright は直接 goto で良い。ここから 開催→レース→券種→買い目入力→カート と進む
-# (その先の画面 HTML は未確認 = _vote_url 以降は要実機調整)。
+# 投票エントリ (マイページの「投票する」リンク先, 実機確認済)。
 _VOTE_TOP_URL = f"{_BASE}/keiba/auth/VoteKeibaTop.do?gamenId=P901&gamenKoumokuId=topVote"
-# ↓↓↓ vote_* / cart 系は **要実機調整** (投票ページHTML未確認)。login は確定済。 ↓↓↓
+# レースまとめ投票画面の要素 (実機HTML確認済 2026-05)。login/賭式/レース選択/金額/セットは
+# 確定。**馬番セルのクリック (着順列の意味) だけ bet type により挙動が異なり要目視検証**。
 SELECTORS = {
     "login_id": 'input[name="SSO_ACCOUNTID"]',       # 確定
     "login_password": 'input[name="SSO_PASSWORD"]',  # 確定
     "login_submit": '#btn-login',                    # 確定 (JSリンク formSubmit())
-    "logged_in_marker": "text=ログアウト",            # ログイン成功判定 (要確認)
-    "vote_pin": 'input[name="ansyoNo"]',             # 投票暗証 (要る場合・要確認)
-    # 投票フォーム (1 買い目ぶん) — 要確認
-    "bet_type_select": 'select[name="shikibetsu"]',
-    "umaban_input": 'input[name="umaban"]',          # 組番入力 (式別で形式が変わる)
-    "amount_input": 'input[name="kingaku"]',         # 金額 (100円単位)
-    "add_to_cart": 'button.add-cart',                # カート投入
-    # 購入確定は **使わない** (人が押す)。参考までに置くがコードからは押さない。
-    "confirm_purchase": 'button.kakutei',
+    "logged_in_marker": "text=ログアウト",            # 確定 (マイページに存在)
+    "matome_link": '#todayMultiRace',                # 確定 (レースまとめ投票へ)
+    # まとめ投票画面 (確定):
+    "race_checkbox": 'input[type="checkbox"][value="{race_val}"]',  # value=kaisaiBi_joCode_raceNo
+    "bet_type_checkbox": 'input[name="betTypeSelect"][value="{code}"]',  # 1-9
+    "amount_input": '#textfield11',                  # 金額 (100円単位 / "00円" 接尾)
+    "set_button": '#multiSet',                       # セット (買い目を #buylist に積む)
+    "payment_opcoin": '#paymentMethodOpCoin',        # 支払=OPコイン (口座は OPコイン残)
+    "buylist": '#buylist',                           # 積まれた買い目一覧 (人が目視)
+    "delete_selected": '#choice a',                  # 選択項目削除 (誤りの訂正)
+    "delete_all": '#all a',                          # 全買い目削除 (開始時クリア用)
+    "horse_cell": '#horseArea td[name="horse{pos}"] a',  # pos=1/2/3 (着順列), text=馬番
+    # 購入手続は **絶対に押さない** (人が #buylist 確認後に押す)。
+    "confirm_purchase": '#gotobuy',
+}
+# 当方 bet_type → オッズパーク betType コード (betTypeSelect value, 実機確認済)。
+_BET_TYPE_CODE = {
+    "win": "1", "place": "2", "quinella": "5", "exacta": "6",
+    "wide": "7", "trio": "8", "trifecta": "9",
 }
 # 当方 bet_type → オッズパーク式別の表示値/コード (要確認)。
 _SHIKIBETSU = {
@@ -177,35 +186,33 @@ def fill_cart(
             page.wait_for_timeout(2000)
             _shot(page, "2_vote_top")
             jo = _vote_jo_code(netkeiba_rid)
-            kaisai_bi = netkeiba_rid[:4] + netkeiba_rid[6:8] + netkeiba_rid[8:10]  # YYYYMMDD
             if not jo:
                 raise OddsparkBetError(f"投票 joCode 不明 (場名未対応): {netkeiba_rid}")
+            kaisai_bi = netkeiba_rid[:4] + netkeiba_rid[6:8] + netkeiba_rid[8:10]  # YYYYMMDD
+            race_no = str(int(netkeiba_rid[10:12]))                                # 非ゼロ詰め
+            race_val = f"{kaisai_bi}_{jo}_{race_no}"   # レース選択 checkbox の value
+
+            # 2b) レースまとめ投票画面へ
             try:
-                page.evaluate(f"selectJo('{kaisai_bi}', '{jo}')")  # サイトの JS 関数
+                page.click(SELECTORS["matome_link"])
                 page.wait_for_timeout(2500)
-                _shot(page, "3_jo_selected")
-                print(f"  競馬場選択: joCode={jo} kaisaiBi={kaisai_bi} ({loc.venue})")
-            except Exception as ex:  # noqa: BLE001
-                _shot(page, "jo_select_failed")
-                raise OddsparkBetError(f"競馬場選択 (selectJo) 失敗: {ex}") from ex
+            except Exception:  # noqa: BLE001
+                page.wait_for_timeout(1000)   # 既にまとめ画面のことも
+            _shot(page, "3_matome")
 
-            # 3) レース選択 → 式別/組番/金額入力 → カート投入 — **要実機HTML (次段階)**。
-            #    投票システムは JS SPA で買い目を strVoteData に符号化し #gotobuy→VoteConfirm.do
-            #    (=購入手続) に進む。確定 (#gotobuy/VoteConfirm) は **絶対に踏まない**。
-            #    レース選択後の式別/馬番入力フォーム HTML を貰えればここを実装する。
-            try:
-                for i, leg in enumerate(legs, 1):
-                    _add_leg_to_cart(page, leg)
-                    _shot(page, f"4_cart_{i}_{leg.bet_type}")
-                    print(f"  + カート投入: {_SHIKIBETSU.get(leg.bet_type, leg.bet_type)} "
-                          f"{'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
-                _shot(page, "5_cart_filled")
-                print("[oddspark_bet] カート投入完了。**購入確定は押していません**。")
-            except OddsparkBetError as ex:
-                print(f"[oddspark_bet] {ex}")
-                print("[oddspark_bet] (レース選択〜買い目入力は未実装 = 投票画面HTML待ち)")
+            # 支払方法を OPコイン に (口座は OPコイン残) — 一度だけ
+            _select_payment_opcoin(page)
 
-            print("[oddspark_bet] ブラウザは開いたまま。内容確認後、人が確定。Enter で終了。")
+            # 3) 各買い目を セット (=カート投入手前)。**確定 (#gotobuy) は押さない**。
+            for i, leg in enumerate(legs, 1):
+                _add_leg_to_cart(page, leg, race_val)
+                _shot(page, f"4_set_{i}_{leg.bet_type}")
+                print(f"  + セット: {leg.bet_type} {'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
+            _shot(page, "5_cart_filled")
+            print("[oddspark_bet] セット完了。**購入確定 (#gotobuy/VoteConfirm) は押していません**。\n"
+                  "  → 右の買い目一覧 (#buylist) が意図通りか **必ず目視確認**。特にワイド/3連複/3連単の\n"
+                  "    馬番選択は着順列の挙動が bet type で異なるため、組番が正しいか確認してから人が確定。")
+            print("[oddspark_bet] ブラウザは開いたまま。Enter で終了。")
             input()
         finally:
             browser.close()
@@ -234,26 +241,63 @@ def _login(page, creds: dict) -> None:
             "ログイン後もログインフォームが残存 — ID/PW 誤り・ロック・要セレクタ確認")
 
 
-def _vote_url(loc) -> str:
-    """投票エントリ (VoteKeibaTop, 確定値)。**ここから 開催→レース→券種 への遷移と
-    買い目入力フォームは未確認** = `_add_leg_to_cart` と合わせて要実機調整。
-    一旦この TOP へ遷移し、続きのナビゲーション/フォーム HTML を貰って詰める。"""
-    return _VOTE_TOP_URL
-
-
-def _add_leg_to_cart(page, leg: CartLeg) -> None:
-    """要実機調整: 1 買い目をフォームに入力してカート投入。式別ごとに組番入力形式が違う。"""
+def _select_payment_opcoin(page) -> None:
+    """支払方法を OPコインに (口座は OPコイン残)。一度だけ呼ぶ。"""
     try:
-        page.select_option(SELECTORS["bet_type_select"], label=_SHIKIBETSU[leg.bet_type])
-        # 組番入力 (式別で形式が変わる — 要実機調整)。ここでは "-" 連結を一旦入れる。
-        page.fill(SELECTORS["umaban_input"], "-".join(map(str, leg.key)))
-        page.fill(SELECTORS["amount_input"], str(leg.stake // 100))  # 100円単位
-        page.click(SELECTORS["add_to_cart"])
-        page.wait_for_timeout(800)
+        page.check(SELECTORS["payment_opcoin"])
+    except Exception:  # noqa: BLE001
+        pass   # 既選択/不可視でも続行 (人が最終確認)
+
+
+def _select_umaban(page, leg: CartLeg) -> None:
+    """馬番選択: 着順列 (horse1=1着, horse2=2着, horse3=3着) の該当馬番セルを click。
+
+    単勝/複勝(1頭)=1着列のみ。馬単/3連単(順序)=key 順に 1/2/3着列。
+    **馬連/ワイド/3連複 (順不同) は box 選択で着順列の意味が異なり得る** → key を先頭列から
+    順に置くが、組番が正しいかは #buylist で要目視 (確定前)。
+    """
+    import re as _re
+    for i, num in enumerate(leg.key):
+        pos = min(i + 1, 3)
+        cell = page.locator(SELECTORS["horse_cell"].format(pos=pos),
+                            has_text=_re.compile(rf"^\s*{num}\s*$"))
+        if cell.count() == 0:
+            raise OddsparkBetError(f"馬番セル不在: horse{pos}={num} (頭数/締切確認)")
+        cell.first.click()
+        page.wait_for_timeout(200)
+
+
+def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
+    """1 買い目を「まとめ投票」画面でセット (#buylist へ)。**確定は押さない**。
+
+    順序 (実機準拠): 金額入力 → レースチェック → 賭式選択 → 馬番選択 → セット。
+    """
+    import re as _re
+    try:
+        # 1) 金額 (100円単位。"00円" 接尾なので stake//100 を入力)
+        page.fill(SELECTORS["amount_input"], str(leg.stake // 100))
+        # 2) レースチェック (value = kaisaiBi_joCode_raceNo)
+        cb = page.locator(SELECTORS["race_checkbox"].format(race_val=race_val))
+        if cb.count() == 0:
+            raise OddsparkBetError(f"レース checkbox 不在: {race_val} (締切/未発売?)")
+        if not cb.first.is_checked():
+            cb.first.check()
+        # 3) 賭式選択 (他の betType を外して当該のみ)
+        page.evaluate(
+            "document.querySelectorAll('input[name=betTypeSelect]:checked')"
+            ".forEach(function(c){c.checked=false;});")
+        page.check(SELECTORS["bet_type_checkbox"].format(code=_BET_TYPE_CODE[leg.bet_type]))
+        # 4) 馬番選択
+        _select_umaban(page, leg)
+        # 5) セット (#buylist へ積む)
+        page.click(SELECTORS["set_button"])
+        page.wait_for_timeout(1000)
+    except OddsparkBetError:
+        raise
     except Exception as ex:  # noqa: BLE001
         _shot(page, f"addleg_failed_{leg.bet_type}")
         raise OddsparkBetError(
-            f"買い目投入失敗 ({leg.bet_type} {leg.key}) — SELECTORS/入力形式を実機調整: {ex}"
+            f"買い目セット失敗 ({leg.bet_type} {leg.key}) — SELECTORS/馬番選択を実機調整: {ex}"
         ) from ex
 
 
