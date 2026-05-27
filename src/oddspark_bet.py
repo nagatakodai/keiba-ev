@@ -318,6 +318,8 @@ def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
 
 def _race_meta(netkeiba_rid: str) -> str:
     """netkeiba rid → レース選択 checkbox value (YYYYMMDD_joCode_raceNo非ゼロ詰め)。"""
+    if not (netkeiba_rid.isdigit() and len(netkeiba_rid) == 12):
+        raise OddsparkBetError(f"netkeiba rid 形式不正 (12桁数字でない): {netkeiba_rid!r}")
     jo = _vote_jo_code(netkeiba_rid)
     if not jo:
         raise OddsparkBetError(f"投票 joCode 不明 (場名未対応/JRA): {netkeiba_rid}")
@@ -409,6 +411,16 @@ class BettingSession:
     def _goto_matome(self) -> None:
         self.page.goto(_VOTE_TOP_URL, wait_until="domcontentloaded")
         self.page.wait_for_timeout(1500)
+        # セッション切れ検出: 投票TOPがログインフォームに化けていたら再ログインが必要。
+        # (長時間 daemon で session 失効すると goto がログインへリダイレクトされる)
+        try:
+            if self.page.locator(SELECTORS["login_id"]).count() > 0:
+                raise OddsparkBetError(
+                    "セッション切れ — daemon を再起動してログインし直してください")
+        except OddsparkBetError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.page.click(SELECTORS["matome_link"])
             self.page.wait_for_timeout(2000)
@@ -483,23 +495,31 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
     print("[oddspark_bet] watch-auto を --bet-oddspark で回すと発走前レースが積まれます。")
     print("[oddspark_bet] **購入確定は常に人が目視で押します** (自動では絶対に押しません)。"
           " Ctrl-C で終了。")
+    max_attempts = 3                      # 一過性エラー (ブラウザ glitch 等) の再試行上限
+    attempts: dict[str, int] = {}
     try:
         while True:
             for req in sorted(QUEUE_DIR.glob("*.req")):
                 rid = req.stem
+                terminal = True   # 処理確定 (.done に落とす) か。一過性失敗のみ False で .req 残置
                 try:
                     legs, label = _legs_from_snapshot(rid)
                     status, _ok = sess.add_race(rid, legs, label=label)
                     if status == "dup":
                         print(f"[oddspark_bet] {rid} は投入済 (skip)")
                 except OddsparkBetError as ex:
+                    # 締切/未発売/joCode 無し/束無し = 確定的に投票不可 → 再試行しない
                     print(f"[oddspark_bet] {rid} skip: {ex}")
-                except Exception as ex:  # noqa: BLE001
-                    print(f"[oddspark_bet] {rid} 失敗: {ex}")
-                try:
-                    req.rename(req.with_suffix(".done"))   # 再投入防止
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as ex:  # noqa: BLE001 — ブラウザ/通信 glitch は一過性とみなす
+                    attempts[rid] = attempts.get(rid, 0) + 1
+                    terminal = attempts[rid] >= max_attempts
+                    note = "上限到達→打ち切り" if terminal else f"再試行 {attempts[rid]}/{max_attempts}"
+                    print(f"[oddspark_bet] {rid} 失敗 ({note}): {ex}")
+                if terminal:
+                    try:
+                        req.rename(req.with_suffix(".done"))   # 再投入防止
+                    except Exception:  # noqa: BLE001
+                        pass
             time.sleep(poll_sec)
     except KeyboardInterrupt:
         print("\n[oddspark_bet] 終了 (Ctrl-C)。ブラウザを閉じます。")
@@ -529,7 +549,10 @@ def _main() -> None:
         poll = 5
         for a in argv:
             if a.startswith("--poll="):
-                poll = max(1, int(a.split("=", 1)[1]))
+                try:
+                    poll = max(1, int(a.split("=", 1)[1]))
+                except ValueError:
+                    print(f"[oddspark_bet] --poll 値が不正 ({a}) → 既定 {poll}s")
         run_session(
             headful="--headless" not in argv,
             manual_login="--auto-login" not in argv,   # 既定は人がログイン

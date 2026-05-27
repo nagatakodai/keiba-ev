@@ -174,12 +174,14 @@ WINDOW ?= 5
 TOLERANCE ?= 4
 INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
+BET_ODDSPARK ?=
+BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,)
 watch-auto:
 	@echo "watch-auto: 締切 $(WINDOW)±$(TOLERANCE) 分 / $(INTERVAL_SEC) 秒おき / Ctrl+C で終了"
 	@while true; do \
 		$(PY) -m src.auto_watch \
 			--window $(WINDOW) --tolerance $(TOLERANCE) \
-			--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) || true; \
+			--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) $(BET_ARGS) || true; \
 		echo "[next poll in $(INTERVAL_SEC)s]"; \
 		sleep $(INTERVAL_SEC); \
 	done

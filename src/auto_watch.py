@@ -60,6 +60,9 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
     カート投入する (購入確定は人)。NAR (投票 joCode がある場) のみ・束が非空のみ・
     未投入のみ enqueue。**賭金は動かない** (カート投入手前まで)。
     """
+    # netkeiba rid は 12桁数字前提 (これでないと daemon 側 race_val 生成が壊れる)
+    if not (netkeiba_rid.isdigit() and len(netkeiba_rid) == 12):
+        return False
     # JRA / 未対応場は oddspark で投票できない → enqueue しない
     from .oddspark_bet import _vote_jo_code
     if _vote_jo_code(netkeiba_rid) is None:

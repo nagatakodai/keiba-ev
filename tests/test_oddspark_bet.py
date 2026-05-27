@@ -38,3 +38,23 @@ def test_vote_jo_code_maps_venue():
     assert ob._vote_jo_code("202650052705") == "51"   # 園田(netkeiba50) → vote 51
     assert ob._vote_jo_code("202635052601") == "11"   # 盛岡(netkeiba35) → vote 11
     assert ob._vote_jo_code("202699052601") is None    # 未対応コード → None
+
+
+def test_race_meta_builds_checkbox_value():
+    # netkeiba rid → まとめ画面のレース選択 checkbox value (YYYYMMDD_joCode_raceNo非0詰め)
+    assert ob._race_meta("202650052709") == "20260527_51_9"   # 園田9R
+    assert ob._race_meta("202647052712") == "20260527_42_12"  # 笠松12R
+
+
+def test_race_meta_rejects_non_12digit():
+    # 内部 race_id を誤って渡しても int('-5') でクラッシュせず明示エラー
+    for bad in ("2026500527-527-9", "20265005270", "abcd"):
+        with pytest.raises(ob.OddsparkBetError, match="形式不正"):
+            ob._race_meta(bad)
+
+
+def test_to_netkeiba_rid_accepts_both_forms():
+    assert ob._to_netkeiba_rid("202650052709") == "202650052709"
+    assert ob._to_netkeiba_rid("2026500527-527-9") == "202650052709"
+    with pytest.raises(ob.OddsparkBetError, match="形式不正"):
+        ob._to_netkeiba_rid("nope")
