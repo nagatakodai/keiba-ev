@@ -141,11 +141,11 @@ export function PredictionsList({
                 return (
                 <li
                   key={`${p.race_id}-${p.saved_at}`}
-                  className={`py-2.5 flex flex-wrap md:flex-nowrap items-center gap-3 hover:bg-(--color-panel-2) -mx-4 px-4 ${rowBg}`}
+                  className={`py-2.5 flex flex-wrap md:flex-nowrap items-start gap-3 hover:bg-(--color-panel-2) -mx-4 px-4 ${rowBg}`}
                 >
                   <Link
                     href={`/predictions/${p.race_id}`}
-                    className="flex items-center gap-3 flex-1 min-w-0"
+                    className="flex items-start gap-3 flex-1 min-w-0"
                   >
                     <div className="w-12 text-center shrink-0">
                       <div className="text-2xl font-bold tabnum leading-none">
@@ -190,8 +190,8 @@ export function PredictionsList({
                             </Badge>
                           )}
                           {bundleSkipped && (
-                            // 見送り (Claude 総合オススメが空束) は「不的中」ではなく「未参加」表示
-                            <Badge tone="muted">束 未参加 (見送り)</Badge>
+                            // 見送り (Claude 総合オススメが空束) は「不的中」ではなく「見送り」表示
+                            <Badge tone="muted">束 見送り</Badge>
                           )}
                           <PlanHitTag plan="F" hit={!!hit.plan_f_hit} />
                           <PlanHitTag plan="A" hit={hit.plan_a_hit} />
@@ -261,13 +261,13 @@ export function PredictionsList({
                       )}
                     </div>
                   </Link>
-                  <div className="flex gap-1 shrink-0 items-center">
+                  <div className="flex gap-1 shrink-0 items-start">
                     {hit ? (
                       anyHit ? (
                         <Badge tone="good">的中</Badge>
                       ) : bundleSkipped ? (
-                        // 見送り = 賭けてないので「不的中」ではなく「未参加」
-                        <Badge tone="muted">未参加</Badge>
+                        // 見送り = 賭けてないので「不的中」ではなく「見送り」
+                        <Badge tone="muted">見送り</Badge>
                       ) : (
                         <Badge tone="bad">不的中</Badge>
                       )

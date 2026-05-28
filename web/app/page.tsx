@@ -131,7 +131,7 @@ function PredictionRowItem({
             anyHit ? (
               <Badge tone="good">的中</Badge>
             ) : bundleSkipped ? (
-              <Badge tone="muted">未参加</Badge>
+              <Badge tone="muted">見送り</Badge>
             ) : (
               <Badge tone="bad">不的中</Badge>
             )
