@@ -15,17 +15,18 @@ PY=.venv/bin/python
 step() { echo ""; echo "===== [$(date '+%F %T')] $* ====="; }
 rc_of() { echo "  -> exit code $1"; }
 
-step "Step 0: enumerate recent gap 20260522-20260525 (JRA+NAR)"
-$PY -m src.bulk_fetch --since 20260522 --until 20260525 --enum-only; rc_of $?
+step "Step 0: enumerate recent gap 20260522-20260528 (JRA+NAR)"
+$PY -m src.bulk_fetch --since 20260522 --until 20260528 --enum-only; rc_of $?
 
 step "Step 1: build full-year rids list (union existing + gap)"
 cat data/cache/rids_20260101_20260521.txt \
-    data/cache/rids_20260522_20260525.txt 2>/dev/null \
+    data/cache/rids_20260522_20260525.txt \
+    data/cache/rids_20260522_20260528.txt 2>/dev/null \
   | sed '/^$/d' | sort -u > data/cache/rids_year_2026.txt
 echo "  full-year rids: $(wc -l < data/cache/rids_year_2026.txt)"
 
 step "Step 2: conservative fetch (workers=2 polite=2000ms, resumable)"
-$PY -m src.bulk_fetch --since 20260101 --until 20260525 \
+$PY -m src.bulk_fetch --since 20260101 --until 20260528 \
     --workers 2 --polite-ms 2000 \
     --rids-file data/cache/rids_year_2026.txt; rc_of $?
 
