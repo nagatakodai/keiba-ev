@@ -808,8 +808,12 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
         return
     print(f"[oddspark_bet] ログイン完了。queue 監視開始: {QUEUE_DIR}")
     print("[oddspark_bet] watch-auto を --bet-oddspark で回すと発走前レースが積まれます。")
-    print("[oddspark_bet] **購入確定は常に人が目視で押します** (自動では絶対に押しません)。"
-          " Ctrl-C で終了。")
+    if auto_purchase:
+        print(f"[oddspark_bet] ⚠ **自動購入モード (実弾)**: カート投入後に #buy まで自動で押します。"
+              f" per-race ¥{max_total_stake:,} / 日次 ¥{daily_cap:,} の二重ガード付き。Ctrl-C で終了。")
+    else:
+        print("[oddspark_bet] **購入確定は常に人が目視で押します** (自動では絶対に押しません)。"
+              " Ctrl-C で終了。")
     attempts: dict[str, int] = {}
     try:
         while True:

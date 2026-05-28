@@ -141,22 +141,27 @@ export function PredictionsList({
                 return (
                 <li
                   key={`${p.race_id}-${p.saved_at}`}
-                  className={`py-2.5 flex flex-wrap md:flex-nowrap items-start gap-3 hover:bg-(--color-panel-2) -mx-4 px-4 ${rowBg}`}
+                  className={`py-2.5 flex flex-col gap-1.5 hover:bg-(--color-panel-2) -mx-4 px-4 ${rowBg}`}
                 >
+                  {/* タイトル行: R番号 + race_class を**独立した上段**に左上固定。
+                      下段のコンテンツ/右側バッジの幅変動でタイトルが横ズレしないように、
+                      この行には他の要素を一切置かない。 */}
                   <Link
                     href={`/predictions/${p.race_id}`}
-                    className="flex items-start gap-3 flex-1 min-w-0"
+                    className="flex items-center gap-2 self-start hover:underline w-fit"
                   >
-                    <div className="w-12 text-center shrink-0">
-                      <div className="text-2xl font-bold tabnum leading-none">
-                        {p.race_number}
-                      </div>
-                      <div className="text-[10px] text-(--color-muted) mt-0.5">R</div>
-                    </div>
-                    <div className="shrink-0">
-                      <Badge tone={raceClassTone(p.race_class)}>{p.race_class}</Badge>
-                    </div>
-                    <div className="flex-1 min-w-0">
+                    <span className="text-xl font-bold tabnum leading-none">
+                      {p.race_number}R
+                    </span>
+                    <Badge tone={raceClassTone(p.race_class)}>{p.race_class}</Badge>
+                  </Link>
+                  {/* コンテンツ行: 締切/発走・保存・hit info を左、状態バッジ列を右に。 */}
+                  <div className="flex flex-wrap md:flex-nowrap items-start gap-3">
+                  <Link
+                    href={`/predictions/${p.race_id}`}
+                    className="flex-1 min-w-0"
+                  >
+                    <div className="min-w-0">
                       {(closeAt != null || startAt != null) && (
                         <div className="text-sm tabnum font-bold leading-tight flex flex-wrap items-baseline gap-x-2 gap-y-0">
                           <span>
@@ -288,6 +293,7 @@ export function PredictionsList({
                   >
                     詳細 →
                   </Link>
+                  </div>
                 </li>
                 );
               })}
