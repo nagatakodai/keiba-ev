@@ -469,10 +469,11 @@ def _validate_and_update_bundle(
     if not llm_mod.is_available():
         return
 
-    console.rule("[bold]Claude 総合オススメ 選定 (claude -p, 検索なし・モデル出力判断)[/bold]")
+    console.rule("[bold]Claude 総合オススメ 選定 (claude -p, web 検索で per-leg 補強)[/bold]")
     chunks: list[str] = []
     saw_error = False
     saw_result = False
+    tool_count = 0
     try:
         for etype, payload in llm_mod.select_bundle_stream(
             rd, bundle, cands, model=model,
@@ -482,6 +483,18 @@ def _validate_and_update_bundle(
             if etype == "text":
                 chunks.append(payload)
                 console.print(payload, end="")
+            elif etype == "tool_use":
+                # 検索 (Brave/Tavily/WebFetch) の query をリアルタイム表示。silent run 防止。
+                tool_count += 1
+                name = (payload or {}).get("name", "?")
+                inp = (payload or {}).get("input") or {}
+                q = inp.get("query") or inp.get("q") or inp.get("url") or ""
+                label = name.replace("mcp__", "").replace("__", "/")
+                if q:
+                    qshort = q if len(q) <= 70 else q[:67] + "..."
+                    console.print(f"[dim]  🔍 {label}: {qshort}[/dim]")
+                else:
+                    console.print(f"[dim]  ⚙ {label}[/dim]")
             elif etype == "result":
                 saw_result = True
                 if payload:
@@ -493,6 +506,8 @@ def _validate_and_update_bundle(
         console.print(f"[yellow]bundle 選定失敗: {ex}[/yellow]")
         return
 
+    if tool_count:
+        console.print(f"[dim](補強のための検索/ツール呼び出し計 {tool_count} 回)[/dim]")
     if saw_error or not saw_result:
         console.print("[yellow]選定が完了しなかったため未選定のまま (モデル束を維持)[/yellow]")
         return
