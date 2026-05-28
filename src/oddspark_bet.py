@@ -228,6 +228,21 @@ def _select_payment_opcoin(page) -> None:
         pass   # 既選択/不可視でも続行 (人が最終確認)
 
 
+def safe_dialog_accept(d) -> None:
+    """削除/セット時の confirm() を自動承認 (購入確定 #gotobuy は押さないので安全)。
+
+    Playwright の dialog イベント発火時には存在していた dialog が、accept() コールが
+    完了する前に閉じる timing race があり、`Dialog.accept: No dialog is showing` が
+    handler に上がってログを汚す (機能には影響なし — カート投入は成功する)。実害は
+    無いので握りつぶし、購入確定の安全性は **#gotobuy を一切クリックしない**設計
+    (`SELECTORS["confirm_purchase"]` は production フローで一切呼ばない) で担保する。
+    """
+    try:
+        d.accept()
+    except Exception:  # noqa: BLE001 — Playwright timing race / 既に閉じた dialog
+        pass
+
+
 def _reset_umaban(page) -> None:
     """馬番グリッドの選択をクリア (**各脚の前に必須**)。
 
@@ -478,7 +493,8 @@ class BettingSession:
             locale="ja-JP", viewport={"width": 1280, "height": 1800})
         self.page = self.ctx.new_page()
         # 削除/セット時の confirm() を自動承認 (購入確定 #gotobuy は押さないので安全)。
-        self.page.on("dialog", lambda d: d.accept())
+        # timing race で「No dialog is showing」が上がるので named helper で握りつぶす。
+        self.page.on("dialog", safe_dialog_accept)
         # 1) ログイン
         if self.manual_login:
             self._wait_manual_login()   # 人がブラウザでログイン → poll で検出 (stdin 非依存)

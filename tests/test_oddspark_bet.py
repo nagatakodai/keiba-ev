@@ -231,3 +231,19 @@ def test_uncheck_ura_multi_best_effort_no_throw():
         def evaluate(self, *a):
             raise RuntimeError("x")
     ob._uncheck_ura_multi(_Boom())   # 例外を投げないこと
+
+
+def test_safe_dialog_accept_swallows_timing_race():
+    """Playwright dialog の timing race ("No dialog is showing") を握りつぶす。"""
+    class _Closed:
+        def accept(self):
+            raise RuntimeError("Dialog.accept: No dialog is showing")
+    ob.safe_dialog_accept(_Closed())   # 上に伝播してログを汚さないこと
+
+    # 正常系は accept() が呼ばれて完了
+    called = []
+    class _Open:
+        def accept(self):
+            called.append(True)
+    ob.safe_dialog_accept(_Open())
+    assert called == [True]

@@ -65,7 +65,7 @@ def main() -> None:
         viewport={"width": 1280, "height": 1800},
         args=["--no-sandbox", "--disable-dev-shm-usage"])
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    page.on("dialog", lambda d: d.accept())   # 削除/セット confirm を自動承認 (#gotobuy は押さない)
+    page.on("dialog", ob.safe_dialog_accept)   # 削除/セット confirm を自動承認 (#gotobuy は押さない)
 
     print("[verify] ブラウザ起動。表示された Chrome でオッズパークにログインしてください ...",
           flush=True)
