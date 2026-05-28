@@ -129,20 +129,25 @@ export default async function PredictionDetailPage({
           hit: isFinishInKeys(keys, finish),
           available: !!keys && keys.length > 0,
         }));
-        const anyHit = planHits.some((h) => h.hit);
+        const anyPlanHit = planHits.some((h) => h.hit);
+        // Claude 総合オススメ束も参照。 legs 空 (= 見送り) なら headline は「未参加」に。
+        // 束が legs を持っていれば bundle hit を加味、無ければ plan hits 基準のまま (旧 snapshot 互換)。
+        const bundleLegs = d.recommended_bundle?.legs;
+        const bundleEmpty = Array.isArray(bundleLegs) && bundleLegs.length === 0;
+        const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
+          bundleLegs.some((l) => betHits(l.bet_type, l.key, finish)));
+        const anyHit = bundleHit || anyPlanHit;
+        const headlineBadge = bundleEmpty
+          ? <Badge tone="muted">未参加 (見送り)</Badge>
+          : anyHit
+            ? <Badge tone="good">的中</Badge>
+            : <Badge tone="bad">不的中</Badge>;
         return (
           <Card
             tone={anyHit ? "active" : "default"}
-            title={
-              <span className="flex items-center gap-2">
-                <span>結果</span>
-                {anyHit ? (
-                  <Badge tone="good">的中</Badge>
-                ) : (
-                  <Badge tone="bad">不的中</Badge>
-                )}
-              </span>
-            }
+            // タイトルは「結果」だけ。バッジは right prop に出して title 内の右ズレを回避。
+            title="結果"
+            right={headlineBadge}
           >
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Stat
@@ -595,15 +600,14 @@ function BundleCard({
   return (
     <Card
       tone={legs.length ? "alert" : "default"}
+      // タイトルは純テキストだけ。右ズレを避けるためバッジ類は right prop / body に移す。
       title={
+        <span className="text-(--color-highlight) font-black">
+          {validated ? "Claude 総合オススメ" : "総合オススメ (モデル)"} — まとめ買い
+        </span>
+      }
+      right={
         <span className="flex items-center gap-2">
-          <span className="text-(--color-highlight) font-black">
-            {validated ? "Claude 総合オススメ" : "総合オススメ (モデル)"} — まとめ買い
-          </span>
-          <span className="text-xs text-(--color-muted) font-normal">
-            全 bet type 横断 · joint (同時) Kelly 最適配分
-            {legs.length > 0 && ` · 完全 top-3 分布 ${bundle.n_outcomes} 通りで E[log 資金] 最大化`}
-          </span>
           {validated ? (
             <Badge tone="magenta">claude -p 検証済{bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
           ) : (
@@ -617,6 +621,10 @@ function BundleCard({
         </span>
       }
     >
+      <p className="text-xs text-(--color-muted) mb-3">
+        全 bet type 横断 · joint (同時) Kelly 最適配分
+        {legs.length > 0 && ` · 完全 top-3 分布 ${bundle.n_outcomes} 通りで E[log 資金] 最大化`}
+      </p>
       {legs.length === 0 ? (
         <p className="text-sm text-(--color-muted)">
           +EV (P×O≥{bundle.pxo_floor.toFixed(2)}) のまとめ買いなし。
