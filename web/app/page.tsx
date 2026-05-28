@@ -99,7 +99,8 @@ function PredictionRowItem({
   const timing = raceTimingStatus(closeAt, startAt, p.has_result, nowMs);
   const anyHit = !!(
     hit &&
-    (hit.plan_a_hit ||
+    (hit.bundle_hit ||
+      hit.plan_a_hit ||
       hit.plan_b_hit ||
       hit.plan_c_hit ||
       hit.plan_g_hit ||
@@ -107,8 +108,10 @@ function PredictionRowItem({
       hit.plan_h2_hit ||
       hit.plan_f_hit)
   );
+  // Claude 総合オススメが「見送り」(束 legs 空) なら「不的中」ではなく「未参加」表示
+  const bundleSkipped = !!(hit && hit.bundle_participated === false);
   const rowBg = hit
-    ? raceTimingRowBg(anyHit ? "good" : "bad")
+    ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
     : raceTimingRowBg(timing.tone);
 
   return (
@@ -125,9 +128,13 @@ function PredictionRowItem({
           </span>
           <Badge tone="muted">{p.race_class}</Badge>
           {hit ? (
-            <Badge tone={anyHit ? "good" : "bad"}>
-              {anyHit ? "的中" : "不的中"}
-            </Badge>
+            anyHit ? (
+              <Badge tone="good">的中</Badge>
+            ) : bundleSkipped ? (
+              <Badge tone="muted">未参加</Badge>
+            ) : (
+              <Badge tone="bad">不的中</Badge>
+            )
           ) : (
             <Badge tone={timing.tone}>{timing.label}</Badge>
           )}

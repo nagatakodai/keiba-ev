@@ -263,9 +263,14 @@ export function PredictionsList({
                   </Link>
                   <div className="flex gap-1 shrink-0 items-center">
                     {hit ? (
-                      <Badge tone={anyHit ? "good" : "bad"}>
-                        {anyHit ? "的中" : "不的中"}
-                      </Badge>
+                      anyHit ? (
+                        <Badge tone="good">的中</Badge>
+                      ) : bundleSkipped ? (
+                        // 見送り = 賭けてないので「不的中」ではなく「未参加」
+                        <Badge tone="muted">未参加</Badge>
+                      ) : (
+                        <Badge tone="bad">不的中</Badge>
+                      )
                     ) : (
                       <Badge tone={timing.tone}>{timing.label}</Badge>
                     )}
