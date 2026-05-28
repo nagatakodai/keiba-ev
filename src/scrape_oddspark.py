@@ -674,8 +674,9 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
 
     # 発走時刻 (discovery 由来) を補完: cache に無い/0 のときのみ上書き
     if start_at and not rd.race.start_at:
+        from .parse import close_at_for_start
         rd.race.start_at = start_at
-        rd.race.close_at = start_at
+        rd.race.close_at = close_at_for_start(start_at)   # 発走 2 分前 固定
 
     # 馬連 / ワイド を other_bets に、3連単を rd.trifecta に追加
     rd.other_bets = dict(rd.other_bets or {})

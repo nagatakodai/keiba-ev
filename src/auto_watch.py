@@ -1,10 +1,13 @@
-"""netkeiba の開催一覧を polling し、発走 window〜window+tolerance 分前のレースを自動解析する。
+"""netkeiba の開催一覧を polling し、**締切** window〜window+tolerance 分前のレースを自動解析する。
 
-検出帯は片側 (+のみ): 発走まで window 分以上のリードを必ず確保する。
+締切は発走の CLOSE_LEAD_SEC (=120) 秒前で固定 (`parse.close_at_for_start`)。検出帯を
+締切基準にすることで、賭けの締切までのリード時間が常に安定する (発走基準より +2 分 lead)。
+片側 (+のみ): 締切まで window 分以上のリードを必ず確保し、締切間際の解析を防ぐ。
 
 使い方:
     python -m src.auto_watch                # 1 巡
-    python -m src.auto_watch --window 5 --tolerance 2   # 発走 5〜7 分前で検出
+    python -m src.auto_watch --window 5 --tolerance 2   # 締切 5〜7 分前で検出
+                                                         # (= 発走 7〜9 分前 相当)
 
 通常は Makefile の `watch-auto` ターゲットから無限ループで叩く。
 """
@@ -181,9 +184,11 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
                 "[bold red]race discovery 不能。数時間-1日待つか、別 IP/VPN から再試行してください。[/bold red]"
             )
 
-    # 検出帯は「発走まで window〜window+tolerance 分」の片側 (+のみ)。
-    # かつての ± の下側 (window-tolerance, 発走に近い側) は使わない。これにより
-    # 必ず window 分以上のリードを確保し、締切間際に解析が走るのを防ぐ。
+    # 検出帯は「**締切まで** window〜window+tolerance 分」の片側 (+のみ)。締切は発走の
+    # CLOSE_LEAD_SEC 秒前で固定 (parse.close_at_for_start)。締切基準にすることで、レース
+    # スケジュールが変わっても「賭けの締切前の lead time」が一定になる。
+    # 片側 (+のみ) なのは window 分以上のリードを必ず確保し、締切間際の解析を防ぐため。
+    from .parse import close_at_for_start
     low_sec = window_min * 60
     high_sec = (window_min + tolerance_min) * 60
 
@@ -192,7 +197,8 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
         start_at = r.get("start_at") or 0
         if start_at <= 0:
             continue
-        delta = start_at - now_ts
+        close_at = close_at_for_start(start_at)
+        delta = close_at - now_ts   # 締切までの秒数
         if not (low_sec <= delta <= high_sec):
             continue
         rid = r["race_id"]
@@ -201,8 +207,8 @@ def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[di
             "netkeiba_race_id": rid,
             "url": r["url"],
             "start_at": start_at,
-            "close_at": start_at,
-            "delta_sec": delta,
+            "close_at": close_at,
+            "delta_sec": delta,   # 締切まで残り秒
             "venue": r["venue"],
             "race_no": r["race_no"],
             "source": r.get("source", "netkeiba"),
@@ -300,8 +306,8 @@ def _in_active_hours(now: datetime, active_hours: str) -> bool:
 
 @app.command()
 def main(
-    window_min: int = typer.Option(5, "--window", help="発走までの目標リード時間 (分)"),
-    tolerance_min: int = typer.Option(2, "--tolerance", help="window からの + 側許容 (分)。発走 window〜window+tolerance 分前で検出"),
+    window_min: int = typer.Option(5, "--window", help="**締切までの**目標リード時間 (分)。締切=発走2分前固定なので、発走基準より +2 分の lead になる"),
+    tolerance_min: int = typer.Option(2, "--tolerance", help="window からの + 側許容 (分)。締切 window〜window+tolerance 分前で検出 (= 発走 window+2〜window+tolerance+2 分前)"),
     ev_max: float = typer.Option(None, "--ev-max"),
     min_prob: float = typer.Option(None, "--min-prob"),
     market_blend: float = typer.Option(None, "--market-blend"),
@@ -334,7 +340,7 @@ def main(
         return
 
     console.print(
-        f"[dim]{now_str}[/dim] 発走 {window_min}〜{window_min + tolerance_min} 分前のレースを検索中..."
+        f"[dim]{now_str}[/dim] 締切 {window_min}〜{window_min + tolerance_min} 分前のレースを検索中... (= 発走 {window_min + 2}〜{window_min + tolerance_min + 2} 分前)"
     )
     try:
         due = _list_due_races(window_min, tolerance_min, now_ts)
@@ -363,8 +369,8 @@ def main(
 
     for race in due:
         rid = race["race_id"]
-        mins = race["delta_sec"] / 60.0
-        tag = f"{race['venue']} {race['race_no']}R 発走まで {mins:.1f}分"
+        mins = race["delta_sec"] / 60.0   # 締切までの分数 (発走 - 2 分 - 現在)
+        tag = f"{race['venue']} {race['race_no']}R 締切まで {mins:.1f}分 (発走まで {mins + 2:.1f}分)"
         if rid in analyzed:
             console.print(f"[dim]skip (already analyzed): {tag} {rid}[/dim]")
             continue

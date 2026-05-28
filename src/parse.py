@@ -24,6 +24,20 @@ from typing import Any
 from bs4 import BeautifulSoup, Tag
 
 from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds, Weather
+
+# 締切は **発走の CLOSE_LEAD_SEC 秒前** で固定 (どの odds 源も明示的な締切時刻を出さない
+# ため、発走 = 締切 として扱っていたのを 2 分前固定に統一)。レース検索のリード時間
+# (auto_watch の --window) もこの「締切まで何分」を基準にする (= 発走基準より +2 分の lead)。
+CLOSE_LEAD_SEC = 120
+
+
+def close_at_for_start(start_at: int) -> int:
+    """発走 unix 秒 → 締切 unix 秒 (発走 CLOSE_LEAD_SEC 秒前で固定、最低 0)。
+    start_at=0 (未確定) はそのまま 0 を返す (締切も未確定)。
+    """
+    if start_at <= 0:
+        return 0
+    return max(0, start_at - CLOSE_LEAD_SEC)
 from .scrape import (
     extract_race_id,
     fetch_html,
@@ -256,7 +270,7 @@ def parse_shutuba(html: str, *, race_id: str | None = None) -> RaceData:
         direction=direction,
         weather_text=weather_text,
         start_at=start_at,
-        close_at=start_at,  # netkeiba は明示的な締切時刻なし。発走 = 締切扱い
+        close_at=close_at_for_start(start_at),  # 締切は発走 CLOSE_LEAD_SEC 秒前で固定
         entries_number=len(horses),
         horses=horses,
         odds_updated_at=int(datetime.now().timestamp()),

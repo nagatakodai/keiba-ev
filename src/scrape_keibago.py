@@ -515,8 +515,9 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
                 netkeiba_rid, [(n, nm, "") for n, nm, _od in hl], win_odds, fetch_past=False)
 
     if start_at and not rd.race.start_at:
+        from .parse import close_at_for_start
         rd.race.start_at = start_at
-        rd.race.close_at = start_at
+        rd.race.close_at = close_at_for_start(start_at)   # 発走 2 分前 固定
 
     rd.other_bets = {bt: v for bt, v in other.items() if v}
     rd.trifecta = trifecta

@@ -471,8 +471,9 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
         rd = build_jra_racedata(netkeiba_rid, other["win"])
 
     if start_at and not rd.race.start_at:
+        from .parse import close_at_for_start
         rd.race.start_at = start_at
-        rd.race.close_at = start_at
+        rd.race.close_at = close_at_for_start(start_at)   # 発走 2 分前 固定
 
     rd.other_bets = {bt: v for bt, v in other.items() if v}
     rd.trifecta = trifecta
