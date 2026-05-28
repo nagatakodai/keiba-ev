@@ -267,7 +267,11 @@ def test_check_daily_cap_branches(monkeypatch, tmp_path):
 
 
 def test_confirm_purchase_skipped_when_flag_disabled(monkeypatch, tmp_path):
-    """AUTO_PURCHASE_VERIFIED=False の間は実弾を撃たず "skipped" を返す (fail-safe)。"""
+    """AUTO_PURCHASE_VERIFIED=False の間は実弾を撃たず "skipped" を返す (fail-safe)。
+
+    実機検証後は True が既定だが、緊急時に False に戻したら fail-safe で実弾を止める
+    挙動を確認 (flag 復元の保険テスト)。
+    """
     monkeypatch.setattr(ob, "DAILY_STAKE_FILE", tmp_path / "daily.json")
     monkeypatch.setattr(ob, "AUTO_PURCHASE_VERIFIED", False)
     sess = ob.BettingSession(headful=False, auto_purchase=True, daily_cap=50_000)
@@ -276,6 +280,13 @@ def test_confirm_purchase_skipped_when_flag_disabled(monkeypatch, tmp_path):
     assert status == "skipped" and "AUTO_PURCHASE_VERIFIED" in msg
     # daily_stake は加算されていない
     assert ob.get_today_stake() == 0
+
+
+def test_auto_purchase_verified_default_true():
+    """実機 DOM 検証後の既定値は True (確定ボタン id=#buy が確認済のため)。"""
+    assert ob.AUTO_PURCHASE_VERIFIED is True
+    # 確定ボタンの主要セレクタが #buy であること (フォールバックは別途維持)
+    assert ob.SELECTORS["confirm_final_candidates"][0] == "#buy"
 
 
 def test_confirm_purchase_skipped_when_daily_cap_exceeded(monkeypatch, tmp_path):

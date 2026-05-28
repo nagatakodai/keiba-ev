@@ -66,19 +66,18 @@ SELECTORS = {
     "umaban_reset": '#reset',
     # 投票内容確認画面への遷移ボタン (まとめ画面)。半自動モードではここで人が止まる。
     "confirm_purchase": '#gotobuy',
-    # 確認画面の **最終購入確定ボタン** (auto_purchase=True で click される最後の関門)。
-    # 実機 DOM 未検証なので _confirm_purchase は複数候補を defensive に試行 + success
-    # marker (受付完了 等) で結果検証する。確定したセレクタが分かったら 1 本に絞る。
+    # 確認画面 (VoteConfirmOpcoin.do) の **最終購入確定ボタン**。実機 HTML で確認済 (2026-05-28):
+    # <a href="#" onclick="clickVoteComplete();" id="buy">投票を申込</a>
+    # form name=voteCompleteOpcoinForm action=/keiba/auth/VoteCompleteOpcoin.do で確定 POST。
+    # フォールバック (UI 改修への保険): id=buy が消えた時のための候補。
     "confirm_final_candidates": [
-        '#buyBtn', '#confirmBtn', '#purchaseBtn', '#submitBtn', '#voteBtn',
-        'input[type="submit"][value*="購入"]',
-        'input[type="button"][value*="購入"]',
-        'input[type="submit"][value*="確定"]',
-        'input[type="button"][value*="確定"]',
+        '#buy',                                # 確定 (id 単独で一意)
+        'a[onclick*="clickVoteComplete"]',     # 確定の onclick で抽出する保険
+        'a:has-text("投票を申込")',
         'a:has-text("購入確定")',
         'a:has-text("投票確定")',
-        'button:has-text("購入確定")',
-        'button:has-text("投票確定")',
+        'button:has-text("投票を申込")',
+        'input[type="submit"][value*="投票を申込"]',
     ],
     # 購入成功の証跡。これを検出できた時だけ daily_stake を加算する (誤検知防止)。
     "purchase_success_text": '受付完了',  # _confirm_purchase でテキスト一致を見る
@@ -95,11 +94,12 @@ _BET_TYPE_CODE = {
 # 過剰投入 (+2/+6) は `_assert_combo_delta` が捕捉して当該脚を中止する二段の安全。
 _ORDERED_BETS_VERIFIED = True
 
-# 自動購入 (#gotobuy → 確認画面 → 確定 まで完全自動) の安全フラグ。
-# 確認画面の最終ボタン DOM は実機検証が必要なので、AUTO_PURCHASE_VERIFIED=False
-# の間は auto_purchase=True を渡されても `_confirm_purchase` が "skipped" を返す
-# (半自動と同じ挙動)。実機で 1 度 success marker が出ることを確認したら True に。
-AUTO_PURCHASE_VERIFIED = False
+# 自動購入 (#gotobuy → 確認画面 → 確定 まで完全自動) の安全フラグ。実機検証済
+# (2026-05-28 笠松10R 馬単8→9 ¥2,100 の VoteConfirmOpcoin.do HTML 全文を確認):
+# 確定ボタンは <a id="buy" onclick="clickVoteComplete()">投票を申込</a> で一意特定可。
+# form は voteCompleteOpcoinForm → /keiba/auth/VoteCompleteOpcoin.do に POST、確定後の
+# 完了画面で「受付完了」テキストが出る想定 (CLAUDE.md の検索ルールと整合)。
+AUTO_PURCHASE_VERIFIED = True
 
 # デイリー上限の既定値 (円)。1 日の累計賭金がここを超えると _confirm_purchase が "skipped"
 # を返し、カートはそのまま (人が判断)。日跨ぎ (JST 00:00) で自動的に counter が 0 に戻る。
