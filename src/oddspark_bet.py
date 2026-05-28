@@ -456,10 +456,11 @@ class BettingSession:
     """
 
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
-                 max_total_stake: int = 10_000) -> None:
+                 max_total_stake: int = 10_000, login_wait_sec: int = 600) -> None:
         self.headful = headful
         self.manual_login = manual_login
         self.max_total_stake = max_total_stake
+        self.login_wait_sec = login_wait_sec
         self.page = None
         self._pw = None
         self.browser = None
@@ -480,9 +481,7 @@ class BettingSession:
         self.page.on("dialog", lambda d: d.accept())
         # 1) ログイン
         if self.manual_login:
-            self.page.goto(_BASE, wait_until="domcontentloaded")
-            print("[oddspark_bet] headful ブラウザでログインを済ませて Enter ...")
-            input()
+            self._wait_manual_login()   # 人がブラウザでログイン → poll で検出 (stdin 非依存)
         else:
             _login(self.page, _creds())
         _shot(self.page, "1_after_login")
@@ -497,6 +496,29 @@ class BettingSession:
                     self.page.wait_for_timeout(500)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _wait_manual_login(self) -> None:
+        """人が headful ブラウザでログインするのを **poll で待つ** (stdin 非依存)。
+
+        `input()` だと background プロセス (統合起動 `make watch-auto-bet` で daemon を
+        `&` 起動した時) で stdin 読取がサスペンドするため、ログアウトリンク (logged_in_marker)
+        の出現を polling で検出する。login_wait_sec 以内に検出できなければ中止。
+        """
+        self.page.goto(_BASE, wait_until="domcontentloaded")
+        print(f"[oddspark_bet] headful ブラウザでオッズパークにログインしてください "
+              f"(検出まで最大 {self.login_wait_sec}s 待機)...", flush=True)
+        for i in range(self.login_wait_sec):
+            try:
+                if self.page.locator(SELECTORS["logged_in_marker"]).count() > 0:
+                    print("[oddspark_bet] ログイン検出。", flush=True)
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            if i and i % 30 == 0:
+                print(f"[oddspark_bet] ログイン待機中... ({i}s)", flush=True)
+            self.page.wait_for_timeout(1000)
+        raise OddsparkBetError(
+            f"{self.login_wait_sec}s 以内にログインを検出できず — ブラウザでログインして再起動してください")
 
     def _goto_matome(self) -> None:
         self.page.goto(_VOTE_TOP_URL, wait_until="domcontentloaded")

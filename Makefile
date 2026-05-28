@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -185,6 +185,25 @@ watch-auto:
 		echo "[next poll in $(INTERVAL_SEC)s]"; \
 		sleep $(INTERVAL_SEC); \
 	done
+
+# --- 投票ブラウザ + watch-auto を 1 コマンドで起動 (--bet-oddspark 強制) ---
+# oddspark 常駐 betting daemon (headful・起動時に人がブラウザでログイン → poll 検出) を
+# background 起動しつつ watch-auto ループを回す。発走前 NAR の束が常駐ブラウザのカートに
+# 積まれ続け、**購入確定は人が目視で押す** (自動では #gotobuy を押さない)。Ctrl+C で両方終了。
+# SESSION_ARGS で daemon に --clear / --poll=5 等を渡せる。
+SESSION_ARGS ?=
+watch-auto-bet:
+	@echo "watch-auto-bet: 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
+	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。**"
+	@bash -c 'trap "kill 0" EXIT INT TERM; \
+		$(PY) -m src.oddspark_bet --session $(SESSION_ARGS) & \
+		while true; do \
+			$(PY) -m src.auto_watch \
+				--window $(WINDOW) --tolerance $(TOLERANCE) \
+				--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) --bet-oddspark || true; \
+			echo "[next poll in $(INTERVAL_SEC)s]"; \
+			sleep $(INTERVAL_SEC); \
+		done'
 
 # --- FastAPI バックエンド ---
 # keirin ev-api (8787) と完全に被らないよう keiba-ev は 9788 を既定にする。
