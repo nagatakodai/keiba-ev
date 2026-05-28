@@ -57,3 +57,17 @@ def test_prompt_includes_kaisai_date_when_start_at_set():
     # 検索クエリ用に開催日 (YYYY-MM-DD) が prompt に乗る
     assert "開催日:" in p
     assert "2025-" in p or "2026-" in p
+
+
+def test_bundle_legs_always_appear_in_candidate_table_even_below_max():
+    """束採用 leg (★) は max_candidates でカットされた場合でも prompt の候補表に必ず出る。
+
+    joint Kelly が低 P×O 脚を組み入れることがあるため、★ id が表に出ない不整合を防ぐ。
+    """
+    # max_candidates=1 → 候補表は本来 P×O 最大の1件だけ。だが束には P×O が低い leg を含める
+    bundle = {"legs": [{"bet_type": "trifecta", "key": [1, 3, 6], "stake": 100}]}
+    p = llm.build_bundle_selection_prompt(_rd(), bundle, CANDS, max_candidates=1)
+    # 最大 P×O は wide:3-6 (2.71)。束は trifecta:1-3-6 (P×O=2.54、本来は cut)
+    assert "wide:3-6" in p              # max P×O はもちろん入る
+    assert "trifecta:1-3-6" in p        # 束採用なので必ず追補されて入る
+    assert "★" in p

@@ -284,6 +284,11 @@ def build_bundle_selection_prompt(
     # 候補は P×O 降順で上位 max_candidates 件 (= モデルの +EV 出力)
     pool = sorted(candidates, key=lambda c: c.get("px_o", 0.0), reverse=True)[:max_candidates]
     bundle_ids = {leg_id(leg) for leg in legs}
+    # 束採用 leg (★) が pool に含まれない (joint Kelly が低P×O脚を組み入れるケース) ことが
+    # あり、その場合 claude に「★ で示されたが表に無い leg」が見え不整合になる。
+    # candidates 中で束採用しているが pool に漏れた leg を必ず追補して整合させる。
+    pool_ids = {leg_id(c) for c in pool}
+    pool += [c for c in candidates if leg_id(c) in bundle_ids and leg_id(c) not in pool_ids]
     # 検索対象は ① 束(★) の全脚 ② 束外の高 P×O 候補上位 (合算で <=8 程度を目安)
     bundle_ids_list = [leg_id(leg) for leg in legs]
 
