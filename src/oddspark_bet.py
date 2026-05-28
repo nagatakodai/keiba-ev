@@ -752,25 +752,23 @@ class BettingSession:
             tag = "[magenta]" if p_status == "ok" else "[yellow]" if p_status == "skipped" else "[red]"
             print(f"  {tag}→ 自動購入 {p_status}:[/] {p_msg}")
             mode_note = f"自動購入 ({p_status})"
-            if p_status in ("ok", "failed"):
-                # ok: 完了画面 → 続けて投票 → まとめ画面 で次レース受入準備に戻す
-                # failed: 確認画面に未確定 bet が残った状態の可能性 → まとめに戻して
-                #   状態リセット (確認画面から離脱 = oddspark の未確定 bet は破棄される
-                #   = カート未確定なので資金は動いていない、安全側)。
-                # skipped: まとめ画面のまま (#gotobuy をクリックする前に return している)
+            if p_status == "ok":
+                # 完了画面 → 続けて投票 → まとめ画面 で次レース受入準備に戻す
                 self._continue_to_matome_after_purchase()
-            elif p_status == "skipped" and "超過" in p_msg:
-                # **CRITICAL**: daily_cap 超過で skip された race の脚はカートに残ったまま。
-                # 次レースが add_race に来て #gotobuy を押すと、leftover legs + 次レース legs が
-                # 一括購入されるが daily_stake には次レース分しか加算されない → cap 突破。
-                # まとめ画面で「全買い目削除 (#all a)」を click して cart 全消ししてから抜ける。
+            else:
+                # ok 以外 (failed / skipped): cart に当該 race の脚が残っている可能性。
+                # 残ったまま次レースが add_race に来て #gotobuy を押すと、leftover legs +
+                # 次レース legs が一括購入されるが daily_stake には次レース分しか加算されず
+                # **cap 突破リスク**。まずまとめ画面に戻し (確認画面に居る場合は離脱で
+                # 未確定 bet 破棄)、その後 #all a で cart 全削除して次レースへの漏れを防ぐ。
+                self._continue_to_matome_after_purchase()
                 try:
                     da = self.page.locator(SELECTORS["delete_all"])
                     if da.count() > 0:
                         da.first.click()
                         self.page.wait_for_timeout(500)
-                        print("  [yellow]→ daily_cap 超過のためカート全削除 (#all a) で次レース"
-                              "への漏れ防止[/]")
+                        print(f"  [yellow]→ {p_status} のためカート全削除 (#all a) "
+                              "で次レースへの漏れ防止[/]")
                 except Exception as ex:  # noqa: BLE001
                     print(f"  [red]⚠ カート削除に失敗 — 次レースで leftover が一括購入される"
                           f"危険 (手動で全買い目削除推奨): {ex}[/]")
@@ -831,26 +829,39 @@ class BettingSession:
                     "確認画面で確定ボタンが見つからない (DOM 未検証 — purchase_review screenshot 参照)")
         self.page.wait_for_timeout(3000)
         _shot(self.page, "purchase_after_click")
-        # 3) 成功 marker を検証 — 偽陽性 (誤検知で daily_stake 加算 → cap bypass) を防ぐため
-        #    3条件を AND 結合:
-        #    (a) URL が VoteComplete... に遷移している (= 確定 POST が走った)
-        #    (b) h2 に「投票申込完了」 (完了画面固有の見出し)
-        #    (c) body に成功 marker (受け付けました/成立組数/投票申込完了 のいずれか)
+        # 3) 成功検知 — 「偽陰性」(成功なのに failed → daily_stake 未加算 → cap 緩む) と
+        #    「偽陽性」(未遷移なのに success → 未購入で daily_stake 加算) を両側で防ぐ:
+        #    (a) URL が VoteComplete... (= server が確定 POST を受理し completion page を返した、
+        #        最強の signal、navigation 起きてなければ #buy 失敗 = 未購入)
+        #    (b) h2 「投票申込完了」 OR body 「受け付けました/成立組数/投票申込完了」
+        #        (= ユーザ可視のレイアウト/文言、render が遅れて片方欠ける可能性があるので OR)
+        # URL 遷移が起きていない時は server 確定が無いとみなし failed (safe)。URL 遷移済なら
+        # h2/body のどちらか一方でも検知できれば success として daily_stake 加算 (under-count 防止)。
+        # render 完了を許容するため check の前に 1 秒追加待機 + 不足分は最大 6 秒まで polling する。
         success = False
-        try:
-            url = self.page.url or ""
-            is_complete_url = "VoteComplete" in url
-            has_h2 = self.page.locator('h2:has-text("投票申込完了")').count() > 0
-            body_txt = self.page.evaluate(
-                "() => document.body ? document.body.innerText || '' : ''")
-            has_marker = any(m in body_txt for m in SELECTORS["purchase_success_markers"])
-            success = is_complete_url and has_h2 and has_marker
-        except Exception:  # noqa: BLE001
-            pass
+        import time as _t
+        deadline = _t.time() + 6.0
+        while _t.time() < deadline:
+            try:
+                url = self.page.url or ""
+                is_complete_url = "VoteComplete" in url
+                if not is_complete_url:
+                    # URL すら遷移してない: 待っても無駄 (#buy 失敗 / form submit ブロック)
+                    break
+                has_h2 = self.page.locator('h2:has-text("投票申込完了")').count() > 0
+                body_txt = self.page.evaluate(
+                    "() => document.body ? document.body.innerText || '' : ''")
+                has_marker = any(m in body_txt for m in SELECTORS["purchase_success_markers"])
+                if has_h2 or has_marker:
+                    success = True
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            self.page.wait_for_timeout(500)
         if not success:
             return ("failed",
-                    "成功 marker (URL=VoteComplete... + h2=投票申込完了 + body 文言) を検出できず — "
-                    "実際に購入された/されなかったかブラウザで目視確認推奨")
+                    "成功検知失敗 (URL=VoteComplete... に遷移 + h2/body marker のいずれか必須) "
+                    "— ブラウザで購入状況を目視確認推奨")
         new_total = record_daily_stake(race_stake)
         return ("ok",
                 f"購入完了 ¥{race_stake:,} (clicked={clicked_sel}, 本日累計 ¥{new_total:,} / 上限¥{self.daily_cap:,})")
@@ -1011,9 +1022,18 @@ def _main() -> None:
                     print(f"[oddspark_bet] --daily-cap 値が不正 ({a}) → 既定 ¥{daily_cap:,}")
             elif a.startswith("--stake-multiplier="):
                 try:
-                    stake_multiplier = max(0.0, float(a.split("=", 1)[1]))
+                    v = float(a.split("=", 1)[1])
                 except ValueError:
-                    print(f"[oddspark_bet] --stake-multiplier 値が不正 ({a}) → 既定 1.0x")
+                    v = 0
+                # 0 以下や 100 超は誤入力扱いで既定に戻す (Pydantic と同じ gt=0/le=100 制約)。
+                # 0 だと _apply_stake_multiplier の min ¥100 floor が走り「全 leg ¥100」の
+                # 予期しない挙動になるため拒否。
+                if v <= 0 or v > 100:
+                    print(f"[oddspark_bet] --stake-multiplier 値が範囲外 ({a}) → 既定 1.0x "
+                          "(有効範囲: 0 < N <= 100)")
+                    stake_multiplier = 1.0
+                else:
+                    stake_multiplier = v
             elif a.startswith("--payment="):
                 v = a.split("=", 1)[1].strip().lower()
                 if v in _VALID_PAYMENT_METHODS:
