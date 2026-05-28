@@ -132,8 +132,11 @@ export function PredictionsList({
                     hit.plan_h2_hit ||
                     hit.plan_f_hit)
                 );
+                // Claude 総合オススメが「見送り」(束 legs 空) で、他 Plan も全て外し / 不在 の race は
+                // 「不的中」(=賭けて外れた) ではなく「未参加」(=賭けていない) として中立色で表示する。
+                const bundleSkipped = !!(hit && hit.bundle_participated === false);
                 const rowBg = hit
-                  ? raceTimingRowBg(anyHit ? "good" : "bad")
+                  ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
                   : raceTimingRowBg(timing.tone);
                 return (
                 <li
@@ -185,6 +188,10 @@ export function PredictionsList({
                                 ? ` (${hit.bundle_hit_bet_types!.map((bt) => BET_LABELS[bt] ?? bt).join("/")})`
                                 : ""}
                             </Badge>
+                          )}
+                          {bundleSkipped && (
+                            // 見送り (Claude 総合オススメが空束) は「不的中」ではなく「未参加」表示
+                            <Badge tone="muted">束 未参加 (見送り)</Badge>
                           )}
                           <PlanHitTag plan="F" hit={!!hit.plan_f_hit} />
                           <PlanHitTag plan="A" hit={hit.plan_a_hit} />

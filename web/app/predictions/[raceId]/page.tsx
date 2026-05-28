@@ -609,8 +609,11 @@ function BundleCard({
           ) : (
             legs.length > 0 && <Badge tone="warn">Claude 検証前 (モデルのみ)</Badge>
           )}
-          {finish && legs.length > 0 &&
-            (bundleHit ? <Badge tone="good">束 的中</Badge> : <Badge tone="bad">束 不的中</Badge>)}
+          {finish && (legs.length === 0
+            ? <Badge tone="muted">束 未参加 (見送り)</Badge>
+            : bundleHit
+              ? <Badge tone="good">束 的中</Badge>
+              : <Badge tone="bad">束 不的中</Badge>)}
         </span>
       }
     >

@@ -299,6 +299,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "payout": payout,
                 "bundle_hit": bool(bundle_hit_legs),
                 "bundle_hit_bet_types": sorted({leg["bet_type"] for leg in bundle_hit_legs}),
+                # claude 総合オススメが「見送り」(束 legs 空) かどうか。frontend で「不的中」
+                # ではなく「未参加」ラベルを出すための discriminator。bundle_hit=False が
+                # 「賭けて外れた」(legs>0) なのか「そもそも賭けていない」(legs=0) なのかを区別する。
+                "bundle_participated": bool(bundle_legs),
                 "plan_a_hit": race_plan_hits.get("Plan A", False),
                 "plan_b_hit": race_plan_hits.get("Plan B", False),
                 "plan_c_hit": race_plan_hits.get("Plan C", False),
