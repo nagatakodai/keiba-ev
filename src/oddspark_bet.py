@@ -340,6 +340,12 @@ def _assert_combo_delta(page, before: int | None, leg: CartLeg) -> None:
     順不同は a.on 検証で別途担保済なので続行 (既存の検証済フローを壊さない)。
     """
     after = _combo_count(page)
+    # 組数表示の更新が非同期で遅延することがある: まだ変化が出ていなければ一度だけ
+    # 待って再読する (セット成功脚を timing で誤って中止しないため)。過剰投入 (+2/+6) は
+    # セット完了後に確定値で出るので、この再読は after==before の時しか発火しない。
+    if before is not None and after == before:
+        page.wait_for_timeout(1500)
+        after = _combo_count(page)
     if before is None or after is None:
         if leg.bet_type in ("exacta", "trifecta"):
             raise OddsparkBetError(

@@ -206,6 +206,17 @@ def test_assert_combo_delta_rejects_over_injection(monkeypatch):
     ob._assert_combo_delta(object(), 0, ob.CartLeg("wide", [1, 2], 100))
 
 
+def test_assert_combo_delta_reread_on_async_delay(monkeypatch):
+    """組数更新が遅延 (after==before) なら一度待って再読し、+1 になれば通過 (誤中止しない)。"""
+    seq = iter([0, 1])   # 1回目=未更新(0), 再読=1
+    monkeypatch.setattr(ob, "_combo_count", lambda p: next(seq))
+
+    class _P:
+        def wait_for_timeout(self, ms):  # 再読前の待機 (no-op)
+            pass
+    ob._assert_combo_delta(_P(), 0, ob.CartLeg("win", [1], 100))   # raise しない
+
+
 def test_assert_combo_delta_unreadable_ordered_aborts_unordered_continues(monkeypatch):
     # 組数を読めない時: 順序付きは安全側で中止、順不同は続行 (既存フロー維持)
     monkeypatch.setattr(ob, "_combo_count", lambda p: None)   # after 読めず
