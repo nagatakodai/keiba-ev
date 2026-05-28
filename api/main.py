@@ -266,6 +266,8 @@ class WatchAutoStartRequest(BaseModel):
     # **このセッション中のみ** 全 leg の stake を N 倍 (100円単位丸め)。per-race 上限 +
     # daily_cap は維持されるので、倍率により超過する race は自然に reject される。
     bet_stake_multiplier: float = 1.0
+    # 支払方法: "opcoin" (OPコイン残, 既定) | "buylimit" (投票資金残, 会員入金)
+    bet_payment_method: str = "opcoin"
 
 
 @app.post("/api/watch-auto/start")
@@ -285,6 +287,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_auto_purchase=req.bet_auto_purchase,
         bet_daily_cap=req.bet_daily_cap,
         bet_stake_multiplier=req.bet_stake_multiplier,
+        bet_payment_method=req.bet_payment_method,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "config": WATCH.config, "job": job.to_dict()}

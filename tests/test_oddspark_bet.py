@@ -301,6 +301,27 @@ def test_confirm_purchase_skipped_when_daily_cap_exceeded(monkeypatch, tmp_path)
     assert ob.get_today_stake() == 49_500   # 加算されていない
 
 
+def test_payment_method_validation():
+    """payment_method=opcoin | buylimit | (不正値 → opcoin に fallback)。"""
+    assert ob.BettingSession(headful=False, payment_method="opcoin").payment_method == "opcoin"
+    assert ob.BettingSession(headful=False, payment_method="buylimit").payment_method == "buylimit"
+    # 不正値は既定 (opcoin) に倒れる
+    assert ob.BettingSession(headful=False, payment_method="invalid").payment_method == "opcoin"
+
+
+def test_select_payment_method_dispatches_to_right_selector():
+    """_select_payment_method が method に応じて opcoin/buylimit の radio を check する。"""
+    seen = []
+
+    class _P:
+        def check(self, sel):
+            seen.append(sel)
+    ob._select_payment_method(_P(), "opcoin")
+    assert seen[-1] == ob.SELECTORS["payment_opcoin"]   # #paymentMethodOpCoin
+    ob._select_payment_method(_P(), "buylimit")
+    assert seen[-1] == ob.SELECTORS["payment_buylimit"]  # #paymentMethodBuyLimit
+
+
 def test_apply_stake_multiplier_basic():
     """stake_multiplier=N で各 leg の stake が N 倍 (100円単位丸め)、key/bet_type は不変。"""
     legs = [

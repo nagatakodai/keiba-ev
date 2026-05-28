@@ -56,7 +56,8 @@ SELECTORS = {
     "bet_type_checkbox": 'input[name="betTypeSelect"][value="{code}"]',  # 1-9
     "amount_input": '#textfield11',                  # 金額 (100円単位 / "00円" 接尾)
     "set_button": '#multiSet',                       # セット (買い目を #buylist に積む)
-    "payment_opcoin": '#paymentMethodOpCoin',        # 支払=OPコイン (口座は OPコイン残)
+    "payment_opcoin": '#paymentMethodOpCoin',        # 支払=OPコイン (口座は OPコイン残, value=1)
+    "payment_buylimit": '#paymentMethodBuyLimit',    # 支払=投票資金 (value=0)
     "buylist": '#buylist',                           # 積まれた買い目一覧 (人が目視)
     "delete_selected": '#choice a',                  # 選択項目削除 (誤りの訂正)
     "delete_all": '#all a',                          # 全買い目削除 (開始時クリア用)
@@ -250,12 +251,29 @@ def _login(page, creds: dict) -> None:
             "ログイン後もログインフォームが残存 — ID/PW 誤り・ロック・要セレクタ確認")
 
 
-def _select_payment_opcoin(page) -> None:
-    """支払方法を OPコインに (口座は OPコイン残)。一度だけ呼ぶ。"""
+PAYMENT_OPCOIN = "opcoin"        # 既定: OPコイン残から引落 → VoteConfirm/CompleteOpcoin.do フロー
+PAYMENT_BUYLIMIT = "buylimit"    # 投票資金: 投票資金残から引落 (会員入金額)
+_VALID_PAYMENT_METHODS = {PAYMENT_OPCOIN, PAYMENT_BUYLIMIT}
+
+
+def _select_payment_method(page, method: str = PAYMENT_OPCOIN) -> None:
+    """支払方法 radio を選択する。method=opcoin (既定) | buylimit。
+
+    OPコイン  : `#paymentMethodOpCoin`  (value=1) — OPコイン残 (チャージ済) から引落。
+    投票資金  : `#paymentMethodBuyLimit` (value=0) — 投票資金残 (会員入金) から引落。
+    どちらも radio name=paymentMethod なので排他選択。既選択/不可視は黙って続行する。
+    """
+    sel_key = "payment_opcoin" if method == PAYMENT_OPCOIN else "payment_buylimit"
     try:
-        page.check(SELECTORS["payment_opcoin"])
+        page.check(SELECTORS[sel_key])
     except Exception:  # noqa: BLE001
         pass   # 既選択/不可視でも続行 (人が最終確認)
+
+
+# 後方互換 (旧名 import を壊さない)。新規呼び出しは _select_payment_method を使う。
+def _select_payment_opcoin(page) -> None:
+    """[deprecated] 後方互換: OPコイン選択。新規は _select_payment_method を使うこと。"""
+    _select_payment_method(page, PAYMENT_OPCOIN)
 
 
 def safe_dialog_accept(d) -> None:
@@ -576,7 +594,8 @@ class BettingSession:
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
                  max_total_stake: int = 10_000, login_wait_sec: int = 600,
                  auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
-                 stake_multiplier: float = 1.0) -> None:
+                 stake_multiplier: float = 1.0,
+                 payment_method: str = PAYMENT_OPCOIN) -> None:
         self.headful = headful
         self.manual_login = manual_login
         self.max_total_stake = max_total_stake
@@ -591,6 +610,10 @@ class BettingSession:
         # 例: 1.0=既定 / 2.0=倍掛け / 0.5=半額。per-race 上限/日次上限は維持されるので、
         # 倍率により合計が max_total_stake を超える race は通常通り reject される。
         self.stake_multiplier = float(stake_multiplier) if stake_multiplier else 1.0
+        # 支払方法: opcoin (OPコイン残) または buylimit (投票資金残)。既定は OPコイン。
+        if payment_method not in _VALID_PAYMENT_METHODS:
+            payment_method = PAYMENT_OPCOIN
+        self.payment_method = payment_method
         self.page = None
         self._pw = None
         self.browser = None
@@ -669,7 +692,7 @@ class BettingSession:
             self.page.wait_for_timeout(2000)
         except Exception:  # noqa: BLE001
             self.page.wait_for_timeout(800)   # 既にまとめ画面のことも
-        _select_payment_opcoin(self.page)
+        _select_payment_method(self.page, self.payment_method)
 
     def add_race(self, netkeiba_rid: str, legs: list[CartLeg],
                  label: str = "") -> tuple[str, int]:
@@ -803,7 +826,7 @@ class BettingSession:
             self.page.wait_for_timeout(1500)
             self.page.click(SELECTORS["matome_link"])   # レースまとめ → まとめ画面
             self.page.wait_for_timeout(1500)
-            _select_payment_opcoin(self.page)
+            _select_payment_method(self.page, self.payment_method)
             _shot(self.page, "post_purchase_matome")
             return
         except Exception:  # noqa: BLE001
@@ -831,7 +854,8 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
                 max_total_stake: int = 10_000, poll_sec: int = 5,
                 clear_existing: bool = False,
                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
-                stake_multiplier: float = 1.0) -> None:
+                stake_multiplier: float = 1.0,
+                payment_method: str = PAYMENT_OPCOIN) -> None:
     """常駐 betting セッション: 起動時に人がログイン → queue (`QUEUE_DIR`) を監視し、
     watch-auto が積んだ <netkeiba_rid>.req の snapshot 束を同じブラウザにカート投入し続ける。
 
@@ -846,9 +870,11 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
     sess = BettingSession(headful=headful, manual_login=manual_login,
                           max_total_stake=max_total_stake,
                           auto_purchase=auto_purchase, daily_cap=daily_cap,
-                          stake_multiplier=stake_multiplier)
+                          stake_multiplier=stake_multiplier,
+                          payment_method=payment_method)
     mode = "**自動購入 (実弾)**" if auto_purchase else "半自動 (人が確定)"
-    print(f"[oddspark_bet] 常駐セッション開始 ({mode})。")
+    pay_label = "OPコイン残" if payment_method == PAYMENT_OPCOIN else "投票資金残 (会員入金)"
+    print(f"[oddspark_bet] 常駐セッション開始 ({mode}, 支払={pay_label})。")
     if stake_multiplier != 1.0:
         print(f"[oddspark_bet] ⚠ stake_multiplier={stake_multiplier}x 適用 — 全 leg の stake を "
               f"{stake_multiplier} 倍 (100円単位丸め)。per-race ¥{max_total_stake:,} 超過の race は reject。")
@@ -933,6 +959,7 @@ def _main() -> None:
         poll = 5
         daily_cap = DAILY_CAP_DEFAULT
         stake_multiplier = 1.0
+        payment_method = PAYMENT_OPCOIN
         for a in argv:
             if a.startswith("--poll="):
                 try:
@@ -949,11 +976,19 @@ def _main() -> None:
                     stake_multiplier = max(0.0, float(a.split("=", 1)[1]))
                 except ValueError:
                     print(f"[oddspark_bet] --stake-multiplier 値が不正 ({a}) → 既定 1.0x")
+            elif a.startswith("--payment="):
+                v = a.split("=", 1)[1].strip().lower()
+                if v in _VALID_PAYMENT_METHODS:
+                    payment_method = v
+                else:
+                    print(f"[oddspark_bet] --payment 値が不正 ({a}) → 既定 {payment_method} "
+                          f"(opcoin | buylimit)")
         run_session(
             headful="--headless" not in argv,
             auto_purchase="--auto-purchase" in argv,
             daily_cap=daily_cap,
             stake_multiplier=stake_multiplier,
+            payment_method=payment_method,
             manual_login="--auto-login" not in argv,   # 既定は人がログイン
             poll_sec=poll,
             clear_existing="--clear" in argv,

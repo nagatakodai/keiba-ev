@@ -260,6 +260,8 @@ export type WatchAutoStatus = {
     bet_daily_cap?: number;   // 円
     // セッション中のみ全 leg の stake を N 倍 (100円単位丸め)。per-race 上限 / daily_cap は維持。
     bet_stake_multiplier?: number;
+    // 支払方法: "opcoin" (OPコイン残, 既定) | "buylimit" (投票資金残, 会員入金)
+    bet_payment_method?: "opcoin" | "buylimit";
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -429,6 +431,7 @@ export const api = {
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;
     bet_stake_multiplier?: number;
+    bet_payment_method?: "opcoin" | "buylimit";
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

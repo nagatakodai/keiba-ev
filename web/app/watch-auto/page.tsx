@@ -62,6 +62,8 @@ export default function WatchAutoPage() {
   const [betDailyCap, setBetDailyCap] = useState("50000");
   // セッション中のみ全 leg の stake を倍率倍に (100円単位丸め)。1.0=既定 / 2.0=倍掛け 等。
   const [betStakeMultiplier, setBetStakeMultiplier] = useState("1");
+  // 支払方法: opcoin (OPコイン残, 既定) または buylimit (投票資金残)
+  const [betPaymentMethod, setBetPaymentMethod] = useState<"opcoin" | "buylimit">("opcoin");
 
   // 前回使った設定 (backend に persist 済 status.config) を form の default に流し込む。
   // status は 5s 間隔で polling されるので、ユーザ編集を上書きしないよう初回 config 到着時に
@@ -86,6 +88,8 @@ export default function WatchAutoPage() {
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
     if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
+    if (c.bet_payment_method === "buylimit" || c.bet_payment_method === "opcoin")
+      setBetPaymentMethod(c.bet_payment_method);
   }
 
   const refreshHistory = async () => {
@@ -134,6 +138,7 @@ export default function WatchAutoPage() {
         bet_auto_purchase: betAutoPurchase,
         bet_daily_cap: parseInt(betDailyCap, 10) || 50000,
         bet_stake_multiplier: parseFloat(betStakeMultiplier) || 1.0,
+        bet_payment_method: betPaymentMethod,
       });
       await Promise.all([refreshStatus(), refreshHistory()]);
     } catch (e) {
@@ -380,6 +385,33 @@ export default function WatchAutoPage() {
                     disabled={running}
                     className="w-24"
                   />
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
+                      支払方法
+                    </span>
+                    <div className="flex gap-3 text-sm">
+                      <label className="inline-flex items-center gap-1 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bet_payment_method"
+                          checked={betPaymentMethod === "opcoin"}
+                          onChange={() => setBetPaymentMethod("opcoin")}
+                          disabled={running}
+                        />
+                        OPコイン
+                      </label>
+                      <label className="inline-flex items-center gap-1 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bet_payment_method"
+                          checked={betPaymentMethod === "buylimit"}
+                          onChange={() => setBetPaymentMethod("buylimit")}
+                          disabled={running}
+                        />
+                        投票資金
+                      </label>
+                    </div>
+                  </div>
                 </div>
                 {betAutoPurchase && (
                   <p className="mt-2 text-xs text-(--color-bad)">
