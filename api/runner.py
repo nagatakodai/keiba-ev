@@ -340,6 +340,10 @@ class WatchAutoManager:
 
     def __init__(self) -> None:
         self.job: Job | None = None
+        # オッズパーク投票 daemon (headful ブラウザ・人がログイン)。bet_oddspark=True の時だけ
+        # 起動し、watch-auto 停止で一緒に倒す。watch loop は毎tick フレッシュ subprocess で
+        # ブラウザを保持できないため、ブラウザはこの別の常駐 daemon プロセスが持つ。
+        self.bet_job: Job | None = None
         # 前回使った設定を persist 済 state file から復元しておく。停止中 / API 再起動後
         # でも status.config に「前回値」が乗るので、frontend がそれを form の default に
         # 使える (watch-auto 設定パネルの prefill)。
@@ -362,6 +366,10 @@ class WatchAutoManager:
         return self.job is not None and self.job.status == "running"
 
     @property
+    def bet_running(self) -> bool:
+        return self.bet_job is not None and self.bet_job.status == "running"
+
+    @property
     def config(self) -> dict[str, Any]:
         return dict(self._config)
 
@@ -378,6 +386,7 @@ class WatchAutoManager:
         with_exacta: bool = False,
         with_trio: bool = False,
         active_hours: str = "09:00-23:45",
+        bet_oddspark: bool = False,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -385,6 +394,7 @@ class WatchAutoManager:
                 ev_max=ev_max, min_prob=min_prob, market_blend=market_blend,
                 aptitude_top=aptitude_top, with_exacta=with_exacta,
                 with_trio=with_trio, active_hours=active_hours,
+                bet_oddspark=bet_oddspark,
             )
 
     async def _start_locked(
@@ -400,6 +410,7 @@ class WatchAutoManager:
         with_exacta: bool,
         with_trio: bool,
         active_hours: str,
+        bet_oddspark: bool = False,
     ) -> Job:
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
@@ -426,6 +437,8 @@ class WatchAutoManager:
             inner.append("--with-exacta")
         if with_trio:
             inner.append("--with-trio")
+        if bet_oddspark:
+            inner.append("--bet-oddspark")
         cmd = [
             PY, "-m", "api._watch_loop",
             "--interval", str(interval_sec),
@@ -443,6 +456,7 @@ class WatchAutoManager:
             "aptitude_top": aptitude_top,
             "with_exacta": with_exacta,
             "with_trio": with_trio,
+            "bet_oddspark": bet_oddspark,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -455,10 +469,33 @@ class WatchAutoManager:
         # 続ける無限ループになる。spawn が成功 (running/pending) の時のみ persist。
         if self.job.status in ("pending", "running"):
             _save_watch_state({"should_run": True, "config": self._config})
+        # bet_oddspark なら投票 daemon (headful ブラウザ) を別 subprocess で起動。
+        # watch loop は毎tick フレッシュ subprocess でブラウザを保持できないため、
+        # ブラウザ常駐はこの daemon が担う。env 継承で DISPLAY が無いと headful 起動に失敗する。
+        if bet_oddspark:
+            await self._start_betting_daemon()
         return self.job
+
+    async def _start_betting_daemon(self) -> None:
+        """オッズパーク投票 daemon (`oddspark_bet --session`) を起動。
+
+        headful ブラウザを開き、人がログイン (poll 検出) → queue を消費してカート投入する。
+        **購入確定は人** (#gotobuy は自動で押さない)。uvicorn の env (DISPLAY) を継承するので
+        `make api` を DISPLAY のある端末で起動していればブラウザが画面に出る。
+        """
+        if self.bet_job is not None and self.bet_job.status in ("pending", "running"):
+            return
+        self.bet_job = Job(
+            job_id=f"oddspark-session-{int(time.time())}",
+            label="oddspark-bet-session",
+            cmd=[PY, "-m", "src.oddspark_bet", "--session"],
+        )
+        await self.bet_job.start()
 
     async def stop(self) -> None:
         async with self._ensure_lock():
+            if self.bet_job:
+                await self.bet_job.cancel()   # 投票ブラウザも一緒に閉じる
             if self.job:
                 await self.job.cancel()
             _save_watch_state({"should_run": False, "config": self._config})
@@ -481,6 +518,7 @@ class WatchAutoManager:
                 with_exacta=bool(cfg.get("with_exacta")),
                 with_trio=bool(cfg.get("with_trio")),
                 active_hours=cfg.get("active_hours", "09:00-23:45"),
+                bet_oddspark=bool(cfg.get("bet_oddspark")),
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

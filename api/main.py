@@ -255,6 +255,10 @@ class WatchAutoStartRequest(BaseModel):
     # 範囲外は result fetch のみ動かして race detection はスキップ。
     # JRA 土日 ~9:50-17:00 + NAR ナイター ~14:00-21:00 + ばんえい 等の遅レースを含めて広め。
     active_hours: str = "09:00-23:45"
+    # オッズパーク自動投票 (カート投入)。ON で auto_watch に --bet-oddspark を付け、
+    # 投票 daemon (headful ブラウザ・人がログイン) を起動する。購入確定は常に人。
+    # **headful なので `make api` は DISPLAY のある端末で起動しておくこと** (WSLg 等)。
+    bet_oddspark: bool = False
 
 
 @app.post("/api/watch-auto/start")
@@ -270,22 +274,26 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         with_exacta=req.with_exacta,
         with_trio=req.with_trio,
         active_hours=req.active_hours,
+        bet_oddspark=req.bet_oddspark,
     )
-    return {"running": WATCH.running, "config": WATCH.config, "job": job.to_dict()}
+    return {"running": WATCH.running, "bet_running": WATCH.bet_running,
+            "config": WATCH.config, "job": job.to_dict()}
 
 
 @app.post("/api/watch-auto/stop")
 async def api_watch_stop() -> dict[str, Any]:
     await WATCH.stop()
-    return {"running": WATCH.running, "config": WATCH.config}
+    return {"running": WATCH.running, "bet_running": WATCH.bet_running, "config": WATCH.config}
 
 
 @app.get("/api/watch-auto/status")
 def api_watch_status() -> dict[str, Any]:
     return {
         "running": WATCH.running,
+        "bet_running": WATCH.bet_running,
         "config": WATCH.config,
         "job": WATCH.job.to_dict() if WATCH.job else None,
+        "bet_job": WATCH.bet_job.to_dict() if WATCH.bet_job else None,
     }
 
 

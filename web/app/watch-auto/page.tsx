@@ -54,6 +54,8 @@ export default function WatchAutoPage() {
   const [activeHours, setActiveHours] = useState("09:00-23:45");
   const [withExacta, setWithExacta] = useState(false);
   const [withTrio, setWithTrio] = useState(false);
+  // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) が起動し、人がログイン。
+  const [betOddspark, setBetOddspark] = useState(false);
 
   // 前回使った設定 (backend に persist 済 status.config) を form の default に流し込む。
   // status は 5s 間隔で polling されるので、ユーザ編集を上書きしないよう初回 config 到着時に
@@ -74,6 +76,7 @@ export default function WatchAutoPage() {
     if (c.active_hours != null) setActiveHours(String(c.active_hours));
     if (c.with_exacta != null) setWithExacta(!!c.with_exacta);
     if (c.with_trio != null) setWithTrio(!!c.with_trio);
+    if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
   }
 
   const refreshHistory = async () => {
@@ -118,6 +121,7 @@ export default function WatchAutoPage() {
         active_hours: activeHours.trim() || "09:00-23:45",
         with_exacta: withExacta,
         with_trio: withTrio,
+        bet_oddspark: betOddspark,
       });
       await Promise.all([refreshStatus(), refreshHistory()]);
     } catch (e) {
@@ -321,8 +325,33 @@ export default function WatchAutoPage() {
                 />
                 <span>3 連複も取得 (jiku iter / fetch +40s)</span>
               </label>
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={betOddspark}
+                  onChange={(e) => setBetOddspark(e.target.checked)}
+                  disabled={running}
+                  className="accent-(--color-accent)"
+                />
+                <span>オッズパーク自動投票 (カート投入・要ログイン)</span>
+              </label>
             </div>
+            {betOddspark && (
+              <p className="mt-2 text-xs text-(--color-muted)">
+                ⚠ ON で開始すると <b>headful ブラウザが開きます</b>(人がログイン)。発走前 NAR の束を
+                カートに投入し続けますが、<b>購入確定は常に人が目視で押します</b>(自動では押しません)。
+                ブラウザを表示するには <code>make api</code> を DISPLAY のある端末 (WSLg 等) で起動しておくこと。
+              </p>
+            )}
             {error && <div className="mt-3 text-sm text-(--color-bad)">{error}</div>}
+            {running && status?.config?.bet_oddspark && (
+              <p className="mt-2 text-xs">
+                投票ブラウザ:{" "}
+                {status?.bet_running
+                  ? <span className="text-(--color-accent)">稼働中 — ブラウザでログイン後、束がカートに積まれます (確定は人)</span>
+                  : <span className="text-(--color-bad)">未起動 — DISPLAY 不在等で daemon が落ちた可能性 (ライブログ参照)</span>}
+              </p>
+            )}
             <p className="mt-3 text-xs text-(--color-muted)">
               稼働中はパラメータ変更不可。停止 → 設定変更 → 開始の順で適用。
             </p>
@@ -330,7 +359,7 @@ export default function WatchAutoPage() {
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: 発走${status?.config?.window}〜${(status?.config?.window ?? 0) + (status?.config?.tolerance ?? 0)}分前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}`
+              ? `稼働中: 発走${status?.config?.window}〜${(status?.config?.window ?? 0) + (status?.config?.tolerance ?? 0)}分前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}`
               : "停止中。タイトルをクリックして設定を展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>

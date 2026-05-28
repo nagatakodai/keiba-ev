@@ -238,6 +238,8 @@ export type JobInfo = {
 
 export type WatchAutoStatus = {
   running: boolean;
+  // オッズパーク投票 daemon (headful ブラウザ) が稼働中か。
+  bet_running?: boolean;
   config: {
     window?: number;
     tolerance?: number;
@@ -251,8 +253,11 @@ export type WatchAutoStatus = {
     // race detection を行う JST 時間帯 (HH:MM-HH:MM)。
     // backend (api/main.py:WatchAutoStartRequest) の default は "09:00-23:45"。
     active_hours?: string;
+    // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) を起動。
+    bet_oddspark?: boolean;
   };
   job: JobInfo | null;
+  bet_job?: JobInfo | null;
 };
 
 export type PendingItem = {
@@ -412,8 +417,9 @@ export const api = {
     with_exacta?: boolean;
     with_trio?: boolean;
     active_hours?: string;
+    bet_oddspark?: boolean;
   }) =>
-    jsonFetch<{ running: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
+    jsonFetch<{ running: boolean; bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,
       { method: "POST", body: JSON.stringify(body) },
     ),
