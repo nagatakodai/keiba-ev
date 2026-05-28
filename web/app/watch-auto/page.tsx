@@ -257,7 +257,7 @@ export default function WatchAutoPage() {
                 disabled={running}
               />
               <Input
-                label="TOLERANCE (+分のみ / 発走 window〜window+tol 分前)"
+                label="TOLERANCE (+分のみ / 締切 window〜window+tol 分前 = 発走 +2分の lead)"
                 value={tolerance}
                 onChange={(e) => setTolerance(e.target.value)}
                 disabled={running}
