@@ -284,7 +284,8 @@ def process_pending(
                     kr = fetch_keibago_result(nk)
                     if kr and kr.get("finish_order"):
                         result, reason = ({"finish_order": kr["finish_order"],
-                                           "payout": kr.get("payout", 0)}, "")
+                                           "payout": kr.get("payout", 0),
+                                           "source": "keibago"}, "")
                         _log(f"keiba.go.jp result fallback ok: {nk} {kr['finish_order']}", url)
                 except Exception as ex:  # noqa: BLE001
                     _log(f"keiba.go.jp result fallback failed: {ex}", url)
@@ -294,7 +295,8 @@ def process_pending(
                     jr = fetch_jra_result(nk)
                     if jr and jr.get("finish_order"):
                         result, reason = ({"finish_order": jr["finish_order"],
-                                           "payout": jr.get("payout", 0)}, "")
+                                           "payout": jr.get("payout", 0),
+                                           "source": "jra"}, "")
                         _log(f"JRA result fallback ok: {nk} {jr['finish_order']}", url)
                 except Exception as ex:  # noqa: BLE001
                     _log(f"JRA result fallback failed: {ex}", url)
