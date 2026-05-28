@@ -389,6 +389,7 @@ class WatchAutoManager:
         bet_oddspark: bool = False,
         bet_auto_purchase: bool = False,
         bet_daily_cap: int = 50000,
+        bet_stake_multiplier: float = 1.0,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -399,6 +400,7 @@ class WatchAutoManager:
                 bet_oddspark=bet_oddspark,
                 bet_auto_purchase=bet_auto_purchase,
                 bet_daily_cap=bet_daily_cap,
+                bet_stake_multiplier=bet_stake_multiplier,
             )
 
     async def _start_locked(
@@ -417,6 +419,7 @@ class WatchAutoManager:
         bet_oddspark: bool = False,
         bet_auto_purchase: bool = False,
         bet_daily_cap: int = 50000,
+        bet_stake_multiplier: float = 1.0,
     ) -> Job:
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
@@ -465,6 +468,7 @@ class WatchAutoManager:
             "bet_oddspark": bet_oddspark,
             "bet_auto_purchase": bet_auto_purchase,
             "bet_daily_cap": bet_daily_cap,
+            "bet_stake_multiplier": bet_stake_multiplier,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -484,11 +488,13 @@ class WatchAutoManager:
             await self._start_betting_daemon(
                 auto_purchase=bool(self._config.get("bet_auto_purchase")),
                 daily_cap=int(self._config.get("bet_daily_cap") or 50000),
+                stake_multiplier=float(self._config.get("bet_stake_multiplier") or 1.0),
             )
         return self.job
 
     async def _start_betting_daemon(self, *, auto_purchase: bool = False,
-                                    daily_cap: int = 50000) -> None:
+                                    daily_cap: int = 50000,
+                                    stake_multiplier: float = 1.0) -> None:
         """オッズパーク投票 daemon (`oddspark_bet --session`) を起動。
 
         headful ブラウザを開き、人がログイン (poll 検出) → queue を消費。
@@ -503,9 +509,16 @@ class WatchAutoManager:
         cmd = [PY, "-m", "src.oddspark_bet", "--session", f"--daily-cap={daily_cap}"]
         if auto_purchase:
             cmd.append("--auto-purchase")
+        if stake_multiplier != 1.0:
+            cmd.append(f"--stake-multiplier={stake_multiplier}")
+        label_extra = ""
+        if auto_purchase:
+            label_extra += " [auto-purchase]"
+        if stake_multiplier != 1.0:
+            label_extra += f" [×{stake_multiplier}]"
         self.bet_job = Job(
             job_id=f"oddspark-session-{int(time.time())}",
-            label="oddspark-bet-session" + (" [auto-purchase]" if auto_purchase else ""),
+            label="oddspark-bet-session" + label_extra,
             cmd=cmd,
         )
         await self.bet_job.start()
@@ -539,6 +552,7 @@ class WatchAutoManager:
                 bet_oddspark=bool(cfg.get("bet_oddspark")),
                 bet_auto_purchase=bool(cfg.get("bet_auto_purchase")),
                 bet_daily_cap=int(cfg.get("bet_daily_cap") or 50000),
+                bet_stake_multiplier=float(cfg.get("bet_stake_multiplier") or 1.0),
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

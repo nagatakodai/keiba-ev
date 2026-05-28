@@ -258,6 +258,8 @@ export type WatchAutoStatus = {
     // 自動購入 (実弾): ON で #gotobuy まで自動。daily_cap で日次上限ガード。
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;   // 円
+    // セッション中のみ全 leg の stake を N 倍 (100円単位丸め)。per-race 上限 / daily_cap は維持。
+    bet_stake_multiplier?: number;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -426,6 +428,7 @@ export const api = {
     bet_oddspark?: boolean;
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;
+    bet_stake_multiplier?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

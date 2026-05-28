@@ -301,6 +301,63 @@ def test_confirm_purchase_skipped_when_daily_cap_exceeded(monkeypatch, tmp_path)
     assert ob.get_today_stake() == 49_500   # 加算されていない
 
 
+def test_apply_stake_multiplier_basic():
+    """stake_multiplier=N で各 leg の stake が N 倍 (100円単位丸め)、key/bet_type は不変。"""
+    legs = [
+        ob.CartLeg("wide", [2, 11], 600),
+        ob.CartLeg("win", [7], 300),
+        ob.CartLeg("exacta", [1, 2], 100),
+    ]
+    out = ob._apply_stake_multiplier(legs, 2.0)
+    assert [l.stake for l in out] == [1200, 600, 200]
+    # 元の leg リストは変更しない (新リストを返す)
+    assert [l.stake for l in legs] == [600, 300, 100]
+    # key/bet_type は保存
+    assert out[0].bet_type == "wide" and out[0].key == [2, 11]
+
+
+def test_apply_stake_multiplier_identity_when_one():
+    """multiplier=1.0 は no-op (引数をそのまま返す)。"""
+    legs = [ob.CartLeg("win", [1], 500)]
+    assert ob._apply_stake_multiplier(legs, 1.0) is legs
+
+
+def test_apply_stake_multiplier_min_100():
+    """微小な multiplier でも最低 100 円 (1 円賭けは不可)。"""
+    out = ob._apply_stake_multiplier([ob.CartLeg("win", [1], 100)], 0.1)
+    assert out[0].stake == 100   # 10 にはしない
+
+
+def test_apply_stake_multiplier_rounds_to_100():
+    """100 円単位に四捨五入丸め (150 → 200、149 → 100)。"""
+    # 100 * 1.5 = 150 → round(1.5)*100 = 200
+    assert ob._apply_stake_multiplier([ob.CartLeg("win", [1], 100)], 1.5)[0].stake == 200
+    # 100 * 1.49 = 149 → round(1.49)*100 = 100
+    assert ob._apply_stake_multiplier([ob.CartLeg("win", [1], 100)], 1.49)[0].stake == 100
+
+
+def test_add_race_respects_stake_multiplier(monkeypatch):
+    """BettingSession.stake_multiplier が add_race の cap 判定に反映される。"""
+    monkeypatch.setattr(ob, "_race_meta", lambda r: "20260527_51_9")
+    monkeypatch.setattr(ob, "_select_only_race", lambda p, rv: None)
+    monkeypatch.setattr(ob, "_add_leg_to_cart", lambda p, leg, rv: None)
+    monkeypatch.setattr(ob, "_shot", lambda p, n: None)
+    sess = ob.BettingSession(headful=False, manual_login=True,
+                             max_total_stake=10_000, stake_multiplier=2.0)
+    sess.page = object()
+    # 合計 4000 だが 2倍で 8000 → 範囲内、投入成功
+    legs = [ob.CartLeg("wide", [2, 11], 1500), ob.CartLeg("win", [7], 2500)]
+    st, ok = sess.add_race("202650052709", legs)
+    assert (st, ok) == ("ok", 2)
+    assert sess._session_staked == 8000   # 2 倍適用後 (3000 + 5000)
+    # 合計 6000 だが 2倍で 12000 → 上限超過で reject
+    sess2 = ob.BettingSession(headful=False, manual_login=True,
+                              max_total_stake=10_000, stake_multiplier=2.0)
+    sess2.page = object()
+    with pytest.raises(ob.OddsparkBetError, match="上限"):
+        sess2.add_race("202650052710", [ob.CartLeg("wide", [1, 2], 6000)])
+
+
 def test_confirm_purchase_skipped_when_auto_purchase_off():
     """auto_purchase=False は実弾を撃たない (半自動)。"""
     sess = ob.BettingSession(headful=False, auto_purchase=False)

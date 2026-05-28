@@ -60,6 +60,8 @@ export default function WatchAutoPage() {
   // bet_oddspark が ON でないと意味が無い。daily_cap (円) で日次上限ガード。
   const [betAutoPurchase, setBetAutoPurchase] = useState(false);
   const [betDailyCap, setBetDailyCap] = useState("50000");
+  // セッション中のみ全 leg の stake を倍率倍に (100円単位丸め)。1.0=既定 / 2.0=倍掛け 等。
+  const [betStakeMultiplier, setBetStakeMultiplier] = useState("1");
 
   // 前回使った設定 (backend に persist 済 status.config) を form の default に流し込む。
   // status は 5s 間隔で polling されるので、ユーザ編集を上書きしないよう初回 config 到着時に
@@ -83,6 +85,7 @@ export default function WatchAutoPage() {
     if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
+    if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
   }
 
   const refreshHistory = async () => {
@@ -130,6 +133,7 @@ export default function WatchAutoPage() {
         bet_oddspark: betOddspark,
         bet_auto_purchase: betAutoPurchase,
         bet_daily_cap: parseInt(betDailyCap, 10) || 50000,
+        bet_stake_multiplier: parseFloat(betStakeMultiplier) || 1.0,
       });
       await Promise.all([refreshStatus(), refreshHistory()]);
     } catch (e) {
@@ -368,6 +372,13 @@ export default function WatchAutoPage() {
                     onChange={(e) => setBetDailyCap(e.target.value)}
                     disabled={running || !betAutoPurchase}
                     className="w-32"
+                  />
+                  <Input
+                    label="掛金倍率 (×N)"
+                    value={betStakeMultiplier}
+                    onChange={(e) => setBetStakeMultiplier(e.target.value)}
+                    disabled={running}
+                    className="w-24"
                   />
                 </div>
                 {betAutoPurchase && (

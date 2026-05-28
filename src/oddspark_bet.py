@@ -314,6 +314,20 @@ def record_daily_stake(amount: int) -> int:
     return d[today]
 
 
+def _apply_stake_multiplier(legs: list["CartLeg"], multiplier: float) -> list["CartLeg"]:
+    """各 leg.stake を multiplier 倍 (100円単位に丸め)、新しい CartLeg リストを返す。
+
+    multiplier=1.0 は no-op (引数をそのまま返す)。min 100円 を保証 (1円賭けは不可)。
+    """
+    if multiplier == 1.0:
+        return legs
+    out: list[CartLeg] = []
+    for l in legs:
+        new_stake = max(100, int(round(l.stake * multiplier / 100.0)) * 100)
+        out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=new_stake))
+    return out
+
+
 def check_daily_cap(prospective_stake: int, daily_cap: int) -> tuple[bool, str]:
     """この race の stake (円) を加えても daily_cap 以内か判定。
 
@@ -561,7 +575,8 @@ class BettingSession:
 
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
                  max_total_stake: int = 10_000, login_wait_sec: int = 600,
-                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT) -> None:
+                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
+                 stake_multiplier: float = 1.0) -> None:
         self.headful = headful
         self.manual_login = manual_login
         self.max_total_stake = max_total_stake
@@ -572,6 +587,10 @@ class BettingSession:
         # ④ success marker 検出時のみ daily 加算 (誤検知/失敗で二重購入しない)。
         self.auto_purchase = auto_purchase
         self.daily_cap = daily_cap
+        # **このセッション中のみ** 全 leg の stake を multiplier 倍する (100円単位丸め)。
+        # 例: 1.0=既定 / 2.0=倍掛け / 0.5=半額。per-race 上限/日次上限は維持されるので、
+        # 倍率により合計が max_total_stake を超える race は通常通り reject される。
+        self.stake_multiplier = float(stake_multiplier) if stake_multiplier else 1.0
         self.page = None
         self._pw = None
         self.browser = None
@@ -654,13 +673,20 @@ class BettingSession:
 
     def add_race(self, netkeiba_rid: str, legs: list[CartLeg],
                  label: str = "") -> tuple[str, int]:
-        """1 レースの束をカート投入。戻り値 (status, ok点数)。status: ok/dup。"""
+        """1 レースの束をカート投入。戻り値 (status, ok点数)。status: ok/dup。
+
+        `stake_multiplier != 1.0` のときは leg.stake を倍率倍して 100 円単位に丸める。
+        合計が `max_total_stake` を超えると race ごと reject (倍率込みで安全網が効く)。
+        """
         if netkeiba_rid in self._added:
             return ("dup", 0)
+        if self.stake_multiplier != 1.0:
+            legs = _apply_stake_multiplier(legs, self.stake_multiplier)
         total = sum(l.stake for l in legs)
         if total > self.max_total_stake:
             raise OddsparkBetError(
-                f"レース合計 ¥{total:,} > 上限 ¥{self.max_total_stake:,} — 投入しない")
+                f"レース合計 ¥{total:,} > 上限 ¥{self.max_total_stake:,} "
+                f"(stake_multiplier={self.stake_multiplier}x 適用後) — 投入しない")
         race_val = _race_meta(netkeiba_rid)
         # 対象レースのみ選択 (画面状態がズレていれば まとめ を開き直して再試行)。
         try:
@@ -690,6 +716,10 @@ class BettingSession:
             tag = "[magenta]" if p_status == "ok" else "[yellow]" if p_status == "skipped" else "[red]"
             print(f"  {tag}→ 自動購入 {p_status}:[/] {p_msg}")
             mode_note = f"自動購入 ({p_status})"
+            if p_status == "ok":
+                # 完了画面 → 続けて投票 (#buythru) → レースまとめ (#todayMultiRace) で
+                # 次レース受入準備に戻す。クリック失敗時は _goto_matome に fallback。
+                self._continue_to_matome_after_purchase()
         else:
             mode_note = "**購入確定は人が押す**"
         print(f"[oddspark_bet] {label or netkeiba_rid}: {ok}/{len(legs)} 点 カート投入。"
@@ -764,6 +794,26 @@ class BettingSession:
         return ("ok",
                 f"購入完了 ¥{race_stake:,} (clicked={clicked_sel}, 本日累計 ¥{new_total:,} / 上限¥{self.daily_cap:,})")
 
+    def _continue_to_matome_after_purchase(self) -> None:
+        """購入完了画面 (VoteCompleteOpcoin.do) → 「続けて投票」(#buythru) → まとめ投票
+        (#todayMultiRace) で次レース受入準備に戻す。失敗時は _goto_matome に fallback。
+        """
+        try:
+            self.page.click('#buythru')          # 続けて投票 → VoteKeibaTop.do
+            self.page.wait_for_timeout(1500)
+            self.page.click(SELECTORS["matome_link"])   # レースまとめ → まとめ画面
+            self.page.wait_for_timeout(1500)
+            _select_payment_opcoin(self.page)
+            _shot(self.page, "post_purchase_matome")
+            return
+        except Exception:  # noqa: BLE001
+            pass
+        # フォールバック: 公式ナビが失敗しても URL 直 goto + matome クリックで確実に戻す
+        try:
+            self._goto_matome()
+        except Exception as ex:  # noqa: BLE001
+            print(f"[oddspark_bet] 完了画面→まとめ画面の戻りに失敗: {ex}")
+
     def close(self) -> None:
         try:
             if self.browser is not None:
@@ -780,7 +830,8 @@ class BettingSession:
 def run_session(*, headful: bool = True, manual_login: bool = True,
                 max_total_stake: int = 10_000, poll_sec: int = 5,
                 clear_existing: bool = False,
-                auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT) -> None:
+                auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
+                stake_multiplier: float = 1.0) -> None:
     """常駐 betting セッション: 起動時に人がログイン → queue (`QUEUE_DIR`) を監視し、
     watch-auto が積んだ <netkeiba_rid>.req の snapshot 束を同じブラウザにカート投入し続ける。
 
@@ -794,9 +845,13 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     sess = BettingSession(headful=headful, manual_login=manual_login,
                           max_total_stake=max_total_stake,
-                          auto_purchase=auto_purchase, daily_cap=daily_cap)
+                          auto_purchase=auto_purchase, daily_cap=daily_cap,
+                          stake_multiplier=stake_multiplier)
     mode = "**自動購入 (実弾)**" if auto_purchase else "半自動 (人が確定)"
     print(f"[oddspark_bet] 常駐セッション開始 ({mode})。")
+    if stake_multiplier != 1.0:
+        print(f"[oddspark_bet] ⚠ stake_multiplier={stake_multiplier}x 適用 — 全 leg の stake を "
+              f"{stake_multiplier} 倍 (100円単位丸め)。per-race ¥{max_total_stake:,} 超過の race は reject。")
     if auto_purchase:
         today = get_today_stake()
         print(f"[oddspark_bet] daily_cap: 本日累計 ¥{today:,} / 上限 ¥{daily_cap:,}")
@@ -877,6 +932,7 @@ def _main() -> None:
     if "--session" in argv:
         poll = 5
         daily_cap = DAILY_CAP_DEFAULT
+        stake_multiplier = 1.0
         for a in argv:
             if a.startswith("--poll="):
                 try:
@@ -888,10 +944,16 @@ def _main() -> None:
                     daily_cap = max(0, int(a.split("=", 1)[1]))
                 except ValueError:
                     print(f"[oddspark_bet] --daily-cap 値が不正 ({a}) → 既定 ¥{daily_cap:,}")
+            elif a.startswith("--stake-multiplier="):
+                try:
+                    stake_multiplier = max(0.0, float(a.split("=", 1)[1]))
+                except ValueError:
+                    print(f"[oddspark_bet] --stake-multiplier 値が不正 ({a}) → 既定 1.0x")
         run_session(
             headful="--headless" not in argv,
             auto_purchase="--auto-purchase" in argv,
             daily_cap=daily_cap,
+            stake_multiplier=stake_multiplier,
             manual_login="--auto-login" not in argv,   # 既定は人がログイン
             poll_sec=poll,
             clear_existing="--clear" in argv,
