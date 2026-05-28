@@ -387,6 +387,8 @@ class WatchAutoManager:
         with_trio: bool = False,
         active_hours: str = "09:00-23:45",
         bet_oddspark: bool = False,
+        bet_auto_purchase: bool = False,
+        bet_daily_cap: int = 50000,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -395,6 +397,8 @@ class WatchAutoManager:
                 aptitude_top=aptitude_top, with_exacta=with_exacta,
                 with_trio=with_trio, active_hours=active_hours,
                 bet_oddspark=bet_oddspark,
+                bet_auto_purchase=bet_auto_purchase,
+                bet_daily_cap=bet_daily_cap,
             )
 
     async def _start_locked(
@@ -411,6 +415,8 @@ class WatchAutoManager:
         with_trio: bool,
         active_hours: str,
         bet_oddspark: bool = False,
+        bet_auto_purchase: bool = False,
+        bet_daily_cap: int = 50000,
     ) -> Job:
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
@@ -457,6 +463,8 @@ class WatchAutoManager:
             "with_exacta": with_exacta,
             "with_trio": with_trio,
             "bet_oddspark": bet_oddspark,
+            "bet_auto_purchase": bet_auto_purchase,
+            "bet_daily_cap": bet_daily_cap,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -473,22 +481,32 @@ class WatchAutoManager:
         # watch loop は毎tick フレッシュ subprocess でブラウザを保持できないため、
         # ブラウザ常駐はこの daemon が担う。env 継承で DISPLAY が無いと headful 起動に失敗する。
         if bet_oddspark:
-            await self._start_betting_daemon()
+            await self._start_betting_daemon(
+                auto_purchase=bool(self._config.get("bet_auto_purchase")),
+                daily_cap=int(self._config.get("bet_daily_cap") or 50000),
+            )
         return self.job
 
-    async def _start_betting_daemon(self) -> None:
+    async def _start_betting_daemon(self, *, auto_purchase: bool = False,
+                                    daily_cap: int = 50000) -> None:
         """オッズパーク投票 daemon (`oddspark_bet --session`) を起動。
 
-        headful ブラウザを開き、人がログイン (poll 検出) → queue を消費してカート投入する。
-        **購入確定は人** (#gotobuy は自動で押さない)。uvicorn の env (DISPLAY) を継承するので
-        `make api` を DISPLAY のある端末で起動していればブラウザが画面に出る。
+        headful ブラウザを開き、人がログイン (poll 検出) → queue を消費。
+        - auto_purchase=False (既定): カート投入のみ、購入確定は人。
+        - auto_purchase=True (実弾): #gotobuy → 確認 → 確定 まで自動。daily_cap で日次上限ガード。
+          (`AUTO_PURCHASE_VERIFIED=False` の間は src 側で fail-safe で実弾を撃たない。)
+        uvicorn の env (DISPLAY) を継承するので `make api` を DISPLAY のある端末で起動していれば
+        ブラウザが画面に出る。
         """
         if self.bet_job is not None and self.bet_job.status in ("pending", "running"):
             return
+        cmd = [PY, "-m", "src.oddspark_bet", "--session", f"--daily-cap={daily_cap}"]
+        if auto_purchase:
+            cmd.append("--auto-purchase")
         self.bet_job = Job(
             job_id=f"oddspark-session-{int(time.time())}",
-            label="oddspark-bet-session",
-            cmd=[PY, "-m", "src.oddspark_bet", "--session"],
+            label="oddspark-bet-session" + (" [auto-purchase]" if auto_purchase else ""),
+            cmd=cmd,
         )
         await self.bet_job.start()
 
@@ -519,6 +537,8 @@ class WatchAutoManager:
                 with_trio=bool(cfg.get("with_trio")),
                 active_hours=cfg.get("active_hours", "09:00-23:45"),
                 bet_oddspark=bool(cfg.get("bet_oddspark")),
+                bet_auto_purchase=bool(cfg.get("bet_auto_purchase")),
+                bet_daily_cap=int(cfg.get("bet_daily_cap") or 50000),
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

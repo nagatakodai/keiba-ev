@@ -233,6 +233,71 @@ def test_uncheck_ura_multi_best_effort_no_throw():
     ob._uncheck_ura_multi(_Boom())   # 例外を投げないこと
 
 
+def test_today_jst_format():
+    """JST 日付キー が "YYYY-MM-DD" 形式 (日跨ぎで日次累計リセットのため)。"""
+    s = ob._today_jst()
+    assert len(s) == 10 and s[4] == "-" and s[7] == "-"
+    int(s[:4]); int(s[5:7]); int(s[8:10])   # parse OK
+
+
+def test_daily_stake_record_and_read(monkeypatch, tmp_path):
+    """record_daily_stake が累計、get_today_stake で読み戻し、日付キー別に独立。"""
+    monkeypatch.setattr(ob, "DAILY_STAKE_FILE", tmp_path / "daily.json")
+    assert ob.get_today_stake() == 0           # 初期は 0
+    ob.record_daily_stake(300)
+    ob.record_daily_stake(700)
+    assert ob.get_today_stake() == 1000
+    # 別日付のキーは独立 (= 日跨ぎで自動 reset)
+    monkeypatch.setattr(ob, "_today_jst", lambda: "2099-12-31")
+    assert ob.get_today_stake() == 0
+
+
+def test_check_daily_cap_branches(monkeypatch, tmp_path):
+    monkeypatch.setattr(ob, "DAILY_STAKE_FILE", tmp_path / "daily.json")
+    # 上限無効化 (0以下) は常に allowed
+    allowed, _ = ob.check_daily_cap(1_000_000, 0)
+    assert allowed
+    # 範囲内
+    ob.record_daily_stake(10_000)
+    allowed, msg = ob.check_daily_cap(5_000, 50_000)
+    assert allowed and "15,000" in msg
+    # 超過
+    allowed, msg = ob.check_daily_cap(45_000, 50_000)
+    assert not allowed and "超過" in msg
+
+
+def test_confirm_purchase_skipped_when_flag_disabled(monkeypatch, tmp_path):
+    """AUTO_PURCHASE_VERIFIED=False の間は実弾を撃たず "skipped" を返す (fail-safe)。"""
+    monkeypatch.setattr(ob, "DAILY_STAKE_FILE", tmp_path / "daily.json")
+    monkeypatch.setattr(ob, "AUTO_PURCHASE_VERIFIED", False)
+    sess = ob.BettingSession(headful=False, auto_purchase=True, daily_cap=50_000)
+    sess.page = object()    # page には触れない (skipped で抜けるため)
+    status, msg = sess._confirm_purchase(race_stake=300)
+    assert status == "skipped" and "AUTO_PURCHASE_VERIFIED" in msg
+    # daily_stake は加算されていない
+    assert ob.get_today_stake() == 0
+
+
+def test_confirm_purchase_skipped_when_daily_cap_exceeded(monkeypatch, tmp_path):
+    """daily_cap 超過時は実弾を撃たず "skipped" を返し、daily_stake も加算しない。"""
+    monkeypatch.setattr(ob, "DAILY_STAKE_FILE", tmp_path / "daily.json")
+    monkeypatch.setattr(ob, "AUTO_PURCHASE_VERIFIED", True)   # フラグ ON でも cap でガード
+    ob.record_daily_stake(49_500)
+    sess = ob.BettingSession(headful=False, auto_purchase=True, daily_cap=50_000)
+    sess.page = object()
+    status, msg = sess._confirm_purchase(race_stake=1_000)
+    assert status == "skipped" and "超過" in msg
+    assert ob.get_today_stake() == 49_500   # 加算されていない
+
+
+def test_confirm_purchase_skipped_when_auto_purchase_off():
+    """auto_purchase=False は実弾を撃たない (半自動)。"""
+    sess = ob.BettingSession(headful=False, auto_purchase=False)
+    sess.page = object()
+    status, _ = sess._confirm_purchase(race_stake=500)
+    assert status == "skipped"
+
+
 def test_safe_dialog_accept_swallows_timing_race():
     """Playwright dialog の timing race ("No dialog is showing") を握りつぶす。"""
     class _Closed:

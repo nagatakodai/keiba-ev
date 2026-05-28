@@ -56,6 +56,10 @@ export default function WatchAutoPage() {
   const [withTrio, setWithTrio] = useState(false);
   // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) が起動し、人がログイン。
   const [betOddspark, setBetOddspark] = useState(false);
+  // **自動購入 (実弾)** モード: ON で #gotobuy → 確認画面 → 確定 まで自動 (人の介入なし)。
+  // bet_oddspark が ON でないと意味が無い。daily_cap (円) で日次上限ガード。
+  const [betAutoPurchase, setBetAutoPurchase] = useState(false);
+  const [betDailyCap, setBetDailyCap] = useState("50000");
 
   // 前回使った設定 (backend に persist 済 status.config) を form の default に流し込む。
   // status は 5s 間隔で polling されるので、ユーザ編集を上書きしないよう初回 config 到着時に
@@ -77,6 +81,8 @@ export default function WatchAutoPage() {
     if (c.with_exacta != null) setWithExacta(!!c.with_exacta);
     if (c.with_trio != null) setWithTrio(!!c.with_trio);
     if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
+    if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
+    if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
   }
 
   const refreshHistory = async () => {
@@ -122,6 +128,8 @@ export default function WatchAutoPage() {
         with_exacta: withExacta,
         with_trio: withTrio,
         bet_oddspark: betOddspark,
+        bet_auto_purchase: betAutoPurchase,
+        bet_daily_cap: parseInt(betDailyCap, 10) || 50000,
       });
       await Promise.all([refreshStatus(), refreshHistory()]);
     } catch (e) {
@@ -337,11 +345,41 @@ export default function WatchAutoPage() {
               </label>
             </div>
             {betOddspark && (
-              <p className="mt-2 text-xs text-(--color-muted)">
-                ⚠ ON で開始すると <b>headful ブラウザが開きます</b>(人がログイン)。発走前 NAR の束を
-                カートに投入し続けますが、<b>購入確定は常に人が目視で押します</b>(自動では押しません)。
-                ブラウザを表示するには <code>make api</code> を DISPLAY のある端末 (WSLg 等) で起動しておくこと。
-              </p>
+              <>
+                <p className="mt-2 text-xs text-(--color-muted)">
+                  ⚠ ON で開始すると <b>headful ブラウザが開きます</b>(人がログイン)。発走前 NAR の束を
+                  カートに投入し続けます。ブラウザを表示するには <code>make api</code> を DISPLAY のある端末
+                  (WSLg 等) で起動しておくこと。
+                </p>
+                <div className="mt-3 flex items-end gap-4 flex-wrap">
+                  <label className="inline-flex items-center gap-2 cursor-pointer text-sm">
+                    <input
+                      type="checkbox"
+                      checked={betAutoPurchase}
+                      onChange={(e) => setBetAutoPurchase(e.target.checked)}
+                      disabled={running}
+                      className="accent-(--color-bad)"
+                    />
+                    <span><b className="text-(--color-bad)">⚠ 自動購入 (実弾)</b> — #gotobuy まで自動でクリック (人の介入なし)</span>
+                  </label>
+                  <Input
+                    label="日次上限 (円)"
+                    value={betDailyCap}
+                    onChange={(e) => setBetDailyCap(e.target.value)}
+                    disabled={running || !betAutoPurchase}
+                    className="w-32"
+                  />
+                </div>
+                {betAutoPurchase && (
+                  <p className="mt-2 text-xs text-(--color-bad)">
+                    🚨 <b>実弾モード</b>: 確定ボタンを自動でクリックし、実際に賭けます。per-race ¥10,000 +
+                    日次 ¥{(parseInt(betDailyCap, 10) || 50000).toLocaleString()} を上限としますが、
+                    オッズパーク利用規約および誤発注の責任は使用者にあります。
+                    確認画面の最終ボタン DOM が未検証の間は <code>AUTO_PURCHASE_VERIFIED=False</code> により
+                    src 側で fail-safe (実弾は撃たれない)。実機で 1 回検証後に flag を True に。
+                  </p>
+                )}
+              </>
             )}
             {error && <div className="mt-3 text-sm text-(--color-bad)">{error}</div>}
             {running && status?.config?.bet_oddspark && (

@@ -64,8 +64,24 @@ SELECTORS = {
     # 馬番グリッドのリセット (各脚の前に押して累積/トグルを防ぐ)。実機 DOM 確認済:
     # <a id="reset">リセット</a> (div.control 内なので 馬番/枠番 のみクリア)。
     "umaban_reset": '#reset',
-    # 購入手続は **絶対に押さない** (人が #buylist 確認後に押す)。
+    # 投票内容確認画面への遷移ボタン (まとめ画面)。半自動モードではここで人が止まる。
     "confirm_purchase": '#gotobuy',
+    # 確認画面の **最終購入確定ボタン** (auto_purchase=True で click される最後の関門)。
+    # 実機 DOM 未検証なので _confirm_purchase は複数候補を defensive に試行 + success
+    # marker (受付完了 等) で結果検証する。確定したセレクタが分かったら 1 本に絞る。
+    "confirm_final_candidates": [
+        '#buyBtn', '#confirmBtn', '#purchaseBtn', '#submitBtn', '#voteBtn',
+        'input[type="submit"][value*="購入"]',
+        'input[type="button"][value*="購入"]',
+        'input[type="submit"][value*="確定"]',
+        'input[type="button"][value*="確定"]',
+        'a:has-text("購入確定")',
+        'a:has-text("投票確定")',
+        'button:has-text("購入確定")',
+        'button:has-text("投票確定")',
+    ],
+    # 購入成功の証跡。これを検出できた時だけ daily_stake を加算する (誤検知防止)。
+    "purchase_success_text": '受付完了',  # _confirm_purchase でテキスト一致を見る
 }
 # 当方 bet_type → オッズパーク betType コード (betTypeSelect value, 実機確認済)。
 _BET_TYPE_CODE = {
@@ -78,6 +94,17 @@ _BET_TYPE_CODE = {
 # 1脚 = 単一順列 (馬単[1,2]→組数+1, 3連単[1,2,3]→組数+1, #buylist は 1→2 / 1→2→3 で正順)。
 # 過剰投入 (+2/+6) は `_assert_combo_delta` が捕捉して当該脚を中止する二段の安全。
 _ORDERED_BETS_VERIFIED = True
+
+# 自動購入 (#gotobuy → 確認画面 → 確定 まで完全自動) の安全フラグ。
+# 確認画面の最終ボタン DOM は実機検証が必要なので、AUTO_PURCHASE_VERIFIED=False
+# の間は auto_purchase=True を渡されても `_confirm_purchase` が "skipped" を返す
+# (半自動と同じ挙動)。実機で 1 度 success marker が出ることを確認したら True に。
+AUTO_PURCHASE_VERIFIED = False
+
+# デイリー上限の既定値 (円)。1 日の累計賭金がここを超えると _confirm_purchase が "skipped"
+# を返し、カートはそのまま (人が判断)。日跨ぎ (JST 00:00) で自動的に counter が 0 に戻る。
+DAILY_CAP_DEFAULT = 50_000
+DAILY_STAKE_FILE = ROOT / "data" / "cache" / "oddspark_daily_stake.json"
 # 当方 bet_type → オッズパーク式別の表示値/コード (要確認)。
 _SHIKIBETSU = {
     "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
@@ -229,18 +256,77 @@ def _select_payment_opcoin(page) -> None:
 
 
 def safe_dialog_accept(d) -> None:
-    """削除/セット時の confirm() を自動承認 (購入確定 #gotobuy は押さないので安全)。
+    """削除/セット/購入確定時の confirm() を自動承認。
 
     Playwright の dialog イベント発火時には存在していた dialog が、accept() コールが
     完了する前に閉じる timing race があり、`Dialog.accept: No dialog is showing` が
     handler に上がってログを汚す (機能には影響なし — カート投入は成功する)。実害は
-    無いので握りつぶし、購入確定の安全性は **#gotobuy を一切クリックしない**設計
-    (`SELECTORS["confirm_purchase"]` は production フローで一切呼ばない) で担保する。
+    無いので握りつぶす。半自動モードでは #gotobuy を一切クリックしない設計だが、
+    `auto_purchase=True` モードでは購入確定の dialog も自動承認の対象になる
+    (アプリ層の AUTO_PURCHASE_VERIFIED / daily_cap が買うか買わないかを決める)。
     """
     try:
         d.accept()
     except Exception:  # noqa: BLE001 — Playwright timing race / 既に閉じた dialog
         pass
+
+
+# -------------------------- デイリー上限 / 自動購入 ヘルパ ---------------------
+
+def _today_jst() -> str:
+    """JST の "YYYY-MM-DD"。日次累計のキー。"""
+    import datetime as _dt
+    jst = _dt.timezone(_dt.timedelta(hours=9))
+    return _dt.datetime.now(jst).strftime("%Y-%m-%d")
+
+
+def _load_daily_stake_map() -> dict[str, int]:
+    if not DAILY_STAKE_FILE.exists():
+        return {}
+    try:
+        d = json.loads(DAILY_STAKE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: int(v) for k, v in d.items() if isinstance(v, (int, float))}
+
+
+def _save_daily_stake_map(d: dict[str, int]) -> None:
+    DAILY_STAKE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DAILY_STAKE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.rename(DAILY_STAKE_FILE)   # atomic
+
+
+def get_today_stake() -> int:
+    """本日(JST)の累計購入額(円)。日跨ぎで自動的に 0 に戻る (キーが変わるため)。"""
+    return _load_daily_stake_map().get(_today_jst(), 0)
+
+
+def record_daily_stake(amount: int) -> int:
+    """today's stake に amount を加算して新規累計を返す。**購入 success 検出時のみ呼ぶ**。"""
+    d = _load_daily_stake_map()
+    today = _today_jst()
+    d[today] = d.get(today, 0) + max(0, amount)
+    _save_daily_stake_map(d)
+    return d[today]
+
+
+def check_daily_cap(prospective_stake: int, daily_cap: int) -> tuple[bool, str]:
+    """この race の stake (円) を加えても daily_cap 以内か判定。
+
+    戻り値 (allowed, message)。daily_cap<=0 は無効化扱い (常に allowed)。
+    """
+    if daily_cap <= 0:
+        return (True, "daily_cap 無効 (≤0)")
+    today = get_today_stake()
+    projected = today + max(0, prospective_stake)
+    if projected > daily_cap:
+        return (False,
+                f"日次上限超過: 本日累計¥{today:,} + 本race¥{prospective_stake:,} = "
+                f"¥{projected:,} > 上限¥{daily_cap:,}")
+    return (True,
+            f"日次累計¥{today:,} + 本race¥{prospective_stake:,} "
+            f"→ ¥{projected:,} / 上限¥{daily_cap:,}")
 
 
 def _reset_umaban(page) -> None:
@@ -471,11 +557,18 @@ class BettingSession:
     """
 
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
-                 max_total_stake: int = 10_000, login_wait_sec: int = 600) -> None:
+                 max_total_stake: int = 10_000, login_wait_sec: int = 600,
+                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT) -> None:
         self.headful = headful
         self.manual_login = manual_login
         self.max_total_stake = max_total_stake
         self.login_wait_sec = login_wait_sec
+        # 自動購入: True で add_race の最後に #gotobuy → 確認画面 → 確定 まで自動。
+        # 安全策: ① AUTO_PURCHASE_VERIFIED フラグ (実機検証前は実弾を撃たない)、
+        # ② per-race max_total_stake (既存)、③ daily_cap で日次累計を制限、
+        # ④ success marker 検出時のみ daily 加算 (誤検知/失敗で二重購入しない)。
+        self.auto_purchase = auto_purchase
+        self.daily_cap = daily_cap
         self.page = None
         self._pw = None
         self.browser = None
@@ -588,13 +681,85 @@ class BettingSession:
         _shot(self.page, f"bet_{netkeiba_rid}_filled")
         self._added.add(netkeiba_rid)
         self._session_staked += staked
+        # auto_purchase=True: ここで実際に購入確定 (実弾)。 false なら従来通り人が確定。
+        if self.auto_purchase and staked > 0:
+            p_status, p_msg = self._confirm_purchase(staked)
+            tag = "[magenta]" if p_status == "ok" else "[yellow]" if p_status == "skipped" else "[red]"
+            print(f"  {tag}→ 自動購入 {p_status}:[/] {p_msg}")
+            mode_note = f"自動購入 ({p_status})"
+        else:
+            mode_note = "**購入確定は人が押す**"
         print(f"[oddspark_bet] {label or netkeiba_rid}: {ok}/{len(legs)} 点 カート投入。"
-              f"**購入確定は人が押す** (本セッション投入累計 ¥{self._session_staked:,} 未確定含む)")
-        if self._session_staked > self.max_total_stake:
+              f"{mode_note} (本セッション投入累計 ¥{self._session_staked:,} 未確定含む)")
+        if not self.auto_purchase and self._session_staked > self.max_total_stake:
             print(f"[oddspark_bet] ⚠ 累計 ¥{self._session_staked:,} が per-race 上限 "
                   f"¥{self.max_total_stake:,} 超。**購入確定は #buylist 全体を一括購入する**ので、"
                   "レースごとに確定/クリアして溜め過ぎに注意。")
         return ("ok", ok)
+
+    def _confirm_purchase(self, race_stake: int) -> tuple[str, str]:
+        """カートを #gotobuy → 確認画面 → 確定 で **実際に購入** する。**実弾**。
+
+        戻り値 (status, message)。
+        - "ok": 購入成功 (受付完了 marker 検出 → daily_stake を加算)
+        - "skipped": 条件未充足で実行せず (フラグ未検証 / daily_cap 超過 / auto_purchase=False)
+        - "failed": クリック失敗 / DOM 不一致 / success marker 不検出 (daily_stake は加算しない)
+
+        4 段の安全:
+        ① AUTO_PURCHASE_VERIFIED (実機検証フラグ) が False ならスキップ
+        ② daily_cap で本日累計を制限 → 超過なら NOOP (カート残し人が判断)
+        ③ 確認画面で確定ボタンを **複数候補から検出** + click → success marker を必ず確認
+        ④ success marker 検出時のみ daily_stake を加算 (失敗で二重購入しない)
+        """
+        if not self.auto_purchase:
+            return ("skipped", "auto_purchase=False")
+        if not AUTO_PURCHASE_VERIFIED:
+            return ("skipped",
+                    "AUTO_PURCHASE_VERIFIED=False (確認画面の最終ボタン DOM 未検証なので fail-safe)")
+        allowed, msg = check_daily_cap(race_stake, self.daily_cap)
+        if not allowed:
+            return ("skipped", msg)
+        # 1) 投票内容確認画面へ (#gotobuy = 「投票内容確認」ボタン)
+        try:
+            self.page.click(SELECTORS["confirm_purchase"])
+            self.page.wait_for_timeout(2500)
+        except Exception as ex:  # noqa: BLE001
+            _shot(self.page, "purchase_gotobuy_failed")
+            return ("failed", f"#gotobuy クリック失敗: {ex}")
+        _shot(self.page, "purchase_review")
+        # 2) 確認画面で最終 「確定/購入」 ボタンを click (候補を順に試す)
+        clicked_sel = None
+        for sel in SELECTORS["confirm_final_candidates"]:
+            try:
+                loc = self.page.locator(sel)
+                if loc.count() > 0:
+                    loc.first.click()
+                    clicked_sel = sel
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        if not clicked_sel:
+            _shot(self.page, "purchase_review_no_button")
+            return ("failed",
+                    "確認画面で確定ボタンが見つからない (DOM 未検証 — purchase_review screenshot 参照)")
+        self.page.wait_for_timeout(3000)
+        _shot(self.page, "purchase_after_click")
+        # 3) 成功 marker を検証 (受付完了/投票完了 等のテキスト)
+        success = False
+        try:
+            body_txt = self.page.evaluate(
+                "() => document.body ? document.body.innerText || '' : ''")
+            if any(m in body_txt for m in ("受付完了", "投票完了", "購入完了", "受付しました")):
+                success = True
+        except Exception:  # noqa: BLE001
+            pass
+        if not success:
+            return ("failed",
+                    "成功 marker (受付完了/投票完了 等) を検出できず — "
+                    "実際に購入された/されなかったかブラウザで目視確認推奨")
+        new_total = record_daily_stake(race_stake)
+        return ("ok",
+                f"購入完了 ¥{race_stake:,} (clicked={clicked_sel}, 本日累計 ¥{new_total:,} / 上限¥{self.daily_cap:,})")
 
     def close(self) -> None:
         try:
@@ -611,15 +776,30 @@ class BettingSession:
 
 def run_session(*, headful: bool = True, manual_login: bool = True,
                 max_total_stake: int = 10_000, poll_sec: int = 5,
-                clear_existing: bool = False) -> None:
+                clear_existing: bool = False,
+                auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT) -> None:
     """常駐 betting セッション: 起動時に人がログイン → queue (`QUEUE_DIR`) を監視し、
     watch-auto が積んだ <netkeiba_rid>.req の snapshot 束を同じブラウザにカート投入し続ける。
-    **購入確定は常に人が押す** (自動では絶対に押さない)。Ctrl-C で終了。
+
+    モード:
+    - auto_purchase=False (既定・半自動): カート投入のみ。**購入確定は常に人**。
+    - auto_purchase=True  (実弾・全自動): #gotobuy → 確認画面 → 確定まで自動。
+      per-race ¥{max_total_stake} + 日次 ¥{daily_cap} で二重ガード。AUTO_PURCHASE_VERIFIED が
+      False のうちは fail-safe で実弾を撃たない (実機 DOM 検証後にフラグを True に)。
+    Ctrl-C で終了。
     """
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     sess = BettingSession(headful=headful, manual_login=manual_login,
-                          max_total_stake=max_total_stake)
-    print("[oddspark_bet] 常駐セッション開始 (B案 半自動)。")
+                          max_total_stake=max_total_stake,
+                          auto_purchase=auto_purchase, daily_cap=daily_cap)
+    mode = "**自動購入 (実弾)**" if auto_purchase else "半自動 (人が確定)"
+    print(f"[oddspark_bet] 常駐セッション開始 ({mode})。")
+    if auto_purchase:
+        today = get_today_stake()
+        print(f"[oddspark_bet] daily_cap: 本日累計 ¥{today:,} / 上限 ¥{daily_cap:,}")
+        if not AUTO_PURCHASE_VERIFIED:
+            print("[oddspark_bet] ⚠ AUTO_PURCHASE_VERIFIED=False — 確認画面 DOM 未検証なので "
+                  "実弾は撃たれません (fail-safe)。1 度実機で confirm 画面を検証してフラグを True に。")
     try:
         sess.start(clear_existing=clear_existing)
     except Exception as ex:  # noqa: BLE001
@@ -689,14 +869,22 @@ def _main() -> None:
     # 常駐セッション (watch-auto --bet-oddspark と連携): 起動時に人がログイン → queue 監視。
     if "--session" in argv:
         poll = 5
+        daily_cap = DAILY_CAP_DEFAULT
         for a in argv:
             if a.startswith("--poll="):
                 try:
                     poll = max(1, int(a.split("=", 1)[1]))
                 except ValueError:
                     print(f"[oddspark_bet] --poll 値が不正 ({a}) → 既定 {poll}s")
+            elif a.startswith("--daily-cap="):
+                try:
+                    daily_cap = max(0, int(a.split("=", 1)[1]))
+                except ValueError:
+                    print(f"[oddspark_bet] --daily-cap 値が不正 ({a}) → 既定 ¥{daily_cap:,}")
         run_session(
             headful="--headless" not in argv,
+            auto_purchase="--auto-purchase" in argv,
+            daily_cap=daily_cap,
             manual_login="--auto-login" not in argv,   # 既定は人がログイン
             poll_sec=poll,
             clear_existing="--clear" in argv,

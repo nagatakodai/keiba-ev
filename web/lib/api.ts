@@ -255,6 +255,9 @@ export type WatchAutoStatus = {
     active_hours?: string;
     // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) を起動。
     bet_oddspark?: boolean;
+    // 自動購入 (実弾): ON で #gotobuy まで自動。daily_cap で日次上限ガード。
+    bet_auto_purchase?: boolean;
+    bet_daily_cap?: number;   // 円
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -421,6 +424,8 @@ export const api = {
     with_trio?: boolean;
     active_hours?: string;
     bet_oddspark?: boolean;
+    bet_auto_purchase?: boolean;
+    bet_daily_cap?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

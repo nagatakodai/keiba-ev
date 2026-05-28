@@ -256,9 +256,13 @@ class WatchAutoStartRequest(BaseModel):
     # JRA 土日 ~9:50-17:00 + NAR ナイター ~14:00-21:00 + ばんえい 等の遅レースを含めて広め。
     active_hours: str = "09:00-23:45"
     # オッズパーク自動投票 (カート投入)。ON で auto_watch に --bet-oddspark を付け、
-    # 投票 daemon (headful ブラウザ・人がログイン) を起動する。購入確定は常に人。
+    # 投票 daemon (headful ブラウザ・人がログイン) を起動する。
     # **headful なので `make api` は DISPLAY のある端末で起動しておくこと** (WSLg 等)。
     bet_oddspark: bool = False
+    # 自動購入 (実弾)。ON で #gotobuy → 確認 → 確定 まで自動。daily_cap で日次上限ガード。
+    # AUTO_PURCHASE_VERIFIED=False の間は src 側で fail-safe (実弾を撃たない)。
+    bet_auto_purchase: bool = False
+    bet_daily_cap: int = 50000   # 円
 
 
 @app.post("/api/watch-auto/start")
@@ -275,6 +279,8 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         with_trio=req.with_trio,
         active_hours=req.active_hours,
         bet_oddspark=req.bet_oddspark,
+        bet_auto_purchase=req.bet_auto_purchase,
+        bet_daily_cap=req.bet_daily_cap,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "config": WATCH.config, "job": job.to_dict()}
