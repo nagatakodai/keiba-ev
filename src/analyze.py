@@ -188,28 +188,12 @@ def main(
     _print_bet_tables(bet_tables, aptitude_top_horses=apt_top)
     _print_judgment_notes(rd, rows)
 
-    initial_eval = ""
-    evidence: dict = {}
+    initial_eval = ""   # 3連単 evidence は廃止 (refresh の context 用に空のまま渡す)
     if not no_llm:
-        # LLM に持ち時計を渡す: snapshot 直列化と同じヘルパを再利用
+        # claude による評価は **総合オススメ束(全 bet type 横断)に対する web 検索補強のみ**。
+        # 3連単 単独の evidence (旧 _print_llm_evaluation + parse_evidence) は廃止し、
+        # 1 race = 1 claude call に集約 (search 込みの bundle 選定)。
         best_times_for_llm = _serialize_best_times(rd, feats) if feats else []
-        initial_eval = _print_llm_evaluation(
-            rd, plan_rows, model=llm_model, ev_max=ev_max, min_prob=min_prob, probs=probs,
-            aptitudes=aptitudes, aptitude_top_horses=apt_top,
-            market_signals=market_signals, horse_best_times=best_times_for_llm,
-        )
-        evidence = llm_mod.parse_evidence(initial_eval)
-        if evidence:
-            _print_evidence_adjusted(
-                plan_rows, evidence,
-                hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
-                aptitude_top_horses=apt_top,
-            )
-            if not no_cache:
-                _save_evidence_to_snapshot(
-                    race_id, plan_rows, evidence, apt_top, hit_points=hit_points,
-                )
-        # 「Claude 総合オススメ」まとめ買い束を claude -p で web 検証し、cut を反映して再保存。
         if not no_cache:
             _validate_and_update_bundle(
                 race_id, rd, probs, rows, bet_tables,
@@ -1325,13 +1309,14 @@ def _refresh_and_reevaluate(
     _print_bet_tables(bet_tables2, aptitude_top_horses=apt_top2)
     _print_judgment_notes(rd2, rows2)
 
-    if not no_llm:
-        _print_llm_refresh_evaluation(
-            rd2, plan_rows2, rows_old, initial_eval,
-            model=model, ev_max=ev_max, min_prob=min_prob, probs=probs2,
-            race_id=race_id, no_cache=no_cache,
-            hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
-            aptitudes=aptitudes2, aptitude_top_horses=apt_top2,
+    if not no_llm and not no_cache:
+        # refresh 時も「総合オススメ束への web 検索補強」だけを行う。
+        # 旧 _print_llm_refresh_evaluation の 3連単 evidence は廃止。
+        best_times2_for_llm = _serialize_best_times(rd2, feats2) if feats2 else []
+        _validate_and_update_bundle(
+            race_id, rd2, probs2, rows2, bet_tables2,
+            aptitudes=aptitudes2, market_signals=market_signals2,
+            horse_best_times=best_times2_for_llm, model=model,
         )
 
 

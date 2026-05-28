@@ -270,26 +270,44 @@ def build_bundle_selection_prompt(
     horse_best_times: list[dict] | None = None,
     max_candidates: int = 40,
 ) -> str:
-    """モデル出力 (全 bet type の +EV 候補 + joint Kelly 束) を提示し、**web 検索せず**
-    数値判断のみで最終「買い目」を選ばせる prompt。出力 picks (= 買う leg id 配列)。"""
+    """モデル出力 (joint Kelly 束 + 全 bet type の +EV 候補) を提示し、**web 検索で
+    補強根拠を集めて**最終「買い目 (picks)」を選ばせる prompt。
+
+    CLAUDE.md の検索 MCP 運用ルール (1レース最大6クエリ・補強根拠 3+/2/1/0 の加減点・
+    Plan 入りの最終ルール) を統合。3連単単独の補強は廃止し、全 bet type 横断の総合
+    オススメ束のみを検索で補強する。出力 picks (= 買う leg id 配列) + per-leg notes
+    (補強根拠数+内容) + cuts + summary + confidence。
+    """
     r = rd.race
     legs = bundle.get("legs", [])
     horse_name = {h.number: h.name for h in r.horses}
     # 候補は P×O 降順で上位 max_candidates 件 (= モデルの +EV 出力)
     pool = sorted(candidates, key=lambda c: c.get("px_o", 0.0), reverse=True)[:max_candidates]
     bundle_ids = {leg_id(leg) for leg in legs}
+    # 検索対象は ① 束(★) の全脚 ② 束外の高 P×O 候補上位 (合算で <=8 程度を目安)
+    bundle_ids_list = [leg_id(leg) for leg in legs]
 
+    # 開催日: start_at(unix) から JST 日付に変換 (検索クエリの「馬場状態 YYYYMMDD」用)。
+    import datetime as _dt
+    if r.start_at:
+        kaisai_date = _dt.datetime.fromtimestamp(r.start_at).strftime("%Y-%m-%d")
+    else:
+        kaisai_date = "当日"
     lines = [
         f"# レース: {r.venue_name} {r.race_number}R ({r.race_class}) "
         f"{r.surface}{r.distance}m {r.weather_text}",
+        f"開催日: {kaisai_date}",
         "",
-        "あなたは確率モデルの出力を最終判断する馬券選定者です。**web 検索は使わず**、"
-        "下記モデル出力の数値 (推定P・オッズ・P×O・Kelly・適性) のみで判断してください。",
+        "あなたは確率モデルの出力に **web 検索の補強根拠** を重ねて最終買い目を決める"
+        "馬券選定者です。モデルが出した「総合オススメ束(joint Kelly)」を尊重しつつ、"
+        "**Brave Search / Tavily** で各脚の馬・騎手・コース適性・取消/体調を検証し、"
+        "補強根拠の量と質で picks (買う) / cuts (外す) を判断してください。",
         "",
         "## モデルの joint Kelly 束 (モデル推奨・配分付き) ★が束採用",
         f"投資総額 ¥{bundle.get('total_stake', 0):,} / 束の的中率(1点以上) "
         f"{bundle.get('bundle_hit_prob', 0) * 100:.1f}% / min払戻比 "
         f"{bundle.get('min_payout_ratio', 0):.2f}",
+        f"束採用 leg ids: {bundle_ids_list}",
         "",
         "## モデルの +EV 候補 (P×O 降順, 全 bet type 横断)",
         "| id | 種別 | 買い目 | オッズ | 推定P | P×O | Kelly | 束 |",
@@ -314,17 +332,52 @@ def build_bundle_selection_prompt(
 
     lines += [
         "",
+        "## 検索 MCP の運用ルール (CLAUDE.md 準拠)",
+        "**検索対象の優先**: 束採用 leg(★) の登場馬 + 束外の高 P×O 候補(P×O≥2.0 等)。",
+        "**検索すべき情報**(優先度順):",
+        "  1. 馬の直近5走の着順詳細・距離適性・コース実績",
+        "  2. 騎手の当該コース成績 / 主戦騎手 vs 乗り替わり",
+        "  3. 当日の馬場状態 (高速 / 重 / 渋り) と当該馬の馬場適性",
+        "  4. 厩舎調整 / パドック気配 / 馬体重変化",
+        "  5. 取消・除外・体調不安 (絡む目を全カットする根拠)",
+        "**検索すべきでないこと**: 既に上表に出ている数値 (オッズ/人気/推定P)、競馬の基本ルール、"
+        "1か月以上前の汎用情報。",
+        "**検索予算**: 1 レースあたり**最大 6 クエリ** (Brave + Tavily 合算)。クエリ前に必ず"
+        "「この検索で何が決まるか」を 1 行で説明する。",
+        "**クエリのテンプレ**: \"<馬名>\" 直近5走 / \"<馬名>\" <距離>m <芝|ダ> / "
+        "\"<騎手名>\" <競馬場> 成績 / <場名> 馬場状態 <YYYYMMDD> / \"<馬名>\" 取消 OR 体調",
+        "",
+        "## 補強根拠による加点・減点ルール",
+        "| 検索で見つかった根拠 | アクション |",
+        "|---|---|",
+        "| 距離 / コース / 馬場適性が良い | **+補強根拠 1** |",
+        "| 直近5走で 2-3 着率突出 | **+補強根拠 1** |",
+        "| 騎手が当該コース得意 | **+補強根拠 1** |",
+        "| 馬体重大幅減 (-10kg超) / 大幅増 (+10kg超) | **−補強根拠 1** |",
+        "| 取消 / 除外 / 体調不安 | **絡む目を全カット (必ず cuts に入れる)** |",
+        "",
+        "## picks/cuts の最終ルール",
+        "- **コア** (補強3件以上)        → picks に必ず入れる、可能なら厚め",
+        "- **採用** (補強2件)            → picks 候補 (Kelly/P×O が許せば入れる)",
+        "- **保留** (補強1件のみ)        → picks 外す (cuts へ) — 確率モデルの楽観バイアス警戒",
+        "- **却下** (補強0件 or 否定根拠) → cuts に入れる",
+        "- **絶対却下** (取消/致命的マイナス) → 関連する全 leg を cuts に",
+        "",
         "## 指示",
-        "1. モデルの +EV 候補をすべて見て、**実際に買う買い目 (picks)** を選ぶ。",
-        "2. 基本はモデルの joint Kelly 束 (★) を尊重しつつ、P×O が薄い/Kelly が極小/適性が"
-        "   低い脚は外し、確率・P×O・適性が噛み合う堅い脚を残す。点数は絞ってよい。",
-        "3. **web 検索・外部情報は使わない** (モデル出力の数値判断のみ)。",
-        "4. picks は上表の id をそのまま使う。トリガミ防止のため最終配分は別途モデルが再計算する。",
+        "1. まず束採用 leg(★)を中心に検索で補強。検索クエリは出し惜しまず、ただし 6 本以内。",
+        "2. **picks** = 実際に買う leg id 配列。**cuts** = モデル候補のうち外す leg id 配列。",
+        "3. picks/cuts ともに上表の id をそのまま使う(`win:7` / `wide:2-11` / `trifecta:1-2-3` 形式)。",
+        "4. picks=[] (空配列) は「明示的な見送り(賭けない)」を意味する。**確証が無い時はためらわず []**。",
+        "5. notes は picks 各 leg について補強根拠の **件数 + 内容**(検索で何がわかったか)を 1-2 行で。",
+        "6. 検索で決定的な否定根拠(取消等)を見つけたら必ず cuts に入れる。",
+        "7. トリガミ防止の最終配分はモデルが再計算するので、stake は決めなくてよい。",
         "",
         "最後に必ず以下の JSON を ```json ... ``` で出力:",
         "```json",
-        '{"picks": ["win:7", "wide:2-11"], "notes": {"win:7": "理由"}, '
-        '"summary": "選定の総評", "confidence": "high|mid|low"}',
+        '{"picks": ["win:7", "wide:2-11"],'
+        ' "cuts": ["trifecta:9-4-2"],'
+        ' "notes": {"win:7": "補強3件: ①距離適性◎ ②騎手当該場勝率18% ③直近3走連対"},'
+        ' "summary": "選定の総評", "confidence": "high|mid|low"}',
         "```",
     ]
     return "\n".join(lines)
@@ -341,8 +394,10 @@ def select_bundle_stream(
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
 ) -> Iterator[tuple[str, Any]]:
-    """モデル出力から最終買い目を選ばせる stream-json。**web 検索なし** (ツール無効)。
-    evaluate_stream と同じ event 形式を yield。"""
+    """モデル出力から最終買い目を選ばせる stream-json。**web 検索を使った補強有り**
+    (Brave/Tavily/WebFetch/Read を許可)。CLAUDE.md の検索ルールに従って per-leg の
+    補強根拠を集め、picks/cuts/notes を返す。evaluate_stream と同じ event 形式を yield。
+    """
     if not is_available():
         yield ("error", "claude CLI が見つかりません")
         return
@@ -360,8 +415,10 @@ def select_bundle_stream(
         "--verbose",
         "--no-session-persistence",
         "--permission-mode", "bypassPermissions",
-        "--allowedTools", "",   # web 検索を含む全ツール無効 (モデル出力の数値判断のみ)
-        "--disallowedTools", DISALLOWED_TOOLS + "," + ",".join(ALLOWED_TOOLS),
+        # web 検索系 (Brave/Tavily/WebFetch) + 過去 snapshot 読み込み用 Read を許可。
+        # 検索ルール (1レース最大6クエリ・補強根拠 3+/2/1/0 加減点) は prompt 側で制約。
+        "--allowedTools", ",".join(ALLOWED_TOOLS),
+        "--disallowedTools", DISALLOWED_TOOLS,
     ]
     proc = subprocess.Popen(
         cmd, cwd=str(ROOT),

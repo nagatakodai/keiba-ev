@@ -520,17 +520,8 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_jra] snapshot 保存失敗: {ex}")
         if with_llm:
-            from . import llm as llm_mod
-            try:
-                initial = az_mod._print_llm_evaluation(
-                    rd, plan_rows, model="opus", probs=probs, aptitudes=aptitudes,
-                    aptitude_top_horses=apt_top, market_signals=market_signals,
-                    horse_best_times=best_times)
-                evidence = llm_mod.parse_evidence(initial)
-                if evidence:
-                    az_mod._save_evidence_to_snapshot(race_id, plan_rows, evidence, apt_top, hit_points=3)
-            except Exception as ex:  # noqa: BLE001
-                print(f"[analyze_jra] LLM evidence 失敗: {ex}")
+            # claude 評価は **総合オススメ束に対する web 検索補強のみ**
+            # (3連単単独の evidence は廃止、1 race = 1 claude call に集約)。
             try:
                 az_mod._validate_and_update_bundle(
                     race_id, rd, probs, tri_table, snap_bet_tables,
