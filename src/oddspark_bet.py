@@ -72,10 +72,12 @@ _BET_TYPE_CODE = {
     "win": "1", "place": "2", "quinella": "5", "exacta": "6",
     "wide": "7", "trio": "8", "trifecta": "9",
 }
-# 馬単/3連単 (順序付き) の自動投入可否。裏目/マルチ (全順列化) サブオプションを確実に
-# OFF にできると実機検証できたら True にする (それまで fail-safe で見送り)。
-# 順不同 (単複/馬連/ワイド/3連複) はこのオプションが無いので常に投入可 (実機確認済)。
-_ORDERED_BETS_VERIFIED = False
+# 馬単/3連単 (順序付き) の自動投入可否。実機検証済 (2026-05-28 笠松1R, persistent profile):
+# まとめ画面で 馬単/3連単 を選んでも 裏目/マルチ は既定 OFF (<a id="betType{N}MultiFlag"
+# class="btn-urame|btn-multi"> は `disabled`→選択で enabled だが ON クラス無し) で、
+# 1脚 = 単一順列 (馬単[1,2]→組数+1, 3連単[1,2,3]→組数+1, #buylist は 1→2 / 1→2→3 で正順)。
+# 過剰投入 (+2/+6) は `_assert_combo_delta` が捕捉して当該脚を中止する二段の安全。
+_ORDERED_BETS_VERIFIED = True
 # 当方 bet_type → オッズパーク式別の表示値/コード (要確認)。
 _SHIKIBETSU = {
     "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
@@ -308,26 +310,25 @@ def _combo_count(page) -> int | None:
 
 
 def _uncheck_ura_multi(page) -> None:
-    """馬単[裏目]/3連単[マルチ] (着順入替えの全順列化) サブオプションを OFF にする。
+    """馬単[裏目]/3連単[マルチ] (着順入替えの全順列化) を OFF にする。
 
-    オンだと「選択した着順を入替えた全組合せ」になり 順列数×stake で過剰投入になる
-    (順不同の 単複/馬連/ワイド/3連複 にはこの sub-option は無い)。要素 id 不明なので
-    ラベル文字列 '裏目'/'マルチ' に紐づく checkbox を best-effort で uncheck し、
-    取りこぼしは `_assert_combo_delta` の 組数=1 検証で最終捕捉する (二段の安全)。
-    click() で外す (onchange JS を発火させるため checked=false ではなく)。
+    まとめ画面では betType checkbox の隣の **トグルリンク** `<a id="betType{N}MultiFlag"
+    class="btn-urame|btn-multi ...">裏目/マルチ</a>` で制御 (チェックボックスではない)。
+    `disabled` クラスは無効(=OFF)。`on`/`active`/`selected` 等の有効クラスが付いていたら
+    全順列化されるので click して OFF にする。要素 id (betType4/6/9MultiFlag) で確実に
+    特定でき、checkbox には一切触れない (賭式選択を誤って外さない)。取りこぼしは
+    `_assert_combo_delta` の 組数=1 検証で最終捕捉する (二段の安全)。
     """
-    for word in ("裏目", "マルチ"):
-        try:
-            page.evaluate(
-                "(w) => { for (const cb of document.querySelectorAll("
-                "'input[type=checkbox]')) {"
-                " const lbl = (cb.closest('label') ? cb.closest('label').innerText : '')"
-                " + (cb.labels ? Array.from(cb.labels).map(l=>l.innerText).join('') : '')"
-                " + (cb.nextElementSibling ? cb.nextElementSibling.innerText : '')"
-                " + (cb.parentElement ? cb.parentElement.innerText : '');"
-                " if (lbl.indexOf(w) >= 0 && cb.checked) cb.click(); } }", word)
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        page.evaluate(
+            "() => { for (const a of document.querySelectorAll("
+            "'a[id^=\"betType\"][id$=\"MultiFlag\"]')) {"
+            " const c = ' ' + (a.className || '') + ' ';"
+            " if (c.indexOf(' disabled ') < 0 &&"
+            " /( on | active | selected | btn-urame-on | btn-multi-on )/.test(c)) a.click();"
+            " } }")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _assert_combo_delta(page, before: int | None, leg: CartLeg) -> None:
@@ -358,10 +359,8 @@ def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
     順序 (実機準拠): 金額入力 → レースチェック → 賭式選択 → (順序付きは裏目/マルチ OFF)
     → 馬番選択 → セット → 組数=+1 検証。
     """
-    # 馬単/3連単 (順序付き) は 裏目/マルチ サブオプション (全順列化) の制御が未検証。
-    # _uncheck_ura_multi (OFF 処理) + _assert_combo_delta (組数=1 検証) は実装済だが、
-    # フラグの flip は実機 DOM で「裏目/マルチ OFF → #buylist 組数=1」を1度目視確認して
-    # から (CLAUDE.md の precondition)。それまでは fail-safe で見送る (手動投入は可)。
+    # 馬単/3連単 (順序付き) は実機検証済 (_ORDERED_BETS_VERIFIED=True)。万一フラグを False に
+    # 戻した場合は fail-safe で見送る (裏目/マルチ の全順列化制御が未検証扱いになるため)。
     if leg.bet_type in ("exacta", "trifecta") and not _ORDERED_BETS_VERIFIED:
         raise OddsparkBetError(
             f"{leg.bet_type} は裏目/マルチ(全順列)制御が未検証のため自動投入を見送り — "

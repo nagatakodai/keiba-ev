@@ -158,12 +158,19 @@ def test_add_race_failed_leg_not_counted(monkeypatch):
     assert ok == 1 and sess._session_staked == 600   # 失敗脚 600 は露出に含めない
 
 
-def test_ordered_bets_skipped_until_verified():
-    """馬単/3連単 は裏目/マルチ未検証の間 fail-safe で見送る (page に触れる前に raise)。"""
-    assert ob._ORDERED_BETS_VERIFIED is False   # 既定は fail-safe
+def test_ordered_bets_enabled_after_verification():
+    """馬単/3連単 は実機検証済 (2026-05-28 笠松1R: 組数+1) なので投入可。
+
+    過剰投入 (裏目/マルチ の +2/+6) は _add_leg_to_cart 内の _assert_combo_delta が
+    捕捉して当該脚を中止する (別テスト test_assert_combo_delta_* で検証済)。
+    """
+    assert ob._ORDERED_BETS_VERIFIED is True
+    # フラグ True なら page に触れる前の "見送り" 早期 raise はしない (page=None なら
+    # 賭式選択時に AttributeError 等。"見送り" メッセージでないことだけ確認)。
     for bt in ("exacta", "trifecta"):
-        with pytest.raises(ob.OddsparkBetError, match="見送り"):
+        with pytest.raises(Exception) as ei:
             ob._add_leg_to_cart(None, ob.CartLeg(bt, [1, 2, 3], 100), "20260527_51_9")
+        assert "見送り" not in str(ei.value)
 
 
 # --- 組数 (combination count) ガード: 裏目/マルチ・馬番累積の過剰投入を捕捉 ---
