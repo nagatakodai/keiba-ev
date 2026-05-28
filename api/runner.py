@@ -489,11 +489,16 @@ class WatchAutoManager:
         # watch loop は毎tick フレッシュ subprocess でブラウザを保持できないため、
         # ブラウザ常駐はこの daemon が担う。env 継承で DISPLAY が無いと headful 起動に失敗する。
         if bet_oddspark:
+            # ここも `or 既定` を避ける (cap=0 等の意図的な値が消えるバグ防止)
+            cfg = self._config
             await self._start_betting_daemon(
-                auto_purchase=bool(self._config.get("bet_auto_purchase")),
-                daily_cap=int(self._config.get("bet_daily_cap") or 50000),
-                stake_multiplier=float(self._config.get("bet_stake_multiplier") or 1.0),
-                payment_method=str(self._config.get("bet_payment_method") or "opcoin"),
+                auto_purchase=bool(cfg.get("bet_auto_purchase")),
+                daily_cap=int(cfg["bet_daily_cap"])
+                    if cfg.get("bet_daily_cap") is not None else 50000,
+                stake_multiplier=float(cfg["bet_stake_multiplier"])
+                    if cfg.get("bet_stake_multiplier") is not None else 1.0,
+                payment_method=str(cfg["bet_payment_method"])
+                    if cfg.get("bet_payment_method") else "opcoin",
             )
         return self.job
 
@@ -560,9 +565,14 @@ class WatchAutoManager:
                 active_hours=cfg.get("active_hours", "09:00-23:45"),
                 bet_oddspark=bool(cfg.get("bet_oddspark")),
                 bet_auto_purchase=bool(cfg.get("bet_auto_purchase")),
-                bet_daily_cap=int(cfg.get("bet_daily_cap") or 50000),
-                bet_stake_multiplier=float(cfg.get("bet_stake_multiplier") or 1.0),
-                bet_payment_method=str(cfg.get("bet_payment_method") or "opcoin"),
+                # `or default` だと意図的に 0 / 1.0 / "opcoin" を入れた場合に既定で上書き
+                # されてしまう (例: cap=0 で無効化したつもりが 50000 に戻る)。None のときだけ既定。
+                bet_daily_cap=int(cfg["bet_daily_cap"])
+                    if cfg.get("bet_daily_cap") is not None else 50000,
+                bet_stake_multiplier=float(cfg["bet_stake_multiplier"])
+                    if cfg.get("bet_stake_multiplier") is not None else 1.0,
+                bet_payment_method=str(cfg["bet_payment_method"])
+                    if cfg.get("bet_payment_method") else "opcoin",
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

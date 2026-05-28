@@ -70,15 +70,11 @@ SELECTORS = {
     # 確認画面 (VoteConfirmOpcoin.do) の **最終購入確定ボタン**。実機 HTML で確認済 (2026-05-28):
     # <a href="#" onclick="clickVoteComplete();" id="buy">投票を申込</a>
     # form name=voteCompleteOpcoinForm action=/keiba/auth/VoteCompleteOpcoin.do で確定 POST。
-    # フォールバック (UI 改修への保険): id=buy が消えた時のための候補。
+    # 厳格セレクタのみ: #buy が無ければ即 failed で止める (FAQ 等の「購入確定」テキストを
+    # 誤クリック → 関係ない場所に navigate → 別ページの body 文言で成功誤検知の経路を防ぐ)。
     "confirm_final_candidates": [
         '#buy',                                # 確定 (id 単独で一意)
-        'a[onclick*="clickVoteComplete"]',     # 確定の onclick で抽出する保険
-        'a:has-text("投票を申込")',
-        'a:has-text("購入確定")',
-        'a:has-text("投票確定")',
-        'button:has-text("投票を申込")',
-        'input[type="submit"][value*="投票を申込"]',
+        'a[onclick*="clickVoteComplete"]',     # 確定の onclick (id 消えた時の保険、形が固有)
     ],
     # 購入成功の証跡 (VoteCompleteOpcoin.do の実 HTML 確認済 2026-05-28 園田10R 700円):
     # h2 = "投票申込完了" / body = "投票申込を受け付けました。" / 表 = "成立組数" "成立合計金額"。
@@ -261,13 +257,30 @@ def _select_payment_method(page, method: str = PAYMENT_OPCOIN) -> None:
 
     OPコイン  : `#paymentMethodOpCoin`  (value=1) — OPコイン残 (チャージ済) から引落。
     投票資金  : `#paymentMethodBuyLimit` (value=0) — 投票資金残 (会員入金) から引落。
-    どちらも radio name=paymentMethod なので排他選択。既選択/不可視は黙って続行する。
+    どちらも radio name=paymentMethod なので排他選択。
+
+    **検証付き**: check 後に is_checked() で確認し、要求した radio が選択されていない
+    時は OddsparkBetError を raise (誤って別の支払元から引落される silent failure を防ぐ)。
+    radio が画面に存在しない場合 (まだ matome に遷移してない等) は黙って続行 (DOM 不安定)。
     """
     sel_key = "payment_opcoin" if method == PAYMENT_OPCOIN else "payment_buylimit"
     try:
         page.check(SELECTORS[sel_key])
     except Exception:  # noqa: BLE001
-        pass   # 既選択/不可視でも続行 (人が最終確認)
+        pass   # 既選択/transient 失敗 → 下の is_checked で最終判定
+    # 検証: radio が存在するなら必ず checked であることを確かめる
+    try:
+        loc = page.locator(SELECTORS[sel_key])
+        if loc.count() == 0:
+            return                              # radio 不在 → DOM 未到達、黙って続行
+        if not loc.first.is_checked():
+            raise OddsparkBetError(
+                f"支払方法 {method} の radio が選択されていない — 別の支払元から誤って "
+                f"引落される危険があるため中止 (selector={SELECTORS[sel_key]})")
+    except OddsparkBetError:
+        raise
+    except Exception:  # noqa: BLE001
+        pass   # is_checked 自体の失敗 (DOM unstable) → 黙って続行
 
 
 # 後方互換 (旧名 import を壊さない)。新規呼び出しは _select_payment_method を使う。
@@ -746,6 +759,21 @@ class BettingSession:
                 #   = カート未確定なので資金は動いていない、安全側)。
                 # skipped: まとめ画面のまま (#gotobuy をクリックする前に return している)
                 self._continue_to_matome_after_purchase()
+            elif p_status == "skipped" and "超過" in p_msg:
+                # **CRITICAL**: daily_cap 超過で skip された race の脚はカートに残ったまま。
+                # 次レースが add_race に来て #gotobuy を押すと、leftover legs + 次レース legs が
+                # 一括購入されるが daily_stake には次レース分しか加算されない → cap 突破。
+                # まとめ画面で「全買い目削除 (#all a)」を click して cart 全消ししてから抜ける。
+                try:
+                    da = self.page.locator(SELECTORS["delete_all"])
+                    if da.count() > 0:
+                        da.first.click()
+                        self.page.wait_for_timeout(500)
+                        print("  [yellow]→ daily_cap 超過のためカート全削除 (#all a) で次レース"
+                              "への漏れ防止[/]")
+                except Exception as ex:  # noqa: BLE001
+                    print(f"  [red]⚠ カート削除に失敗 — 次レースで leftover が一括購入される"
+                          f"危険 (手動で全買い目削除推奨): {ex}[/]")
         else:
             mode_note = "**購入確定は人が押す**"
         print(f"[oddspark_bet] {label or netkeiba_rid}: {ok}/{len(legs)} 点 カート投入。"
@@ -803,18 +831,25 @@ class BettingSession:
                     "確認画面で確定ボタンが見つからない (DOM 未検証 — purchase_review screenshot 参照)")
         self.page.wait_for_timeout(3000)
         _shot(self.page, "purchase_after_click")
-        # 3) 成功 marker を検証 (VoteCompleteOpcoin.do の実 HTML 確認済 2026-05-28 園田10R)
+        # 3) 成功 marker を検証 — 偽陽性 (誤検知で daily_stake 加算 → cap bypass) を防ぐため
+        #    3条件を AND 結合:
+        #    (a) URL が VoteComplete... に遷移している (= 確定 POST が走った)
+        #    (b) h2 に「投票申込完了」 (完了画面固有の見出し)
+        #    (c) body に成功 marker (受け付けました/成立組数/投票申込完了 のいずれか)
         success = False
         try:
+            url = self.page.url or ""
+            is_complete_url = "VoteComplete" in url
+            has_h2 = self.page.locator('h2:has-text("投票申込完了")').count() > 0
             body_txt = self.page.evaluate(
                 "() => document.body ? document.body.innerText || '' : ''")
-            if any(m in body_txt for m in SELECTORS["purchase_success_markers"]):
-                success = True
+            has_marker = any(m in body_txt for m in SELECTORS["purchase_success_markers"])
+            success = is_complete_url and has_h2 and has_marker
         except Exception:  # noqa: BLE001
             pass
         if not success:
             return ("failed",
-                    f"成功 marker ({'/'.join(SELECTORS['purchase_success_markers'])}) を検出できず — "
+                    "成功 marker (URL=VoteComplete... + h2=投票申込完了 + body 文言) を検出できず — "
                     "実際に購入された/されなかったかブラウザで目視確認推奨")
         new_total = record_daily_stake(race_stake)
         return ("ok",

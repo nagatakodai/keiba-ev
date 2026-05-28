@@ -136,8 +136,17 @@ export default function WatchAutoPage() {
         with_trio: withTrio,
         bet_oddspark: betOddspark,
         bet_auto_purchase: betAutoPurchase,
-        bet_daily_cap: parseInt(betDailyCap, 10) || 50000,
-        bet_stake_multiplier: parseFloat(betStakeMultiplier) || 1.0,
+        // 0 を許容 (cap=0 で無効化を意図的に表現できる)。NaN/負値だけ既定に戻す。
+        bet_daily_cap: (() => {
+          const v = parseInt(betDailyCap, 10);
+          return Number.isFinite(v) && v >= 0 ? v : 50000;
+        })(),
+        // 0 を許容 (cap=0 で無効化、multiplier は backend Pydantic で gt=0 拒否される)。
+        // `|| default` だと 0 が既定で上書きされ意図と異なる挙動になるため NaN 判定で分岐。
+        bet_stake_multiplier: (() => {
+          const v = parseFloat(betStakeMultiplier);
+          return Number.isFinite(v) && v > 0 ? v : 1.0;
+        })(),
         bet_payment_method: betPaymentMethod,
       });
       await Promise.all([refreshStatus(), refreshHistory()]);

@@ -322,6 +322,38 @@ def test_select_payment_method_dispatches_to_right_selector():
     assert seen[-1] == ob.SELECTORS["payment_buylimit"]  # #paymentMethodBuyLimit
 
 
+def test_select_payment_method_raises_when_radio_unchecked():
+    """is_checked() が False を返したら OddsparkBetError を raise (silent fallback 防止)。"""
+    class _Loc:
+        def __init__(self, checked): self._checked = checked
+        def count(self): return 1
+        @property
+        def first(self): return self
+        def is_checked(self): return self._checked
+
+    class _PageUnchecked:
+        def check(self, sel): pass     # check() 自体は通る
+        def locator(self, sel): return _Loc(False)   # でも実際は未選択
+
+    with pytest.raises(ob.OddsparkBetError, match="radio が選択されていない"):
+        ob._select_payment_method(_PageUnchecked(), "buylimit")
+
+
+def test_select_payment_method_silent_when_radio_absent():
+    """radio が画面に無い (count=0、まだ matome に遷移してない 等) なら黙って続行。"""
+    class _Loc:
+        def count(self): return 0
+        @property
+        def first(self): return self
+        def is_checked(self): return False
+
+    class _PageAbsent:
+        def check(self, sel): pass
+        def locator(self, sel): return _Loc()
+    # 例外を投げず素通りすること
+    ob._select_payment_method(_PageAbsent(), "opcoin")
+
+
 def test_apply_stake_multiplier_basic():
     """stake_multiplier=N で各 leg の stake が N 倍 (100円単位丸め)、key/bet_type は不変。"""
     legs = [

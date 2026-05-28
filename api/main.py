@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from typing import Literal
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -262,12 +263,15 @@ class WatchAutoStartRequest(BaseModel):
     # 自動購入 (実弾)。ON で #gotobuy → 確認 → 確定 まで自動。daily_cap で日次上限ガード。
     # AUTO_PURCHASE_VERIFIED=False の間は src 側で fail-safe (実弾を撃たない)。
     bet_auto_purchase: bool = False
-    bet_daily_cap: int = 50000   # 円
+    # 日次上限 (円)。0 で無効化、ge=0 で負値拒否、le で安全上限 (誤入力暴走防止)。
+    bet_daily_cap: int = Field(default=50000, ge=0, le=10_000_000)
     # **このセッション中のみ** 全 leg の stake を N 倍 (100円単位丸め)。per-race 上限 +
-    # daily_cap は維持されるので、倍率により超過する race は自然に reject される。
-    bet_stake_multiplier: float = 1.0
-    # 支払方法: "opcoin" (OPコイン残, 既定) | "buylimit" (投票資金残, 会員入金)
-    bet_payment_method: str = "opcoin"
+    # daily_cap は維持される。gt=0 で 0 倍を拒否 (誤入力で予期しない floor 動作を避ける)、
+    # le=100 で実用上限 (100 倍超は事故の方が高確率)。
+    bet_stake_multiplier: float = Field(default=1.0, gt=0.0, le=100.0)
+    # 支払方法: opcoin (OPコイン残, 既定) | buylimit (投票資金残, 会員入金)
+    # Literal で API 境界で値検証 (任意文字列を入れて子プロセスのラベルに垂れ流すのを防ぐ)。
+    bet_payment_method: Literal["opcoin", "buylimit"] = "opcoin"
 
 
 @app.post("/api/watch-auto/start")
