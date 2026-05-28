@@ -164,3 +164,52 @@ def test_ordered_bets_skipped_until_verified():
     for bt in ("exacta", "trifecta"):
         with pytest.raises(ob.OddsparkBetError, match="見送り"):
             ob._add_leg_to_cart(None, ob.CartLeg(bt, [1, 2, 3], 100), "20260527_51_9")
+
+
+# --- 組数 (combination count) ガード: 裏目/マルチ・馬番累積の過剰投入を捕捉 ---
+
+class _FakeEvalPage:
+    """evaluate(js) が固定値を返すだけのフェイク page (組数読取テスト用)。"""
+    def __init__(self, ret):
+        self._ret = ret
+
+    def evaluate(self, *args):
+        return self._ret
+
+
+def test_combo_count_parses_or_none():
+    # "組数：N通り" を数値抽出 (要素 id 非依存)
+    assert ob._combo_count(_FakeEvalPage("8")) == 8
+    assert ob._combo_count(_FakeEvalPage("1,200")) == 1200
+    assert ob._combo_count(_FakeEvalPage(None)) is None   # マッチ無し
+    # evaluate が例外でも None (ブラウザ未対応/未到達)
+    class _Boom:
+        def evaluate(self, *a):
+            raise RuntimeError("no js")
+    assert ob._combo_count(_Boom()) is None
+
+
+def test_assert_combo_delta_rejects_over_injection(monkeypatch):
+    # 1 脚 = 必ず +1 組。+2 (裏目) や +6 (マルチ) は raise して中止
+    monkeypatch.setattr(ob, "_combo_count", lambda p: 6)   # after=6
+    with pytest.raises(ob.OddsparkBetError, match="組数が想定外"):
+        ob._assert_combo_delta(object(), 0, ob.CartLeg("trifecta", [1, 2, 3], 100))
+    # ちょうど +1 なら通過
+    monkeypatch.setattr(ob, "_combo_count", lambda p: 1)
+    ob._assert_combo_delta(object(), 0, ob.CartLeg("wide", [1, 2], 100))
+
+
+def test_assert_combo_delta_unreadable_ordered_aborts_unordered_continues(monkeypatch):
+    # 組数を読めない時: 順序付きは安全側で中止、順不同は続行 (既存フロー維持)
+    monkeypatch.setattr(ob, "_combo_count", lambda p: None)   # after 読めず
+    with pytest.raises(ob.OddsparkBetError, match="安全側で中止"):
+        ob._assert_combo_delta(object(), None, ob.CartLeg("exacta", [1, 2], 100))
+    ob._assert_combo_delta(object(), None, ob.CartLeg("win", [1], 100))   # 順不同は OK
+
+
+def test_uncheck_ura_multi_best_effort_no_throw():
+    # evaluate が失敗してもスローしない (best-effort、組数検証が最終ゲート)
+    class _Boom:
+        def evaluate(self, *a):
+            raise RuntimeError("x")
+    ob._uncheck_ura_multi(_Boom())   # 例外を投げないこと

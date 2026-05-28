@@ -285,16 +285,83 @@ def _select_umaban(page, leg: CartLeg) -> None:
             f"({leg.bet_type} {leg.key}) — リセット/トグル要確認")
 
 
+def _combo_count(page) -> int | None:
+    """カートの現在の合計組数 ("組数：N通り") を読む。読めなければ None。
+
+    要素 id 非依存で body テキストから正規表現抽出する (まとめ画面の summary 欄)。
+    セット の前後で読んで差分を取り、1 脚が想定どおり 1 組だけ増えたかを検証する
+    (裏目/マルチ の全順列化や馬番累積で組数が膨れるのを捕捉する最終ゲート)。
+    """
+    try:
+        v = page.evaluate(
+            "() => { const m = (document.body.innerText || '')"
+            ".match(/\\u7d44\\u6570[^0-9]*([0-9,]+)\\s*\\u901a\\u308a/);"
+            " return m ? m[1] : null; }")
+    except Exception:  # noqa: BLE001
+        return None
+    if not v:
+        return None
+    try:
+        return int(str(v).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _uncheck_ura_multi(page) -> None:
+    """馬単[裏目]/3連単[マルチ] (着順入替えの全順列化) サブオプションを OFF にする。
+
+    オンだと「選択した着順を入替えた全組合せ」になり 順列数×stake で過剰投入になる
+    (順不同の 単複/馬連/ワイド/3連複 にはこの sub-option は無い)。要素 id 不明なので
+    ラベル文字列 '裏目'/'マルチ' に紐づく checkbox を best-effort で uncheck し、
+    取りこぼしは `_assert_combo_delta` の 組数=1 検証で最終捕捉する (二段の安全)。
+    click() で外す (onchange JS を発火させるため checked=false ではなく)。
+    """
+    for word in ("裏目", "マルチ"):
+        try:
+            page.evaluate(
+                "(w) => { for (const cb of document.querySelectorAll("
+                "'input[type=checkbox]')) {"
+                " const lbl = (cb.closest('label') ? cb.closest('label').innerText : '')"
+                " + (cb.labels ? Array.from(cb.labels).map(l=>l.innerText).join('') : '')"
+                " + (cb.nextElementSibling ? cb.nextElementSibling.innerText : '')"
+                " + (cb.parentElement ? cb.parentElement.innerText : '');"
+                " if (lbl.indexOf(w) >= 0 && cb.checked) cb.click(); } }", word)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _assert_combo_delta(page, before: int | None, leg: CartLeg) -> None:
+    """セット後、組数が想定どおり 1 組だけ増えたか検証 (過剰/欠落投入の捕捉)。
+
+    1 脚 = 必ず 1 組 (単複=1, 馬連/ワイド/3連複=1 ペア/トリオ, 馬単/3連単=1 順列)。
+    裏目/マルチ オンや馬番累積だと +2/+6 等になるので raise して当該脚を中止する。
+    組数を読めない時: 順序付き (馬単/3連単) は全順列化を検知できないので安全側で中止、
+    順不同は a.on 検証で別途担保済なので続行 (既存の検証済フローを壊さない)。
+    """
+    after = _combo_count(page)
+    if before is None or after is None:
+        if leg.bet_type in ("exacta", "trifecta"):
+            raise OddsparkBetError(
+                "組数を読めず 裏目/マルチ の全順列化を検知できない — 安全側で中止 "
+                f"({leg.bet_type} {leg.key})")
+        return
+    added = after - before
+    if added != 1:
+        raise OddsparkBetError(
+            f"組数が想定外: +{added}通り (期待 +1) — 裏目/マルチ/馬番累積を疑い中止 "
+            f"({leg.bet_type} {leg.key})")
+
+
 def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
     """1 買い目を「まとめ投票」画面でセット (#buylist へ)。**確定は押さない**。
 
-    順序 (実機準拠): 金額入力 → レースチェック → 賭式選択 → 馬番選択 → セット。
+    順序 (実機準拠): 金額入力 → レースチェック → 賭式選択 → (順序付きは裏目/マルチ OFF)
+    → 馬番選択 → セット → 組数=+1 検証。
     """
-    import re as _re
     # 馬単/3連単 (順序付き) は 裏目/マルチ サブオプション (全順列化) の制御が未検証。
-    # オンだと「選択した着順を入替えた全組合せ」になり 順列数×stake で過剰投入になる
-    # (順不同の 馬連/ワイド/3連複 にはこの sub-option は無い)。実機 DOM で裏目/マルチ
-    # を確実に OFF にできると確認できるまで、自動投入は fail-safe で見送る (手動投入は可)。
+    # _uncheck_ura_multi (OFF 処理) + _assert_combo_delta (組数=1 検証) は実装済だが、
+    # フラグの flip は実機 DOM で「裏目/マルチ OFF → #buylist 組数=1」を1度目視確認して
+    # から (CLAUDE.md の precondition)。それまでは fail-safe で見送る (手動投入は可)。
     if leg.bet_type in ("exacta", "trifecta") and not _ORDERED_BETS_VERIFIED:
         raise OddsparkBetError(
             f"{leg.bet_type} は裏目/マルチ(全順列)制御が未検証のため自動投入を見送り — "
@@ -313,12 +380,17 @@ def _add_leg_to_cart(page, leg: CartLeg, race_val: str) -> None:
             "document.querySelectorAll('input[name=betTypeSelect]:checked')"
             ".forEach(function(c){c.checked=false;});")
         page.check(SELECTORS["bet_type_checkbox"].format(code=_BET_TYPE_CODE[leg.bet_type]))
+        # 3.5) 順序付き (馬単/3連単) は 裏目/マルチ を OFF にして全順列化を防ぐ
+        if leg.bet_type in ("exacta", "trifecta"):
+            _uncheck_ura_multi(page)
         # 4) 馬番選択 — **前脚の選択が残るので必ずリセットしてから** (累積/トグル防止)
         _reset_umaban(page)
         _select_umaban(page, leg)
-        # 5) セット (#buylist へ積む)
+        # 5) セット (#buylist へ積む) → 組数が +1 だけ増えたか検証
+        before = _combo_count(page)
         page.click(SELECTORS["set_button"])
         page.wait_for_timeout(1000)
+        _assert_combo_delta(page, before, leg)
     except OddsparkBetError:
         raise
     except Exception as ex:  # noqa: BLE001
