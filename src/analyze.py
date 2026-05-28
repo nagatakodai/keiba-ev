@@ -514,23 +514,49 @@ def _validate_and_update_bundle(
         return
 
     review = llm_mod.parse_bundle_review("".join(chunks))
+    bundle, applied = _decide_selection_bundle(review, cands, probs, bundle)
+    if not applied:
+        # picks/cuts を適用できなかった (picks が候補 id に一致しない / 旧形式で picks も
+        # cuts も無い)。モデル束を維持し validated バッジは付けない (未検証扱い)。
+        console.print("[yellow]claude 選定を適用できず — モデル束を維持 (未検証)[/yellow]")
+        return
+    n = len(bundle.get("legs", []))
+    console.print(f"[cyan]claude 選定適用 → 束 {n} 脚" + (" (見送り)" if n == 0 else "") + "[/cyan]")
+    bundle["llm_review"] = {"validated": True, "mode": "selection", **review}
+    _update_snapshot_bundle(race_id, bundle)
+
+
+def _decide_selection_bundle(review: dict, cands: list, probs, model_bundle: dict) -> tuple[dict, bool]:
+    """claude の選定 (review) から最終束を決める。戻り値 (bundle, applied)。
+
+    - picks 明示 (list):
+        - 空 `[]` = 明示的な見送り → 空束 (applied=True、claude が「賭けない」と判断)
+        - 有効 id あり → その脚で joint Kelly 再構築 (applied=True)
+        - 全て不正 id (selected 空) → モデル束維持 (applied=False、未検証扱い)
+    - picks 不在 (None) + cuts あり → 後方互換: cuts を除いた脚で再構築 (applied=True)
+    - picks も cuts も無し → モデル束維持 (applied=False)
+
+    `if picks:` だと `[]` (見送り) が falsy で素通りし、claude が賭けない判断をした
+    のにモデルの全束が validated 扱いで投入され得たため、`picks is not None` で分岐する。
+    """
+    from . import llm as llm_mod
+    from . import portfolio as pf_mod
     picks = review.get("picks")
-    if picks:
+    if picks is not None:
         pick_set = set(picks)
-        selected = [
-            c for c in cands
-            if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) in pick_set
-        ]
-        if selected:
-            bundle = pf_mod.build_bundle(selected, probs)   # picks のみで joint Kelly 再計算
-            console.print(f"[cyan]claude 選定 {len(picks)} 点 → 束再構築: {len(bundle.get('legs', []))} 脚[/cyan]")
-    elif review.get("cuts"):   # 後方互換: cuts のみ返した場合
+        selected = [c for c in cands
+                    if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) in pick_set]
+        if not picks:                       # 明示的な見送り (賭けない)
+            return pf_mod.build_bundle([], probs), True
+        if selected:                        # 有効な picks → その脚で再構築
+            return pf_mod.build_bundle(selected, probs), True
+        return model_bundle, False          # picks が全て候補 id に不一致 → 適用不可
+    if review.get("cuts"):                  # 後方互換: cuts のみ
         cut_set = set(review["cuts"])
         kept = [c for c in cands
                 if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) not in cut_set]
-        bundle = pf_mod.build_bundle(kept, probs)
-    bundle["llm_review"] = {"validated": True, "mode": "selection", **review}
-    _update_snapshot_bundle(race_id, bundle)
+        return pf_mod.build_bundle(kept, probs), True
+    return model_bundle, False
 
 
 def _update_snapshot_bundle(race_id: str, bundle: dict) -> None:
