@@ -739,9 +739,12 @@ class BettingSession:
             tag = "[magenta]" if p_status == "ok" else "[yellow]" if p_status == "skipped" else "[red]"
             print(f"  {tag}→ 自動購入 {p_status}:[/] {p_msg}")
             mode_note = f"自動購入 ({p_status})"
-            if p_status == "ok":
-                # 完了画面 → 続けて投票 (#buythru) → レースまとめ (#todayMultiRace) で
-                # 次レース受入準備に戻す。クリック失敗時は _goto_matome に fallback。
+            if p_status in ("ok", "failed"):
+                # ok: 完了画面 → 続けて投票 → まとめ画面 で次レース受入準備に戻す
+                # failed: 確認画面に未確定 bet が残った状態の可能性 → まとめに戻して
+                #   状態リセット (確認画面から離脱 = oddspark の未確定 bet は破棄される
+                #   = カート未確定なので資金は動いていない、安全側)。
+                # skipped: まとめ画面のまま (#gotobuy をクリックする前に return している)
                 self._continue_to_matome_after_purchase()
         else:
             mode_note = "**購入確定は人が押す**"

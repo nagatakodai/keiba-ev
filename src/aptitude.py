@@ -182,25 +182,31 @@ APTITUDE_CEIL = 100.0
 def _normalize_to_100(raw: dict[int, float]) -> dict[int, float]:
     """同レース内で min-max scaling して [APTITUDE_FLOOR, APTITUDE_CEIL] に展開。
 
-    - 全頭情報無し (max<=0) → 0 (uninformative の signal、表示で「データ無し」を示す)
-    - 全頭同値 (mx-mn ≈ 0) → 中央 (FLOOR+CEIL)/2 を返す
-    - それ以外 → 最弱を FLOOR、最強を CEIL にして線形 scaling
+    raw=0 は **「情報無し」の signal** として 0 のまま残す (新馬・経験 0 走 etc.)。
+    positive な raw 値 (>0) のみで min-max scaling し、最弱を FLOOR (60)、最強を CEIL
+    (100)、間は線形に分布。これで:
+    - 全頭情報無し (max<=0)            → 全 0 (はっきり「データ無し」を示す)
+    - 1頭だけ positive (他は 0)        → その1頭 CEIL、他は 0
+    - positive 同士が同値             → positive は CEIL、 0 は 0
+    - それ以外                          → positive を [FLOOR, CEIL] に min-max 展開、 0 は 0
+
     旧 (max のみ割り) は raw 拮抗時に全頭 99-100 になり弁別不能だった。本実装は raw が
-    僅差でも刻みを残し、平均的に 80 前後に来るので人が読みやすい。
+    僅差でも刻みを残しつつ、 raw=0 horse を 60 (「最弱だが情報あり」) と誤表示しない。
     """
     if not raw:
         return {}
     clipped = {k: max(v, 0.0) for k, v in raw.items()}
-    vals = list(clipped.values())
-    mn, mx = min(vals), max(vals)
-    if mx <= 0:
-        return {k: 0.0 for k in clipped}
+    pos_vals = [v for v in clipped.values() if v > 0]
+    if not pos_vals:
+        return {k: 0.0 for k in clipped}   # 全頭情報無し
+    mn, mx = min(pos_vals), max(pos_vals)
     if mx - mn < 1e-9:
-        mid = (APTITUDE_FLOOR + APTITUDE_CEIL) / 2.0
-        return {k: mid for k in clipped}
+        # positive 同士全て同値: 等しく CEIL を付与 (情報なし horse は 0 を維持)
+        return {k: (APTITUDE_CEIL if v > 0 else 0.0) for k, v in clipped.items()}
     spread = APTITUDE_CEIL - APTITUDE_FLOOR
     rng = mx - mn
-    return {k: APTITUDE_FLOOR + (v - mn) / rng * spread for k, v in clipped.items()}
+    return {k: (APTITUDE_FLOOR + (v - mn) / rng * spread if v > 0 else 0.0)
+            for k, v in clipped.items()}
 
 
 def _ability_raw(fv: FeatureVec) -> float:
