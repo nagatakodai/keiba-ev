@@ -171,15 +171,36 @@ _WEIGHTS = {
 _W_SUM = sum(_WEIGHTS.values())
 
 
+# 適性指数の表示レンジ。同レース内最弱が APTITUDE_FLOOR、最強が APTITUDE_CEIL になる
+# min-max scaling を使う。旧実装は max のみで割っていたため ability や距離適性のように
+# raw 値が拮抗するレースで全頭 99-100 に張り付き、刻みが効かなかった。FLOOR を上げる
+# (例: 60) ことで平均が ~80 付近に来る読みやすい指数になる。
+APTITUDE_FLOOR = 60.0
+APTITUDE_CEIL = 100.0
+
+
 def _normalize_to_100(raw: dict[int, float]) -> dict[int, float]:
-    """同レース内 max が 100 になるよう scale。負値は 0 にクリップ。"""
+    """同レース内で min-max scaling して [APTITUDE_FLOOR, APTITUDE_CEIL] に展開。
+
+    - 全頭情報無し (max<=0) → 0 (uninformative の signal、表示で「データ無し」を示す)
+    - 全頭同値 (mx-mn ≈ 0) → 中央 (FLOOR+CEIL)/2 を返す
+    - それ以外 → 最弱を FLOOR、最強を CEIL にして線形 scaling
+    旧 (max のみ割り) は raw 拮抗時に全頭 99-100 になり弁別不能だった。本実装は raw が
+    僅差でも刻みを残し、平均的に 80 前後に来るので人が読みやすい。
+    """
     if not raw:
         return {}
     clipped = {k: max(v, 0.0) for k, v in raw.items()}
-    m = max(clipped.values(), default=0.0)
-    if m <= 0:
+    vals = list(clipped.values())
+    mn, mx = min(vals), max(vals)
+    if mx <= 0:
         return {k: 0.0 for k in clipped}
-    return {k: v / m * 100.0 for k, v in clipped.items()}
+    if mx - mn < 1e-9:
+        mid = (APTITUDE_FLOOR + APTITUDE_CEIL) / 2.0
+        return {k: mid for k in clipped}
+    spread = APTITUDE_CEIL - APTITUDE_FLOOR
+    rng = mx - mn
+    return {k: APTITUDE_FLOOR + (v - mn) / rng * spread for k, v in clipped.items()}
 
 
 def _ability_raw(fv: FeatureVec) -> float:

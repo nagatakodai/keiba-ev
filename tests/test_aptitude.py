@@ -96,25 +96,42 @@ def test_graded_summary_aggregates_by_grade():
 # --- _normalize_to_100 ---
 
 
-def test_normalize_to_100_basic():
+def test_normalize_to_100_min_max_spread():
+    """min-max scaling: 最弱を APTITUDE_FLOOR、最強を APTITUDE_CEIL に揃え、線形 scaling。
+
+    旧 spec (max のみで割る) では raw 拮抗時に全頭が 99-100 に張り付いて弁別不能
+    だったので min-max に変更。raw が僅差でも刻みが残る。
+    """
+    from src.aptitude import APTITUDE_FLOOR, APTITUDE_CEIL
     d = {1: 5.0, 2: 10.0, 3: 2.5}
     n = _normalize_to_100(d)
-    assert n[2] == 100.0  # max
-    assert n[1] == 50.0
-    assert n[3] == 25.0
+    # 最強 (10.0) → CEIL (100)、最弱 (2.5) → FLOOR (60)、中央 (5.0) は線形補間
+    assert n[2] == APTITUDE_CEIL == 100.0
+    assert n[3] == APTITUDE_FLOOR == 60.0
+    # 5.0 は (5-2.5)/(10-2.5) = 1/3 の位置 → FLOOR + 40*1/3 ≈ 73.3
+    assert abs(n[1] - (APTITUDE_FLOOR + (5.0 - 2.5) / (10.0 - 2.5) * (APTITUDE_CEIL - APTITUDE_FLOOR))) < 1e-6
 
 
 def test_normalize_to_100_all_zero():
-    """全 0 入力は全 0 出力 (除算回避)。"""
+    """全 0 入力は全 0 出力 (uninformative の signal で 表示で「データ無し」を示す)。"""
     n = _normalize_to_100({1: 0.0, 2: 0.0})
     assert all(v == 0.0 for v in n.values())
 
 
+def test_normalize_to_100_all_same_returns_mid():
+    """全頭同値 (mx-mn≈0 だが情報あり) は (FLOOR+CEIL)/2 を返す (ゼロ割回避)。"""
+    from src.aptitude import APTITUDE_FLOOR, APTITUDE_CEIL
+    n = _normalize_to_100({1: 5.0, 2: 5.0, 3: 5.0})
+    mid = (APTITUDE_FLOOR + APTITUDE_CEIL) / 2.0
+    assert all(abs(v - mid) < 1e-9 for v in n.values())
+
+
 def test_normalize_to_100_clips_negative():
-    """負値は 0 にクリップ。"""
+    """負値は 0 にクリップしてから scaling。クリップ後の最弱 (=0) が FLOOR になる。"""
+    from src.aptitude import APTITUDE_FLOOR, APTITUDE_CEIL
     n = _normalize_to_100({1: -3.0, 2: 10.0})
-    assert n[1] == 0.0
-    assert n[2] == 100.0
+    assert n[1] == APTITUDE_FLOOR == 60.0   # クリップ後 0 が最弱 → FLOOR
+    assert n[2] == APTITUDE_CEIL == 100.0
 
 
 def test_normalize_to_100_empty():
