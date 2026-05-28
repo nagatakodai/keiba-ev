@@ -79,8 +79,11 @@ SELECTORS = {
         'button:has-text("投票を申込")',
         'input[type="submit"][value*="投票を申込"]',
     ],
-    # 購入成功の証跡。これを検出できた時だけ daily_stake を加算する (誤検知防止)。
-    "purchase_success_text": '受付完了',  # _confirm_purchase でテキスト一致を見る
+    # 購入成功の証跡 (VoteCompleteOpcoin.do の実 HTML 確認済 2026-05-28 園田10R 700円):
+    # h2 = "投票申込完了" / body = "投票申込を受け付けました。" / 表 = "成立組数" "成立合計金額"。
+    # これらのいずれかが body テキストに出れば購入成功とみなし daily_stake を加算する。
+    # 必ず複数 marker で OR 判定 (1つの marker だけだと文言改訂で全件 failed になる)。
+    "purchase_success_markers": ("投票申込完了", "受け付けました", "成立組数"),
 }
 # 当方 bet_type → オッズパーク betType コード (betTypeSelect value, 実機確認済)。
 _BET_TYPE_CODE = {
@@ -744,18 +747,18 @@ class BettingSession:
                     "確認画面で確定ボタンが見つからない (DOM 未検証 — purchase_review screenshot 参照)")
         self.page.wait_for_timeout(3000)
         _shot(self.page, "purchase_after_click")
-        # 3) 成功 marker を検証 (受付完了/投票完了 等のテキスト)
+        # 3) 成功 marker を検証 (VoteCompleteOpcoin.do の実 HTML 確認済 2026-05-28 園田10R)
         success = False
         try:
             body_txt = self.page.evaluate(
                 "() => document.body ? document.body.innerText || '' : ''")
-            if any(m in body_txt for m in ("受付完了", "投票完了", "購入完了", "受付しました")):
+            if any(m in body_txt for m in SELECTORS["purchase_success_markers"]):
                 success = True
         except Exception:  # noqa: BLE001
             pass
         if not success:
             return ("failed",
-                    "成功 marker (受付完了/投票完了 等) を検出できず — "
+                    f"成功 marker ({'/'.join(SELECTORS['purchase_success_markers'])}) を検出できず — "
                     "実際に購入された/されなかったかブラウザで目視確認推奨")
         new_total = record_daily_stake(race_stake)
         return ("ok",

@@ -143,17 +143,25 @@ export function PredictionsList({
                   key={`${p.race_id}-${p.saved_at}`}
                   className={`py-2.5 flex flex-col gap-1.5 hover:bg-(--color-panel-2) -mx-4 px-4 ${rowBg}`}
                 >
-                  {/* タイトル行: R番号 + race_class を**独立した上段**に左上固定。
+                  {/* タイトル行: 会場 + R番号 + race_class を**独立した上段**に左上固定。
                       下段のコンテンツ/右側バッジの幅変動でタイトルが横ズレしないように、
-                      この行には他の要素を一切置かない。 */}
+                      この行には他の要素を一切置かない。race_class が空 (園田など) の場合は
+                      Badge を非表示 (空チップが出ないように)。 */}
                   <Link
                     href={`/predictions/${p.race_id}`}
                     className="flex items-center gap-2 self-start hover:underline w-fit"
                   >
+                    {p.venue_name && (
+                      <span className="text-sm font-bold text-(--color-foreground)">
+                        {p.venue_name}
+                      </span>
+                    )}
                     <span className="text-xl font-bold tabnum leading-none">
                       {p.race_number}R
                     </span>
-                    <Badge tone={raceClassTone(p.race_class)}>{p.race_class}</Badge>
+                    {p.race_class && (
+                      <Badge tone={raceClassTone(p.race_class)}>{p.race_class}</Badge>
+                    )}
                   </Link>
                   {/* コンテンツ行: 締切/発走・保存・hit info を左、状態バッジ列を右に。 */}
                   <div className="flex flex-wrap md:flex-nowrap items-start gap-3">
