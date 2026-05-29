@@ -200,6 +200,10 @@ def main(
                 aptitudes=aptitudes, market_signals=market_signals,
                 horse_best_times=best_times_for_llm, model=llm_model,
             )
+            # 回収優先 (recommended_bundle) の選定+更新が終わったので、ここから先 (auto_watch が
+            # snapshot を見て enqueue → daemon が購入開始) と並行で **的中優先 (recommended_bundle_hit)
+            # を別 process で claude 選定**。analyze は即終了する。
+            _spawn_hit_bundle_claude(race_id)
 
     if refresh:
         if not url:
@@ -434,23 +438,26 @@ def _validate_and_update_bundle(
     market_signals=None,
     horse_best_times=None,
     model: str = "opus",
+    prioritize: str = "yield",
 ) -> None:
-    """claude -p (web 検索なし) にモデル出力を全部見せて最終「買い目」を選定させ、
-    その picks で recommended_bundle を再構築して snapshot 更新。
+    """claude -p (web 検索付き) にモデル出力を全部見せて最終「買い目」を選定させ、
+    その picks で recommended_bundle (回収優先) または recommended_bundle_hit (的中優先) を
+    再構築して snapshot 更新。
 
-    モデルの全 +EV 候補 (全 bet type) + joint Kelly 束を claude に提示し、claude は
-    数値判断のみ (検索なし) で買う leg を picks として返す。picks の候補だけで joint
-    Kelly を再計算 (トリガミ防止込み) して束を置換する。検証不能/見送り時は no-op
-    (モデル束を維持)。
+    `prioritize="yield"` (default): 回収優先 — joint Kelly EV 最適束、`recommended_bundle` を更新。
+    `prioritize="hit"`             : 的中優先 — prob 降順 pool で Kelly、`recommended_bundle_hit` を更新。
+
+    検証不能/見送り時は no-op (モデル束を維持)。
     """
     cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
-    bundle = pf_mod.build_bundle(cands, probs)
+    bundle = pf_mod.build_bundle(cands, probs, prioritize=prioritize)
     if not bundle.get("legs"):
         return  # 見送り (+EV 束なし) — 選定対象なし
     if not llm_mod.is_available():
         return
 
-    console.rule("[bold]Claude 総合オススメ 選定 (claude -p, web 検索で per-leg 補強)[/bold]")
+    mode_jp = "的中優先" if prioritize == "hit" else "回収優先"
+    console.rule(f"[bold]Claude 総合オススメ 選定 ({mode_jp}, claude -p, web 検索で per-leg 補強)[/bold]")
     chunks: list[str] = []
     saw_error = False
     saw_result = False
@@ -460,6 +467,7 @@ def _validate_and_update_bundle(
             rd, bundle, cands, model=model,
             aptitudes=aptitudes, market_signals=market_signals,
             horse_best_times=horse_best_times,
+            prioritize=prioritize,
         ):
             if etype == "text":
                 chunks.append(payload)
@@ -502,8 +510,10 @@ def _validate_and_update_bundle(
         return
     n = len(bundle.get("legs", []))
     console.print(f"[cyan]claude 選定適用 → 束 {n} 脚" + (" (見送り)" if n == 0 else "") + "[/cyan]")
-    bundle["llm_review"] = {"validated": True, "mode": "selection", **review}
-    _update_snapshot_bundle(race_id, bundle)
+    bundle["llm_review"] = {
+        "validated": True, "mode": "selection", "prioritize": prioritize, **review,
+    }
+    _update_snapshot_bundle(race_id, bundle, prioritize=prioritize)
 
 
 def _decide_selection_bundle(review: dict, cands: list, probs, model_bundle: dict) -> tuple[dict, bool]:
@@ -539,8 +549,12 @@ def _decide_selection_bundle(review: dict, cands: list, probs, model_bundle: dic
     return model_bundle, False
 
 
-def _update_snapshot_bundle(race_id: str, bundle: dict) -> None:
-    """既存 snapshot JSON の recommended_bundle だけ差し替える。"""
+def _update_snapshot_bundle(race_id: str, bundle: dict, *, prioritize: str = "yield") -> None:
+    """既存 snapshot JSON の recommended_bundle / recommended_bundle_hit を差し替える。
+
+    prioritize="yield" → recommended_bundle (回収優先, 実弾で買う)
+    prioritize="hit"   → recommended_bundle_hit (的中優先, おまけ計測)
+    """
     path = ROOT / "data" / "predictions" / f"{race_id}.json"
     if not path.exists():
         return
@@ -548,9 +562,11 @@ def _update_snapshot_bundle(race_id: str, bundle: dict) -> None:
         snap = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    snap["recommended_bundle"] = bundle
+    field = "recommended_bundle_hit" if prioritize == "hit" else "recommended_bundle"
+    snap[field] = bundle
     path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
-    console.print("[dim]recommended_bundle 更新 (LLM 検証反映)[/dim]")
+    label = "recommended_bundle_hit" if prioritize == "hit" else "recommended_bundle"
+    console.print(f"[dim]{label} 更新 (LLM 検証反映)[/dim]")
 
 
 def _save_prediction_snapshot(
@@ -660,6 +676,69 @@ def _save_prediction_snapshot(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     console.print(f"[dim]prediction snapshot: {out.relative_to(ROOT)}[/dim]")
+    # 的中優先 Claude 選定用の state を pickle で side-car 保存。analyze.py 終了後に
+    # detached `python -m src.evaluate_hit_bundle <race_id>` がこれを読んで claude を呼ぶ。
+    try:
+        _save_analyze_state_for_hit(
+            race_id, rd, probs, rows, bet_tables,
+            aptitudes=aptitudes, market_signals=market_signals, feats=feats,
+        )
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[yellow]analyze_state 保存失敗 (的中 Claude 不可): {ex}[/yellow]")
+
+
+def _save_analyze_state_for_hit(
+    race_id: str, rd, probs, rows, bet_tables,
+    *, aptitudes=None, market_signals=None, feats=None,
+) -> None:
+    """的中優先 Claude 再評価 (`evaluate_hit_bundle`) 用に rd/probs/rows/bet_tables を
+    pickle で side-car 保存。detached subprocess が後で読み込んで claude を呼ぶ。"""
+    import pickle
+    state_dir = ROOT / "data" / "cache" / "analyze_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "rd": rd, "probs": probs, "rows": rows, "bet_tables": bet_tables,
+        "aptitudes": aptitudes, "market_signals": market_signals,
+        "horse_best_times": _serialize_best_times(rd, feats) if feats else [],
+    }
+    (state_dir / f"{race_id}.pkl").write_bytes(pickle.dumps(state))
+
+
+def _load_analyze_state_for_hit(race_id: str) -> dict | None:
+    """`evaluate_hit_bundle` で pickle を読み込む。読めなければ None。"""
+    import pickle
+    p = ROOT / "data" / "cache" / "analyze_state" / f"{race_id}.pkl"
+    if not p.exists():
+        return None
+    try:
+        return pickle.loads(p.read_bytes())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _spawn_hit_bundle_claude(race_id: str) -> None:
+    """analyze flow の最後に呼ぶ。detached subprocess で 的中優先 Claude 選定を起動 (待たない)。
+
+    `python -m src.evaluate_hit_bundle <race_id>` を background 起動。stdout/stderr は
+    log file に redirect。これで:
+      ① analyze.py が即終了 → auto_watch が enqueue → daemon が回収優先 bundle を購入
+      ② parallel で 的中優先 claude が走り、終了後 snapshot を更新 (おまけ計測用)
+    の二段運用が成立する。
+    """
+    import subprocess
+    import sys
+    log_dir = ROOT / "data" / "cache" / "hit_bundle_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = (log_dir / f"{race_id}.log").open("a")
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "src.evaluate_hit_bundle", race_id],
+            cwd=str(ROOT), start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        )
+        console.print(f"[dim]的中優先 Claude 選定を background 起動 (PID 別、log: {log_dir / f'{race_id}.log'})[/dim]")
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[yellow]的中優先 Claude spawn 失敗: {ex}[/yellow]")
 
 
 def _print_race_header(rd) -> None:

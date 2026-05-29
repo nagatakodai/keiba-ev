@@ -770,6 +770,8 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
                     aptitudes=aptitudes, market_signals=market_signals,
                     horse_best_times=best_times, model="opus",
                 )
+                # 回収優先 完了 → 的中優先 を別 process で並行 spawn (実弾購入と並行)
+                az_mod._spawn_hit_bundle_claude(race_id)
             except Exception as ex:  # noqa: BLE001
                 print(f"[analyze_oddspark] bundle 検証失敗: {ex}")
 

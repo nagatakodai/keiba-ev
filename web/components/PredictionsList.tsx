@@ -86,7 +86,9 @@ export function PredictionsList({
   }
   const groups = groupByVenue(items);
   return (
-    <>
+    // 2 列レイアウト (2026-05-29 ユーザ指示): 会場 Card を 2 列の grid に配置。
+    // 単一会場でも 1 列で詰まらず、複数会場は横並びで一覧性が上がる。
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
       {groups.map(([venue, races]) => {
         const latestSavedAt = races
           .map((r) => r.saved_at)
@@ -269,6 +271,6 @@ export function PredictionsList({
           </Card>
         );
       })}
-    </>
+    </div>
   );
 }

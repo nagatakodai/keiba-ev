@@ -269,6 +269,7 @@ def build_bundle_selection_prompt(
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
     max_candidates: int = 40,
+    prioritize: str = "yield",
 ) -> str:
     """モデル出力 (joint Kelly 束 + 全 bet type の +EV 候補) を提示し、**web 検索で
     補強根拠を集めて**最終「買い目 (picks)」を選ばせる prompt。
@@ -298,17 +299,31 @@ def build_bundle_selection_prompt(
         kaisai_date = _dt.datetime.fromtimestamp(r.start_at).strftime("%Y-%m-%d")
     else:
         kaisai_date = "当日"
+    is_hit_mode = (prioritize == "hit")
+    mode_label = "**的中優先**" if is_hit_mode else "**回収優先**"
+    mode_explain = (
+        "確率の高い目を抑えて『当たる頻度』を上げる戦略。回収率 (P×O) は break-even (1.0) 以上であれば許容。"
+        "回収最大化 (P×O 上位選抜) より、当て率を取りに行きます。**実弾は買いません (おまけ計測)**。"
+        if is_hit_mode else
+        "joint Kelly で E[log(資金)] を最大化する EV 最適 (回収率最大化) 戦略。**実弾で買う対象**。"
+    )
     lines = [
         f"# レース: {r.venue_name} {r.race_number}R ({r.race_class}) "
         f"{r.surface}{r.distance}m {r.weather_text}",
         f"開催日: {kaisai_date}",
+        f"選定モード: {mode_label} — {mode_explain}",
         "",
         "あなたは確率モデルの出力に **web 検索の補強根拠** を重ねて最終買い目を決める"
-        "馬券選定者です。モデルが出した「総合オススメ束(joint Kelly)」を尊重しつつ、"
+        f"馬券選定者です。モデルが出した「{mode_label} 束」を尊重しつつ、"
         "**Brave Search / Tavily** で各脚の馬・騎手・コース適性・取消/体調を検証し、"
-        "補強根拠の量と質で picks (買う) / cuts (外す) を判断してください。",
+        "補強根拠の量と質で picks (買う) / cuts (外す) を判断してください。"
+        + (
+            "\n**的中優先モードでは:** 確率の高い脚 (prob 上位) を優先しつつ、補強根拠で外せる目を cuts に。"
+            "回収率最適化ではないので Kelly fraction より確率順位を重視してください。"
+            if is_hit_mode else ""
+        ),
         "",
-        "## モデルの joint Kelly 束 (モデル推奨・配分付き) ★が束採用",
+        f"## モデルの joint Kelly 束 ({mode_label}) ★が束採用",
         f"投資総額 ¥{bundle.get('total_stake', 0):,} / 束の的中率(1点以上) "
         f"{bundle.get('bundle_hit_prob', 0) * 100:.1f}% / min払戻比 "
         f"{bundle.get('min_payout_ratio', 0):.2f}",
@@ -398,6 +413,7 @@ def select_bundle_stream(
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
+    prioritize: str = "yield",
 ) -> Iterator[tuple[str, Any]]:
     """モデル出力から最終買い目を選ばせる stream-json。**web 検索を使った補強有り**
     (Brave/Tavily/WebFetch/Read を許可)。CLAUDE.md の検索ルールに従って per-leg の
@@ -412,6 +428,7 @@ def select_bundle_stream(
     prompt = build_bundle_selection_prompt(
         rd, bundle, candidates, aptitudes=aptitudes,
         market_signals=market_signals, horse_best_times=horse_best_times,
+        prioritize=prioritize,
     )
     cmd = [
         "claude", "-p", prompt,

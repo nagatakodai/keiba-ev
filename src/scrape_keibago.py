@@ -575,14 +575,14 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_keibago] snapshot 保存失敗: {ex}")
         if with_llm:
-            # claude 評価は **総合オススメ束に対する web 検索補強のみ**
-            # (3連単単独の evidence は廃止、1 race = 1 claude call に集約)。
+            # 回収優先 (recommended_bundle) の claude 選定。終了後 detached で 的中優先 を別 process spawn。
             try:
                 az_mod._validate_and_update_bundle(
                     race_id, rd, probs, tri_table, snap_bet_tables,
                     aptitudes=aptitudes, market_signals=market_signals,
                     horse_best_times=best_times, model="opus",
                 )
+                az_mod._spawn_hit_bundle_claude(race_id)
             except Exception as ex:  # noqa: BLE001
                 print(f"[analyze_keibago] bundle 検証失敗: {ex}")
 
