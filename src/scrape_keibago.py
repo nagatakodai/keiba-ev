@@ -462,7 +462,8 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
 
 
 def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
-                    with_llm: bool = True) -> dict:
+                    with_llm: bool = True, market_blend: float = 0.78,
+                    aptitude_top: int = 6) -> dict:
     """NAR race を keiba.go.jp の全6券種オッズで解析 (netkeiba/oddspark の上位互換)。
 
     出馬表/馬柱は data/raw の netkeiba cache があれば使い (確率モデルが効く)、無ければ
@@ -525,7 +526,7 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
     s = sum(1.0 / o for o in win_odds.values()) or 1.0
     mwp = {n: (1.0 / o) / s for n, o in win_odds.items()}
-    probs = ev_mod.estimate_probs(rd, market_blend=0.78, market_win_override=mwp)
+    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     tri_table = ev_mod.build_table(rd, probs) if rd.trifecta else []
@@ -551,7 +552,7 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         has_past = any(h.past_runs for h in rd.race.horses)
         feats = build_features(rd) if (used_cache or has_past) else None
         aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
-        apt_top = az_mod._aptitude_top_horses(aptitudes, n=6) if aptitudes else None
+        apt_top = az_mod._aptitude_top_horses(aptitudes, n=aptitude_top) if aptitudes else None
         plan_rows = ev_mod.apply_caps(tri_table)
         # keiba.go.jp の馬連/ワイド/馬単/3連複は組合せ明示で信頼できる (consistency NG 時は
         # 既に [] に落としてある) ので、束だけでなく EV table も snapshot に載せる
@@ -667,18 +668,31 @@ def _main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if not args:
         print("usage: python -m src.scrape_keibago <netkeiba_nar_race_id> "
-              "[--snapshot] [--start-at=UNIX] [--no-llm]")
+              "[--snapshot] [--start-at=UNIX] [--market-blend=X] [--aptitude-top=N] [--no-llm]")
         raise SystemExit(2)
     rid = args[0]
     save = "--snapshot" in sys.argv
     start_at = 0
+    market_blend = 0.78
+    aptitude_top = 6
     for a in sys.argv:
         if a.startswith("--start-at="):
             start_at = int(a.split("=", 1)[1] or 0)
+        elif a.startswith("--market-blend="):
+            try:
+                market_blend = float(a.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif a.startswith("--aptitude-top="):
+            try:
+                aptitude_top = int(a.split("=", 1)[1])
+            except ValueError:
+                pass
     if save:
         try:
             res = analyze_keibago(rid, save_snapshot=True, start_at=start_at,
-                                  with_llm="--no-llm" not in sys.argv)
+                                  with_llm="--no-llm" not in sys.argv,
+                                  market_blend=market_blend, aptitude_top=aptitude_top)
         except KeibagoError as ex:
             print(f"keiba.go.jp 解析不能 ({rid}): {ex}")
             raise SystemExit(1)

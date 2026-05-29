@@ -432,7 +432,8 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
 
 
 def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
-                with_llm: bool = True) -> dict:
+                with_llm: bool = True, market_blend: float = 0.78,
+                aptitude_top: int = 6) -> dict:
     """JRA race を JRA 公式の全券種オッズで解析 (netkeiba 非依存)。
 
     出馬表/馬柱は data/raw の netkeiba cache があれば使い (確率モデルが効く)、無ければ
@@ -481,7 +482,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
     s = sum(1.0 / o for o in win_odds.values()) or 1.0
     mwp = {n: (1.0 / o) / s for n, o in win_odds.items()}
-    probs = ev_mod.estimate_probs(rd, market_blend=0.78, market_win_override=mwp)
+    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     tri_table = ev_mod.build_table(rd, probs) if rd.trifecta else []
@@ -502,7 +503,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
         has_past = any(h.past_runs for h in rd.race.horses)
         feats = build_features(rd) if (used_cache or has_past) else None
         aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
-        apt_top = az_mod._aptitude_top_horses(aptitudes, n=6) if aptitudes else None
+        apt_top = az_mod._aptitude_top_horses(aptitudes, n=aptitude_top) if aptitudes else None
         plan_rows = ev_mod.apply_caps(tri_table)
         snap_bet_tables = {k: v for k, v in tables.items()
                            if k in ("win", "place", "quinella", "wide", "exacta", "trio") and v}
@@ -539,7 +540,8 @@ def _main() -> None:
     import sys
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if not args and "--discover" not in sys.argv:
-        print("usage: python -m src.scrape_jra <netkeiba_jra_race_id> [--snapshot] [--start-at=UNIX] [--no-llm]")
+        print("usage: python -m src.scrape_jra <netkeiba_jra_race_id> [--snapshot] [--start-at=UNIX] "
+              "[--market-blend=X] [--aptitude-top=N] [--no-llm]")
         print("       python -m src.scrape_jra --discover")
         raise SystemExit(2)
     if "--discover" in sys.argv:
@@ -548,12 +550,25 @@ def _main() -> None:
         return
     if "--snapshot" in sys.argv:
         start_at = 0
+        market_blend = 0.78
+        aptitude_top = 6
         for a in sys.argv:
             if a.startswith("--start-at="):
                 start_at = int(a.split("=", 1)[1] or 0)
+            elif a.startswith("--market-blend="):
+                try:
+                    market_blend = float(a.split("=", 1)[1])
+                except ValueError:
+                    pass
+            elif a.startswith("--aptitude-top="):
+                try:
+                    aptitude_top = int(a.split("=", 1)[1])
+                except ValueError:
+                    pass
         try:
             res = analyze_jra(args[0], save_snapshot=True, start_at=start_at,
-                              with_llm="--no-llm" not in sys.argv)
+                              with_llm="--no-llm" not in sys.argv,
+                              market_blend=market_blend, aptitude_top=aptitude_top)
         except JraError as ex:
             print(f"JRA 解析不能 ({args[0]}): {ex}")
             raise SystemExit(1)

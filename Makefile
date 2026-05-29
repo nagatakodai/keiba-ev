@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet bet
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -204,6 +204,26 @@ watch-auto-bet:
 			echo "[next poll in $(INTERVAL_SEC)s]"; \
 			sleep $(INTERVAL_SEC); \
 		done'
+
+# --- 推奨デフォルトで watch-auto-bet を起動するショートカット ---
+# `make bet` 一発で:
+#   WINDOW=1 (締切1分前=発走3分前 dispatch), TOLERANCE=4, INTERVAL_SEC=60,
+#   ACTIVE_HOURS=09:00-23:45, MARKET_BLEND=0.8 (市場やや寄せ),
+#   MIN_PROB=0.5, APTITUDE_TOP=6, --stake-multiplier=2, 投票資金支払,
+#   env 自動ログイン (ODDSPARK_ID/PASSWORD/PIN 必須), 実弾自動購入, daily_cap=¥50,000
+# 個別上書き例: `make bet WINDOW=3` / `make bet SESSION_ARGS="..."`
+bet:
+	$(MAKE) watch-auto-bet \
+		WINDOW=$(if $(filter command line,$(origin WINDOW)),$(WINDOW),1) \
+		TOLERANCE=$(if $(filter command line,$(origin TOLERANCE)),$(TOLERANCE),4) \
+		INTERVAL_SEC=$(if $(filter command line,$(origin INTERVAL_SEC)),$(INTERVAL_SEC),60) \
+		ACTIVE_HOURS=$(if $(filter command line,$(origin ACTIVE_HOURS)),$(ACTIVE_HOURS),09:00-23:45) \
+		MARKET_BLEND=$(if $(filter command line,$(origin MARKET_BLEND)),$(MARKET_BLEND),0.8) \
+		MIN_PROB=$(if $(filter command line,$(origin MIN_PROB)),$(MIN_PROB),0.5) \
+		APTITUDE_TOP=$(if $(filter command line,$(origin APTITUDE_TOP)),$(APTITUDE_TOP),6) \
+		WITH_EXACTA=$(if $(filter command line,$(origin WITH_EXACTA)),$(WITH_EXACTA),1) \
+		WITH_TRIO=$(if $(filter command line,$(origin WITH_TRIO)),$(WITH_TRIO),1) \
+		SESSION_ARGS='$(if $(filter command line,$(origin SESSION_ARGS)),$(SESSION_ARGS),--auto-purchase --auto-login --clear --payment=buylimit --stake-multiplier=2 --daily-cap=50000 --poll=5)'
 
 # --- FastAPI バックエンド ---
 # keirin ev-api (8787) と完全に被らないよう keiba-ev は 9788 を既定にする。

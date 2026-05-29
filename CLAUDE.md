@@ -1,5 +1,12 @@
 # keiba-ev — 中央競馬 EV 分析プロジェクト
 
+## 開発フロー
+
+- **commit + main push は確認なしで OK** (2026-05-29 ユーザ許可)。論理的なまとまりごとに commit して main へ直 push してよい。
+- 但し依然として要確認: 破壊的操作 (reset --hard / force push / branch -D), `.env` 等機密のコミット可能性, hooks の skip。
+- commit message は日本語 conventional 風 (`feat:` / `fix:` / `refactor:` 等)。Co-Authored-By 付け。
+
+
 ## netkeiba IP 規制対応
 
 netkeiba は `race.netkeiba.com` と `nar.netkeiba.com` の特定 IP に対し、短時間で大量 request すると **CloudFront 経由で HTTP 400 を返す** (= empty body `<html><head></head><body></body></html>`)。本リポジトリでは:

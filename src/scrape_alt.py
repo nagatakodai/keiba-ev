@@ -110,3 +110,71 @@ def is_alt_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def fetch_race_list_keibabook(yyyymmdd: str | None = None) -> list[dict]:
+    """競馬ブック中央 TOP から指定日 (既定: 当日) の JRA race 発走時刻を取得。
+
+    URL: https://p.keibabook.co.jp/cyuou/top
+    返り値: [{"venue": "東京", "race_no": 1, "start_at": <unix>, "date": "YYYYMMDD"}, ...]
+
+    keibabook の race_id 形式 (YYYY<kk><場code><日目><R>) は netkeiba と別 namespace
+    なので **URL からの race_id 直接変換はしない**。場名と R を抽出して呼出側で
+    `scrape_jra.discover_jra_races()` の (venue_code → venue_name) と join する
+    (auto_watch._list_due_races の JRA 部分)。
+
+    静的 HTML 構造 (実機確認 2026-05-29):
+      <li class="active" style="<yyyymmdd>">  ← 当日 tab
+      <div class="active" style="<yyyymmdd>">  ← 当日 content
+        <th colspan="3" class="midasi green">N回<場名>M日目</th>  ← 場 section header
+        <tr>...<p class="raceno">XR</p>...<td>...HH:MM</td></tr>  ← 各レース
+    """
+    target_date = yyyymmdd or datetime.now().strftime("%Y%m%d")
+    html = _http_get("https://p.keibabook.co.jp/cyuou/top")
+    # 当日 div は `style="<yyyymmdd>"` を持つ (id="tab_menu-box" 内、最初のみ active)
+    # 当日が掲載されていない (前日 etc) 場合は空 (フォールバック先で判定)
+    # 日付 div は `<div class="active|" style="<yyyymmdd>">` の形 (active は当日のみ、
+    # 他の日 (週末両日 等) は class="" だが style に日付が入る)。当日の div を style 一致
+    # で探し、次の日付 div か tab_menu-box 末尾 まで切り出す。
+    target_div = re.search(
+        rf'<div\s+class="[^"]*"\s+style="{target_date}">(.*?)(?=<div\s+class="[^"]*"\s+style="\d{{8}}">|<div\s+class="midasi_sub">)',
+        html, re.DOTALL,
+    )
+    if not target_div:
+        return []
+    body = target_div.group(1)
+    # 場 section (th class="midasi green") を順に walk
+    sec_re = re.compile(
+        r'<th\s+colspan="3"\s+class="midasi green">(\d+)回([^\d<]+?)\s*(\d+)日目</th>(.*?)'
+        r'(?=<th\s+colspan="3"\s+class="midasi green">|</tbody>\s*</table>)',
+        re.DOTALL,
+    )
+    race_re = re.compile(
+        r'<p\s+class="raceno">(\d+)R</p>.*?<td>(.*?)</td>',
+        re.DOTALL,
+    )
+    time_re = re.compile(r'(\d{1,2}):(\d{2})')
+
+    out: list[dict] = []
+    for sec in sec_re.finditer(body):
+        venue = sec.group(2).strip()
+        sec_body = sec.group(4)
+        for rm in race_re.finditer(sec_body):
+            race_no = int(rm.group(1))
+            cell = rm.group(2)
+            tm = time_re.search(cell)
+            if not tm:
+                continue
+            hh, mm = int(tm.group(1)), int(tm.group(2))
+            try:
+                dt = datetime.strptime(target_date, "%Y%m%d").replace(hour=hh, minute=mm)
+                start_at = int(dt.timestamp())
+            except ValueError:
+                continue
+            out.append({
+                "venue": venue,
+                "race_no": race_no,
+                "start_at": start_at,
+                "date": target_date,
+            })
+    return out

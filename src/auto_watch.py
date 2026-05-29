@@ -24,9 +24,8 @@ import typer
 from rich.console import Console
 
 from .fetch_result import process_pending, schedule as schedule_result_fetch
-from .parse import _split_race_id, parse_race_list
-from .scrape import NetkeibaBlocked, fetch_html, race_list_url
-from .scrape_alt import fetch_race_list_keibalab
+from .parse import _split_race_id
+from .scrape_alt import fetch_race_list_keibabook
 from .scrape_oddspark import fetch_race_list_oddspark
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,12 +55,18 @@ def _append_history(record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+# oddspark 投票を打たない場 (analyze/snapshot は通常通り保存、enqueue だけ skip)。
+# 場名は src/parse.py:VENUE_CODE の値と一致させる。
+BET_SKIP_VENUES: set[str] = {"浦和"}
+
+
 def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
     """snapshot に束(legs)があれば oddspark 常駐 betting セッションの queue に投入する。
 
     `--bet-oddspark` 時のみ呼ぶ。`oddspark_bet --session` daemon が <rid>.req を拾って
     カート投入する (購入確定は人)。NAR (投票 joCode がある場) のみ・束が非空のみ・
     未投入のみ enqueue。**賭金は動かない** (カート投入手前まで)。
+    BET_SKIP_VENUES の場 (現状: 浦和) は enqueue しない (snapshot は残る)。
     """
     # netkeiba rid は 12桁数字前提 (これでないと daemon 側 race_val 生成が壊れる)
     if not (netkeiba_rid.isdigit() and len(netkeiba_rid) == 12):
@@ -69,6 +74,12 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
     # JRA / 未対応場は oddspark で投票できない → enqueue しない
     from .oddspark_bet import _vote_jo_code
     if _vote_jo_code(netkeiba_rid) is None:
+        return False
+    # ユーザ指定スキップ場 (浦和 等) → 投票しない
+    from .parse import VENUE_CODE
+    venue = VENUE_CODE.get(netkeiba_rid[4:6], "")
+    if venue in BET_SKIP_VENUES:
+        console.print(f"[yellow]oddspark enqueue skip: {venue} は BET_SKIP_VENUES 指定 ({netkeiba_rid})[/yellow]")
         return False
     snap = ROOT / "data/predictions" / f"{race_id}.json"
     if not snap.exists():
@@ -128,61 +139,73 @@ def _recently_failed(race_id: str, now_ts: int, cooldown_sec: int = FAILED_RETRY
 
 
 def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[dict]:
-    """その日 (JST) の開催一覧を netkeiba (JRA + NAR) から取得し、締切 N±M 分のレースを抽出。
+    """その日 (JST) の開催一覧を **公式ソース** から取得し、締切 N±M 分のレースを抽出。
 
-    netkeiba 両ドメインが block されたら keibalab.jp に fallback する
-    (race_id + 発走時刻だけ取れる; live odds は不可なので analyze 自体は失敗するが、
-    どの race が走るかは把握できる)。
+    - NAR: **oddspark** の当日 race list (netkeiba_rid + 発走時刻、netkeiba 不要)。
+      analyze は `_dispatch_nar_fallback` で keiba.go.jp 公式 (全6券種) → oddspark 順。
+    - JRA: 発走時刻ソースが現状無いため live discovery skip (CLAUDE.md 既知の宿題)。
+      JRA を打つ場合は手動で `python -m src.scrape_jra <rid> --snapshot` または
+      `make run URL=...` を使う。
+
+    netkeiba live (race_list / shutuba / odds) は IP 規制を避けるため **常に使わない**。
+    過去レースの解析や学習・holdout は data/raw/ の netkeiba キャッシュをそのまま使う。
     """
     today = datetime.fromtimestamp(now_ts).strftime("%Y%m%d")
     races: list[dict] = []
-    blocked_count = 0
-    for is_nar in (False, True):
-        try:
-            html = fetch_html(race_list_url(today, nar=is_nar), timeout_ms=30_000)
-            races.extend(parse_race_list(html, today))
-        except NetkeibaBlocked as ex:
-            blocked_count += 1
-            console.print(f"[red]netkeiba blocked (nar={is_nar}): {ex}[/red]")
-        except Exception as ex:
-            console.print(f"[yellow]race_list fetch failed (nar={is_nar}): {ex}[/yellow]")
-    if blocked_count >= 2:
-        # 両ドメイン block → **oddspark** で NAR を discovery + analyze 続行 (odds も取れる)。
-        # oddspark に無い JRA 等は keibalab で race 発見のみ試みる (analyze は netkeiba 依存)。
-        console.print(
-            "[bold yellow]netkeiba 両ドメイン block → oddspark (NAR) / keibalab に fallback します。"
-            "[/bold yellow]"
-        )
-        try:
-            ops = fetch_race_list_oddspark(today)
-            console.print(f"[cyan]oddspark fallback: {len(ops)} NAR races detected[/cyan]")
-            for a in ops:
+    # NAR 公式 (oddspark の当日 race list) で discovery。netkeiba race_list は呼ばない。
+    try:
+        ops = fetch_race_list_oddspark(today)
+        console.print(f"[cyan]oddspark NAR discovery: {len(ops)} races[/cyan]")
+        for a in ops:
+            races.append({
+                "race_id": a["netkeiba_race_id"],
+                "url": a["url"],
+                "start_at": a["start_at"],
+                "venue": a["venue"],
+                "race_no": a["race_no"],
+                "source": "oddspark",
+            })
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[red]oddspark NAR discovery 失敗: {ex}[/red]")
+    # JRA discovery: 競馬ブック (発走時刻ソース) × JRA 公式 discover (netkeiba_rid ソース) を
+    # (venue_name, race_no) で join。発走時刻と netkeiba_rid の両方が揃った race のみ採用。
+    try:
+        from .parse import VENUE_CODE
+        from .scrape_jra import discover_jra_races
+        kb = fetch_race_list_keibabook(today)
+        if kb:
+            jra = discover_jra_races()
+            # (venue_name, race_no) → netkeiba_rid
+            jra_by_key = {(VENUE_CODE.get(r["venue"], ""), r["race_no"]): r
+                          for r in jra if r["date"] == today}
+            joined = 0
+            for k in kb:
+                key = (k["venue"], k["race_no"])
+                j = jra_by_key.get(key)
+                if not j:
+                    continue
+                rid = j["netkeiba_rid"]
                 races.append({
-                    "race_id": a["netkeiba_race_id"],
-                    "url": a["url"],
-                    "start_at": a["start_at"],
-                    "venue": a["venue"],
-                    "race_no": a["race_no"],
-                    "source": "oddspark",
+                    "race_id": rid,
+                    "url": f"https://race.netkeiba.com/race/shutuba.html?race_id={rid}",
+                    "start_at": k["start_at"],
+                    "venue": k["venue"],
+                    "race_no": k["race_no"],
+                    "source": "keibabook",   # = JRA (keibago/oddspark でない印)
                 })
-        except Exception as ex:  # noqa: BLE001
-            console.print(f"[red]oddspark fallback 失敗: {ex}[/red]")
-        # oddspark で見つからない場合に備え keibalab も (race 発見のみ)
-        if not races:
-            try:
-                alt = fetch_race_list_keibalab(today)
-                console.print(f"[cyan]keibalab fallback: {len(alt)} races detected[/cyan]")
-                for a in alt:
-                    races.append({
-                        "race_id": a.race_id, "url": a.url, "start_at": a.start_at,
-                        "venue": a.venue or "?", "race_no": a.race_no,
-                    })
-            except Exception as ex:  # noqa: BLE001
-                console.print(f"[red]keibalab fallback も失敗: {ex}[/red]")
-        if not races:
+                joined += 1
             console.print(
-                "[bold red]race discovery 不能。数時間-1日待つか、別 IP/VPN から再試行してください。[/bold red]"
+                f"[cyan]JRA discovery: keibabook {len(kb)} × JRA 公式 {len(jra)} → "
+                f"join {joined} races[/cyan]"
             )
+        else:
+            console.print(f"[yellow]keibabook JRA discovery 0 件 (当日 JRA 無し or 取得失敗)[/yellow]")
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[red]JRA discovery 失敗: {ex}[/red]")
+    if not races:
+        console.print(
+            "[yellow]race discovery 0 件 (NAR/JRA とも当日無し or 公式ソース不通)[/yellow]"
+        )
 
     # 検出帯は「**締切まで** window〜window+tolerance 分」の片側 (+のみ)。締切は発走の
     # CLOSE_LEAD_SEC 秒前で固定 (parse.close_at_for_start)。締切基準にすることで、レース
@@ -229,42 +252,66 @@ def _normalize_race_id(netkeiba_rid: str) -> str:
     return f"{cup_id}-{schedule_index}-{race_number}"
 
 
-def _dispatch_analyze(url: str, extra_args: list[str]) -> int:
-    cmd = [sys.executable, "-m", "src.analyze", url, "--llm-model", "opus", *extra_args]
-    console.print(f"[bold cyan]→ analyze:[/bold cyan] {url}")
-    proc = subprocess.run(cmd, cwd=ROOT)
-    return proc.returncode
-
-
-def _dispatch_keibago(netkeiba_rid: str, start_at: int = 0) -> int:
-    """netkeiba block 中の NAR: keiba.go.jp の全6券種オッズで解析し snapshot を保存。"""
+def _dispatch_keibago(netkeiba_rid: str, start_at: int = 0,
+                      *, market_blend: float | None = None,
+                      aptitude_top: int | None = None) -> int:
+    """NAR: keiba.go.jp の全6券種オッズで解析し snapshot を保存。"""
     cmd = [sys.executable, "-m", "src.scrape_keibago", netkeiba_rid,
            "--snapshot", f"--start-at={start_at}"]
+    if market_blend is not None:
+        cmd.append(f"--market-blend={market_blend}")
+    if aptitude_top is not None:
+        cmd.append(f"--aptitude-top={aptitude_top}")
     console.print(f"[bold cyan]→ keiba.go.jp analyze:[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
 
-def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0) -> int:
-    """netkeiba block 中の NAR: oddspark オッズで解析し snapshot を保存。"""
+def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
+                       *, market_blend: float | None = None,
+                       aptitude_top: int | None = None) -> int:
+    """NAR: oddspark オッズで解析し snapshot を保存 (keibago 不可時)。"""
     cmd = [sys.executable, "-m", "src.scrape_oddspark", netkeiba_rid,
            "--snapshot", f"--start-at={start_at}"]
+    if market_blend is not None:
+        cmd.append(f"--market-blend={market_blend}")
+    if aptitude_top is not None:
+        cmd.append(f"--aptitude-top={aptitude_top}")
     console.print(f"[bold cyan]→ oddspark analyze:[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
 
-def _dispatch_nar_fallback(netkeiba_rid: str, start_at: int = 0) -> int:
+def _dispatch_jra(netkeiba_rid: str, start_at: int = 0,
+                  *, market_blend: float | None = None,
+                  aptitude_top: int | None = None) -> int:
+    """JRA: 公式 (accessO.html token walk) で全7券種オッズを取得して snapshot 保存。"""
+    cmd = [sys.executable, "-m", "src.scrape_jra", netkeiba_rid,
+           "--snapshot", f"--start-at={start_at}"]
+    if market_blend is not None:
+        cmd.append(f"--market-blend={market_blend}")
+    if aptitude_top is not None:
+        cmd.append(f"--aptitude-top={aptitude_top}")
+    console.print(f"[bold cyan]→ JRA 公式 analyze:[/bold cyan] {netkeiba_rid}")
+    proc = subprocess.run(cmd, cwd=ROOT)
+    return proc.returncode
+
+
+def _dispatch_nar_fallback(netkeiba_rid: str, start_at: int = 0,
+                           *, market_blend: float | None = None,
+                           aptitude_top: int | None = None) -> int:
     """NAR フォールバック: keiba.go.jp (全6券種・組合せ明示) を優先、失敗時 oddspark。
 
     keiba.go.jp は馬連/ワイド/馬単/3連複/3連単 を組合せ明示で取れるので oddspark
     (単複/3連単のみ + グリッド誤オッズ回避で他を無効) より優れる。当日 NAR で
     keiba.go.jp が解決できない (場名/開催) 場合のみ oddspark に落ちる。
     """
-    rc = _dispatch_keibago(netkeiba_rid, start_at)
+    rc = _dispatch_keibago(netkeiba_rid, start_at,
+                           market_blend=market_blend, aptitude_top=aptitude_top)
     if rc != 0:
         console.print("[yellow]keiba.go.jp 不可 → oddspark にフォールバック[/yellow]")
-        rc = _dispatch_oddspark(netkeiba_rid, start_at)
+        rc = _dispatch_oddspark(netkeiba_rid, start_at,
+                                market_blend=market_blend, aptitude_top=aptitude_top)
     return rc
 
 
@@ -353,19 +400,11 @@ def main(
         return
 
     analyzed = _load_analyzed()
-    extra: list[str] = []
-    if ev_max is not None:
-        extra += ["--ev-max", str(ev_max)]
-    if min_prob is not None:
-        extra += ["--min-prob", str(min_prob)]
-    if market_blend is not None:
-        extra += ["--market-blend", str(market_blend)]
-    if aptitude_top is not None:
-        extra += ["--aptitude-top", str(aptitude_top)]
-    if with_exacta:
-        extra.append("--with-exacta")
-    if with_trio:
-        extra.append("--with-trio")
+    # 公式ソース (keibago) は単複/馬連/ワイド/馬単/3連複/3連単 を組合せ明示で常時 fetch する
+    # ため --with-exacta/--with-trio は no-op。--ev-max/--min-prob は keibago の plan filter に
+    # まだ通っていない (TODO: 必要なら scrape_keibago に --min-prob を足す)。
+    # 効くのは --market-blend / --aptitude-top (下の _dispatch_nar_fallback で渡す)。
+    _ = (ev_max, min_prob, with_exacta, with_trio)   # 受け取るが現状未配線 (no-op)
 
     for race in due:
         rid = race["race_id"]
@@ -384,11 +423,20 @@ def main(
             console.print(f"  [dim]dry-run: {race['url']}[/dim]")
             continue
         started_at = int(time.time())
-        if race.get("source") == "oddspark":
-            # netkeiba block 中の NAR: keiba.go.jp (全6券種) 優先・oddspark フォールバック
-            rc = _dispatch_nar_fallback(race["netkeiba_race_id"], race.get("start_at", 0))
+        # 公式ソース dispatch:
+        #   NAR (source=oddspark)  → keiba.go.jp (全6券種) 優先・oddspark フォールバック
+        #   JRA (source=keibabook) → JRA 公式 accessO.html (全7券種)
+        # netkeiba live は一切使わない。
+        if race.get("source") == "keibabook":
+            rc = _dispatch_jra(
+                race["netkeiba_race_id"], race.get("start_at", 0),
+                market_blend=market_blend, aptitude_top=aptitude_top,
+            )
         else:
-            rc = _dispatch_analyze(race["url"], extra)
+            rc = _dispatch_nar_fallback(
+                race["netkeiba_race_id"], race.get("start_at", 0),
+                market_blend=market_blend, aptitude_top=aptitude_top,
+            )
         finished_at = int(time.time())
         if rc == 0:
             _mark_analyzed(rid)

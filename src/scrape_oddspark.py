@@ -635,7 +635,8 @@ def build_oddspark_racedata(
 
 
 def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
-                     with_llm: bool = True) -> dict:
+                     with_llm: bool = True, market_blend: float = 0.78,
+                     aptitude_top: int = 6) -> dict:
     """NAR race を oddspark の単複/3連単オッズで解析する (netkeiba block 中のフォールバック)。
 
     出馬表 (馬柱/特徴量) は data/raw の netkeiba cache があれば使い (確率モデルが効く)、
@@ -699,7 +700,7 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
         ]
 
     mwp = market_win_probs_from_tanfuku(bets.tanfuku)
-    probs = ev_mod.estimate_probs(rd, market_blend=0.78, market_win_override=mwp)
+    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     # 3連単 EV table (rd.trifecta 由来)
@@ -727,7 +728,7 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
         has_past = any(h.past_runs for h in rd.race.horses)
         feats = build_features(rd) if (used_cache or has_past) else None
         aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
-        apt_top = az_mod._aptitude_top_horses(aptitudes, n=6) if aptitudes else None
+        apt_top = az_mod._aptitude_top_horses(aptitudes, n=aptitude_top) if aptitudes else None
         plan_rows = ev_mod.apply_caps(tri_table)
         snap_bet_tables = {k: v for k, v in tables.items()
                            if k in ("win", "place") and v}
@@ -803,16 +804,29 @@ def _cli() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     save = "--snapshot" in sys.argv
     start_at = 0
+    market_blend = 0.78
+    aptitude_top = 6
     for a in sys.argv:
         if a.startswith("--start-at="):
             start_at = int(a.split("=", 1)[1] or 0)
+        elif a.startswith("--market-blend="):
+            try:
+                market_blend = float(a.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif a.startswith("--aptitude-top="):
+            try:
+                aptitude_top = int(a.split("=", 1)[1])
+            except ValueError:
+                pass
     if not args:
-        console.print("usage: python -m src.scrape_oddspark <netkeiba_nar_race_id> [--snapshot] [--start-at=UNIX]")
+        console.print("usage: python -m src.scrape_oddspark <netkeiba_nar_race_id> [--snapshot] [--start-at=UNIX] [--market-blend=X] [--aptitude-top=N]")
         raise SystemExit(2)
     rid = args[0]
     try:
         res = analyze_oddspark(rid, save_snapshot=save, start_at=start_at,
-                               with_llm="--no-llm" not in sys.argv)
+                               with_llm="--no-llm" not in sys.argv,
+                               market_blend=market_blend, aptitude_top=aptitude_top)
     except OddsparkError as ex:
         console.print(f"[yellow]oddspark 解析不能 ({rid}): {ex}[/yellow]")
         raise SystemExit(1)
