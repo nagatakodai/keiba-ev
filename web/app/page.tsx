@@ -547,7 +547,8 @@ export default async function DashboardPage() {
                 ? `参加 ${claudeBundle.participated_races} / 集計 ${claudeBundle.races}`
                 : "—"
             }
-            tone={claudeBundle && claudeBundle.hits > 0 ? "good" : "default"}
+            // 値は黒文字 (default)。左 border のみ緑で AI 種別を示す (2026-05-29 ユーザ指示)
+            tone="default"
             accentTone="good"
           />
           <Stat

@@ -42,12 +42,14 @@ export default async function CalibratePage({
   const confidence = calibrationConfidence(cal.race_count);
   const lastUpdated = fmtRelativeFromNow(cal.last_updated_at);
   const yb = cal.claude_bundle;       // 回収優先 (実弾で買う)
-  const hb = cal.claude_bundle_hit;   // 的中優先 (おまけ計測)
   const roiPct = (b?: { roi: number } | null) =>
     b ? `${Math.round(b.roi * 100)}%` : "—";
-  // 100% 超 → 黒 (default)、未満 → 赤 (損失) (dashboard と同じ閾値)
+  // 回収率: 100% 未満 → 赤文字 (損失)、100% 以上 → 黒 (default)
   const roiTone = (b?: { participated_races: number; roi: number } | null) =>
-    !b || b.participated_races === 0 ? "default" : b.roi > 1 ? "default" : "bad";
+    !b || b.participated_races === 0 ? "default" : b.roi >= 1 ? "default" : "bad";
+  // 的中率: 30% 未満 → 赤文字、30% 以上 → 黒 (default)
+  const hitTone = (b?: { participated_races: number; hit_rate: number } | null) =>
+    !b || b.participated_races === 0 ? "default" : b.hit_rate < 0.3 ? "bad" : "default";
 
   return (
     <Page>
@@ -56,7 +58,7 @@ export default async function CalibratePage({
         subtitle="計算 EV と実 EV のオフセット (tier ratio) + 回収優先 / 的中優先 bundle の実績。サンプル 30+ で初めて判断材料になる。"
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Stat
           label="対象レース"
           value={cal.race_count}
@@ -72,6 +74,7 @@ export default async function CalibratePage({
           label="回収優先AI 的中率"
           value={!yb || yb.participated_races === 0 ? "—" : fmtPct(yb.hit_rate, 1)}
           hint={yb && yb.participated_races > 0 ? `${yb.hits} 的中 / ${yb.participated_races} 参加` : "—"}
+          tone={hitTone(yb)}
           accentTone="good"
         />
         <Stat
@@ -84,17 +87,6 @@ export default async function CalibratePage({
           }
           tone={roiTone(yb)}
           accentTone="info"
-        />
-        <Stat
-          label="的中優先AI 回収率"
-          value={roiPct(hb)}
-          hint={
-            hb && hb.participated_races > 0
-              ? `${hb.hits} 的中 / ${hb.participated_races} 参加 (おまけ計測)`
-              : "新スキーマ待ち"
-          }
-          tone={roiTone(hb)}
-          accentTone="good"
         />
       </div>
 
