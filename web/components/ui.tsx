@@ -133,9 +133,11 @@ export function Badge({
 }: PropsWithChildren<{ tone?: BadgeTone }>) {
   const cls = {
     default: "bg-white text-(--color-foreground) border-(--color-line)",
-    good: "bg-emerald-50 text-emerald-800 border-emerald-300",
+    // 的中/不的中 などの結果系で「鮮やか」に視認できるよう一段濃いめに
+    // (2026-05-29 ユーザ指示)。bg 200 / border 500 / text 900。
+    good: "bg-emerald-200 text-emerald-900 border-emerald-500 font-semibold",
     warn: "bg-amber-50 text-amber-800 border-amber-400",
-    bad: "bg-red-50 text-red-800 border-red-400",
+    bad: "bg-red-200 text-red-900 border-red-500 font-semibold",
     magenta: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-300",
     // Plan F の最終買い目を示す赤ピンク。border-400 で他より一段強調。
     rose: "bg-rose-50 text-rose-800 border-rose-400",
@@ -473,9 +475,10 @@ export function raceTimingRowBg(tone: BadgeTone): string {
   return (
     {
       default: "",
-      good: "bg-emerald-50/40",
+      // 的中/不的中 行 bg も連動して一段濃く (badge と合わせて鮮やかに)
+      good: "bg-emerald-100/80",
       warn: "bg-amber-50/50",
-      bad: "bg-red-50/60",
+      bad: "bg-red-100/70",
       magenta: "bg-fuchsia-50/40",
       rose: "bg-rose-50/60",
       info: "bg-sky-50/50",

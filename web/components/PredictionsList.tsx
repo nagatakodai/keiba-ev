@@ -237,24 +237,21 @@ export function PredictionsList({
                     </div>
                   </Link>
                   <div className="flex gap-1 shrink-0 items-start">
+                    {/* **1 ラベル原則** (2026-05-29 ユーザ指示):
+                        優先順 hit (的中/見送り/不的中) > 補強済 > timing。
+                        timing.label="結果待ち" は 評価待ち 文脈で冗長なので非表示。 */}
                     {hit ? (
                       anyHit ? (
                         <Badge tone="good">的中</Badge>
                       ) : bundleSkipped ? (
-                        // 見送り = 賭けてないので「不的中」ではなく「見送り」
                         <Badge tone="muted">見送り</Badge>
                       ) : (
                         <Badge tone="bad">不的中</Badge>
                       )
-                    ) : (
-                      <Badge tone={timing.tone}>{timing.label}</Badge>
-                    )}
-                    {/* has_evidence=true なら Claude 評価が完了 (検索補強反映済)、
-                        false なら未完了 (分析途中・失敗・cancel いずれか) */}
-                    {p.has_evidence ? (
+                    ) : p.has_evidence ? (
                       <Badge tone="magenta">補強済</Badge>
-                    ) : !p.has_result ? (
-                      <Badge tone="muted">評価待ち</Badge>
+                    ) : timing.label !== "結果待ち" ? (
+                      <Badge tone={timing.tone}>{timing.label}</Badge>
                     ) : null}
                   </div>
                   <Link
