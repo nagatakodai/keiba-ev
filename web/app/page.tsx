@@ -494,7 +494,7 @@ export default async function DashboardPage() {
               !claudeBundle
                 ? "default"
                 : claudeBundle.payout - claudeBundle.stake >= 0
-                ? "good"
+                ? "info"
                 : "bad"
             }
             accentTone={

@@ -88,7 +88,7 @@ export function Stat({
   label: string;
   value: ReactNode;
   hint?: ReactNode;
-  tone?: "default" | "good" | "warn" | "bad";
+  tone?: "default" | "good" | "warn" | "bad" | "info";
   // optional 左 border の色のみ別系統で指定 (value 色は tone が制御)。
   // 例: tone=default (数値は標準色) + accentTone="info" (左 border は青)。
   accentTone?: "default" | "good" | "warn" | "bad" | "info" | "muted";
@@ -100,6 +100,8 @@ export function Stat({
       ? "text-(--color-warn)"
       : tone === "bad"
       ? "text-(--color-bad)"
+      : tone === "info"
+      ? "text-(--color-info)"
       : "text-(--color-foreground)";
   const accentSrc = accentTone ?? tone;
   const accent =
