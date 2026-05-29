@@ -51,7 +51,7 @@ export default async function PredictionsPage({
   return (
     <Page>
       <PageHeader
-        title="予測履歴"
+        title="予測分析履歴"
         subtitle={`本日 ${today} 分のみ表示 (会場ごと / R 番号順)。`}
         right={
           <div className="flex items-center gap-3 text-xs">
@@ -70,7 +70,7 @@ export default async function PredictionsPage({
                 href="/predictions/archive"
                 className="text-(--color-accent) hover:underline"
               >
-                過去の予測履歴 ({pastCount}) →
+                過去の予測分析履歴 ({pastCount}) →
               </Link>
             )}
           </div>
@@ -85,7 +85,7 @@ export default async function PredictionsPage({
         showHits={showHits}
         emptyMessage={
           pastCount > 0
-            ? `本日の予測はまだありません。過去分 ${pastCount} 件は「過去の予測履歴」へ。`
+            ? `本日の予測はまだありません。過去分 ${pastCount} 件は「過去の予測分析履歴」へ。`
             : "まだ予測はありません。"
         }
       />

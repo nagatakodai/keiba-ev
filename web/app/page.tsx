@@ -132,7 +132,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
         </span>
       </h2>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <Card title="累積収支 (¥, 回収優先 vs 的中優先)">
+        <Card title="累積収支">
           <LineChart
             seriesA={yieldNetSeries}
             seriesB={hitNetSeries}
@@ -143,7 +143,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
         </Card>
-        <Card title="累積回収率 推移 (%)">
+        <Card title="累積回収率 推移">
           <LineChart
             seriesA={yieldRoiSeries.map((v) => v * 100)}
             seriesB={hitRoiSeries.map((v) => v * 100)}
@@ -155,7 +155,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             referenceY={100}
           />
         </Card>
-        <Card title={`結果分布 (n=${totalRaces})`}>
+        <Card title="結果分布">
           <div className="space-y-3">
             <DistroBar
               label="回収優先AI"
@@ -286,7 +286,7 @@ function DistroBar({
       <div className="flex items-baseline justify-between text-xs mb-1">
         <span className="font-bold">{label}</span>
         <span className="text-(--color-muted) tabnum">
-          的中 {hits} ／ 不的中 {misses} ／ 見送り {skips} (n={total})
+          的中 {hits} ／ 不的中 {misses} ／ 見送り {skips}
         </span>
       </div>
       <div className="flex h-5 overflow-hidden border border-(--color-line)">
@@ -454,7 +454,66 @@ export default async function DashboardPage() {
       {/* watch-auto stat はダッシュボードから削除 (2026-05-29 ユーザ指示)。
           状態は header の WatchPill で確認可能。 */}
 
-      {/* 回収優先AI セクション (実弾で買う) */}
+      {/* 一番上の段: 的中レース数 / 見送りレース数 / 収支 (全て回収優先AI 基準) */}
+      <div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <Stat
+            label="的中レース数"
+            value={claudeBundle?.hits ?? 0}
+            hint={
+              claudeBundle
+                ? `参加 ${claudeBundle.participated_races} / 集計 ${claudeBundle.races}`
+                : "—"
+            }
+            tone={claudeBundle && claudeBundle.hits > 0 ? "good" : "default"}
+            accentTone="info"
+          />
+          <Stat
+            label="見送りレース数"
+            value={claudeBundle?.skipped_races ?? 0}
+            hint={
+              claudeBundle && claudeBundle.races > 0
+                ? `見送り率 ${Math.round((claudeBundle.skipped_races / claudeBundle.races) * 100)}%`
+                : "—"
+            }
+            accentTone="muted"
+          />
+          <Stat
+            label="収支"
+            value={
+              !claudeBundle
+                ? "—"
+                : `${claudeBundle.payout - claudeBundle.stake >= 0 ? "+" : ""}${fmtYen(claudeBundle.payout - claudeBundle.stake)}`
+            }
+            hint={
+              claudeBundle
+                ? `賭金 ${fmtYen(claudeBundle.stake)} → 払戻 ${fmtYen(claudeBundle.payout)}`
+                : "—"
+            }
+            tone={
+              !claudeBundle
+                ? "default"
+                : claudeBundle.payout - claudeBundle.stake >= 0
+                ? "good"
+                : "bad"
+            }
+            accentTone={
+              !claudeBundle || claudeBundle.payout - claudeBundle.stake >= 0 ? "good" : "bad"
+            }
+          />
+        </div>
+        <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
+          ※ 全て回収優先AI 基準 ／ 集計対象 {cal?.race_count ?? 0} レース ／
+          {confidence && (
+            <span className="ml-1">
+              <Badge tone={confidence.tone}>{confidence.label}</Badge>
+            </span>
+          )}
+          <span className="ml-1">最終更新 {lastUpdated}</span>
+        </div>
+      </div>
+
+      {/* 回収優先AI セクション (実弾で買う) — 回収系=緑 / 的中系=青 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
           <span className="inline-block w-1 h-4 bg-(--color-good) translate-y-0.5" />
@@ -463,21 +522,30 @@ export default async function DashboardPage() {
             joint Kelly EV 最適 / 実弾で買う対象
           </span>
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* 左=的中率 (青線), 右=回収率 (緑線) (2026-05-29 ユーザ指示) */}
         <Stat
-          label="集計対象レース"
-          value={cal?.race_count ?? 0}
-          hint={
-            confidence ? (
-              <span className="flex items-center gap-1">
-                <Badge tone={confidence.tone}>{confidence.label}</Badge>
-                <span>· 最終更新 {lastUpdated}</span>
-              </span>
-            ) : (
-              "—"
-            )
+          label="回収優先AI 的中率"
+          value={
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "—"
+              : fmtPct(claudeBundle.hit_rate, 1)
           }
-          tone={confidence?.tone === "good" ? "good" : confidence?.tone === "warn" ? "warn" : "bad"}
+          hint={
+            claudeBundle && claudeBundle.participated_races > 0
+              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加 (見送り除く)`
+              : ""
+          }
+          tone={
+            !claudeBundle || claudeBundle.participated_races < 30
+              ? "warn"
+              : claudeBundle.hit_rate >= 0.3
+              ? "good"
+              : claudeBundle.hit_rate >= 0.15
+              ? "warn"
+              : "bad"
+          }
+          accentTone="good"
         />
         <Stat
           label="回収優先AI 回収率"
@@ -500,33 +568,12 @@ export default async function DashboardPage() {
               ? "warn"
               : "bad"
           }
-        />
-        <Stat
-          label="回収優先AI 的中率"
-          value={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "—"
-              : fmtPct(claudeBundle.hit_rate, 1)
-          }
-          hint={
-            claudeBundle && claudeBundle.participated_races > 0
-              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加 (見送り除く)`
-              : ""
-          }
-          tone={
-            !claudeBundle || claudeBundle.participated_races < 30
-              ? "warn"
-              : claudeBundle.hit_rate >= 0.3
-              ? "good"
-              : claudeBundle.hit_rate >= 0.15
-              ? "warn"
-              : "bad"
-          }
+          accentTone="info"
         />
         </div>
       </section>
 
-      {/* 的中優先AI セクション (おまけ計測 / 買わない) */}
+      {/* 的中優先AI セクション (おまけ計測 / 買わない) — 的中系=青 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
           <span className="inline-block w-1 h-4 bg-(--color-info) translate-y-0.5" />
@@ -535,20 +582,29 @@ export default async function DashboardPage() {
             prob 降順 pool / おまけ計測・買わない
           </span>
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Stat
-          label="集計対象レース"
-          value={cal?.race_count ?? 0}
-          hint={
-            confidence ? (
-              <span className="flex items-center gap-1">
-                <Badge tone={confidence.tone}>{confidence.label}</Badge>
-              </span>
-            ) : (
-              "—"
-            )
+          label="的中優先AI 的中率"
+          value={
+            !claudeBundleHit || claudeBundleHit.participated_races === 0
+              ? "—"
+              : fmtPct(claudeBundleHit.hit_rate, 1)
           }
-          tone={confidence?.tone === "good" ? "good" : confidence?.tone === "warn" ? "warn" : "bad"}
+          hint={
+            claudeBundleHit && claudeBundleHit.participated_races > 0
+              ? `${claudeBundleHit.hits} 的中 / ${claudeBundleHit.participated_races} 参加`
+              : "新スキーマ待ち (本日以降の analyze から蓄積)"
+          }
+          tone={
+            !claudeBundleHit || claudeBundleHit.participated_races < 30
+              ? "warn"
+              : claudeBundleHit.hit_rate >= 0.3
+              ? "good"
+              : claudeBundleHit.hit_rate >= 0.15
+              ? "warn"
+              : "bad"
+          }
+          accentTone="good"
         />
         <Stat
           label="的中優先AI 回収率"
@@ -571,28 +627,7 @@ export default async function DashboardPage() {
               ? "warn"
               : "bad"
           }
-        />
-        <Stat
-          label="的中優先AI 的中率"
-          value={
-            !claudeBundleHit || claudeBundleHit.participated_races === 0
-              ? "—"
-              : fmtPct(claudeBundleHit.hit_rate, 1)
-          }
-          hint={
-            claudeBundleHit && claudeBundleHit.participated_races > 0
-              ? `${claudeBundleHit.hits} 的中 / ${claudeBundleHit.participated_races} 参加`
-              : "新スキーマ待ち (本日以降の analyze から蓄積)"
-          }
-          tone={
-            !claudeBundleHit || claudeBundleHit.participated_races < 30
-              ? "warn"
-              : claudeBundleHit.hit_rate >= 0.3
-              ? "good"
-              : claudeBundleHit.hit_rate >= 0.15
-              ? "warn"
-              : "bad"
-          }
+          accentTone="info"
         />
         </div>
       </section>

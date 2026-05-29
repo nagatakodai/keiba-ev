@@ -214,8 +214,8 @@ export default function WatchAutoPage() {
   return (
     <Page>
           <PageHeader
-            title="watch-auto"
-            subtitle="netkeiba の開催一覧を polling し、発走間際のレースを自動で解析する。"
+            title="自動予測分析・投票"
+            subtitle="公式ソースの当日開催一覧を polling し、発走間際のレースを自動で予測分析する。"
           />
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -236,7 +236,7 @@ export default function WatchAutoPage() {
           label="polling 間隔"
           value={status?.config?.interval_sec ? `${status.config.interval_sec}s` : "—"}
         />
-        <Stat label="自動解析 件数" value={history.length} />
+        <Stat label="自動予測分析 件数" value={history.length} />
       </div>
 
       <Card
@@ -467,7 +467,7 @@ export default function WatchAutoPage() {
         {job ? (
           <LogStream key={job.id} url={`/api/watch-auto/stream`} height="h-[50vh]" emptyHint="(ログ待機中...)" />
         ) : (
-          <p className="text-sm text-(--color-muted)">未起動。開始ボタンで watch-auto を立ち上げます。</p>
+          <p className="text-sm text-(--color-muted)">未起動。開始ボタンで 自動予測分析・投票 を立ち上げます。</p>
         )}
       </Card>
 
@@ -483,7 +483,7 @@ export default function WatchAutoPage() {
       </Card>
 
       <Card
-        title="自動解析の履歴 (最新3件)"
+        title="自動予測分析の履歴 (最新3件)"
         right={
           <Link
             href="/predictions"
@@ -500,7 +500,7 @@ export default function WatchAutoPage() {
             <table className="w-full text-sm tabnum table-zebra">
               <thead className="text-left text-(--color-muted) text-xs">
                 <tr className="border-b border-(--color-line)">
-                  <th className="py-2 pr-3">解析時刻</th>
+                  <th className="py-2 pr-3">予測分析時刻</th>
                   <th className="py-2 pr-3">会場</th>
                   <th className="py-2 pr-3">R</th>
                   <th className="py-2 pr-3">締切</th>

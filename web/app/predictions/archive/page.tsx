@@ -52,7 +52,7 @@ export default async function PredictionsArchivePage({
   return (
     <Page>
       <PageHeader
-        title="過去の予測履歴"
+        title="過去の予測分析履歴"
         subtitle={`本日 (${today}) より前の予測 ${past.length} 件。`}
         right={
           <div className="flex items-center gap-3 text-xs">

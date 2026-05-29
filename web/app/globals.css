@@ -13,9 +13,10 @@
   --nav-text: #ffffff;
   --accent: #0033aa;       /* link blue */
   --highlight: #d04a1a;    /* CTA / active orange */
-  --good: #1f9c54;
+  --good: #10b981;         /* emerald-500: ミドリっぽい鮮やかな緑 (旧 #1f9c54 から bump) */
   --warn: #d28f0a;
   --bad: #c93030;
+  --info: #0ea5e9;         /* sky-500: 鮮やかな青 (的中系の border 等で使用) */
   --magenta: #b332a0;
   --gold: #ebb838;
 }
@@ -36,6 +37,7 @@
   --color-good: var(--good);
   --color-warn: var(--warn);
   --color-bad: var(--bad);
+  --color-info: var(--info);
   --color-magenta: var(--magenta);
   --color-gold: var(--gold);
   --font-sans: var(--font-noto-jp);

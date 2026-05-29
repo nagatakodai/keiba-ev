@@ -14,14 +14,14 @@ export function WatchPill() {
           ? "bg-(--color-good)/10 border-(--color-good) text-(--color-good)"
           : "bg-white border-(--color-line) text-(--color-muted) hover:border-(--color-accent)"
       }`}
-      title="watch-auto status"
+      title="自動予測分析・投票 の稼働状態"
     >
       <span
         className={`inline-block w-2 h-2 rounded-full ${
           running ? "bg-(--color-good) animate-pulse" : "bg-(--color-muted)/60"
         }`}
       />
-      <span>watch-auto</span>
+      <span>自動予測分析・投票</span>
       <span>{running ? "稼働中" : "停止"}</span>
     </Link>
   );

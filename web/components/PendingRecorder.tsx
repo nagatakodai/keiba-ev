@@ -65,7 +65,7 @@ function RecorderRow({
       setOk(
         res.matched
           ? "記録 + 予測と突合済み"
-          : "記録しました (予測履歴なし)",
+          : "記録しました (予測分析履歴なし)",
       );
       setTimeout(onDone, 600);
     } catch (e) {

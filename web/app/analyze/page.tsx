@@ -60,8 +60,8 @@ export default function AnalyzePage() {
   return (
     <Page>
       <PageHeader
-        title="解析"
-        subtitle="netkeiba の URL を渡して Plan A/B/C/H を生成。refresh で発走 5 分前まで待機し最新オッズで再評価。"
+        title="レース予測分析"
+        subtitle="URL を渡して回収優先AI と 的中優先AI を生成。refresh で発走 5 分前まで待機し最新オッズで再分析。"
       />
 
       <Card title="リクエスト">
@@ -153,7 +153,7 @@ export default function AnalyzePage() {
 
           <div className="flex items-center gap-2">
             <Button type="submit" disabled={submitting || !url}>
-              {submitting ? "起動中..." : job ? "別ジョブで再実行" : "解析を開始"}
+              {submitting ? "起動中..." : job ? "別ジョブで再実行" : "予測分析を開始"}
             </Button>
             {job && (
               <Button type="button" variant="ghost" onClick={cancel} disabled={job.status !== "running"}>

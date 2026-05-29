@@ -83,11 +83,15 @@ export function Stat({
   value,
   hint,
   tone = "default",
+  accentTone,
 }: {
   label: string;
   value: ReactNode;
   hint?: ReactNode;
   tone?: "default" | "good" | "warn" | "bad";
+  // optional 左 border の色のみ別系統で指定 (value 色は tone が制御)。
+  // 例: tone=default (数値は標準色) + accentTone="info" (左 border は青)。
+  accentTone?: "default" | "good" | "warn" | "bad" | "info" | "muted";
 }) {
   const color =
     tone === "good"
@@ -97,13 +101,18 @@ export function Stat({
       : tone === "bad"
       ? "text-(--color-bad)"
       : "text-(--color-foreground)";
+  const accentSrc = accentTone ?? tone;
   const accent =
-    tone === "good"
+    accentSrc === "good"
       ? "border-l-(--color-good)"
-      : tone === "warn"
+      : accentSrc === "warn"
       ? "border-l-(--color-warn)"
-      : tone === "bad"
+      : accentSrc === "bad"
       ? "border-l-(--color-bad)"
+      : accentSrc === "info"
+      ? "border-l-(--color-info)"
+      : accentSrc === "muted"
+      ? "border-l-(--color-line)"
       : "border-l-(--color-accent)";
   return (
     <div
@@ -141,7 +150,7 @@ export function Badge({
     magenta: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-300",
     // Plan F の最終買い目を示す赤ピンク。border-400 で他より一段強調。
     rose: "bg-rose-50 text-rose-800 border-rose-400",
-    info: "bg-sky-50 text-sky-800 border-sky-300",
+    info: "bg-sky-100 text-sky-900 border-sky-500 font-semibold",
     // 白に近い淡いオレンジ。"結果待ち" 等の "進行中だが警告ではない" 状態用。
     pending: "bg-orange-50 text-orange-700 border-orange-200",
     muted: "bg-(--color-panel-2) text-(--color-muted) border-(--color-line)",

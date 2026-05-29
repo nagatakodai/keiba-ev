@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { api } from "@/lib/api";
-
-export const metadata: Metadata = { title: "確率較正" };
 import {
   Badge,
   Card,
@@ -20,6 +18,8 @@ import {
   tierTone,
 } from "@/components/ui";
 
+export const metadata: Metadata = { title: "確率較正" };
+
 export const dynamic = "force-dynamic";
 
 export default async function CalibratePage({
@@ -34,7 +34,7 @@ export default async function CalibratePage({
   if (!cal) {
     return (
       <Page>
-        <PageHeader title="キャリブレーション" />
+        <PageHeader title="確率較正" />
         <Card>
           <p className="text-sm text-(--color-bad)">FastAPI に到達できませんでした。</p>
         </Card>
@@ -51,7 +51,7 @@ export default async function CalibratePage({
   return (
     <Page>
       <PageHeader
-        title="キャリブレーション"
+        title="確率較正"
         subtitle="計算 EV と実 EV のオフセット、Plan 別 ROI。サンプル 30+ で初めて係数判断材料になる。"
       />
 
