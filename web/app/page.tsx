@@ -67,31 +67,22 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
     (a.saved_at ?? "").localeCompare(b.saved_at ?? ""),
   );
 
-  // 累積収支 (回収優先): 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
+  // 累積収支 (回収優先のみ): 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
+  // 的中優先AI は計測用なのでグラフには出さない (2026-05-29 ユーザ指示)。
   let yieldStakeAcc = 0;
   let yieldPayoutAcc = 0;
-  let hitStakeAcc = 0;
-  let hitPayoutAcc = 0;
   const series = sorted.map((r) => {
     if (r.bundle_participated) {
       yieldStakeAcc += r.bundle_stake ?? 0;
       yieldPayoutAcc += r.bundle_payout ?? 0;
     }
-    if (r.bundle_hit_first_participated) {
-      hitStakeAcc += r.bundle_hit_first_stake ?? 0;
-      hitPayoutAcc += r.bundle_hit_first_payout ?? 0;
-    }
     return {
       yieldNet: yieldPayoutAcc - yieldStakeAcc,
       yieldRoi: yieldStakeAcc > 0 ? yieldPayoutAcc / yieldStakeAcc : 0,
-      hitNet: hitPayoutAcc - hitStakeAcc,
-      hitRoi: hitStakeAcc > 0 ? hitPayoutAcc / hitStakeAcc : 0,
     };
   });
   const yieldNetSeries = series.map((s) => s.yieldNet);
-  const hitNetSeries = series.map((s) => s.hitNet);
   const yieldRoiSeries = series.map((s) => s.yieldRoi);
-  const hitRoiSeries = series.map((s) => s.hitRoi);
 
   // 結果分布: 的中 / 不的中 / 見送り レース数
   const yieldHits = races.filter((r) => r.bundle_hit).length;
@@ -100,13 +91,6 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   ).length;
   const yieldSkips = races.filter(
     (r) => r.bundle_participated === false,
-  ).length;
-  const hitHits = races.filter((r) => r.bundle_hit_first_hit).length;
-  const hitMisses = races.filter(
-    (r) => r.bundle_hit_first_participated && !r.bundle_hit_first_hit,
-  ).length;
-  const hitSkips = races.filter(
-    (r) => r.bundle_hit_first_participated === false,
   ).length;
   const totalRaces = races.length;
 
@@ -135,22 +119,16 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
         <Card title="累積収支">
           <LineChart
             seriesA={yieldNetSeries}
-            seriesB={hitNetSeries}
             labelA="回収優先"
-            labelB="的中優先"
             colorA="#0ea5e9"
-            colorB="#10b981"
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
         </Card>
         <Card title="累積回収率 推移">
           <LineChart
             seriesA={yieldRoiSeries.map((v) => v * 100)}
-            seriesB={hitRoiSeries.map((v) => v * 100)}
             labelA="回収優先"
-            labelB="的中優先"
             colorA="#0ea5e9"
-            colorB="#10b981"
             yFmt={(v) => `${v.toFixed(0)}%`}
             referenceY={100}
           />
@@ -163,15 +141,9 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
               misses={yieldMisses}
               skips={yieldSkips}
             />
-            <DistroBar
-              label="的中優先AI"
-              hits={hitHits}
-              misses={hitMisses}
-              skips={hitSkips}
-            />
           </div>
         </Card>
-        <Card title="回収優先AI 的中 bet 種別">
+        <Card title="的中 bet 種別">
           {Object.keys(betTypeHits).length === 0 ? (
             <p className="text-xs text-(--color-muted)">的中なし</p>
           ) : (
@@ -205,26 +177,98 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   );
 }
 
+// 的中優先AI 専用チャート (おまけ計測 / 買わない)。回収優先とは別系列なので独立コンポーネント。
+// 緑系で統一し、的中優先AI スタッツの直下に置く。
+function HitCharts({ races }: { races: RaceHit[] }) {
+  const sorted = [...races].sort((a, b) =>
+    (a.saved_at ?? "").localeCompare(b.saved_at ?? ""),
+  );
+  // 累積収支 (的中優先): bundle_hit_first_* を使用。参加レースのみ加算。
+  let hitStakeAcc = 0;
+  let hitPayoutAcc = 0;
+  const series = sorted.map((r) => {
+    if (r.bundle_hit_first_participated) {
+      hitStakeAcc += r.bundle_hit_first_stake ?? 0;
+      hitPayoutAcc += r.bundle_hit_first_payout ?? 0;
+    }
+    return {
+      hitNet: hitPayoutAcc - hitStakeAcc,
+      hitRoi: hitStakeAcc > 0 ? hitPayoutAcc / hitStakeAcc : 0,
+    };
+  });
+  const hitNetSeries = series.map((s) => s.hitNet);
+  const hitRoiSeries = series.map((s) => s.hitRoi);
+
+  const hitHits = races.filter((r) => r.bundle_hit_first_hit).length;
+  const hitMisses = races.filter(
+    (r) => r.bundle_hit_first_participated && !r.bundle_hit_first_hit,
+  ).length;
+  const hitSkips = races.filter(
+    (r) => r.bundle_hit_first_participated === false,
+  ).length;
+
+  // 計測データがまだ無い (全レース未参加) なら描画しない。
+  if (hitHits + hitMisses === 0) {
+    return (
+      <p className="px-1 text-xs text-(--color-muted)">
+        的中優先AI のチャートは新スキーマ蓄積後に表示されます (本日以降の analyze から)。
+      </p>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <Card title="累積収支 (的中優先)">
+        <LineChart
+          seriesA={hitNetSeries}
+          labelA="的中優先"
+          colorA="#10b981"
+          yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
+        />
+      </Card>
+      <Card title="累積回収率 推移 (的中優先)">
+        <LineChart
+          seriesA={hitRoiSeries.map((v) => v * 100)}
+          labelA="的中優先"
+          colorA="#10b981"
+          yFmt={(v) => `${v.toFixed(0)}%`}
+          referenceY={100}
+        />
+      </Card>
+      <Card title="結果分布 (的中優先)">
+        <DistroBar
+          label="的中優先AI"
+          hits={hitHits}
+          misses={hitMisses}
+          skips={hitSkips}
+        />
+      </Card>
+    </div>
+  );
+}
+
 function LineChart({
   seriesA, seriesB, labelA, labelB, colorA, colorB, yFmt, referenceY,
 }: {
   seriesA: number[];
-  seriesB: number[];
+  // seriesB は任意 (省略時は系列 A=回収優先 のみ描画)。
+  seriesB?: number[];
   labelA: string;
-  labelB: string;
+  labelB?: string;
   colorA: string;
-  colorB: string;
+  colorB?: string;
   yFmt: (v: number) => string;
   referenceY?: number;
 }) {
+  const sB = seriesB ?? [];
   const w = 600;
   const h = 180;
   const pad = { l: 48, r: 12, t: 8, b: 18 };
-  const allValues = [...seriesA, ...seriesB, ...(referenceY !== undefined ? [referenceY] : [])];
+  const allValues = [...seriesA, ...sB, ...(referenceY !== undefined ? [referenceY] : [])];
   const minY = Math.min(0, ...allValues);
   const maxY = Math.max(0, ...allValues);
   const rangeY = maxY - minY || 1;
-  const n = Math.max(seriesA.length, seriesB.length);
+  const n = Math.max(seriesA.length, sB.length);
   const innerW = w - pad.l - pad.r;
   const innerH = h - pad.t - pad.b;
   const xAt = (i: number) =>
@@ -253,15 +297,19 @@ function LineChart({
         {seriesA.length > 0 && (
           <path d={lineFor(seriesA)} fill="none" stroke={colorA} strokeWidth={2} />
         )}
-        {seriesB.length > 0 && (
-          <path d={lineFor(seriesB)} fill="none" stroke={colorB} strokeWidth={2} strokeDasharray="3 2" />
+        {sB.length > 0 && colorB && (
+          <path d={lineFor(sB)} fill="none" stroke={colorB} strokeWidth={2} strokeDasharray="3 2" />
         )}
         {/* legend */}
         <g transform={`translate(${pad.l + 4}, ${pad.t + 12})`}>
           <rect width={9} height={9} fill={colorA} />
           <text x={14} y={9} fontSize={10} fill="#374151">{labelA}</text>
-          <rect width={9} height={9} fill={colorB} x={70} />
-          <text x={84} y={9} fontSize={10} fill="#374151">{labelB}</text>
+          {labelB && colorB && (
+            <>
+              <rect width={9} height={9} fill={colorB} x={70} />
+              <text x={84} y={9} fontSize={10} fill="#374151">{labelB}</text>
+            </>
+          )}
         </g>
       </svg>
     </div>
@@ -572,7 +620,13 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* 的中優先AI セクション (おまけ計測 / 買わない) — 的中率系=緑 */}
+      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 回収優先のみ */}
+      {cal && cal.races.length > 0 && (
+        <DashboardCharts races={cal.races} />
+      )}
+
+      {/* 的中優先AI セクション (おまけ計測 / 買わない) — 的中率系=緑。
+          実弾で買う対象でないため、チャート (回収優先のみ) の下に配置。 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
           <span className="inline-block w-1 h-4 bg-(--color-good) translate-y-0.5" />
@@ -627,12 +681,9 @@ export default async function DashboardPage() {
           accentTone="info"
         />
         </div>
+        {/* 的中優先AI 専用チャート (回収優先とは別系列) */}
+        {cal && cal.races.length > 0 && <HitCharts races={cal.races} />}
       </section>
-
-      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) */}
-      {cal && cal.races.length > 0 && (
-        <DashboardCharts races={cal.races} />
-      )}
     </Page>
   );
 }
