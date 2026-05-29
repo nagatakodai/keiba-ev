@@ -14,9 +14,18 @@ const notoSansJP = Noto_Sans_JP({
 });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
+// **タイトル方針** (2026-05-29 ユーザ指示): 全ページ `<ページ名> ｜ 競馬予想オーケストレーションAIの競愛`。
+// 各ページが `export const metadata = { title: "<ページ名>" }` を返すと template が適用される。
+// ルート (/) はクライアントコンポーネントで metadata を export できないため、default で
+// 「ダッシュボード ｜ ...」を出す。
+const BRAND_SUFFIX = "競馬予想オーケストレーションAIの競愛";
+
 export const metadata: Metadata = {
-  title: "競愛 ｜ 競馬 オーケストレーションAI",
-  description: "中央 (JRA) + 地方 (NAR) 競馬の全7券種を確率モデル + Claude AI で解析し、回収/的中の 2 軸で総合オススメを提示する競馬オーケストレーション AI「競愛」。",
+  title: {
+    template: `%s ｜ ${BRAND_SUFFIX}`,
+    default: `ダッシュボード ｜ ${BRAND_SUFFIX}`,
+  },
+  description: "中央 (JRA) + 地方 (NAR) 競馬の全7券種を確率モデル + Claude AI で解析し、回収/的中の 2 軸で総合オススメを提示する競馬予想オーケストレーション AI「競愛」。",
 };
 
 const NAV = [
@@ -38,7 +47,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
               <Link href="/" className="flex items-baseline gap-1.5 font-bold tracking-tight">
                 <span className="text-(--color-accent) text-lg sm:text-xl">競愛</span>
                 <span className="text-(--color-muted) text-xs font-normal hidden sm:inline">
-                  ｜ 競馬 オーケストレーションAI
+                  ｜ 競馬予想オーケストレーションAI
                 </span>
               </Link>
               <div className="ml-auto">

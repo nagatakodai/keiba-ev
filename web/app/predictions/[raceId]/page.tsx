@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import {
@@ -11,6 +12,20 @@ import {
   type PredictionRow,
   type RecommendedBundle,
 } from "@/lib/api";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ raceId: string }>;
+}): Promise<Metadata> {
+  const { raceId } = await params;
+  try {
+    const d = await api.getPrediction(raceId);
+    return { title: `${d.venue_name} ${d.race_number}R` };
+  } catch {
+    return { title: "予測詳細" };
+  }
+}
 import {
   Badge,
   type BadgeTone,

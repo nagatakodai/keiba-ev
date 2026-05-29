@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import {
   api,
@@ -5,6 +6,8 @@ import {
   type PredictionSummary,
   type WatchAutoHistoryItem,
 } from "@/lib/api";
+
+export const metadata: Metadata = { title: "予測履歴" };
 import { Page, PageHeader, savedAtDate, todayJST } from "@/components/ui";
 import { PredictionsList } from "@/components/PredictionsList";
 
