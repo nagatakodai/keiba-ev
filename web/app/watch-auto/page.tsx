@@ -56,6 +56,8 @@ export default function WatchAutoPage() {
   const [withTrio, setWithTrio] = useState(false);
   // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) が起動し、人がログイン。
   const [betOddspark, setBetOddspark] = useState(false);
+  // 自動ログイン: ON で env 認証 (ODDSPARK_ID/PASSWORD/PIN) で自動ログイン。OFF は人が手でログイン。
+  const [betAutoLogin, setBetAutoLogin] = useState(false);
   // **自動購入 (実弾)** モード: ON で #gotobuy → 確認画面 → 確定 まで自動 (人の介入なし)。
   // bet_oddspark が ON でないと意味が無い。daily_cap (円) で日次上限ガード。
   const [betAutoPurchase, setBetAutoPurchase] = useState(false);
@@ -85,6 +87,7 @@ export default function WatchAutoPage() {
     if (c.with_exacta != null) setWithExacta(!!c.with_exacta);
     if (c.with_trio != null) setWithTrio(!!c.with_trio);
     if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
+    if (c.bet_auto_login != null) setBetAutoLogin(!!c.bet_auto_login);
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
     if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
@@ -135,6 +138,7 @@ export default function WatchAutoPage() {
         with_exacta: withExacta,
         with_trio: withTrio,
         bet_oddspark: betOddspark,
+        bet_auto_login: betAutoLogin,
         bet_auto_purchase: betAutoPurchase,
         // 0 を許容 (cap=0 で無効化を意図的に表現できる)。NaN/負値だけ既定に戻す。
         bet_daily_cap: (() => {
@@ -365,10 +369,29 @@ export default function WatchAutoPage() {
             {betOddspark && (
               <>
                 <p className="mt-2 text-xs text-(--color-muted)">
-                  ⚠ ON で開始すると <b>headful ブラウザが開きます</b>(人がログイン)。発走前 NAR の束を
+                  ⚠ ON で開始すると <b>headful ブラウザが開きます</b>。発走前 NAR の束を
                   カートに投入し続けます。ブラウザを表示するには <code>make api</code> を DISPLAY のある端末
                   (WSLg 等) で起動しておくこと。
                 </p>
+                <div className="mt-3">
+                  <label className="inline-flex items-center gap-2 cursor-pointer text-sm">
+                    <input
+                      type="checkbox"
+                      checked={betAutoLogin}
+                      onChange={(e) => setBetAutoLogin(e.target.checked)}
+                      disabled={running}
+                      className="accent-(--color-accent)"
+                    />
+                    <span>自動ログイン — env 認証で自動ログイン (OFF は人が手でログイン)</span>
+                  </label>
+                  {betAutoLogin && (
+                    <p className="mt-1 text-xs text-(--color-muted)">
+                      <code>make api</code> を起動する端末の env に <code>ODDSPARK_ID</code> /{" "}
+                      <code>ODDSPARK_PASSWORD</code> (+ 必要なら <code>ODDSPARK_PIN</code>) を設定しておくこと。
+                      未設定だと daemon が起動直後に失敗します (ライブログ参照)。認証情報はコミット禁止。
+                    </p>
+                  )}
+                </div>
                 <div className="mt-3 flex items-end gap-4 flex-wrap">
                   <label className="inline-flex items-center gap-2 cursor-pointer text-sm">
                     <input

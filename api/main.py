@@ -260,6 +260,10 @@ class WatchAutoStartRequest(BaseModel):
     # 投票 daemon (headful ブラウザ・人がログイン) を起動する。
     # **headful なので `make api` は DISPLAY のある端末で起動しておくこと** (WSLg 等)。
     bet_oddspark: bool = False
+    # 自動ログイン。ON で daemon に --auto-login を付け、env 認証 (ODDSPARK_ID/PASSWORD/PIN) で
+    # 自動ログインする。**uvicorn (`make api`) の env にこれらを設定しておくこと** (未設定だと daemon が
+    # 起動直後に失敗)。OFF (既定) は人が headful ブラウザで手でログイン (最も安全)。
+    bet_auto_login: bool = False
     # 自動購入 (実弾)。ON で #gotobuy → 確認 → 確定 まで自動。daily_cap で日次上限ガード。
     # AUTO_PURCHASE_VERIFIED=False の間は src 側で fail-safe (実弾を撃たない)。
     bet_auto_purchase: bool = False
@@ -288,6 +292,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         with_trio=req.with_trio,
         active_hours=req.active_hours,
         bet_oddspark=req.bet_oddspark,
+        bet_auto_login=req.bet_auto_login,
         bet_auto_purchase=req.bet_auto_purchase,
         bet_daily_cap=req.bet_daily_cap,
         bet_stake_multiplier=req.bet_stake_multiplier,

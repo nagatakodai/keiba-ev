@@ -391,6 +391,7 @@ class WatchAutoManager:
         bet_daily_cap: int = 50000,
         bet_stake_multiplier: float = 1.0,
         bet_payment_method: str = "opcoin",
+        bet_auto_login: bool = False,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -403,6 +404,7 @@ class WatchAutoManager:
                 bet_daily_cap=bet_daily_cap,
                 bet_stake_multiplier=bet_stake_multiplier,
                 bet_payment_method=bet_payment_method,
+                bet_auto_login=bet_auto_login,
             )
 
     async def _start_locked(
@@ -423,6 +425,7 @@ class WatchAutoManager:
         bet_daily_cap: int = 50000,
         bet_stake_multiplier: float = 1.0,
         bet_payment_method: str = "opcoin",
+        bet_auto_login: bool = False,
     ) -> Job:
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
@@ -473,6 +476,7 @@ class WatchAutoManager:
             "bet_daily_cap": bet_daily_cap,
             "bet_stake_multiplier": bet_stake_multiplier,
             "bet_payment_method": bet_payment_method,
+            "bet_auto_login": bet_auto_login,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -499,16 +503,22 @@ class WatchAutoManager:
                     if cfg.get("bet_stake_multiplier") is not None else 1.0,
                 payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
+                auto_login=bool(cfg.get("bet_auto_login")),
             )
         return self.job
 
     async def _start_betting_daemon(self, *, auto_purchase: bool = False,
                                     daily_cap: int = 50000,
                                     stake_multiplier: float = 1.0,
-                                    payment_method: str = "opcoin") -> None:
+                                    payment_method: str = "opcoin",
+                                    auto_login: bool = False) -> None:
         """オッズパーク投票 daemon (`oddspark_bet --session`) を起動。
 
-        headful ブラウザを開き、人がログイン (poll 検出) → queue を消費。
+        headful ブラウザを開き、ログイン → queue を消費。
+        - auto_login=False (既定): 人が headful ブラウザで手でログイン (poll 検出, 最も安全)。
+        - auto_login=True: `--auto-login` を付け、env 認証 (`ODDSPARK_ID`/`ODDSPARK_PASSWORD`/
+          `ODDSPARK_PIN`) で自動ログイン。**uvicorn (`make api`) の env にこれらを設定しておくこと**
+          (未設定だと daemon が起動直後に失敗 → ライブログにエラー)。認証情報はコード/ログに残さない。
         - auto_purchase=False (既定): カート投入のみ、購入確定は人。
         - auto_purchase=True (実弾): #gotobuy → 確認 → 確定 まで自動。daily_cap で日次上限ガード。
           (`AUTO_PURCHASE_VERIFIED=False` の間は src 側で fail-safe で実弾を撃たない。)
@@ -519,11 +529,15 @@ class WatchAutoManager:
             return
         cmd = [PY, "-m", "src.oddspark_bet", "--session", f"--daily-cap={daily_cap}",
                f"--payment={payment_method}"]
+        if auto_login:
+            cmd.append("--auto-login")
         if auto_purchase:
             cmd.append("--auto-purchase")
         if stake_multiplier != 1.0:
             cmd.append(f"--stake-multiplier={stake_multiplier}")
         label_extra = ""
+        if auto_login:
+            label_extra += " [auto-login]"
         if auto_purchase:
             label_extra += " [auto-purchase]"
         if stake_multiplier != 1.0:
@@ -573,6 +587,7 @@ class WatchAutoManager:
                     if cfg.get("bet_stake_multiplier") is not None else 1.0,
                 bet_payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
+                bet_auto_login=bool(cfg.get("bet_auto_login")),
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

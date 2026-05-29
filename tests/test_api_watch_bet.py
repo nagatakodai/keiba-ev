@@ -37,3 +37,17 @@ def test_bet_oddspark_off_no_daemon(no_spawn):
     assert mgr.bet_job is None                          # daemon は起動しない
     assert mgr.bet_running is False
     assert mgr.config.get("bet_oddspark") is False
+
+
+def test_bet_auto_login_appends_flag(no_spawn):
+    mgr = runner.WatchAutoManager()
+    asyncio.run(mgr.start(bet_oddspark=True, bet_auto_login=True))
+    assert mgr.config["bet_auto_login"] is True
+    assert "--auto-login" in mgr.bet_job.cmd            # daemon に自動ログイン付与
+
+
+def test_bet_auto_login_default_off(no_spawn):
+    mgr = runner.WatchAutoManager()
+    asyncio.run(mgr.start(bet_oddspark=True))
+    assert mgr.config.get("bet_auto_login") is False
+    assert "--auto-login" not in mgr.bet_job.cmd        # 既定は人が手でログイン

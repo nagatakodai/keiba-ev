@@ -236,6 +236,8 @@ export type WatchAutoStatus = {
     active_hours?: string;
     // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) を起動。
     bet_oddspark?: boolean;
+    // 自動ログイン: ON で env 認証 (ODDSPARK_ID/PASSWORD/PIN) で自動ログイン。OFF は人が手で。
+    bet_auto_login?: boolean;
     // 自動購入 (実弾): ON で #gotobuy まで自動。daily_cap で日次上限ガード。
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;   // 円
@@ -434,6 +436,7 @@ export const api = {
     with_trio?: boolean;
     active_hours?: string;
     bet_oddspark?: boolean;
+    bet_auto_login?: boolean;
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;
     bet_stake_multiplier?: number;
