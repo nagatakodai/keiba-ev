@@ -189,6 +189,11 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
 
     pairs: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     last_updated_at: str | None = None
+    # **集計 cutoff** (2026-05-29 ユーザ指示): Plan A/B → bundle 集約と Claude 選定の
+    # 大幅な spec 変更があったので、Claude 回収率 / 的中率を **今日 (JST 2026-05-29) 以降の
+    # snapshot だけ** で計算しなおす。古い snapshot は dashboard / 履歴ページに表示しない。
+    # 後で延ばしたければ CALIBRATION_CUTOFF_ISO_JST を更新するだけ。
+    CALIBRATION_CUTOFF_ISO_JST = "2026-05-29T00:00:00"
     if PRED_DIR.exists():
         for pred_path in sorted(PRED_DIR.glob("*.json")):
             race_id = pred_path.stem
@@ -199,6 +204,11 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 pred = json.loads(pred_path.read_text(encoding="utf-8"))
                 result = json.loads(result_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
+                continue
+            # cutoff より古い snapshot は除外 (saved_at は JST naive ISO8601 文字列なので
+            # そのまま辞書順比較で OK)
+            saved_at = pred.get("saved_at") or ""
+            if saved_at < CALIBRATION_CUTOFF_ISO_JST:
                 continue
             pairs.append((race_id, pred, result))
             r_ts = result.get("recorded_at")
