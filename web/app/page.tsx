@@ -526,9 +526,19 @@ export default async function DashboardPage() {
       {/* watch-auto stat はダッシュボードから削除 (2026-05-29 ユーザ指示)。
           状態は header の WatchPill で確認可能。 */}
 
-      {/* 一番上の段: 的中レース数 / 見送りレース数 / 収支 (全て回収優先AI 基準) */}
+      {/* 一番上の段: 総合レース数 / 的中レース数 / 見送りレース数 / 収支 (全て回収優先AI 基準) */}
       <div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Stat
+            label="総合レース数"
+            value={cal?.race_count ?? 0}
+            hint={
+              claudeBundle
+                ? `参加 ${claudeBundle.participated_races} / 見送り ${claudeBundle.skipped_races}`
+                : "—"
+            }
+            accentTone="muted"
+          />
           <Stat
             label="的中レース数"
             value={claudeBundle?.hits ?? 0}
