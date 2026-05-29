@@ -15,8 +15,8 @@ const notoSansJP = Noto_Sans_JP({
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "競馬オーケストレーションAI ｜ dashboard",
-  description: "中央 (JRA) + 地方 (NAR) 競馬の全7券種を確率モデル + Claude AI で解析し、回収/的中の 2 軸で総合オススメを提示するオーケストレーション AI。",
+  title: "競愛 ｜ 競馬 オーケストレーションAI",
+  description: "中央 (JRA) + 地方 (NAR) 競馬の全7券種を確率モデル + Claude AI で解析し、回収/的中の 2 軸で総合オススメを提示する競馬オーケストレーション AI「競愛」。",
 };
 
 const NAV = [
@@ -36,10 +36,9 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           <header className="bg-white border-b border-(--color-line) sticky top-0 z-20">
             <div className="max-w-7xl mx-auto px-4 h-12 flex items-center gap-4">
               <Link href="/" className="flex items-baseline gap-1.5 font-bold tracking-tight">
-                <span className="text-(--color-accent) text-base sm:text-lg">競馬</span>
-                <span className="text-(--color-highlight) text-base sm:text-lg">オーケストレーションAI</span>
+                <span className="text-(--color-accent) text-lg sm:text-xl">競愛</span>
                 <span className="text-(--color-muted) text-xs font-normal hidden sm:inline">
-                  ｜ dashboard
+                  ｜ 競馬 オーケストレーションAI
                 </span>
               </Link>
               <div className="ml-auto">
