@@ -71,14 +71,14 @@ export default async function CalibratePage({
             accentTone="muted"
           />
           <Stat
-            label="回収優先AI 的中率"
+            label="的中率"
             value={!yb || yb.participated_races === 0 ? "—" : fmtPct(yb.hit_rate, 1)}
             hint={yb && yb.participated_races > 0 ? `${yb.hits} 的中 / ${yb.participated_races} 参加` : "—"}
             tone={hitTone(yb)}
             accentTone="good"
           />
           <Stat
-            label="回収優先AI 回収率"
+            label="回収率"
             value={roiPct(yb)}
             hint={
               yb && yb.participated_races > 0
