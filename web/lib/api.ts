@@ -336,10 +336,17 @@ export type ClaudeBundleAggregate = {
   hit_rate_ci_low?: number;
   hit_rate_ci_high?: number;
   stake: number;                  // Σ bundle stake (¥)
-  payout: number;                 // Σ snapshot 時点 payout (¥)
-  roi: number;                    // payout / stake
+  // 予想オッズ (snapshot 時点) 基準の ROI
+  payout: number;
+  roi: number;
   roi_ci_low?: number;
   roi_ci_high?: number;
+  // **最終オッズ** 基準の ROI (result fetch 時に保存される final_odds × stake)。
+  // result に final_odds が無いレースは予想オッズに fallback (= payout と一致)。
+  payout_final?: number;
+  roi_final?: number;
+  roi_final_ci_low?: number;
+  roi_final_ci_high?: number;
 };
 
 export type CalibrationRaceItem = {
@@ -353,13 +360,17 @@ export type CalibrationRaceItem = {
   bundle_hit_bet_types?: string[];
   bundle_participated?: boolean;
   bundle_stake?: number;
-  bundle_payout?: number;
+  bundle_payout?: number;              // 予想オッズ基準
+  bundle_payout_final?: number;        // 最終オッズ基準 (result.final_odds × stake)
   // 的中優先 bundle (おまけ計測) の的中。古い snapshot で欠落あり。
   bundle_hit_first_hit?: boolean;
   bundle_hit_first_bet_types?: string[];
   bundle_hit_first_participated?: boolean;
   bundle_hit_first_stake?: number;
   bundle_hit_first_payout?: number;
+  bundle_hit_first_payout_final?: number;
+  // 最終オッズ取得済 race か (frontend で「予想/最終」両表示の discriminator)
+  has_final_odds?: boolean;
 };
 
 export type CalibrationReport = {

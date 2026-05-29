@@ -244,18 +244,45 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         from src.portfolio import _bet_hits
         a3, b3, c3 = (list(finish_tuple) + [0, 0, 0])[:3]
 
+        # **最終オッズ** (2026-05-29~): result["final_odds"] = `{leg_id: final_odds}` (`leg_id`
+        # は `"<bet_type>:<key-with-->"` 形式, llm.leg_id と一致)。result fetch 時に保存される。
+        # 古い result では空 → snapshot odds (予想時点) に fallback して旧挙動を維持する。
+        final_odds = result.get("final_odds") or {}
+
+        def _leg_id_for(leg: dict) -> str:
+            bt = leg.get("bet_type", "")
+            key = leg.get("key") or []
+            return f"{bt}:{'-'.join(str(k) for k in key)}"
+
         def _bundle_stats(bundle: dict | None) -> dict:
-            """bundle dict → {legs, hit_legs, stake, payout, participated, hit} の集計。"""
+            """bundle dict → {legs, hit_legs, stake, payout(予想), payout_final(最終),
+            participated, hit} の集計。
+
+            payout (snapshot odds 基準) は従来通り保持。
+            payout_final は **実最終オッズ × stake** で計算 (final_odds から lookup)。
+            final_odds 不在脚は snapshot odds に fallback (= payout と同じ値)。
+            """
             legs = (bundle or {}).get("legs") or []
             hit_legs = [
                 leg for leg in legs
                 if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])), a3, b3, c3)
             ]
+            payout_snapshot = sum(int(leg.get("payout_if_hit", 0)) for leg in hit_legs)
+            # 実払戻 (最終オッズ × stake) を計算。final_odds 不在脚は snapshot odds で補完。
+            payout_final = 0
+            for leg in hit_legs:
+                stake = int(leg.get("stake", 0))
+                fo = final_odds.get(_leg_id_for(leg))
+                if fo is None or fo <= 0:
+                    payout_final += int(leg.get("payout_if_hit", 0))
+                else:
+                    payout_final += int(round(stake * float(fo)))
             return {
                 "legs": legs,
                 "hit_legs": hit_legs,
                 "stake": sum(int(leg.get("stake", 0)) for leg in legs),
-                "payout": sum(int(leg.get("payout_if_hit", 0)) for leg in hit_legs),
+                "payout": payout_snapshot,            # 予想オッズ基準
+                "payout_final": payout_final,         # 最終オッズ基準 (実払戻に近い)
                 "participated": bool(legs),
                 "hit": bool(hit_legs),
             }
@@ -270,18 +297,23 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "finish": list(finish_tuple),
                 "winning_tier": winning_tier,
                 "payout": payout,
-                # 回収優先 bundle (実弾で買う)
+                # 回収優先 bundle (実弾で買う)。bundle_payout = 予想オッズ基準 (snapshot)、
+                # bundle_payout_final = 最終オッズ基準 (実払戻に近い、後付け)。
                 "bundle_hit": b_yield["hit"],
                 "bundle_hit_bet_types": sorted({leg["bet_type"] for leg in b_yield["hit_legs"]}),
                 "bundle_participated": b_yield["participated"],
                 "bundle_stake": b_yield["stake"],
                 "bundle_payout": b_yield["payout"],
+                "bundle_payout_final": b_yield["payout_final"],
                 # 的中優先 bundle (おまけ計測のみ、古い snapshot で欠落することあり)
                 "bundle_hit_first_hit": b_hit["hit"],
                 "bundle_hit_first_bet_types": sorted({leg["bet_type"] for leg in b_hit["hit_legs"]}),
                 "bundle_hit_first_participated": b_hit["participated"],
                 "bundle_hit_first_stake": b_hit["stake"],
                 "bundle_hit_first_payout": b_hit["payout"],
+                "bundle_hit_first_payout_final": b_hit["payout_final"],
+                # 最終オッズが取れたかの discriminator (frontend で「予想/最終 切替表示」用)
+                "has_final_odds": bool(final_odds),
                 # LLM 評価有無の discriminator
                 "has_evidence": bool(pred.get("evidence")),
                 "saved_at": pred.get("saved_at"),
@@ -309,22 +341,32 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
 
     def _bundle_agg(
         races_: list[dict], part_field: str, hit_field: str,
-        stake_field: str, payout_field: str,
+        stake_field: str, payout_field: str, payout_final_field: str,
     ) -> dict:
-        """bundle (回収優先 / 的中優先) の集計。見送り (participated=false) は除外。"""
+        """bundle (回収優先 / 的中優先) の集計。見送り (participated=false) は除外。
+
+        payout (予想) と payout_final (最終オッズ) の両方で ROI を出す。
+        """
         part = [r for r in races_ if r.get(part_field)]
         per_race = [
             (int(r.get(stake_field, 0)), int(r.get(payout_field, 0)))
+            for r in part
+        ]
+        per_race_final = [
+            (int(r.get(stake_field, 0)), int(r.get(payout_final_field, 0)))
             for r in part
         ]
         hits = sum(1 for r in part if r.get(hit_field))
         n = len(part)
         stake_sum = sum(s for s, _ in per_race)
         payout_sum = sum(p for _, p in per_race)
+        payout_final_sum = sum(p for _, p in per_race_final)
         hit_rate = hits / n if n else 0.0
         roi = (payout_sum / stake_sum) if stake_sum else 0.0
+        roi_final = (payout_final_sum / stake_sum) if stake_sum else 0.0
         hr_low, hr_high = _wilson_ci(hits, n)
         roi_low, roi_high = _bootstrap_roi_ci(per_race)
+        roi_final_low, roi_final_high = _bootstrap_roi_ci(per_race_final)
         return {
             "races": len(races_),
             "participated_races": n,
@@ -334,20 +376,27 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             "hit_rate_ci_low": hr_low,
             "hit_rate_ci_high": hr_high,
             "stake": stake_sum,
+            # 予想オッズ基準
             "payout": payout_sum,
             "roi": roi,
             "roi_ci_low": roi_low,
             "roi_ci_high": roi_high,
+            # 最終オッズ基準 (実払戻に近い)
+            "payout_final": payout_final_sum,
+            "roi_final": roi_final,
+            "roi_final_ci_low": roi_final_low,
+            "roi_final_ci_high": roi_final_high,
         }
 
     # 回収優先 (実弾で買う Claude 選定束)
     claude_bundle = _bundle_agg(
-        races, "bundle_participated", "bundle_hit", "bundle_stake", "bundle_payout",
+        races, "bundle_participated", "bundle_hit",
+        "bundle_stake", "bundle_payout", "bundle_payout_final",
     )
     # 的中優先 (おまけ計測のみ。古い snapshot で欠落あり)
     claude_bundle_hit = _bundle_agg(
         races, "bundle_hit_first_participated", "bundle_hit_first_hit",
-        "bundle_hit_first_stake", "bundle_hit_first_payout",
+        "bundle_hit_first_stake", "bundle_hit_first_payout", "bundle_hit_first_payout_final",
     )
 
     return {

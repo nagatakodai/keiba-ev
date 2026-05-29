@@ -209,20 +209,11 @@ export default async function DashboardPage() {
       <AutoRefresh seconds={15} />
       <PageHeader
         title="ダッシュボード"
-        subtitle="長期 +EV のためのリアルタイム俯瞰。15 秒おきに自動更新。"
+        subtitle="競馬オーケストレーション AI の実弾運用と AI 比較の俯瞰。15 秒おきに自動更新。"
       />
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Stat
-          label="watch-auto"
-          value={watch?.running ? "稼働中" : "停止"}
-          hint={
-            watch?.running
-              ? `発走${watch.config.window}〜${(watch.config.window ?? 0) + (watch.config.tolerance ?? 0)}分前 / ${watch.config.interval_sec}s`
-              : "—"
-          }
-          tone={watch?.running ? "good" : "default"}
-        />
+        {/* 1) 集計対象レース を左端に (2026-05-29 ユーザ指示) */}
         <Stat
           label="集計対象レース"
           value={cal?.race_count ?? 0}
@@ -238,9 +229,19 @@ export default async function DashboardPage() {
           }
           tone={confidence?.tone === "good" ? "good" : confidence?.tone === "warn" ? "warn" : "bad"}
         />
-        {/* Claude 選定 (recommended_bundle) の的中率・回収率 (見送りは含まない) */}
         <Stat
-          label="Claude 回収率 (見送り除く)"
+          label="watch-auto"
+          value={watch?.running ? "稼働中" : "停止"}
+          hint={
+            watch?.running
+              ? `発走${watch.config.window}〜${(watch.config.window ?? 0) + (watch.config.tolerance ?? 0)}分前 / ${watch.config.interval_sec}s`
+              : "—"
+          }
+          tone={watch?.running ? "good" : "default"}
+        />
+        {/* 回収優先 AI (recommended_bundle = 実弾で買う) の回収率・的中率 (見送りは含まない) */}
+        <Stat
+          label="回収優先AI 回収率"
           value={
             !claudeBundle || claudeBundle.participated_races === 0
               ? "—"
@@ -262,7 +263,7 @@ export default async function DashboardPage() {
           }
         />
         <Stat
-          label="Claude 的中率 (見送り除く)"
+          label="回収優先AI 的中率"
           value={
             !claudeBundle || claudeBundle.participated_races === 0
               ? "—"
@@ -270,7 +271,7 @@ export default async function DashboardPage() {
           }
           hint={
             claudeBundle && claudeBundle.participated_races > 0
-              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加`
+              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加 (見送り除く)`
               : ""
           }
           tone={
@@ -285,10 +286,10 @@ export default async function DashboardPage() {
         />
       </div>
 
-      {/* 1.5 的中優先 bundle (おまけ計測): 実弾では買わないが「もし的中優先で賭けたら」を測る */}
+      {/* 1.5 的中優先 AI (おまけ計測): 実弾では買わないが「もし的中優先で賭けたら」を測る */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Stat
-          label="的中優先 回収率 (おまけ計測)"
+          label="的中優先AI 回収率"
           value={
             !claudeBundleHit || claudeBundleHit.participated_races === 0
               ? "—"
@@ -310,7 +311,7 @@ export default async function DashboardPage() {
           }
         />
         <Stat
-          label="的中優先 的中率 (おまけ計測)"
+          label="的中優先AI 的中率"
           value={
             !claudeBundleHit || claudeBundleHit.participated_races === 0
               ? "—"

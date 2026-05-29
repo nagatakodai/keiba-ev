@@ -400,7 +400,35 @@ def fetch_jra_result(netkeiba_rid: str) -> dict | None:
     except Exception:  # noqa: BLE001
         return None
     res = parse_jra_result(page)
-    return res if len(res["finish_order"]) >= 3 else None
+    if len(res["finish_order"]) < 3:
+        return None
+    # 最終オッズも追加で取得 (calibration の 実払戻 ROI 計算用)。失敗しても result は返す。
+    try:
+        loc = find_jra_race(netkeiba_rid)
+        if loc is not None:
+            bets = fetch_jra_bets(loc)
+            res["final_odds"] = _flatten_final_odds_jra(bets)
+        else:
+            res["final_odds"] = {}
+    except Exception:  # noqa: BLE001
+        res["final_odds"] = {}
+    return res
+
+
+def _flatten_final_odds_jra(bets: dict) -> dict[str, float]:
+    """JRA fetch_jra_bets() の結果 → flat {leg_id: final_odds}。
+    leg_id 形式は portfolio/llm.leg_id と合わせる (例 `"trifecta:1-2-3"`)。"""
+    out: dict[str, float] = {}
+    other = bets.get("other_bets") or {}
+    for bt, items in other.items():
+        for b in items:
+            key_str = "-".join(str(k) for k in b.key)
+            if b.odds > 0:
+                out[f"{bt}:{key_str}"] = float(b.odds)
+    for t in bets.get("trifecta") or []:
+        if t.odds > 0:
+            out[f"trifecta:{t.key[0]}-{t.key[1]}-{t.key[2]}"] = float(t.odds)
+    return out
 
 
 def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds]) -> RaceData:

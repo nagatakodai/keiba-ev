@@ -103,6 +103,11 @@ def save_result(race_id: str, payload: dict, *, note: str = "") -> Path:
         "note": note,
         "recorded_at": dt.datetime.now().isoformat(timespec="seconds"),
         "source": payload.get("source", "auto"),
+        # **最終オッズ** (2026-05-29 ユーザ指示): 結果取得時に最終確定オッズも保存し、
+        # calibration の bundle ROI を snapshot odds (予想) から real final odds (実払戻)
+        # ベースに切替える。flat dict 形式 `{"trifecta:1-2-3": 12.3, "wide:3-7": 5.2, ...}`。
+        # 取得失敗時は {} (calibration は snapshot odds に fallback)。
+        "final_odds": payload.get("final_odds") or {},
     }
     out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
@@ -285,6 +290,7 @@ def process_pending(
                     if kr and kr.get("finish_order"):
                         result, reason = ({"finish_order": kr["finish_order"],
                                            "payout": kr.get("payout", 0),
+                                           "final_odds": kr.get("final_odds") or {},
                                            "source": "keibago"}, "")
                         _log(f"keiba.go.jp result fallback ok: {nk} {kr['finish_order']}", url)
                 except Exception as ex:  # noqa: BLE001
@@ -296,6 +302,7 @@ def process_pending(
                     if jr and jr.get("finish_order"):
                         result, reason = ({"finish_order": jr["finish_order"],
                                            "payout": jr.get("payout", 0),
+                                           "final_odds": jr.get("final_odds") or {},
                                            "source": "jra"}, "")
                         _log(f"JRA result fallback ok: {nk} {jr['finish_order']}", url)
                 except Exception as ex:  # noqa: BLE001

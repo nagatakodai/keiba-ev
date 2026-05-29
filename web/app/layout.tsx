@@ -15,8 +15,8 @@ const notoSansJP = Noto_Sans_JP({
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "keiba-ev",
-  description: "中央競馬 3 連単 EV 分析ダッシュボード",
+  title: "競馬オーケストレーションAI ｜ dashboard",
+  description: "中央 (JRA) + 地方 (NAR) 競馬の全7券種を確率モデル + Claude AI で解析し、回収/的中の 2 軸で総合オススメを提示するオーケストレーション AI。",
 };
 
 const NAV = [
@@ -35,11 +35,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           <BackgroundVideo />
           <header className="bg-white border-b border-(--color-line) sticky top-0 z-20">
             <div className="max-w-7xl mx-auto px-4 h-12 flex items-center gap-4">
-              <Link href="/" className="flex items-baseline gap-1 font-bold tracking-tight">
-                <span className="text-(--color-accent) text-lg">keiba</span>
-                <span className="text-(--color-highlight) text-lg">-ev</span>
-                <span className="text-(--color-muted) text-xs font-normal ml-2 hidden sm:inline">
-                  trifecta dashboard
+              <Link href="/" className="flex items-baseline gap-1.5 font-bold tracking-tight">
+                <span className="text-(--color-accent) text-base sm:text-lg">競馬</span>
+                <span className="text-(--color-highlight) text-base sm:text-lg">オーケストレーションAI</span>
+                <span className="text-(--color-muted) text-xs font-normal hidden sm:inline">
+                  ｜ dashboard
                 </span>
               </Link>
               <div className="ml-auto">

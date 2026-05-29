@@ -644,8 +644,11 @@ def _parse_finish_order(html: str) -> list[int]:
 
 
 def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
-    """netkeiba NAR race_id → keiba.go.jp の確定結果 {finish_order, payout}。
+    """netkeiba NAR race_id → keiba.go.jp の確定結果 {finish_order, payout, final_odds}。
 
+    `final_odds` は各 bet type の **最終確定オッズ** を `bet_type:key` 形式 (例
+    `"trifecta:6-7-11"`) で flat dict 化したもの。calibration で実払戻ベースの ROI を
+    計算するために使う。取得失敗時は最終オッズだけ {} で続行。
     netkeiba block 中でも NAR の結果を取得できる (result fetch の fallback)。当日確定
     レースのみ (find_keibago_race が TodayRaceInfo ベース)。未確定/未解決は None。
     """
@@ -660,7 +663,34 @@ def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
     res = parse_keibago_result(rm, rf)
     # 3連単として有効なのは 1-2-3 が揃う (len>=3) 確定結果のみ。同着等で着順が
     # 揃わない / 未確定は None を返し、不完全な結果を save しない (loop は pending 維持)。
-    return res if len(res["finish_order"]) >= 3 else None
+    if len(res["finish_order"]) < 3:
+        return None
+    # 最終オッズ (全6券種) を追加取得。失敗しても結果自体は返す (finish_order があれば save 可)。
+    try:
+        bets = fetch_keibago_bets(loc)
+        res["final_odds"] = _flatten_final_odds(bets)
+    except Exception:  # noqa: BLE001
+        res["final_odds"] = {}
+    return res
+
+
+def _flatten_final_odds(bets: dict) -> dict[str, float]:
+    """{other_bets: {bet_type: [BetOdds]}, trifecta: [TrifectaOdds]} → flat {leg_id: odds}。
+
+    leg_id 形式は portfolio / llm.leg_id と合わせる: `"<bet_type>:<key-joined-by-->"`。
+    例: `"trifecta:1-2-3"` / `"wide:3-7"` / `"win:5"`。
+    """
+    out: dict[str, float] = {}
+    other = bets.get("other_bets") or {}
+    for bt, items in other.items():
+        for b in items:
+            key_str = "-".join(str(k) for k in b.key)
+            if b.odds > 0:
+                out[f"{bt}:{key_str}"] = float(b.odds)
+    for t in bets.get("trifecta") or []:
+        if t.odds > 0:
+            out[f"trifecta:{t.key[0]}-{t.key[1]}-{t.key[2]}"] = float(t.odds)
+    return out
 
 
 def _main() -> None:
