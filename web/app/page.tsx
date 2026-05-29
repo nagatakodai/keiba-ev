@@ -138,8 +138,8 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             seriesB={hitNetSeries}
             labelA="回収優先"
             labelB="的中優先"
-            colorA="#10b981"
-            colorB="#0ea5e9"
+            colorA="#0ea5e9"
+            colorB="#10b981"
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
         </Card>
@@ -149,8 +149,8 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             seriesB={hitRoiSeries.map((v) => v * 100)}
             labelA="回収優先"
             labelB="的中優先"
-            colorA="#10b981"
-            colorB="#0ea5e9"
+            colorA="#0ea5e9"
+            colorB="#10b981"
             yFmt={(v) => `${v.toFixed(0)}%`}
             referenceY={100}
           />
@@ -466,7 +466,7 @@ export default async function DashboardPage() {
                 : "—"
             }
             tone={claudeBundle && claudeBundle.hits > 0 ? "good" : "default"}
-            accentTone="info"
+            accentTone="good"
           />
           <Stat
             label="見送りレース数"
@@ -498,7 +498,7 @@ export default async function DashboardPage() {
                 : "bad"
             }
             accentTone={
-              !claudeBundle || claudeBundle.payout - claudeBundle.stake >= 0 ? "good" : "bad"
+              !claudeBundle || claudeBundle.payout - claudeBundle.stake >= 0 ? "info" : "bad"
             }
           />
         </div>
@@ -513,10 +513,10 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      {/* 回収優先AI セクション (実弾で買う) — 回収系=緑 / 的中系=青 */}
+      {/* 回収優先AI セクション (実弾で買う) — 的中率系=緑 / 回収収支系=青 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
-          <span className="inline-block w-1 h-4 bg-(--color-good) translate-y-0.5" />
+          <span className="inline-block w-1 h-4 bg-(--color-info) translate-y-0.5" />
           <span className="text-base">回収優先AI</span>
           <span className="text-xs font-normal text-(--color-muted)">
             joint Kelly EV 最適 / 実弾で買う対象
@@ -525,7 +525,7 @@ export default async function DashboardPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {/* 左=的中率 (青線), 右=回収率 (緑線) (2026-05-29 ユーザ指示) */}
         <Stat
-          label="回収優先AI 的中率"
+          label="的中率"
           value={
             !claudeBundle || claudeBundle.participated_races === 0
               ? "—"
@@ -548,7 +548,7 @@ export default async function DashboardPage() {
           accentTone="good"
         />
         <Stat
-          label="回収優先AI 回収率"
+          label="回収率"
           value={
             !claudeBundle || claudeBundle.participated_races === 0
               ? "—"
@@ -573,10 +573,10 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* 的中優先AI セクション (おまけ計測 / 買わない) — 的中系=青 */}
+      {/* 的中優先AI セクション (おまけ計測 / 買わない) — 的中率系=緑 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
-          <span className="inline-block w-1 h-4 bg-(--color-info) translate-y-0.5" />
+          <span className="inline-block w-1 h-4 bg-(--color-good) translate-y-0.5" />
           <span className="text-base">的中優先AI</span>
           <span className="text-xs font-normal text-(--color-muted)">
             prob 降順 pool / おまけ計測・買わない
@@ -584,7 +584,7 @@ export default async function DashboardPage() {
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Stat
-          label="的中優先AI 的中率"
+          label="的中率"
           value={
             !claudeBundleHit || claudeBundleHit.participated_races === 0
               ? "—"
@@ -607,7 +607,7 @@ export default async function DashboardPage() {
           accentTone="good"
         />
         <Stat
-          label="的中優先AI 回収率"
+          label="回収率"
           value={
             !claudeBundleHit || claudeBundleHit.participated_races === 0
               ? "—"
