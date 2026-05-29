@@ -371,6 +371,8 @@ export type CalibrationRaceItem = {
   bundle_hit_first_payout_final?: number;
   // 最終オッズ取得済 race か (frontend で「予想/最終」両表示の discriminator)
   has_final_odds?: boolean;
+  // snapshot 保存時刻 (ISO8601 JST naive)。チャートでの時系列ソート / 表示用。
+  saved_at?: string;
 };
 
 export type CalibrationReport = {

@@ -30,10 +30,10 @@ export const metadata: Metadata = {
 
 const NAV = [
   { href: "/", label: "ダッシュボード" },
-  { href: "/analyze", label: "解析" },
-  { href: "/predictions", label: "予測履歴" },
-  { href: "/watch-auto", label: "watch-auto" },
-  { href: "/calibrate", label: "キャリブレーション" },
+  { href: "/analyze", label: "レース予測分析" },
+  { href: "/predictions", label: "予測分析履歴" },
+  { href: "/watch-auto", label: "自動予測分析・投票" },
+  { href: "/calibrate", label: "確率較正" },
 ];
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -45,7 +45,10 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           <header className="bg-white border-b border-(--color-line) sticky top-0 z-20">
             <div className="max-w-7xl mx-auto px-4 h-12 flex items-center gap-4">
               <Link href="/" className="flex items-baseline gap-1.5 font-bold tracking-tight">
-                <span className="text-(--color-accent) text-lg sm:text-xl">競愛</span>
+                <span className="text-lg sm:text-xl">
+                  <span className="text-(--color-accent)">競</span>
+                  <span className="text-(--color-bad)">愛</span>
+                </span>
                 <span className="text-(--color-muted) text-xs font-normal hidden sm:inline">
                   ｜ 競馬予想オーケストレーションAI
                 </span>

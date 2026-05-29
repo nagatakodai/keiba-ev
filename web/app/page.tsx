@@ -59,6 +59,245 @@ function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
 }
 
+// 累積収支推移 (回収優先 + 的中優先) + 結果分布の簡易 SVG チャート群。recharts 等の
+// 重い依存を増やさず Tailwind + inline SVG で軽量描画する。
+function DashboardCharts({ races }: { races: RaceHit[] }) {
+  // saved_at 昇順 (古い順) で並べて累積 stake / payout を計算
+  const sorted = [...races].sort((a, b) =>
+    (a.saved_at ?? "").localeCompare(b.saved_at ?? ""),
+  );
+
+  // 累積収支 (回収優先): 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
+  let yieldStakeAcc = 0;
+  let yieldPayoutAcc = 0;
+  let hitStakeAcc = 0;
+  let hitPayoutAcc = 0;
+  const series = sorted.map((r) => {
+    if (r.bundle_participated) {
+      yieldStakeAcc += r.bundle_stake ?? 0;
+      yieldPayoutAcc += r.bundle_payout ?? 0;
+    }
+    if (r.bundle_hit_first_participated) {
+      hitStakeAcc += r.bundle_hit_first_stake ?? 0;
+      hitPayoutAcc += r.bundle_hit_first_payout ?? 0;
+    }
+    return {
+      yieldNet: yieldPayoutAcc - yieldStakeAcc,
+      yieldRoi: yieldStakeAcc > 0 ? yieldPayoutAcc / yieldStakeAcc : 0,
+      hitNet: hitPayoutAcc - hitStakeAcc,
+      hitRoi: hitStakeAcc > 0 ? hitPayoutAcc / hitStakeAcc : 0,
+    };
+  });
+  const yieldNetSeries = series.map((s) => s.yieldNet);
+  const hitNetSeries = series.map((s) => s.hitNet);
+  const yieldRoiSeries = series.map((s) => s.yieldRoi);
+  const hitRoiSeries = series.map((s) => s.hitRoi);
+
+  // 結果分布: 的中 / 不的中 / 見送り レース数
+  const yieldHits = races.filter((r) => r.bundle_hit).length;
+  const yieldMisses = races.filter(
+    (r) => r.bundle_participated && !r.bundle_hit,
+  ).length;
+  const yieldSkips = races.filter(
+    (r) => r.bundle_participated === false,
+  ).length;
+  const hitHits = races.filter((r) => r.bundle_hit_first_hit).length;
+  const hitMisses = races.filter(
+    (r) => r.bundle_hit_first_participated && !r.bundle_hit_first_hit,
+  ).length;
+  const hitSkips = races.filter(
+    (r) => r.bundle_hit_first_participated === false,
+  ).length;
+  const totalRaces = races.length;
+
+  // bet type 別 hit 内訳 (回収優先)
+  const betTypeHits: Record<string, number> = {};
+  for (const r of races) {
+    for (const bt of r.bundle_hit_bet_types ?? []) {
+      betTypeHits[bt] = (betTypeHits[bt] ?? 0) + 1;
+    }
+  }
+  const betLabel: Record<string, string> = {
+    win: "単勝", place: "複勝", quinella: "馬連", wide: "ワイド",
+    exacta: "馬単", trio: "3連複", trifecta: "3連単",
+  };
+
+  return (
+    <section className="space-y-3">
+      <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
+        <span className="inline-block w-1 h-4 bg-(--color-highlight) translate-y-0.5" />
+        <span className="text-base">チャート</span>
+        <span className="text-xs font-normal text-(--color-muted)">
+          累積収支 / 結果分布 / 的中 bet 種別
+        </span>
+      </h2>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <Card title="累積収支 (¥, 回収優先 vs 的中優先)">
+          <LineChart
+            seriesA={yieldNetSeries}
+            seriesB={hitNetSeries}
+            labelA="回収優先"
+            labelB="的中優先"
+            colorA="#10b981"
+            colorB="#0ea5e9"
+            yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
+          />
+        </Card>
+        <Card title="累積回収率 推移 (%)">
+          <LineChart
+            seriesA={yieldRoiSeries.map((v) => v * 100)}
+            seriesB={hitRoiSeries.map((v) => v * 100)}
+            labelA="回収優先"
+            labelB="的中優先"
+            colorA="#10b981"
+            colorB="#0ea5e9"
+            yFmt={(v) => `${v.toFixed(0)}%`}
+            referenceY={100}
+          />
+        </Card>
+        <Card title={`結果分布 (n=${totalRaces})`}>
+          <div className="space-y-3">
+            <DistroBar
+              label="回収優先AI"
+              hits={yieldHits}
+              misses={yieldMisses}
+              skips={yieldSkips}
+            />
+            <DistroBar
+              label="的中優先AI"
+              hits={hitHits}
+              misses={hitMisses}
+              skips={hitSkips}
+            />
+          </div>
+        </Card>
+        <Card title="回収優先AI 的中 bet 種別">
+          {Object.keys(betTypeHits).length === 0 ? (
+            <p className="text-xs text-(--color-muted)">的中なし</p>
+          ) : (
+            <div className="space-y-1.5">
+              {Object.entries(betTypeHits)
+                .sort((a, b) => b[1] - a[1])
+                .map(([bt, n]) => {
+                  const pct = totalRaces > 0 ? (n / totalRaces) * 100 : 0;
+                  return (
+                    <div key={bt} className="flex items-center gap-2 text-xs">
+                      <span className="w-12 shrink-0 text-(--color-muted)">
+                        {betLabel[bt] ?? bt}
+                      </span>
+                      <div className="flex-1 bg-(--color-panel-2) h-4 relative">
+                        <div
+                          className="absolute inset-y-0 left-0 bg-(--color-good)/60"
+                          style={{ width: `${Math.min(100, pct * 4)}%` }}
+                        />
+                      </div>
+                      <span className="font-bold tabnum w-12 text-right">
+                        {n} 件
+                      </span>
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function LineChart({
+  seriesA, seriesB, labelA, labelB, colorA, colorB, yFmt, referenceY,
+}: {
+  seriesA: number[];
+  seriesB: number[];
+  labelA: string;
+  labelB: string;
+  colorA: string;
+  colorB: string;
+  yFmt: (v: number) => string;
+  referenceY?: number;
+}) {
+  const w = 600;
+  const h = 180;
+  const pad = { l: 48, r: 12, t: 8, b: 18 };
+  const allValues = [...seriesA, ...seriesB, ...(referenceY !== undefined ? [referenceY] : [])];
+  const minY = Math.min(0, ...allValues);
+  const maxY = Math.max(0, ...allValues);
+  const rangeY = maxY - minY || 1;
+  const n = Math.max(seriesA.length, seriesB.length);
+  const innerW = w - pad.l - pad.r;
+  const innerH = h - pad.t - pad.b;
+  const xAt = (i: number) =>
+    pad.l + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+  const yAt = (v: number) =>
+    pad.t + innerH - ((v - minY) / rangeY) * innerH;
+  const lineFor = (s: number[]) =>
+    s.map((v, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
+  const ticks = [minY, minY + rangeY * 0.5, maxY];
+
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto" preserveAspectRatio="none">
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={pad.l} x2={w - pad.r} y1={yAt(t)} y2={yAt(t)}
+                  stroke="#e5e7eb" strokeWidth={1} />
+            <text x={pad.l - 6} y={yAt(t) + 3} fontSize={10}
+                  fill="#6b7280" textAnchor="end">{yFmt(t)}</text>
+          </g>
+        ))}
+        {referenceY !== undefined && (
+          <line x1={pad.l} x2={w - pad.r} y1={yAt(referenceY)} y2={yAt(referenceY)}
+                stroke="#94a3b8" strokeWidth={1} strokeDasharray="4 2" />
+        )}
+        {seriesA.length > 0 && (
+          <path d={lineFor(seriesA)} fill="none" stroke={colorA} strokeWidth={2} />
+        )}
+        {seriesB.length > 0 && (
+          <path d={lineFor(seriesB)} fill="none" stroke={colorB} strokeWidth={2} strokeDasharray="3 2" />
+        )}
+        {/* legend */}
+        <g transform={`translate(${pad.l + 4}, ${pad.t + 12})`}>
+          <rect width={9} height={9} fill={colorA} />
+          <text x={14} y={9} fontSize={10} fill="#374151">{labelA}</text>
+          <rect width={9} height={9} fill={colorB} x={70} />
+          <text x={84} y={9} fontSize={10} fill="#374151">{labelB}</text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+function DistroBar({
+  label, hits, misses, skips,
+}: {
+  label: string;
+  hits: number;
+  misses: number;
+  skips: number;
+}) {
+  const total = hits + misses + skips;
+  if (total === 0) return null;
+  const hPct = (hits / total) * 100;
+  const mPct = (misses / total) * 100;
+  const sPct = (skips / total) * 100;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-xs mb-1">
+        <span className="font-bold">{label}</span>
+        <span className="text-(--color-muted) tabnum">
+          的中 {hits} ／ 不的中 {misses} ／ 見送り {skips} (n={total})
+        </span>
+      </div>
+      <div className="flex h-5 overflow-hidden border border-(--color-line)">
+        <div className="bg-emerald-500" style={{ width: `${hPct}%` }} title={`的中 ${hits}`} />
+        <div className="bg-red-400" style={{ width: `${mPct}%` }} title={`不的中 ${misses}`} />
+        <div className="bg-slate-300" style={{ width: `${sPct}%` }} title={`見送り ${skips}`} />
+      </div>
+    </div>
+  );
+}
+
 // 表示方針: CI 範囲を常に [low, high] で出す。
 // ±X 形式は CI が対称な前提だが、ROI の bootstrap CI は小サンプルだと
 // 強く skewed (下限 0 ・上限大) になるので「±1849%」のように本来の
@@ -212,8 +451,19 @@ export default async function DashboardPage() {
         subtitle="競馬オーケストレーション AI の実弾運用と AI 比較の俯瞰。15 秒おきに自動更新。"
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {/* 1) 集計対象レース を左端に (2026-05-29 ユーザ指示) */}
+      {/* watch-auto stat はダッシュボードから削除 (2026-05-29 ユーザ指示)。
+          状態は header の WatchPill で確認可能。 */}
+
+      {/* 回収優先AI セクション (実弾で買う) */}
+      <section className="space-y-2">
+        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
+          <span className="inline-block w-1 h-4 bg-(--color-good) translate-y-0.5" />
+          <span className="text-base">回収優先AI</span>
+          <span className="text-xs font-normal text-(--color-muted)">
+            joint Kelly EV 最適 / 実弾で買う対象
+          </span>
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <Stat
           label="集計対象レース"
           value={cal?.race_count ?? 0}
@@ -229,17 +479,6 @@ export default async function DashboardPage() {
           }
           tone={confidence?.tone === "good" ? "good" : confidence?.tone === "warn" ? "warn" : "bad"}
         />
-        <Stat
-          label="watch-auto"
-          value={watch?.running ? "稼働中" : "停止"}
-          hint={
-            watch?.running
-              ? `発走${watch.config.window}〜${(watch.config.window ?? 0) + (watch.config.tolerance ?? 0)}分前 / ${watch.config.interval_sec}s`
-              : "—"
-          }
-          tone={watch?.running ? "good" : "default"}
-        />
-        {/* 回収優先 AI (recommended_bundle = 実弾で買う) の回収率・的中率 (見送りは含まない) */}
         <Stat
           label="回収優先AI 回収率"
           value={
@@ -284,10 +523,33 @@ export default async function DashboardPage() {
               : "bad"
           }
         />
-      </div>
+        </div>
+      </section>
 
-      {/* 1.5 的中優先 AI (おまけ計測): 実弾では買わないが「もし的中優先で賭けたら」を測る */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {/* 的中優先AI セクション (おまけ計測 / 買わない) */}
+      <section className="space-y-2">
+        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
+          <span className="inline-block w-1 h-4 bg-(--color-info) translate-y-0.5" />
+          <span className="text-base">的中優先AI</span>
+          <span className="text-xs font-normal text-(--color-muted)">
+            prob 降順 pool / おまけ計測・買わない
+          </span>
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <Stat
+          label="集計対象レース"
+          value={cal?.race_count ?? 0}
+          hint={
+            confidence ? (
+              <span className="flex items-center gap-1">
+                <Badge tone={confidence.tone}>{confidence.label}</Badge>
+              </span>
+            ) : (
+              "—"
+            )
+          }
+          tone={confidence?.tone === "good" ? "good" : confidence?.tone === "warn" ? "warn" : "bad"}
+        />
         <Stat
           label="的中優先AI 回収率"
           value={
@@ -332,13 +594,13 @@ export default async function DashboardPage() {
               : "bad"
           }
         />
-      </div>
+        </div>
+      </section>
 
-      {/* 旧 Plan 別 ROI カードは廃止 (2026-05-29 後半): 集計対象を bundle 2 つだけに集約。 */}
-
-      {/* 予測履歴 (最新予測 / 最新的中 / 本日全件) はダッシュボードから削除
-          (2026-05-29 ユーザ指示: ダッシュボードページ内に予測履歴は不要)。
-          /predictions ページや /calibrate ページから参照する。 */}
+      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) */}
+      {cal && cal.races.length > 0 && (
+        <DashboardCharts races={cal.races} />
+      )}
     </Page>
   );
 }

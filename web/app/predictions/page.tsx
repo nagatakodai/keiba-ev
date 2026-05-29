@@ -7,7 +7,7 @@ import {
   type WatchAutoHistoryItem,
 } from "@/lib/api";
 
-export const metadata: Metadata = { title: "予測履歴" };
+export const metadata: Metadata = { title: "予測分析履歴" };
 import { Page, PageHeader, savedAtDate, todayJST } from "@/components/ui";
 import { PredictionsList } from "@/components/PredictionsList";
 

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { api } from "@/lib/api";
 
-export const metadata: Metadata = { title: "履歴" };
+export const metadata: Metadata = { title: "確率較正" };
 import {
   Badge,
   Card,
