@@ -491,11 +491,12 @@ export default async function DashboardPage() {
                 : "—"
             }
             tone={
+              // 収支: マイナスなら赤、プラスは黒 (default) (2026-05-29 ユーザ指示)
               !claudeBundle
                 ? "default"
-                : claudeBundle.payout - claudeBundle.stake >= 0
-                ? "info"
-                : "bad"
+                : claudeBundle.payout - claudeBundle.stake < 0
+                ? "bad"
+                : "default"
             }
             accentTone={
               !claudeBundle || claudeBundle.payout - claudeBundle.stake >= 0 ? "info" : "bad"
@@ -536,14 +537,13 @@ export default async function DashboardPage() {
               ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加 (見送り除く)`
               : ""
           }
+          // 的中率: 30% 未満 → 赤、それ以外 → 黒 (default) (2026-05-29 ユーザ指示)
           tone={
-            !claudeBundle || claudeBundle.participated_races < 30
-              ? "warn"
-              : claudeBundle.hit_rate >= 0.3
-              ? "good"
-              : claudeBundle.hit_rate >= 0.15
-              ? "warn"
-              : "bad"
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "default"
+              : claudeBundle.hit_rate < 0.3
+              ? "bad"
+              : "default"
           }
           accentTone="good"
         />
@@ -559,13 +559,12 @@ export default async function DashboardPage() {
               ? `${claudeBundle.participated_races} 参加 / ${claudeBundle.skipped_races} 見送り · 賭金 ${fmtYen(claudeBundle.stake)} → 払戻 ${fmtYen(claudeBundle.payout)}`
               : "賭けたレースなし"
           }
+          // 回収率: 100% 超 → 黒 (default)、それ以外 → 赤 (損失) (2026-05-29 ユーザ指示)
           tone={
-            !claudeBundle || claudeBundle.participated_races < 30
-              ? "warn"
-              : claudeBundle.roi >= 1
-              ? "good"
-              : claudeBundle.roi >= 0.85
-              ? "warn"
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "default"
+              : claudeBundle.roi > 1
+              ? "default"
               : "bad"
           }
           accentTone="info"
@@ -595,14 +594,13 @@ export default async function DashboardPage() {
               ? `${claudeBundleHit.hits} 的中 / ${claudeBundleHit.participated_races} 参加`
               : "新スキーマ待ち (本日以降の analyze から蓄積)"
           }
+          // 的中率: 30% 未満 → 赤、それ以外 → 黒
           tone={
-            !claudeBundleHit || claudeBundleHit.participated_races < 30
-              ? "warn"
-              : claudeBundleHit.hit_rate >= 0.3
-              ? "good"
-              : claudeBundleHit.hit_rate >= 0.15
-              ? "warn"
-              : "bad"
+            !claudeBundleHit || claudeBundleHit.participated_races === 0
+              ? "default"
+              : claudeBundleHit.hit_rate < 0.3
+              ? "bad"
+              : "default"
           }
           accentTone="good"
         />
@@ -618,13 +616,12 @@ export default async function DashboardPage() {
               ? `${claudeBundleHit.participated_races} 参加 / 賭金 ${fmtYen(claudeBundleHit.stake)} → 払戻 ${fmtYen(claudeBundleHit.payout)}`
               : "新スキーマ待ち (本日以降の analyze から蓄積)"
           }
+          // 回収率: 100% 超 → 黒、それ以外 → 赤
           tone={
-            !claudeBundleHit || claudeBundleHit.participated_races < 30
-              ? "warn"
-              : claudeBundleHit.roi >= 1
-              ? "good"
-              : claudeBundleHit.roi >= 0.85
-              ? "warn"
+            !claudeBundleHit || claudeBundleHit.participated_races === 0
+              ? "default"
+              : claudeBundleHit.roi > 1
+              ? "default"
               : "bad"
           }
           accentTone="info"
