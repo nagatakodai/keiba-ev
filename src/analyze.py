@@ -295,22 +295,13 @@ def _save_evidence_to_snapshot(
         snap = json.loads(snap_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return
+    # 新スキーマ (2026-05-29 後半): Plan A/B 自体は廃止。evidence は LLM 補強後の 3連単 rows と
+    # cuts のみを保存する。bundle 再生成は `_validate_and_update_bundle` で別途処理。
+    _ = aptitude_top_horses
+    _ = hit_points
     evidence_by_key = evidence.get("evidence_by_key") or {}
     cuts = evidence.get("cuts") or []
     adjusted = ev_mod.apply_evidence(plan_rows, evidence_by_key, cuts)
-    plan_a = ev_mod.plan_balanced(adjusted)
-    plan_b = ev_mod.plan_max_ev(adjusted)
-    plan_c = ev_mod.plan_wide(adjusted)
-    # Plan G: Phase 23 で β=1.0 が overfit と判明 → default β
-    if aptitude_top_horses:
-        plan_g = ev_mod.plan_aptitude_ev(adjusted, aptitude_top_horses)
-    else:
-        plan_g = []
-    # Plan H1 / H2: Phase 22 で β=0 が overfit と判明 → default β
-    # target は CLI --hit-points と一致させて CLI 表示 / calibration を揃える。
-    plan_h1 = ev_mod.plan_hit_pure(adjusted, target=hit_points)
-    plan_h2 = ev_mod.plan_hit_safe(adjusted, target=hit_points)
-    plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
     snap["evidence"] = evidence
     snap["evidence_rows"] = [
         {
@@ -323,16 +314,6 @@ def _save_evidence_to_snapshot(
         }
         for r in adjusted
     ]
-    snap["evidence_plan_a_keys"] = [list(r.key) for r in plan_a]
-    snap["evidence_plan_b_keys"] = [list(r.key) for r in plan_b]
-    snap["evidence_plan_c_keys"] = [list(r.key) for r in plan_c]
-    snap["evidence_plan_g_keys"] = [list(r.key) for r in plan_g]
-    # plan_h1 / plan_h2 は LLM 補強後に再計算済 (plan_rows と apply_evidence 経由)。
-    # 旧コードでは H1/H2 の evidence_*_keys 保存が欠落していて UI で見えなかったので
-    # 修正。Plan F は H1/H2 含む union を反映済。
-    snap["evidence_plan_h1_keys"] = [list(r.key) for r in plan_h1]
-    snap["evidence_plan_h2_keys"] = [list(r.key) for r in plan_h2]
-    snap["evidence_plan_f_keys"] = [list(r.key) for r in plan_f]
     snap_path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -586,32 +567,47 @@ def _save_prediction_snapshot(
     hit_points: int = 3,
     probs=None,
 ) -> None:
-    plan_a = ev_mod.plan_balanced(plan_rows)
-    plan_b = ev_mod.plan_max_ev(plan_rows)
-    plan_c = ev_mod.plan_wide(plan_rows)
-    # H1/H2 ("当て枠") も min_prob/ev_max のキャップは尊重する。
-    # 5-fold CV で β=0 は overfit と判明 → default β を使う。
-    # target は CLI --hit-points と一致させて snapshot / calibration が
-    # CLI 表示と乖離しないようにする (旧実装は 3 hardcode で乖離していた)。
-    plan_h1 = ev_mod.plan_hit_pure(plan_rows, target=hit_points)
-    plan_h2 = ev_mod.plan_hit_safe(plan_rows, target=hit_points)
-    # Plan G: 適性ゲート → EV 足切り (適性指数 top N 頭の集合で P×O≥1.02)。
-    # Phase 23 の sliding-window で β=1.0 +EV 主張が破綻 → default β を使う。
-    if aptitude_top_horses:
-        plan_g = ev_mod.plan_aptitude_ev(plan_rows, aptitude_top_horses)
-    else:
-        plan_g = []
-    plan_f = ev_mod.plan_final(plan_a, plan_b, plan_c, plan_g, plan_h1, plan_h2)
-    # 「Claude 総合オススメ」= 全 bet type 横断の joint Kelly 最適まとめ買い束。
-    # レースの完全な top-3 結果分布の上で束全体の E[log(資金)] を最大化する
-    # (相関を考慮した成長率最適配分)。probs が無い古い呼び出しでは省略。
+    # **新スキーマ (2026-05-29 後半)**: Plan A/B は廃止 (3連単 を「他の券種と同じ」EV table
+    # 扱いに集約)。代わりに 2 つの bundle を計算する:
+    #   - recommended_bundle      : 回収優先 (joint Kelly, EV 最適) — 実弾で買う対象
+    #   - recommended_bundle_hit  : 的中優先 (prob 降順 pool で Kelly 配分) — おまけ計測のみ
+    # bet_tables にも 3連単 を含めて表示する (frontend で他券種と並べる)。
+    _ = hit_points   # 旧 Plan B 用 (現スキーマでは未使用)
     recommended_bundle = None
+    recommended_bundle_hit = None
+    bet_tables_hit_serial: dict[str, list] = {}
     if probs is not None:
         try:
             cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
-            recommended_bundle = pf_mod.build_bundle(cands, probs)
+            recommended_bundle = pf_mod.build_bundle(cands, probs, prioritize="yield")
+            # 的中優先 bundle: 同じ候補プールに prioritize="hit" を適用 (= prob 降順 + 1.0 floor)
+            recommended_bundle_hit = pf_mod.build_bundle(cands, probs, prioritize="hit")
         except Exception as ex:  # noqa: BLE001
             console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
+        # 的中優先 EV table (per bet type, prob 降順, px_o>=1.0)
+        try:
+            bet_tables_hit_serial = _serialize_bet_tables(ev_mod.build_all_bet_tables_hit(rd, probs))
+            # 3連単 (rd.trifecta 由来) も的中優先 table を追加
+            tri_hit = sorted(
+                (r for r in rows if r.px_o >= 1.0),
+                key=lambda r: r.prob, reverse=True,
+            )[:30]
+            if tri_hit:
+                bet_tables_hit_serial["trifecta"] = [
+                    {"key": list(r.key), "odds": r.odds, "popularity": r.popularity,
+                     "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
+                    for r in tri_hit
+                ]
+        except Exception as ex:  # noqa: BLE001
+            console.print(f"[yellow]bet_tables_hit 計算失敗: {ex}[/yellow]")
+    # 回収優先 bet_tables に 3連単 (rows = P×O 降順 top 30) を含める
+    bet_tables_serial = _serialize_bet_tables(bet_tables) if bet_tables else {}
+    if rows:
+        bet_tables_serial["trifecta"] = [
+            {"key": list(r.key), "odds": r.odds, "popularity": r.popularity,
+             "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
+            for r in rows[:30]
+        ]
     snapshot = {
         "race_id": race_id,
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -644,20 +640,21 @@ def _save_prediction_snapshot(
             "trained_at": (lgbm_info or {}).get("trained_at"),
             "engine": "lgbm" if (lgbm_info and lgbm_info.get("available")) else "linear-fallback",
         } if lgbm_info is not None else {"engine": "unknown"},
-        "bet_tables": _serialize_bet_tables(bet_tables) if bet_tables else {},
+        # 回収優先 bet_tables (3連単 を含む全 7 券種、各 P×O 降順 top 30)
+        "bet_tables": bet_tables_serial,
+        # 的中優先 bet_tables (新スキーマ 2026-05-29): 各 bet type を prob 降順、px_o>=1.0 で
+        # 足切り。実弾は 回収優先 のみで買い、的中優先は計測のみ (「おまけ」)。
+        "bet_tables_hit": bet_tables_hit_serial,
         "bet_tables_g": (
             _serialize_bet_tables_g(bet_tables, aptitude_top_horses)
             if bet_tables and aptitude_top_horses else {}
         ),
         "aptitude_top_horses": list(aptitude_top_horses or []),
-        "plan_a_keys": [list(r.key) for r in plan_a],
-        "plan_b_keys": [list(r.key) for r in plan_b],
-        "plan_c_keys": [list(r.key) for r in plan_c],
-        "plan_g_keys": [list(r.key) for r in plan_g],
-        "plan_h1_keys": [list(r.key) for r in plan_h1],
-        "plan_h2_keys": [list(r.key) for r in plan_h2],
-        "plan_f_keys": [list(r.key) for r in plan_f],
+        # 「Claude 総合オススメ」= 全 bet type 横断の joint Kelly 最適まとめ買い束。
+        # recommended_bundle      : 回収優先 (実弾で買う)
+        # recommended_bundle_hit  : 的中優先 (おまけ計測のみ、買わない)
         "recommended_bundle": recommended_bundle,
+        "recommended_bundle_hit": recommended_bundle_hit,
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1055,50 +1052,22 @@ def _print_plans(
     total_budget: int = 10_000,
     aptitude_top_horses: list[int] | None = None,
 ) -> None:
-    ev_budget = int(total_budget * (1.0 - hit_budget_ratio))
-    hit_budget = total_budget - ev_budget
-    console.print(
-        f"[dim]予算配分: +EV 枠 ¥{ev_budget:,} (Plan A/B/C/G のいずれか) / "
-        f"当て枠 ¥{hit_budget:,} (Plan H1/H2 のいずれか)[/dim]"
-    )
-    # Phase 19-23 の旅: bet-type-specific β は in-sample で +EV に見えたが
-    # CV + sliding-window で全て overfit と判明 → 全 Plan が default β=0.78 を使う。
-    ev_plans = [
-        (
-            "Plan A — 5点バランス (holdout -EV / N=291 で hit 1)",
-            ev_mod.plan_balanced(rows), ev_budget,
-        ),
-        (
-            "Plan B — 最高EV (集中 1-3点) (holdout 0 hits / 291, 楽観バイアス疑)",
-            ev_mod.plan_max_ev(rows), ev_budget,
-        ),
-        (
-            f"Plan C — 広め (保険型 ≤{ev_mod.PLAN_C_MAX_POINTS}点) (holdout -EV)",
-            ev_mod.plan_wide(rows),
-            ev_budget,
-        ),
-        (
-            "Plan H1 — 当て枠 / 確率最優先 (CV: β 不安定)",
-            ev_mod.plan_hit_pure(rows, target=hit_points),
-            hit_budget,
-        ),
-        (
-            "Plan H2 — 当て枠 / 確率 +P×O ≥ 1.0 (W4: 89% ROI / hit 3)",
-            ev_mod.plan_hit_safe(rows, target=hit_points),
-            hit_budget,
-        ),
-    ]
-    if aptitude_top_horses:
-        top_n = len(aptitude_top_horses)
-        ev_plans.insert(
-            3,
-            (
-                f"Plan G — 適性ゲート top{top_n} (W4: hit 0/149, +EV claim 取消)",
-                ev_mod.plan_aptitude_ev(rows, aptitude_top_horses),
-                ev_budget,
-            ),
-        )
-    for title, picks, budget in ev_plans:
+    """3連単 解析結果 (回収優先 + 的中優先) を 1 点単位で表示。
+
+    新スキーマ (2026-05-29 後半): Plan A/B/C/F/G/H1/H2 (旧) は廃止。3連単 を「他券種と
+    同じ EV 解析結果」として扱い、ここでは picks ではなく **回収優先 (P×O 上位 5)** と
+    **的中優先 (prob 上位 5、px_o≥1.0)** を参考表示するだけ。実際の購入は
+    recommended_bundle (回収優先) で行われ、的中優先は計測のみ。
+    """
+    _ = (aptitude_top_horses, hit_budget_ratio)   # 旧互換 (CLI 引数受領)
+    yield_picks = [r for r in rows if r.px_o >= PXO_FLOOR][:5]
+    hit_picks = sorted(
+        (r for r in rows if r.px_o >= 1.0), key=lambda r: r.prob, reverse=True,
+    )[:max(hit_points, 5)]
+    for title, picks in (
+        ("3連単・回収優先 (P×O 降順 top 5)", yield_picks),
+        ("3連単・的中優先 (prob 降順, px_o≥1.0)", hit_picks),
+    ):
         if not picks:
             console.print(f"[bold]{title}:[/bold] [red]対象なし、スキップ推奨[/red]")
             continue
@@ -1106,26 +1075,11 @@ def _print_plans(
         total_p = sum(p.prob for p in picks)
         avg_o = sum(p.odds for p in picks) / len(picks)
         ev = sum(p.px_o for p in picks) / len(picks)
-        per_point = budget // len(picks)
+        per_point = total_budget // len(picks) if picks else 0
         console.print(
             f"[bold]{title}:[/bold] {joined}\n"
-            f"  [dim]点数={len(picks)} 1点 ¥{per_point:,} (枠 ¥{budget:,}) "
+            f"  [dim]点数={len(picks)} 1点 ¥{per_point:,} (枠 ¥{total_budget:,}) "
             f"合計的中率={total_p*100:.2f}% 平均オッズ={avg_o:.1f} EV={ev:.2f}[/dim]"
-        )
-
-    final_picks = ev_mod.plan_final(*[p for _, p, _ in ev_plans])
-    if final_picks:
-        joined_f = ", ".join(
-            f"{p.key[0]}-{p.key[1]}-{p.key[2]}({p.px_o:.2f})" for p in final_picks
-        )
-        total_p_f = sum(p.prob for p in final_picks)
-        avg_o_f = sum(p.odds for p in final_picks) / len(final_picks)
-        ev_f = sum(p.px_o for p in final_picks) / len(final_picks)
-        per_point_f = total_budget // len(final_picks)
-        console.print(
-            f"[bold magenta]Plan F — 最終買い目 / A/B/C/H1/H2 union:[/bold magenta] {joined_f}\n"
-            f"  [dim]点数={len(final_picks)} 1点 ¥{per_point_f:,} (枠 ¥{total_budget:,}) "
-            f"合計的中率={total_p_f*100:.2f}% 平均オッズ={avg_o_f:.1f} EV={ev_f:.2f}[/dim]"
         )
 
 

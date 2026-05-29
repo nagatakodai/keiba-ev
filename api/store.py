@@ -208,38 +208,14 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
     tier_stats: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"prob_sum": 0.0, "hits": 0, "rows": 0}
     )
-    plan_stats: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {
-            "hits": 0,
-            "payouts": 0,
-            "races": 0,
-            "participated_races": 0,
-            "total_points": 0,
-            # bootstrap 用に per-race の (stake, payout) を保持
-            "per_race": [],
-        }
-    )
     races: list[dict[str, Any]] = []
 
-    # Plan A/B/C/G は EV 枠 ¥8,000、H1/H2 は当て枠 ¥2,000 (analyze.py の hit_budget_ratio=0.2)。
-    # Plan F は union 採用なので ¥10,000 全額枠。
-    BUDGET_SLOT = {
-        "Plan A": 8000, "Plan B": 8000, "Plan C": 8000, "Plan G": 8000,
-        "Plan H1": 2000, "Plan H2": 2000,
-        "Plan F": 10000,
-    }
-    # 各 plan で `evidence_plan_*_keys` (LLM 補強後) を優先、無ければ
-    # `plan_*_keys` (raw) を使う。Web UI / record.py と同じ pattern。
-    # これで calibration が「user が実際に打った picks」を測ることになる。
-    PLAN_KEY_FIELDS = (
-        ("Plan A", "plan_a_keys", "evidence_plan_a_keys"),
-        ("Plan B", "plan_b_keys", "evidence_plan_b_keys"),
-        ("Plan C", "plan_c_keys", "evidence_plan_c_keys"),
-        ("Plan G", "plan_g_keys", "evidence_plan_g_keys"),
-        ("Plan H1", "plan_h1_keys", "evidence_plan_h1_keys"),
-        ("Plan H2", "plan_h2_keys", "evidence_plan_h2_keys"),
-        ("Plan F", "plan_f_keys", "evidence_plan_f_keys"),
-    )
+    # **新スキーマ (2026-05-29 後半)**: Plan A/B/C/F/G/H1/H2 は全廃。3連単 を「他券種と同じ
+    # EV 解析結果」として bet_tables に含めて表示。集計対象は **2 つの bundle のみ**:
+    #   - recommended_bundle      : 回収優先 (実弾で買う、joint Kelly EV 最適)
+    #   - recommended_bundle_hit  : 的中優先 (おまけ計測、prob 降順 pool で Kelly)
+    # 旧 snapshot との互換は (a) plan_*_keys 集計は完全に削除 (b) recommended_bundle_hit は
+    # 古い snapshot で欠落 → claude_bundle_hit aggregate は 0 集計になる (本日以降に蓄積)。
 
     for race_id, pred, result in pairs:
         finish_tuple = tuple(result["finish_order"])
@@ -253,42 +229,29 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 tier_stats[tier]["hits"] += 1
                 winning_tier = tier
 
-        race_plan_hits: dict[str, bool] = {}
-        for plan_name, raw_field, evidence_field in PLAN_KEY_FIELDS:
-            # evidence_plan_*_keys (LLM 補強後) 優先、無ければ raw plan_*_keys
-            key_list_raw = pred.get(evidence_field)
-            if key_list_raw is None:
-                key_list_raw = pred.get(raw_field)
-            # 旧スナップショットにキー不在 → そのレースはこの plan の集計対象外
-            # (空リスト [] = 「Plan は出したが picks 0」とは区別する)
-            if key_list_raw is None:
-                continue
-            key_list = key_list_raw
-            plan_stats[plan_name]["races"] += 1
-            plan_stats[plan_name]["total_points"] += len(key_list)
-            if key_list:
-                plan_stats[plan_name]["participated_races"] += 1
-            hit = tuple(finish_tuple) in {tuple(k) for k in key_list}
-            race_plan_hits[plan_name] = hit
-            if hit:
-                plan_stats[plan_name]["hits"] += 1
-                if payout > 0:
-                    plan_stats[plan_name]["payouts"] += payout
-            # per-race contribution: stake = points × point_cost、payout = hit 時のみ
-            race_stake = len(key_list) * point_cost
-            race_payout = payout if hit else 0
-            plan_stats[plan_name]["per_race"].append((race_stake, race_payout))
-
-        # 束 (recommended_bundle = 実際に買う総合オススメ) の的中。3連単プランだけでなく
-        # ワイド/馬連/馬単/3連複/単複 も含む全 bet type を考慮 (履歴ラベルが「ワイド当たり
-        # でも不的中」になるのを防ぐ)。bet-type-aware 判定は portfolio._bet_hits を流用。
+        # 束 (回収優先 / 的中優先) の的中を bet-type-aware で判定。
+        # ワイド/馬連/馬単/3連複/単複 も含めた全 bet type を考慮 (portfolio._bet_hits)。
         from src.portfolio import _bet_hits
         a3, b3, c3 = (list(finish_tuple) + [0, 0, 0])[:3]
-        bundle_legs = (pred.get("recommended_bundle") or {}).get("legs") or []
-        bundle_hit_legs = [
-            leg for leg in bundle_legs
-            if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])), a3, b3, c3)
-        ]
+
+        def _bundle_stats(bundle: dict | None) -> dict:
+            """bundle dict → {legs, hit_legs, stake, payout, participated, hit} の集計。"""
+            legs = (bundle or {}).get("legs") or []
+            hit_legs = [
+                leg for leg in legs
+                if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])), a3, b3, c3)
+            ]
+            return {
+                "legs": legs,
+                "hit_legs": hit_legs,
+                "stake": sum(int(leg.get("stake", 0)) for leg in legs),
+                "payout": sum(int(leg.get("payout_if_hit", 0)) for leg in hit_legs),
+                "participated": bool(legs),
+                "hit": bool(hit_legs),
+            }
+
+        b_yield = _bundle_stats(pred.get("recommended_bundle"))
+        b_hit = _bundle_stats(pred.get("recommended_bundle_hit"))
 
         races.append(
             {
@@ -297,20 +260,19 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "finish": list(finish_tuple),
                 "winning_tier": winning_tier,
                 "payout": payout,
-                "bundle_hit": bool(bundle_hit_legs),
-                "bundle_hit_bet_types": sorted({leg["bet_type"] for leg in bundle_hit_legs}),
-                # claude 総合オススメが「見送り」(束 legs 空) かどうか。frontend で「不的中」
-                # ではなく「未参加」ラベルを出すための discriminator。bundle_hit=False が
-                # 「賭けて外れた」(legs>0) なのか「そもそも賭けていない」(legs=0) なのかを区別する。
-                "bundle_participated": bool(bundle_legs),
-                "plan_a_hit": race_plan_hits.get("Plan A", False),
-                "plan_b_hit": race_plan_hits.get("Plan B", False),
-                "plan_c_hit": race_plan_hits.get("Plan C", False),
-                "plan_g_hit": race_plan_hits.get("Plan G", False),
-                "plan_h1_hit": race_plan_hits.get("Plan H1", False),
-                "plan_h2_hit": race_plan_hits.get("Plan H2", False),
-                "plan_f_hit": race_plan_hits.get("Plan F", False),
-                # LLM 評価有無の discriminator (LLM 込みデータと無しを混ぜないため)
+                # 回収優先 bundle (実弾で買う)
+                "bundle_hit": b_yield["hit"],
+                "bundle_hit_bet_types": sorted({leg["bet_type"] for leg in b_yield["hit_legs"]}),
+                "bundle_participated": b_yield["participated"],
+                "bundle_stake": b_yield["stake"],
+                "bundle_payout": b_yield["payout"],
+                # 的中優先 bundle (おまけ計測のみ、古い snapshot で欠落することあり)
+                "bundle_hit_first_hit": b_hit["hit"],
+                "bundle_hit_first_bet_types": sorted({leg["bet_type"] for leg in b_hit["hit_legs"]}),
+                "bundle_hit_first_participated": b_hit["participated"],
+                "bundle_hit_first_stake": b_hit["stake"],
+                "bundle_hit_first_payout": b_hit["payout"],
+                # LLM 評価有無の discriminator
                 "has_evidence": bool(pred.get("evidence")),
                 "saved_at": pred.get("saved_at"),
                 "result_source": result.get("source", "unknown"),
@@ -333,39 +295,51 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             }
         )
 
-    plans_out: list[dict[str, Any]] = []
-    for entry in PLAN_KEY_FIELDS:
-        name = entry[0]
-        s = plan_stats[name]
-        if s["races"] == 0:
-            continue
-        stake = s["total_points"] * point_cost
-        roi = (s["payouts"] / stake) if stake > 0 else 0.0
-        participated = s["participated_races"]
-        hit_rate = s["hits"] / participated if participated else 0.0
-        hr_low, hr_high = _wilson_ci(s["hits"], participated)
-        roi_low, roi_high = _bootstrap_roi_ci(s["per_race"])
-        plans_out.append(
-            {
-                "plan": name,
-                "races": s["races"],
-                "participated_races": participated,
-                "hits": s["hits"],
-                "hit_rate": hit_rate,
-                "hit_rate_ci_low": hr_low,
-                "hit_rate_ci_high": hr_high,
-                "total_points": s["total_points"],
-                "point_cost": point_cost,
-                "assumed_budget_slot": BUDGET_SLOT.get(name, 0),
-                "stake": stake,
-                "payout": s["payouts"],
-                "roi": roi,
-                "roi_ci_low": roi_low,
-                "roi_ci_high": roi_high,
-            }
-        )
-
     evidence_count = sum(1 for r in races if r.get("has_evidence"))
+
+    def _bundle_agg(
+        races_: list[dict], part_field: str, hit_field: str,
+        stake_field: str, payout_field: str,
+    ) -> dict:
+        """bundle (回収優先 / 的中優先) の集計。見送り (participated=false) は除外。"""
+        part = [r for r in races_ if r.get(part_field)]
+        per_race = [
+            (int(r.get(stake_field, 0)), int(r.get(payout_field, 0)))
+            for r in part
+        ]
+        hits = sum(1 for r in part if r.get(hit_field))
+        n = len(part)
+        stake_sum = sum(s for s, _ in per_race)
+        payout_sum = sum(p for _, p in per_race)
+        hit_rate = hits / n if n else 0.0
+        roi = (payout_sum / stake_sum) if stake_sum else 0.0
+        hr_low, hr_high = _wilson_ci(hits, n)
+        roi_low, roi_high = _bootstrap_roi_ci(per_race)
+        return {
+            "races": len(races_),
+            "participated_races": n,
+            "skipped_races": len(races_) - n,
+            "hits": hits,
+            "hit_rate": hit_rate,
+            "hit_rate_ci_low": hr_low,
+            "hit_rate_ci_high": hr_high,
+            "stake": stake_sum,
+            "payout": payout_sum,
+            "roi": roi,
+            "roi_ci_low": roi_low,
+            "roi_ci_high": roi_high,
+        }
+
+    # 回収優先 (実弾で買う Claude 選定束)
+    claude_bundle = _bundle_agg(
+        races, "bundle_participated", "bundle_hit", "bundle_stake", "bundle_payout",
+    )
+    # 的中優先 (おまけ計測のみ。古い snapshot で欠落あり)
+    claude_bundle_hit = _bundle_agg(
+        races, "bundle_hit_first_participated", "bundle_hit_first_hit",
+        "bundle_hit_first_stake", "bundle_hit_first_payout",
+    )
+
     return {
         "race_count": len(pairs),
         "point_cost": point_cost,
@@ -374,7 +348,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "evidence_race_count": evidence_count,
         "non_evidence_race_count": len(pairs) - evidence_count,
         "tiers": tiers_out,
-        "plans": plans_out,
+        # 旧 Plan A/B/C/F/G/H1/H2 は廃止。集計対象は claude_bundle と claude_bundle_hit のみ。
+        "plans": [],
+        "claude_bundle": claude_bundle,
+        "claude_bundle_hit": claude_bundle_hit,
         "races": races,
     }
 

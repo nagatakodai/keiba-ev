@@ -50,17 +50,9 @@ export type PredictionSummary = {
   close_at: number | null;
   start_at: number | null;
   row_count: number;
-  plan_a_count: number;
-  plan_b_count: number;
-  plan_c_count: number;
-  // Plan G (適性ゲート → EV 足切り, Phase 20) の point 数。API が exposing する
-  // ようになったのは 2026-05-24 以降、それ以前の snapshot は欠落することがある。
-  plan_g_count?: number;
-  // 当て枠 Plan H1 / H2 (backend 2026-05-20 以降。古いスナップショットには欠落する)
-  plan_h1_count?: number;
-  plan_h2_count?: number;
-  // 最終買い目 Plan F = A/B/C/G/H1/H2 の union (backend 2026-05-21 以降)
-  plan_f_count?: number;
+  // 新スキーマ (2026-05-29 後半): Plan A/B も廃止。3連単 は他券種と並ぶ bet_tables[trifecta] に
+  // 入り、表示は 2 つの bundle (recommended_bundle 回収優先 + recommended_bundle_hit 的中優先) に集約。
+  // 旧 plan_*_count は backend が 0 を返すように、frontend からも参照しない。
   // 適性指数 top 3 (total 降順)。snapshot に horse_aptitude が無いと空配列。
   top_aptitude?: Array<{ number: number; name: string; total: number }>;
   has_evidence: boolean;
@@ -202,27 +194,16 @@ export type PredictionDetail = {
   bet_tables_g?: Record<string, BetEvRow[]>;
   // 適性総合 top N 頭の馬番リスト (Plan G が依拠する集合)。
   aptitude_top_horses?: number[];
-  plan_a_keys: number[][];
-  plan_b_keys: number[][];
-  plan_c_keys: number[][];
-  // Plan G: 適性 top N 頭の集合 → P×O≥1.02 で足切り (3連単)
-  plan_g_keys?: number[][];
-  plan_h1_keys?: number[][];
-  plan_h2_keys?: number[][];
-  // 最終買い目 Plan F: A/B/C/G/H1/H2 を union dedup・EV 降順
-  plan_f_keys?: number[][];
-  // Claude 総合オススメ: 全 bet type 横断の joint Kelly 最適まとめ買い束。
-  // 古いスナップショットには欠落 (frontend は近似 Kelly ランキングに fallback)。
+  // 新スキーマ (2026-05-29 後半): Plan A/B 自体は廃止。3連単 は bet_tables[trifecta] に入る。
+  // 2 つの bundle のみ表示する:
+  //   recommended_bundle      : 回収優先 (実弾で買う、joint Kelly EV 最適)
+  //   recommended_bundle_hit  : 的中優先 (おまけ計測、prob 降順 pool で Kelly)
   recommended_bundle?: RecommendedBundle | null;
+  recommended_bundle_hit?: RecommendedBundle | null;
+  // 的中優先 EV table (per bet type, prob 降順, px_o>=1.0 で足切り)。
+  bet_tables_hit?: Record<string, BetEvRow[]>;
   evidence?: { evidence_by_key?: Record<string, { count: number; reasons?: string[] }>; cuts?: string[]; final_plan?: unknown };
   evidence_rows?: PredictionRow[];
-  evidence_plan_a_keys?: number[][];
-  evidence_plan_b_keys?: number[][];
-  evidence_plan_c_keys?: number[][];
-  evidence_plan_g_keys?: number[][];
-  evidence_plan_h1_keys?: number[][];
-  evidence_plan_h2_keys?: number[][];
-  evidence_plan_f_keys?: number[][];
   result?: { finish_order: number[]; trifecta_payout?: number; note?: string };
 };
 
@@ -324,27 +305,39 @@ export type CalibrationTier = {
 };
 
 export type CalibrationPlan = {
-  // "Plan A" | "Plan B" | "Plan C" | "Plan H1" | "Plan H2" (順序固定で 5 種返ってくる前提)
+  // 新スキーマ: "Plan A" (3連単 回収優先) | "Plan B" (3連単 的中優先) の 2 種のみ
   plan: string;
-  // 全 calibration 対象レース数 (race_count と同じ)。買い目 0 点のレースも分母に入る。
   races: number;
-  // この Plan が買い目を出した (key_list 長 ≥ 1) レース数。hit_rate の分母として推奨。
+  // この Plan が買い目を出した (key_list 長 ≥ 1) レース数
   participated_races: number;
   hits: number;
-  // hits / participated_races (旧 backend は hits / races だったが新 backend で変更済)
   hit_rate: number;
-  // Wilson 95% 信頼区間 (二項分布)。sample が増えるほど狭くなる。
   hit_rate_ci_low?: number;
   hit_rate_ci_high?: number;
   total_points: number;
-  // リクエスト送信時の point_cost (default 100)。共通単価。
   point_cost: number;
-  // 各 Plan の想定枠 (¥)。A/B/C=8000、H1/H2=2000。フロントで per-point cost を出すならこれを使う。
+  // 想定枠 (¥)。新スキーマでは Plan A/B とも ¥10,000
   assumed_budget_slot: number;
   stake: number;
   payout: number;
   roi: number;
-  // ROI bootstrap 95% 信頼区間 (n_iter=1000, seed=42 固定なのでリロードしても揺れない)。
+  // ROI bootstrap 95% 信頼区間 (n_iter=1000, seed=42 固定)
+  roi_ci_low?: number;
+  roi_ci_high?: number;
+};
+
+// Claude 選定 (recommended_bundle) の集計。**見送り (legs 空) は分母に含まない**。
+export type ClaudeBundleAggregate = {
+  races: number;                  // 全 join レース (見送り含む)
+  participated_races: number;     // 賭けたレース (見送り除外)
+  skipped_races: number;          // 見送りレース数
+  hits: number;
+  hit_rate: number;               // hits / participated_races
+  hit_rate_ci_low?: number;
+  hit_rate_ci_high?: number;
+  stake: number;                  // Σ bundle stake (¥)
+  payout: number;                 // Σ snapshot 時点 payout (¥)
+  roi: number;                    // payout / stake
   roi_ci_low?: number;
   roi_ci_high?: number;
 };
@@ -355,23 +348,18 @@ export type CalibrationRaceItem = {
   finish: number[];
   winning_tier: string | null;
   payout: number;
-  // 束 (recommended_bundle = 実際に買う総合オススメ) の的中。3連単プランだけでなく
-  // ワイド/馬連/馬単/3連複/単複 も含む全 bet type を考慮 (backend 2026-05-27 以降)。
+  // 回収優先 bundle (実弾で買う Claude 選定束) の的中。bet_type 横断 (3連単 + ワイド/馬連/etc)。
   bundle_hit?: boolean;
   bundle_hit_bet_types?: string[];
-  // claude 総合オススメが「見送り」(束 legs 空) のとき false。frontend で「不的中」ではなく
-  // 「未参加」ラベルを出すための discriminator (backend 2026-05-28 以降)。
   bundle_participated?: boolean;
-  plan_a_hit: boolean;
-  plan_b_hit: boolean;
-  plan_c_hit: boolean;
-  // Plan G (適性ゲート→EV足切り) の的中フラグ (backend 2026-05-22 以降)
-  plan_g_hit?: boolean;
-  // 当て枠の的中フラグ (backend 2026-05-20 以降)。古いレースには欠落する可能性。
-  plan_h1_hit?: boolean;
-  plan_h2_hit?: boolean;
-  // 最終買い目 Plan F の的中フラグ (backend 2026-05-21 以降)
-  plan_f_hit?: boolean;
+  bundle_stake?: number;
+  bundle_payout?: number;
+  // 的中優先 bundle (おまけ計測) の的中。古い snapshot で欠落あり。
+  bundle_hit_first_hit?: boolean;
+  bundle_hit_first_bet_types?: string[];
+  bundle_hit_first_participated?: boolean;
+  bundle_hit_first_stake?: number;
+  bundle_hit_first_payout?: number;
 };
 
 export type CalibrationReport = {
@@ -382,7 +370,12 @@ export type CalibrationReport = {
   // race_count < 30 のとき true。フロントで「参考値」バッジを出す目印。
   sample_warning?: boolean;
   tiers: CalibrationTier[];
+  // 新スキーマでは plans は常に空配列 (旧 Plan A/B/C/F/G/H1/H2 廃止)。frontend は無視で OK。
   plans: CalibrationPlan[];
+  // Claude 選定 回収優先 bundle (recommended_bundle) の集計
+  claude_bundle?: ClaudeBundleAggregate;
+  // Claude 選定 的中優先 bundle (recommended_bundle_hit) の集計 (おまけ計測)
+  claude_bundle_hit?: ClaudeBundleAggregate;
   races: CalibrationRaceItem[];
 };
 

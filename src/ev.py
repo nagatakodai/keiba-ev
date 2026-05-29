@@ -624,6 +624,46 @@ def build_all_bet_tables(
     return out
 
 
+def build_all_bet_tables_hit(
+    rd: RaceData, probs: Probabilities, *, min_pxo: float = 1.0
+) -> dict[str, list[BetEvRow]]:
+    """**的中優先版** EV table: 各 bet type を **prob 降順** に並べ替え、px_o ≥ min_pxo で
+    最低ライン (= 賭けても期待値マイナスでない) を確保。
+
+    回収優先版 (build_all_bet_tables) は P×O 降順なので、当て率が低い大穴が優位になりがち。
+    的中優先は確率高い順に並べることで「賭けが当たりやすい」picks を抽出する用途。
+    min_pxo=1.0 でブレイクイーブン未満を除外 (賭ければ理論期待値で損する目は外す)。
+    """
+    out: dict[str, list[BetEvRow]] = {}
+    for bt, bets in (rd.other_bets or {}).items():
+        if not bets:
+            continue
+        table = build_bet_table(bets, probs, bet_type=bt)
+        # px_o フィルタ (期待値ブレイクイーブン以上)
+        filtered = [r for r in table if r.px_o >= min_pxo]
+        # prob 降順に並べ替え
+        filtered.sort(key=lambda r: r.prob, reverse=True)
+        if filtered:
+            out[bt] = filtered
+    return out
+
+
+def trifecta_to_bet_evrow(rows: list[EvRow]) -> list[BetEvRow]:
+    """3連単 EvRow → BetEvRow (bet_type='trifecta') 変換。他券種と並べて表示する用。"""
+    return [
+        BetEvRow(
+            bet_type="trifecta",
+            key=tuple(r.key),
+            odds=r.odds,
+            popularity=r.popularity,
+            prob=r.prob,
+            px_o=r.px_o,
+            tier=r.tier,
+        )
+        for r in rows
+    ]
+
+
 def _tier(pxo: float) -> str:
     if pxo < PXO_FLOOR:
         return "minus"
@@ -798,14 +838,39 @@ def plan_wide(rows: list[EvRow], target: int = PLAN_C_MAX_POINTS) -> list[EvRow]
 
 
 def plan_hit_pure(rows: list[EvRow], target: int = 3) -> list[EvRow]:
-    """Plan H1: 推定 P 上位 N 点。EV 不問。"""
+    """Plan H1 (旧): 推定 P 上位 N 点。EV 不問。
+    新スキーマでは `plan_b_trifecta` (新 Plan B / 的中優先) として参照される。"""
     return sorted(rows, key=lambda r: r.prob, reverse=True)[:target]
 
 
 def plan_hit_safe(rows: list[EvRow], target: int = 3) -> list[EvRow]:
-    """Plan H2: 推定 P 上位 N 点のうち P×O >= 1.0 のみ。"""
+    """Plan H2 (旧, 廃止予定): 推定 P 上位 N 点のうち P×O >= 1.0 のみ。"""
     cand = [r for r in rows if r.px_o >= 1.0]
     return sorted(cand, key=lambda r: r.prob, reverse=True)[:target]
+
+
+# ---------- 新スキーマ (3連単 Plan A/B) -----------------------------------
+# 旧 Plan A/B/C/F/G/H1/H2 は廃止。3連単を「他の券種と同じ EV 解析結果」として
+# 扱い、回収優先 (P×O 降順) / 的中優先 (確率降順) の 2 plan に集約する。
+
+def plan_a_trifecta(rows: list[EvRow], target: int = 5) -> list[EvRow]:
+    """**新 Plan A** (3連単・回収優先): 3連単 EV table を P×O 降順で上位 target 点。
+
+    他の券種 (単複/馬連/ワイド/馬単/3連複) の EV table と同じく
+    「+EV の上位 N」を素直に取る。`rows` は既に px_o 降順想定 (build_table の出力)。
+    PXO_FLOOR (= 1.02) で楽観バイアス分の足切りをして、生 EV カラム順に N 点。
+    """
+    pos = [r for r in rows if r.px_o >= PXO_FLOOR]
+    return pos[:target]
+
+
+def plan_b_trifecta(rows: list[EvRow], target: int = 3) -> list[EvRow]:
+    """**新 Plan B** (3連単・的中優先): 推定 P 上位 target 点。EV 不問。
+
+    旧 plan_hit_pure (Plan H1) と同じロジック (リネーム)。確率が最も高い目を
+    抑え、当てに行く戦略。実機 holdout で 4/7 hits (60-70% ROI) の実績あり。
+    """
+    return sorted(rows, key=lambda r: r.prob, reverse=True)[:target]
 
 
 def plan_final(*plans: list[EvRow]) -> list[EvRow]:

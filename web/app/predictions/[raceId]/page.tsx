@@ -115,28 +115,15 @@ export default async function PredictionDetailPage({
       <TopRecommendationCard d={d} finish={finish} />
 
       {d.result && (() => {
-        const hits: Array<{ plan: PlanLetter; keys: number[][] | undefined }> = [
-          { plan: "F", keys: d.plan_f_keys },
-          { plan: "A", keys: d.plan_a_keys },
-          { plan: "B", keys: d.plan_b_keys },
-          { plan: "C", keys: d.plan_c_keys },
-          { plan: "G", keys: d.plan_g_keys },
-          { plan: "H1", keys: d.plan_h1_keys },
-          { plan: "H2", keys: d.plan_h2_keys },
-        ];
-        const planHits = hits.map(({ plan, keys }) => ({
-          plan,
-          hit: isFinishInKeys(keys, finish),
-          available: !!keys && keys.length > 0,
-        }));
-        const anyPlanHit = planHits.some((h) => h.hit);
-        // Claude 総合オススメ束も参照。 legs 空 (= 見送り) なら headline は「未参加」に。
-        // 束が legs を持っていれば bundle hit を加味、無ければ plan hits 基準のまま (旧 snapshot 互換)。
+        // 新スキーマ: Plan A/B 廃止。表示判定は 2 つの bundle のみ。
         const bundleLegs = d.recommended_bundle?.legs;
         const bundleEmpty = Array.isArray(bundleLegs) && bundleLegs.length === 0;
         const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
           bundleLegs.some((l) => betHits(l.bet_type, l.key, finish)));
-        const anyHit = bundleHit || anyPlanHit;
+        const bundleHitFirstLegs = d.recommended_bundle_hit?.legs;
+        const bundleHitFirstHit = !!(finish && bundleHitFirstLegs && bundleHitFirstLegs.length > 0 &&
+          bundleHitFirstLegs.some((l) => betHits(l.bet_type, l.key, finish)));
+        const anyHit = bundleHit || bundleHitFirstHit;
         const headlineBadge = bundleEmpty
           ? <Badge tone="muted">見送り</Badge>
           : anyHit
@@ -162,18 +149,21 @@ export default async function PredictionDetailPage({
             </div>
             <div className="mt-4 flex items-center gap-2 flex-wrap">
               <span className="text-xs text-(--color-muted) font-bold tracking-wider uppercase">
-                Plan 別
+                Bundle 別
               </span>
-              {planHits.map(({ plan, hit, available }) =>
-                available ? (
-                  <Badge key={plan} tone={hit ? planTone(plan) : "muted"}>
-                    {plan} {hit ? "✓ 的中" : "× 不的中"}
+              {bundleEmpty ? (
+                <Badge tone="muted">見送り (賭けず)</Badge>
+              ) : (
+                <>
+                  <Badge tone={bundleHit ? "good" : "muted"}>
+                    回収優先 {bundleHit ? "✓ 的中" : "× 不的中"}
                   </Badge>
-                ) : (
-                  <Badge key={plan} tone="muted">
-                    {plan} —
-                  </Badge>
-                ),
+                  {bundleHitFirstLegs && bundleHitFirstLegs.length > 0 && (
+                    <Badge tone={bundleHitFirstHit ? "info" : "muted"}>
+                      的中優先 {bundleHitFirstHit ? "✓ 的中" : "× 不的中"} (おまけ)
+                    </Badge>
+                  )}
+                </>
               )}
             </div>
           </Card>
@@ -236,54 +226,8 @@ export default async function PredictionDetailPage({
         );
       })()}
 
-      {(() => {
-        const fKeys = d.evidence_plan_f_keys ?? d.plan_f_keys;
-        if (!fKeys || fKeys.length === 0) return null;
-        const useEvidence = !!d.evidence_plan_f_keys && !!d.evidence_rows;
-        const fRows = useEvidence ? d.evidence_rows! : d.rows;
-        const subtitle = useEvidence
-          ? "最終買い目 / A〜H2 union 重複除去 (補強反映) · ¥10,000 均等振り"
-          : "最終買い目 / A〜H2 union 重複除去 · ¥10,000 均等振り";
-        return (
-          <PlansCard plan="F" subtitle={subtitle} keys={fKeys} rows={fRows} finish={finish} />
-        );
-      })()}
-
-      {(() => {
-        // Plan F と同じ pattern: evidence_plan_*_keys があればそれを優先、無ければ raw plan_*_keys。
-        // Plan F だけ evidence-aware だった旧仕様を A/B/C/G/H1/H2 にも揃える。
-        const hasEv = !!d.evidence_rows;
-        const rowsToUse = hasEv ? d.evidence_rows! : d.rows;
-        const aKeys = d.evidence_plan_a_keys ?? d.plan_a_keys;
-        const bKeys = d.evidence_plan_b_keys ?? d.plan_b_keys;
-        const cKeys = d.evidence_plan_c_keys ?? d.plan_c_keys;
-        const gKeys = d.evidence_plan_g_keys ?? d.plan_g_keys;
-        const h1Keys = d.evidence_plan_h1_keys ?? d.plan_h1_keys;
-        const h2Keys = d.evidence_plan_h2_keys ?? d.plan_h2_keys;
-        const evSuffix = hasEv ? " (LLM 補強反映)" : "";
-        return (
-          <>
-            <PlansCard plan="A" subtitle={`EV 枠 / 5点バランス${evSuffix}`} keys={aKeys} rows={rowsToUse} finish={finish} />
-            <PlansCard plan="B" subtitle={`EV 枠 / 最高 EV 集中${evSuffix}`} keys={bKeys} rows={rowsToUse} finish={finish} />
-            <PlansCard plan="C" subtitle={`EV 枠 / 広め 保険${evSuffix}`} keys={cKeys} rows={rowsToUse} finish={finish} />
-            {gKeys && gKeys.length > 0 && (
-              <PlansCard
-                plan="G"
-                subtitle={`適性ゲート (top ${d.aptitude_top_horses?.length ?? "N"} 頭 → P×O≥1.02) / EV は最終フィルタ${evSuffix}`}
-                keys={gKeys}
-                rows={rowsToUse}
-                finish={finish}
-              />
-            )}
-            {h1Keys && h1Keys.length > 0 && (
-              <PlansCard plan="H1" subtitle={`当て枠 / 確率最優先${evSuffix}`} keys={h1Keys} rows={rowsToUse} finish={finish} />
-            )}
-            {h2Keys && h2Keys.length > 0 && (
-              <PlansCard plan="H2" subtitle={`当て枠 / 確率優先 + P×O ≥ 1.0${evSuffix}`} keys={h2Keys} rows={rowsToUse} finish={finish} />
-            )}
-          </>
-        );
-      })()}
+      {/* 新スキーマ (2026-05-29 後半): Plan A/B 廃止。3連単 は bet_tables[trifecta] に入り
+          他券種と並ぶ。bundle 表示は TopRecommendationCard (回収優先) + 同 (的中優先) で代替。 */}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card title="P×O ランキング 上位 30">

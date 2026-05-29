@@ -179,11 +179,18 @@ def build_bundle(
     stake_unit: int = 100,
     avoid_torigami: bool = True,
     torigami_margin: float = TORIGAMI_MARGIN,
+    prioritize: str = "yield",
 ) -> dict:
     """候補 bet 群から joint Kelly 最適「まとめ買い」束を構築。
 
     candidates: [{"bet_type","key"(list/tuple),"odds","prob","px_o","tier"}, ...]
     返り値は snapshot 直列化済 dict (frontend がそのまま描画)。
+
+    prioritize="yield" (既定): 回収優先 = pool を個別 Kelly fraction (`_kelly_ind`) 降順で
+        絞る。長期 E[log W] 最適 = ROI 最大化志向。
+    prioritize="hit" : 的中優先 = pool を prob 降順で絞る + pxo_floor を 1.0 に緩和。
+        確率高い目を残すので Kelly 配分後も「当て率」が高い束になる (= 回収率はやや劣るが
+        当たり頻度を上げる)。実戦では「回収優先 を主軸 + 的中優先 をおまけ」が定石。
 
     avoid_torigami=True のとき「トリガミ防止」フィルタを適用する。束を丸ごと買った
     ときの投資総額 S に対し、payout(= odds×stake) < S × torigami_margin の脚を除去
@@ -192,16 +199,20 @@ def build_bundle(
     保証される。margin>1 はオッズ下振れ (締切直前のドリフト / 複勝・ワイドのレンジ幅) に
     対する緩衝で、保存オッズから ~(1−1/margin) 下振れしても収支マイナスにならない。
     """
-    # +EV (P×O ≥ floor) かつ odds>1 の候補のみ。個別 Kelly 降順で max_legs に絞る
-    # (最適化コスト上限。f_b=0 が許されるので pool に入れても害はない)。
+    # prioritize="hit" は break-even (1.0) で足切り、回収優先より緩い (確率を取りたい)。
+    effective_floor = 1.0 if prioritize == "hit" else pxo_floor
     pool = [
         c for c in candidates
-        if c.get("odds", 0) > 1.0 and c.get("px_o", 0.0) >= pxo_floor
+        if c.get("odds", 0) > 1.0 and c.get("px_o", 0.0) >= effective_floor
     ]
     for c in pool:
         o = c["odds"]
         c["_kelly_ind"] = (c["px_o"] - 1.0) / (o - 1.0)
-    pool.sort(key=lambda c: c["_kelly_ind"], reverse=True)
+    # 並べ替えキー: yield=個別 Kelly 降順 (= EV 効率) / hit=prob 降順 (= 的中率)
+    if prioritize == "hit":
+        pool.sort(key=lambda c: c.get("prob", 0.0), reverse=True)
+    else:
+        pool.sort(key=lambda c: c["_kelly_ind"], reverse=True)
     pool = pool[:max_legs]
 
     base = {

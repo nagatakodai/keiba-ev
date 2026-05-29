@@ -97,19 +97,14 @@ function PredictionRowItem({
   const closeAt = p.close_at ?? closeAtMap?.get(p.race_id) ?? null;
   const startAt = p.start_at ?? startAtMap?.get(p.race_id) ?? null;
   const timing = raceTimingStatus(closeAt, startAt, p.has_result, nowMs);
-  const anyHit = !!(
-    hit &&
-    (hit.bundle_hit ||
-      hit.plan_a_hit ||
-      hit.plan_b_hit ||
-      hit.plan_c_hit ||
-      hit.plan_g_hit ||
-      hit.plan_h1_hit ||
-      hit.plan_h2_hit ||
-      hit.plan_f_hit)
-  );
-  // Claude 総合オススメが「見送り」(束 legs 空) なら「不的中」ではなく「未参加」表示
+  // Claude 総合オススメが「見送り」(束 legs 空) なら「不的中」ではなく「未参加」表示。
+  // **bundleSkipped は anyHit より優先**: 賭けていない race は plan_X_hit (理論値) が
+  // 立っていても「的中」ではない (見送り = 不参加)。
   const bundleSkipped = !!(hit && hit.bundle_participated === false);
+  // 回収優先 bundle hit OR 的中優先 bundle hit のどちらかで的中扱い
+  const anyHit =
+    !bundleSkipped &&
+    !!(hit && (hit.bundle_hit || hit.bundle_hit_first_hit));
   const rowBg = hit
     ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
     : raceTimingRowBg(timing.tone);
@@ -151,13 +146,8 @@ function PredictionRowItem({
               <span className="font-bold mono">{hit.finish.join("-")}</span>
             </span>
             <span className="text-(--color-muted)">·</span>
-            <PlanHitTag plan="F" hit={!!hit.plan_f_hit} />
-            <PlanHitTag plan="A" hit={hit.plan_a_hit} />
-            <PlanHitTag plan="B" hit={hit.plan_b_hit} />
-            <PlanHitTag plan="C" hit={hit.plan_c_hit} />
-            <PlanHitTag plan="G" hit={!!hit.plan_g_hit} />
-            <PlanHitTag plan="H1" hit={!!hit.plan_h1_hit} />
-            <PlanHitTag plan="H2" hit={!!hit.plan_h2_hit} />
+            {hit.bundle_hit && <Badge tone="good">回収 Claude</Badge>}
+            {hit.bundle_hit_first_hit && <Badge tone="info">的中 Claude</Badge>}
             {hit.payout > 0 && (
               <>
                 <span className="text-(--color-muted)">·</span>
@@ -172,33 +162,6 @@ function PredictionRowItem({
             <span>{fmtServerDateTime(p.saved_at)}</span>
             <span>·</span>
             <span>候補 {p.row_count}</span>
-            <span>·</span>
-            {(p.plan_f_count ?? 0) > 0 && (
-              <>
-                <span className={`font-bold ${planAccentClass("F")}`}>
-                  F·{p.plan_f_count}
-                </span>
-                <span>·</span>
-              </>
-            )}
-            <span className={`font-bold ${planAccentClass("A")}`}>A{p.plan_a_count}</span>
-            <span className={`font-bold ${planAccentClass("B")}`}>B{p.plan_b_count}</span>
-            <span className={`font-bold ${planAccentClass("C")}`}>C{p.plan_c_count}</span>
-            {(p.plan_g_count ?? 0) > 0 && (
-              <span className={`font-bold ${planAccentClass("G")}`}>
-                G·{p.plan_g_count}
-              </span>
-            )}
-            {(p.plan_h1_count ?? 0) > 0 && (
-              <span className={`font-bold ${planAccentClass("H1")}`}>
-                H1·{p.plan_h1_count}
-              </span>
-            )}
-            {(p.plan_h2_count ?? 0) > 0 && (
-              <span className={`font-bold ${planAccentClass("H2")}`}>
-                H2·{p.plan_h2_count}
-              </span>
-            )}
           </div>
         )}
       </Link>
@@ -224,8 +187,8 @@ export default async function DashboardPage() {
       .catch(() => ({ items: [] as WatchAutoHistoryItem[] })),
   ]);
 
-  const planA = cal?.plans.find((p) => p.plan === "Plan A");
-  const planH1 = cal?.plans.find((p) => p.plan === "Plan H1");
+  const claudeBundle = cal?.claude_bundle;
+  const claudeBundleHit = cal?.claude_bundle_hit;
 
   const raceHitMap = new Map<string, RaceHit>();
   for (const r of cal?.races ?? []) raceHitMap.set(r.race_id, r);
@@ -237,31 +200,7 @@ export default async function DashboardPage() {
   }
 
   const nowMs = Date.now();
-  const today = todayJST(nowMs);
-  const todaysPreds = preds.items.filter(
-    (p) => savedAtDate(p.saved_at) === today,
-  );
-  // 最新 (全期間, 最新 10)
-  const latestPreds = preds.items.slice(0, 10);
-  // 最新の的中: raceHitMap に entry があって any plan が hit したもの。
-  // RaceRow 内の anyHit (line 100-109) と plan セットを一致させる
-  // (Plan G/F のみ的中したレースが latest hits に出ない不整合の修正)。
-  const latestHits = preds.items
-    .filter((p) => {
-      const h = raceHitMap.get(p.race_id);
-      return !!(
-        h &&
-        (h.plan_a_hit ||
-          h.plan_b_hit ||
-          h.plan_c_hit ||
-          h.plan_g_hit ||
-          h.plan_h1_hit ||
-          h.plan_h2_hit ||
-          h.plan_f_hit)
-      );
-    })
-    .slice(0, 10);
-
+  // 予測履歴セクションを削除したので related な集計は不要。
   const confidence = cal ? calibrationConfidence(cal.race_count) : null;
   const lastUpdated = cal ? fmtRelativeFromNow(cal.last_updated_at, nowMs) : "—";
 
@@ -299,235 +238,106 @@ export default async function DashboardPage() {
           }
           tone={confidence?.tone === "good" ? "good" : confidence?.tone === "warn" ? "warn" : "bad"}
         />
+        {/* Claude 選定 (recommended_bundle) の的中率・回収率 (見送りは含まない) */}
         <Stat
-          label="Plan A 回収率 (EV 枠)"
-          value={!planA ? "—" : planA.participated_races === 0 ? "未参加" : fmtRoiPct(planA.roi)}
+          label="Claude 回収率 (見送り除く)"
+          value={
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "—"
+              : fmtRoiPct(claudeBundle.roi)
+          }
           hint={
-            planA
-              ? planA.participated_races === 0
-                ? "買い目を出したレースなし"
-                : planRoiHint(planA)
+            claudeBundle && claudeBundle.participated_races > 0
+              ? `${claudeBundle.participated_races} 参加 / ${claudeBundle.skipped_races} 見送り · 賭金 ${fmtYen(claudeBundle.stake)} → 払戻 ${fmtYen(claudeBundle.payout)}`
+              : "賭けたレースなし"
+          }
+          tone={
+            !claudeBundle || claudeBundle.participated_races < 30
+              ? "warn"
+              : claudeBundle.roi >= 1
+              ? "good"
+              : claudeBundle.roi >= 0.85
+              ? "warn"
+              : "bad"
+          }
+        />
+        <Stat
+          label="Claude 的中率 (見送り除く)"
+          value={
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "—"
+              : fmtPct(claudeBundle.hit_rate, 1)
+          }
+          hint={
+            claudeBundle && claudeBundle.participated_races > 0
+              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加`
               : ""
           }
-          tone={planStatTone(planA)}
+          tone={
+            !claudeBundle || claudeBundle.participated_races < 30
+              ? "warn"
+              : claudeBundle.hit_rate >= 0.3
+              ? "good"
+              : claudeBundle.hit_rate >= 0.15
+              ? "warn"
+              : "bad"
+          }
+        />
+      </div>
+
+      {/* 1.5 的中優先 bundle (おまけ計測): 実弾では買わないが「もし的中優先で賭けたら」を測る */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Stat
+          label="的中優先 回収率 (おまけ計測)"
+          value={
+            !claudeBundleHit || claudeBundleHit.participated_races === 0
+              ? "—"
+              : fmtRoiPct(claudeBundleHit.roi)
+          }
+          hint={
+            claudeBundleHit && claudeBundleHit.participated_races > 0
+              ? `${claudeBundleHit.participated_races} 参加 / 賭金 ${fmtYen(claudeBundleHit.stake)} → 払戻 ${fmtYen(claudeBundleHit.payout)}`
+              : "新スキーマ待ち (本日以降の analyze から蓄積)"
+          }
+          tone={
+            !claudeBundleHit || claudeBundleHit.participated_races < 30
+              ? "warn"
+              : claudeBundleHit.roi >= 1
+              ? "good"
+              : claudeBundleHit.roi >= 0.85
+              ? "warn"
+              : "bad"
+          }
         />
         <Stat
-          label="Plan H1 回収率 (当て枠)"
-          value={!planH1 ? "—" : planH1.participated_races === 0 ? "未参加" : fmtRoiPct(planH1.roi)}
+          label="的中優先 的中率 (おまけ計測)"
+          value={
+            !claudeBundleHit || claudeBundleHit.participated_races === 0
+              ? "—"
+              : fmtPct(claudeBundleHit.hit_rate, 1)
+          }
           hint={
-            planH1
-              ? planH1.participated_races === 0
-                ? "新スキーマ待ち (本日以降の analyze から蓄積)"
-                : planRoiHint(planH1)
-              : ""
+            claudeBundleHit && claudeBundleHit.participated_races > 0
+              ? `${claudeBundleHit.hits} 的中 / ${claudeBundleHit.participated_races} 参加`
+              : "新スキーマ待ち (本日以降の analyze から蓄積)"
           }
-          tone={planStatTone(planH1)}
+          tone={
+            !claudeBundleHit || claudeBundleHit.participated_races < 30
+              ? "warn"
+              : claudeBundleHit.hit_rate >= 0.3
+              ? "good"
+              : claudeBundleHit.hit_rate >= 0.15
+              ? "warn"
+              : "bad"
+          }
         />
       </div>
 
-      {/* 2. Plan 別 ROI — ダッシュボード 2 番目 */}
-      {cal && cal.plans.length > 0 && (
-        <Card title={`Plan 別 回収率 (1点 ¥${cal.point_cost})`}>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
-            {cal.plans.map((p) => {
-              const letter = parsePlanLabel(p.plan);
-              const avgPoints =
-                p.participated_races > 0
-                  ? p.total_points / p.participated_races
-                  : 0;
-              const perPointRealistic =
-                avgPoints > 0 ? p.assumed_budget_slot / avgPoints : 0;
-              const notParticipated = p.participated_races === 0;
-              return (
-                <div
-                  key={p.plan}
-                  className={`border border-(--color-line) bg-white p-4 ${
-                    notParticipated ? "opacity-60" : ""
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    {letter && (
-                      <span
-                        className={`inline-block w-1 h-4 ${planBarClass(letter)}`}
-                      />
-                    )}
-                    <div
-                      className={`text-sm font-bold ${
-                        letter ? planAccentClass(letter) : ""
-                      }`}
-                    >
-                      {p.plan}
-                    </div>
-                  </div>
-                  {notParticipated ? (
-                    <>
-                      <div className="mt-2 text-3xl font-black tabnum text-(--color-muted)">
-                        未参加
-                      </div>
-                      <div className="text-xs text-(--color-muted) mt-1">
-                        買い目を出したレースなし
-                        <br />
-                        <span className="text-[10px]">
-                          旧 snapshot は plan_h*_keys 不在で silent 除外。
-                          本日以降の analyze から蓄積開始。
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div
-                        className={`mt-2 text-3xl font-black tabnum ${
-                          // 参加 < 30 は判断材料未満なので、ROI による緑表示はしない
-                          p.participated_races < 30
-                            ? "text-(--color-warn)"
-                            : p.roi >= 1
-                            ? "text-(--color-good)"
-                            : p.roi >= 0.85
-                            ? "text-(--color-warn)"
-                            : "text-(--color-bad)"
-                        }`}
-                      >
-                        {fmtRoiPct(p.roi)}
-                      </div>
-                      <div className="text-xs text-(--color-muted) mt-1 tabnum">
-                        hit {p.hits}/{p.participated_races} (
-                        {fmtPct(p.hit_rate, 1)})
-                      </div>
-                      {p.roi_ci_low !== undefined && p.roi_ci_high !== undefined && (
-                        <div className="text-[11px] text-(--color-muted) mt-0.5 tabnum">
-                          CI [{fmtRoiPct(p.roi_ci_low)}, {fmtRoiPct(p.roi_ci_high)}]
-                          {p.participated_races < 30 && (
-                            <span className="ml-1 text-(--color-warn)">
-                              · 参考値
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      <div className="text-xs text-(--color-muted) mt-0.5 tabnum">
-                        賭金 {fmtYen(p.stake)} · 払戻 {fmtYen(p.payout)}
-                      </div>
-                      <div className="text-[11px] text-(--color-muted) mt-1 tabnum">
-                        枠 {fmtYen(p.assumed_budget_slot)} ÷ 平均{" "}
-                        {avgPoints.toFixed(1)}点 ≒{" "}
-                        {perPointRealistic > 0
-                          ? fmtYen(Math.round(perPointRealistic))
-                          : "—"}
-                        /点
-                      </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <p className="text-xs text-(--color-muted) mt-3 flex items-center gap-2 flex-wrap">
-            {confidence && <Badge tone={confidence.tone}>{confidence.label}</Badge>}
-            <span>
-              サンプル数 {cal.race_count}・最終更新 {lastUpdated}
-              {confidence && confidence.tone === "good"
-                ? " · 数値は判断材料に使える"
-                : " · 数値は参考程度に"}
-            </span>
-          </p>
-        </Card>
-      )}
+      {/* 旧 Plan 別 ROI カードは廃止 (2026-05-29 後半): 集計対象を bundle 2 つだけに集約。 */}
 
-      {/* 3. 最新 / 最新の的中 を横並び */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card
-          title="最新の予測 (直近 10 件)"
-          right={
-            <Link
-              href="/predictions"
-              className="text-xs text-(--color-accent) hover:underline"
-            >
-              すべて見る →
-            </Link>
-          }
-        >
-          {latestPreds.length === 0 ? (
-            <p className="text-sm text-(--color-muted)">
-              まだ予測はありません。<Link className="text-(--color-accent)" href="/analyze">解析</Link> から URL を投入してください。
-            </p>
-          ) : (
-            <ul className="divide-y divide-(--color-line)">
-              {latestPreds.map((p) => (
-                <PredictionRowItem
-                  key={`${p.race_id}-${p.saved_at}`}
-                  p={p}
-                  hit={raceHitMap.get(p.race_id)}
-                  nowMs={nowMs}
-                  closeAtMap={closeAtMap}
-                  startAtMap={startAtMap}
-                />
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        <Card
-          title={
-            <span className="flex items-center gap-2">
-              <span>最新の的中</span>
-              <Badge tone="good">{latestHits.length}</Badge>
-            </span>
-          }
-          right={
-            <Link
-              href="/predictions"
-              className="text-xs text-(--color-accent) hover:underline"
-            >
-              すべて見る →
-            </Link>
-          }
-        >
-          {latestHits.length === 0 ? (
-            <p className="text-sm text-(--color-muted)">
-              まだ的中レースがありません。
-            </p>
-          ) : (
-            <ul className="divide-y divide-(--color-line)">
-              {latestHits.map((p) => (
-                <PredictionRowItem
-                  key={`${p.race_id}-${p.saved_at}`}
-                  p={p}
-                  hit={raceHitMap.get(p.race_id)}
-                  nowMs={nowMs}
-                  closeAtMap={closeAtMap}
-                  startAtMap={startAtMap}
-                />
-              ))}
-            </ul>
-          )}
-        </Card>
-      </div>
-
-      {/* 4. 本日全件 (venue 別) */}
-      <div className="space-y-3">
-        <div className="flex items-baseline justify-between gap-3 px-1">
-          <h2 className="flex items-center gap-2 text-sm font-bold tracking-tight">
-            <span className="inline-block w-1 h-4 bg-(--color-highlight)" />
-            <span>予測履歴 — 本日 {today} 分 (会場ごと)</span>
-            <span className="text-xs text-(--color-muted) font-normal">
-              {todaysPreds.length} 件
-            </span>
-          </h2>
-          <Link
-            href="/predictions"
-            className="text-xs text-(--color-accent) hover:underline shrink-0"
-          >
-            予測履歴ページへ →
-          </Link>
-        </div>
-        <PredictionsList
-          items={todaysPreds}
-          nowMs={nowMs}
-          raceHitMap={raceHitMap}
-          closeAtMap={closeAtMap}
-          startAtMap={startAtMap}
-          emptyMessage="本日の予測はまだありません。"
-        />
-      </div>
+      {/* 予測履歴 (最新予測 / 最新的中 / 本日全件) はダッシュボードから削除
+          (2026-05-29 ユーザ指示: ダッシュボードページ内に予測履歴は不要)。
+          /predictions ページや /calibrate ページから参照する。 */}
     </Page>
   );
 }

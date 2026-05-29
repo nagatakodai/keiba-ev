@@ -207,77 +207,52 @@ export default async function CalibratePage({
         {cal.races.length === 0 ? (
           <p className="text-sm text-(--color-muted)">データなし。</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm tabnum table-zebra">
-              <thead className="text-left text-(--color-muted) text-xs">
-                <tr className="border-b border-(--color-line)">
-                  <th className="py-2 pr-3">会場</th>
-                  <th className="py-2 pr-3 mono">着順</th>
-                  <th className="py-2 pr-3">tier</th>
-                  <th className="py-2 pr-3 text-right">払戻</th>
-                  <th className="py-2 pr-3">的中 Plan</th>
-                  <th className="py-2 pr-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {cal.races.map((r) => {
-                  const anyHit =
-                    r.plan_a_hit ||
-                    r.plan_b_hit ||
-                    r.plan_c_hit ||
-                    !!r.plan_g_hit ||
-                    !!r.plan_h1_hit ||
-                    !!r.plan_h2_hit ||
-                    !!r.plan_f_hit;
-                  return (
-                    <tr
-                      key={r.race_id}
-                      className="border-b border-(--color-line)/60"
-                    >
-                      <td className="py-1.5 pr-3 whitespace-nowrap">{r.venue}</td>
-                      <td className="py-1.5 pr-3 mono whitespace-nowrap">
-                        {r.finish.join("-")}
-                      </td>
-                      <td className="py-1.5 pr-3">
-                        {r.winning_tier ? (
-                          <Badge tone={tierTone(r.winning_tier)}>
-                            {tierLabel(r.winning_tier)}
-                          </Badge>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                      <td className="py-1.5 pr-3 text-right whitespace-nowrap">
-                        {r.payout ? fmtYen(r.payout) : "—"}
-                      </td>
-                      <td className="py-1.5 pr-3">
-                        {anyHit ? (
-                          <div className="flex gap-1 flex-wrap">
-                            {r.plan_f_hit && <Badge tone={planTone("F")}>F</Badge>}
-                            {r.plan_a_hit && <Badge tone={planTone("A")}>A</Badge>}
-                            {r.plan_b_hit && <Badge tone={planTone("B")}>B</Badge>}
-                            {r.plan_c_hit && <Badge tone={planTone("C")}>C</Badge>}
-                            {r.plan_g_hit && <Badge tone={planTone("G")}>G</Badge>}
-                            {r.plan_h1_hit && <Badge tone={planTone("H1")}>H1</Badge>}
-                            {r.plan_h2_hit && <Badge tone={planTone("H2")}>H2</Badge>}
-                          </div>
-                        ) : (
-                          <Badge tone="muted">不的中</Badge>
-                        )}
-                      </td>
-                      <td className="py-1.5 pr-3 text-right">
-                        <Link
-                          href={`/predictions/${r.race_id}`}
-                          className="text-xs text-(--color-accent) hover:underline whitespace-nowrap"
-                        >
-                          詳細 →
-                        </Link>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          // **2 列レイアウト** (2026-05-29 ユーザ指示): 1 race = 1 row card、grid で 2 列。
+          // 旧 table 形式は info 密度が低いため。
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5">
+            {cal.races.map((r) => {
+              // 見送り (Claude 総合オススメが空束) は plan_X_hit が偶然立っていても
+              // 「賭けて当たった」ではないので的中扱いせず、row 自体をグレー bg に。
+              const bundleSkipped = r.bundle_participated === false;
+              const anyHit =
+                !bundleSkipped &&
+                (!!r.bundle_hit || !!r.bundle_hit_first_hit);
+              const rowBg = bundleSkipped
+                ? "bg-(--color-panel-2)"          // 見送り = グレー系
+                : anyHit
+                  ? "bg-(--color-good)/5"        // 的中 = 緑薄
+                  : "";                           // 不的中 = 通常
+              return (
+                <Link
+                  key={r.race_id}
+                  href={`/predictions/${r.race_id}`}
+                  className={`flex items-center gap-2 text-sm tabnum border border-(--color-line) px-2.5 py-1.5 hover:bg-(--color-panel-2) ${rowBg}`}
+                >
+                  <span className="whitespace-nowrap font-bold text-xs w-12 truncate">{r.venue}</span>
+                  <span className="mono whitespace-nowrap text-xs w-16 text-(--color-muted)">{r.finish.join("-")}</span>
+                  {r.winning_tier ? (
+                    <Badge tone={tierTone(r.winning_tier)}>{tierLabel(r.winning_tier)}</Badge>
+                  ) : (
+                    <span className="w-10 text-(--color-muted) text-xs">—</span>
+                  )}
+                  <span className="whitespace-nowrap text-xs text-right flex-1 mono">
+                    {r.payout ? fmtYen(r.payout) : ""}
+                  </span>
+                  <div className="flex gap-1 flex-wrap items-center shrink-0">
+                    {bundleSkipped ? (
+                      <Badge tone="muted">見送り</Badge>
+                    ) : anyHit ? (
+                      <>
+                        {r.bundle_hit && <Badge tone="good">回収</Badge>}
+                        {r.bundle_hit_first_hit && <Badge tone="info">的中</Badge>}
+                      </>
+                    ) : (
+                      <Badge tone="muted">不的中</Badge>
+                    )}
+                  </div>
+                </Link>
+              );
+            })}
           </div>
         )}
       </Card>

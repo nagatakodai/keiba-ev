@@ -121,20 +121,13 @@ export function PredictionsList({
                   nowMs,
                 );
                 const hit = showHits ? raceHitMap?.get(p.race_id) : undefined;
-                const anyHit = !!(
-                  hit &&
-                  (hit.bundle_hit ||   // 総合オススメ束 (ワイド/馬連等を含む) の的中も的中扱い
-                    hit.plan_a_hit ||
-                    hit.plan_b_hit ||
-                    hit.plan_c_hit ||
-                    hit.plan_g_hit ||
-                    hit.plan_h1_hit ||
-                    hit.plan_h2_hit ||
-                    hit.plan_f_hit)
-                );
-                // Claude 総合オススメが「見送り」(束 legs 空) で、他 Plan も全て外し / 不在 の race は
-                // 「不的中」(=賭けて外れた) ではなく「未参加」(=賭けていない) として中立色で表示する。
+                // Claude 総合オススメが「見送り」(束 legs 空) なら「不的中」ではなく「未参加」表示。
+                // **bundleSkipped は anyHit より優先**: 賭けていない race は plan_X_hit (理論値) が
+                // 偶然立っていても「的中」ではない (見送り = 不参加)。
                 const bundleSkipped = !!(hit && hit.bundle_participated === false);
+                const anyHit =
+                  !bundleSkipped &&
+                  !!(hit && (hit.bundle_hit || hit.bundle_hit_first_hit));
                 const rowBg = hit
                   ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
                   : raceTimingRowBg(timing.tone);
@@ -206,13 +199,7 @@ export function PredictionsList({
                             // 見送り (Claude 総合オススメが空束) は「不的中」ではなく「見送り」表示
                             <Badge tone="muted">束 見送り</Badge>
                           )}
-                          <PlanHitTag plan="F" hit={!!hit.plan_f_hit} />
-                          <PlanHitTag plan="A" hit={hit.plan_a_hit} />
-                          <PlanHitTag plan="B" hit={hit.plan_b_hit} />
-                          <PlanHitTag plan="C" hit={hit.plan_c_hit} />
-                          <PlanHitTag plan="G" hit={!!hit.plan_g_hit} />
-                          <PlanHitTag plan="H1" hit={!!hit.plan_h1_hit} />
-                          <PlanHitTag plan="H2" hit={!!hit.plan_h2_hit} />
+                          {hit.bundle_hit_first_hit && <Badge tone="info">的中 Claude</Badge>}
                           {hit.payout > 0 && (
                             <>
                               <span className="text-(--color-muted)">·</span>
@@ -225,33 +212,6 @@ export function PredictionsList({
                       ) : (
                         <div className="text-xs text-(--color-muted) tabnum mt-0.5 flex flex-wrap gap-x-1.5">
                           <span>候補 {p.row_count}</span>
-                          <span>·</span>
-                          {(p.plan_f_count ?? 0) > 0 && (
-                            <>
-                              <span className={`font-bold ${planAccentClass("F")}`}>
-                                F·{p.plan_f_count}
-                              </span>
-                              <span>·</span>
-                            </>
-                          )}
-                          <span className={`font-bold ${planAccentClass("A")}`}>A{p.plan_a_count}</span>
-                          <span className={`font-bold ${planAccentClass("B")}`}>B{p.plan_b_count}</span>
-                          <span className={`font-bold ${planAccentClass("C")}`}>C{p.plan_c_count}</span>
-                          {(p.plan_g_count ?? 0) > 0 && (
-                            <span className={`font-bold ${planAccentClass("G")}`}>
-                              G·{p.plan_g_count}
-                            </span>
-                          )}
-                          {(p.plan_h1_count ?? 0) > 0 && (
-                            <span className={`font-bold ${planAccentClass("H1")}`}>
-                              H1·{p.plan_h1_count}
-                            </span>
-                          )}
-                          {(p.plan_h2_count ?? 0) > 0 && (
-                            <span className={`font-bold ${planAccentClass("H2")}`}>
-                              H2·{p.plan_h2_count}
-                            </span>
-                          )}
                         </div>
                       )}
                       {p.top_aptitude && p.top_aptitude.length > 0 && (
