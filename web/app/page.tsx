@@ -143,7 +143,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             />
           </div>
         </Card>
-        <Card title="的中 bet 種別">
+        <Card title="bet 種別">
           {Object.keys(betTypeHits).length === 0 ? (
             <p className="text-xs text-(--color-muted)">的中なし</p>
           ) : (
