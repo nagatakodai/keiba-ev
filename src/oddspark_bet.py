@@ -687,7 +687,17 @@ class BettingSession:
         if self.manual_login:
             self._wait_manual_login()   # 人がブラウザでログイン → poll で検出 (stdin 非依存)
         else:
-            _login(self.page, _creds())
+            # 自動ログイン: 認証情報が無い / ログイン失敗のときは **例外で即終了せず手動に
+            # フォールバック** (ブラウザを開いたまま人がログインできる)。これがないと
+            # `make api` の env に ODDSPARK_* が無い場合に daemon が 0.5s で code 0 終了し、
+            # 「ブラウザが一瞬開いて閉じる」になる (UI には理由が出ない)。
+            try:
+                _login(self.page, _creds())
+            except Exception as ex:  # noqa: BLE001
+                print(f"[oddspark_bet] 自動ログイン失敗 ({ex}) → 手動ログインにフォールバック。"
+                      " ブラウザでログインしてください "
+                      "(env の ODDSPARK_ID/ODDSPARK_PASSWORD/ODDSPARK_PIN を確認)。", flush=True)
+                self._wait_manual_login()
         _shot(self.page, "1_after_login")
         # 2) まとめ投票画面へ + 支払 OPコイン
         self._goto_matome()
