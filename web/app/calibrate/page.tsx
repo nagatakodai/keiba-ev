@@ -58,36 +58,44 @@ export default async function CalibratePage({
         subtitle="計算 EV と実 EV のオフセット (tier ratio) + 回収優先 / 的中優先 bundle の実績。サンプル 30+ で初めて判断材料になる。"
       />
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <Stat
-          label="対象レース"
-          value={cal.race_count}
-          hint={
-            <span className="flex items-center gap-1">
-              <Badge tone={confidence.tone}>{confidence.label}</Badge>
-              <span>· 最終更新 {lastUpdated}</span>
-            </span>
-          }
-          tone={confidence.tone === "good" ? "good" : confidence.tone === "warn" ? "warn" : "bad"}
-        />
-        <Stat
-          label="回収優先AI 的中率"
-          value={!yb || yb.participated_races === 0 ? "—" : fmtPct(yb.hit_rate, 1)}
-          hint={yb && yb.participated_races > 0 ? `${yb.hits} 的中 / ${yb.participated_races} 参加` : "—"}
-          tone={hitTone(yb)}
-          accentTone="good"
-        />
-        <Stat
-          label="回収優先AI 回収率"
-          value={roiPct(yb)}
-          hint={
-            yb && yb.participated_races > 0
-              ? `賭金 ${fmtYen(yb.stake)} → 払戻 ${fmtYen(yb.payout)} · 見送り ${yb.skipped_races}`
-              : "賭けたレースなし"
-          }
-          tone={roiTone(yb)}
-          accentTone="info"
-        />
+      <div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <Stat
+            label="総合レース数"
+            value={cal.race_count}
+            hint={
+              yb
+                ? `参加 ${yb.participated_races} / 見送り ${yb.skipped_races}`
+                : "—"
+            }
+            accentTone="muted"
+          />
+          <Stat
+            label="回収優先AI 的中率"
+            value={!yb || yb.participated_races === 0 ? "—" : fmtPct(yb.hit_rate, 1)}
+            hint={yb && yb.participated_races > 0 ? `${yb.hits} 的中 / ${yb.participated_races} 参加` : "—"}
+            tone={hitTone(yb)}
+            accentTone="good"
+          />
+          <Stat
+            label="回収優先AI 回収率"
+            value={roiPct(yb)}
+            hint={
+              yb && yb.participated_races > 0
+                ? `賭金 ${fmtYen(yb.stake)} → 払戻 ${fmtYen(yb.payout)} · 見送り ${yb.skipped_races}`
+                : "賭けたレースなし"
+            }
+            tone={roiTone(yb)}
+            accentTone="info"
+          />
+        </div>
+        <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
+          ※ 全て回収優先AI 基準 ／ 集計対象 {cal.race_count} レース ／
+          <span className="ml-1">
+            <Badge tone={confidence.tone}>{confidence.label}</Badge>
+          </span>
+          <span className="ml-1">最終更新 {lastUpdated}</span>
+        </div>
       </div>
 
       <Card title="Tier 別 (ratio = 実hit / 予測P合計)">
