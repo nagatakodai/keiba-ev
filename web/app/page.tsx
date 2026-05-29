@@ -101,10 +101,6 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
       betTypeHits[bt] = (betTypeHits[bt] ?? 0) + 1;
     }
   }
-  const betLabel: Record<string, string> = {
-    win: "単勝", place: "複勝", quinella: "馬連", wide: "ワイド",
-    exacta: "馬単", trio: "3連複", trifecta: "3連単",
-  };
 
   return (
     <section className="space-y-3">
@@ -144,36 +140,52 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
           </div>
         </Card>
         <Card title="bet 種別">
-          {Object.keys(betTypeHits).length === 0 ? (
-            <p className="text-xs text-(--color-muted)">的中なし</p>
-          ) : (
-            <div className="space-y-1.5">
-              {Object.entries(betTypeHits)
-                .sort((a, b) => b[1] - a[1])
-                .map(([bt, n]) => {
-                  const pct = totalRaces > 0 ? (n / totalRaces) * 100 : 0;
-                  return (
-                    <div key={bt} className="flex items-center gap-2 text-xs">
-                      <span className="w-12 shrink-0 text-(--color-muted)">
-                        {betLabel[bt] ?? bt}
-                      </span>
-                      <div className="flex-1 bg-(--color-panel-2) h-4 relative">
-                        <div
-                          className="absolute inset-y-0 left-0 bg-(--color-good)/60"
-                          style={{ width: `${Math.min(100, pct * 4)}%` }}
-                        />
-                      </div>
-                      <span className="font-bold tabnum w-12 text-right">
-                        {n} 件
-                      </span>
-                    </div>
-                  );
-                })}
-            </div>
-          )}
+          <BetTypeBars betTypeHits={betTypeHits} totalRaces={totalRaces} />
         </Card>
       </div>
     </section>
+  );
+}
+
+// bet type 別 hit 件数の横棒。回収優先 / 的中優先 で共用。
+const BET_LABEL: Record<string, string> = {
+  win: "単勝", place: "複勝", quinella: "馬連", wide: "ワイド",
+  exacta: "馬単", trio: "3連複", trifecta: "3連単",
+};
+
+function BetTypeBars({
+  betTypeHits, totalRaces,
+}: {
+  betTypeHits: Record<string, number>;
+  totalRaces: number;
+}) {
+  if (Object.keys(betTypeHits).length === 0) {
+    return <p className="text-xs text-(--color-muted)">的中なし</p>;
+  }
+  return (
+    <div className="space-y-1.5">
+      {Object.entries(betTypeHits)
+        .sort((a, b) => b[1] - a[1])
+        .map(([bt, n]) => {
+          const pct = totalRaces > 0 ? (n / totalRaces) * 100 : 0;
+          return (
+            <div key={bt} className="flex items-center gap-2 text-xs">
+              <span className="w-12 shrink-0 text-(--color-muted)">
+                {BET_LABEL[bt] ?? bt}
+              </span>
+              <div className="flex-1 bg-(--color-panel-2) h-4 relative">
+                <div
+                  className="absolute inset-y-0 left-0 bg-(--color-good)/60"
+                  style={{ width: `${Math.min(100, pct * 4)}%` }}
+                />
+              </div>
+              <span className="font-bold tabnum w-12 text-right">
+                {n} 件
+              </span>
+            </div>
+          );
+        })}
+    </div>
   );
 }
 
@@ -206,6 +218,15 @@ function HitCharts({ races }: { races: RaceHit[] }) {
   const hitSkips = races.filter(
     (r) => r.bundle_hit_first_participated === false,
   ).length;
+
+  // bet type 別 hit 内訳 (的中優先)
+  const betTypeHits: Record<string, number> = {};
+  for (const r of races) {
+    for (const bt of r.bundle_hit_first_bet_types ?? []) {
+      betTypeHits[bt] = (betTypeHits[bt] ?? 0) + 1;
+    }
+  }
+  const totalRaces = races.length;
 
   // 計測データがまだ無い (全レース未参加) なら描画しない。
   if (hitHits + hitMisses === 0) {
@@ -242,6 +263,9 @@ function HitCharts({ races }: { races: RaceHit[] }) {
           misses={hitMisses}
           skips={hitSkips}
         />
+      </Card>
+      <Card title="bet 種別 (的中優先)">
+        <BetTypeBars betTypeHits={betTypeHits} totalRaces={totalRaces} />
       </Card>
     </div>
   );
