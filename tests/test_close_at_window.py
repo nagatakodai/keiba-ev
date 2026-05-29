@@ -34,18 +34,15 @@ def test_list_due_races_uses_close_at_window(monkeypatch):
          "venue": "笠松", "race_no": i, "source": "test"}
         for i, s in enumerate([300, 420, 540, 660], 1)
     ]
-    # netkeiba 両ドメインを「block 中」にして oddspark fallback に落とし、races を直接返す
-    def _blocked(*a, **k):
-        raise auto_watch.NetkeibaBlocked("test-block")
-    monkeypatch.setattr(auto_watch, "fetch_html", _blocked)
-    monkeypatch.setattr(auto_watch, "race_list_url", lambda *a, **k: "u")
-    monkeypatch.setattr(auto_watch, "parse_race_list", lambda *a, **k: [])
+    # discovery は公式ソースのみ (netkeiba live は使わない)。NAR=oddspark の当日 race list を
+    # mock し、JRA=keibabook discovery は空にしてテストを hermetic に保つ。
     # fetch_race_list_oddspark は dict list を返す ([{"netkeiba_race_id", "url", "start_at",
-    # "venue", "race_no"}, ...])。auto_watch:33 でこれを netkeiba 形式 races に変換する。
+    # "venue", "race_no"}, ...])。_list_due_races がこれを netkeiba 形式 races に変換する。
     op_races = [{"netkeiba_race_id": r["race_id"], "url": r["url"],
                  "start_at": r["start_at"], "venue": r["venue"], "race_no": r["race_no"]}
                 for r in races]
     monkeypatch.setattr(auto_watch, "fetch_race_list_oddspark", lambda *a, **k: op_races)
+    monkeypatch.setattr(auto_watch, "fetch_race_list_keibabook", lambda *a, **k: [])
     out = auto_watch._list_due_races(window_min=5, tolerance_min=2, now_ts=now)
     detected = {r["race_no"] for r in out}
     assert detected == {2, 3}, f"5〜7分(締切基準)圏内は 7/9分前(発走基準) のみ、got {detected}"
