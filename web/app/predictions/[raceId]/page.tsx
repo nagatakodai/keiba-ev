@@ -40,7 +40,6 @@ import {
   fmtTs,
   planAccentClass,
   planTone,
-  type PlanLetter,
   pxoTone,
   tierLabel,
   tierTone,
@@ -128,6 +127,13 @@ export default async function PredictionDetailPage({
       />
 
       <TopRecommendationCard d={d} finish={finish} />
+
+      {/* 的中優先AI まとめ買い (おまけ計測・買わない)。回収優先の直下に従属表示。
+          古い snapshot で recommended_bundle_hit が欠落 / 束が空なら出さない。 */}
+      {d.recommended_bundle_hit &&
+        (d.recommended_bundle_hit.legs?.length ?? 0) > 0 && (
+          <BundleCard bundle={d.recommended_bundle_hit} finish={finish} variant="hit" />
+        )}
 
       {d.result && (() => {
         // 新スキーマ: Plan A/B 廃止。表示判定は 2 つの bundle のみ。
@@ -541,10 +547,14 @@ function BundleLegsTable({ legs, finish }: { legs: BundleLeg[]; finish?: number[
 function BundleCard({
   bundle,
   finish,
+  variant = "yield",
 }: {
   bundle: RecommendedBundle;
   finish?: number[];
+  // "yield" = 回収優先 (実弾で買う対象・highlight) / "hit" = 的中優先 (おまけ計測・買わない・緑)
+  variant?: "yield" | "hit";
 }) {
+  const isHit = variant === "hit";
   const legs = bundle.legs ?? [];
   const half = Math.round(bundle.total_stake / 2 / 100) * 100;
   const nTypes = new Set(legs.map((l) => l.bet_type)).size;
@@ -552,30 +562,42 @@ function BundleCard({
   // 束はまずモデル (portfolio.build_bundle) のみで生成され、その後 claude -p の web 調査で
   // 検証される。検証が済むまでは「Claude のオススメ」ではなく「モデル提案」として扱い、
   // Claude branding を付けない (検証前に Claude が裏取りしたかのような誤認を防ぐ)。
-  const validated = bundle.llm_review?.validated === true;
+  // 的中優先は claude 選定対象外 (モデルのみ) なので検証バッジは出さない。
+  const validated = !isHit && bundle.llm_review?.validated === true;
   // トリガミ防止マージン (保存オッズからの下振れ緩衝)。古い snapshot は未保存 → 1 扱い。
   const margin = bundle.torigami_margin ?? 1;
   const driftPct = margin > 1 ? Math.round((1 - 1 / margin) * 100) : 0;
+  // タイトル/色は dashboard 規約に統一: 回収優先=highlight / 的中優先=緑(good)。
+  const titleColor = isHit ? "text-(--color-good)" : "text-(--color-highlight)";
+  const titleLabel = isHit
+    ? "的中優先AI — まとめ買い"
+    : `${validated ? "Claude 総合オススメ" : "総合オススメ (モデル)"} — まとめ買い`;
   return (
     <Card
-      tone={legs.length ? "alert" : "default"}
+      // 的中優先は「買わない」おまけ計測なので alert ハイライトせず default で従属表示。
+      tone={!isHit && legs.length ? "alert" : "default"}
       // タイトルは純テキストだけ。右ズレを避けるためバッジ類は right prop / body に移す。
       title={
-        <span className="text-(--color-highlight) font-black">
-          {validated ? "Claude 総合オススメ" : "総合オススメ (モデル)"} — まとめ買い
+        <span className={`${titleColor} font-black`}>
+          {titleLabel}
+          {isHit && (
+            <span className="ml-2 text-xs font-normal text-(--color-muted)">
+              prob 降順 pool / おまけ計測・買わない
+            </span>
+          )}
         </span>
       }
       right={
         <span className="flex items-center gap-2">
-          {validated ? (
+          {!isHit && (validated ? (
             <Badge tone="magenta">claude -p 検証済{bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
           ) : (
             legs.length > 0 && <Badge tone="warn">Claude 検証前 (モデルのみ)</Badge>
-          )}
+          ))}
           {finish && (legs.length === 0
             ? <Badge tone="muted">束 見送り</Badge>
             : bundleHit
-              ? <Badge tone="good">束 的中</Badge>
+              ? <Badge tone={isHit ? "info" : "good"}>束 的中</Badge>
               : <Badge tone="bad">束 不的中</Badge>)}
         </span>
       }
@@ -654,48 +676,6 @@ function BundleCard({
             候補 {bundle.n_candidates} 点から選択。
           </p>
         </>
-      )}
-    </Card>
-  );
-}
-
-function PlansCard({
-  plan,
-  subtitle,
-  keys,
-  rows,
-  finish,
-}: {
-  plan: PlanLetter;
-  subtitle: string;
-  keys: number[][];
-  rows: PredictionRow[];
-  finish?: number[];
-}) {
-  const map = new Map(rows.map((r) => [fmtKey(r.key), r] as const));
-  const picks = keys
-    .map((k) => map.get(fmtKey(k)))
-    .filter(Boolean) as PredictionRow[];
-  const totalProb = picks.reduce((s, r) => s + r.prob, 0);
-  const avgPxo = picks.length ? picks.reduce((s, r) => s + r.px_o, 0) / picks.length : 0;
-  const finishKey = finish ? finish.join("-") : null;
-
-  return (
-    <Card
-      title={
-        <span className="flex items-center gap-2">
-          <span className={`text-base font-black ${planAccentClass(plan)}`}>Plan {plan}</span>
-          <span className="text-xs text-(--color-muted) font-normal">{subtitle}</span>
-          <span className="text-xs text-(--color-muted) tabnum">
-            · {picks.length} 点 · 的中率 {fmtPct(totalProb, 2)} · 平均 P×O {avgPxo.toFixed(2)}
-          </span>
-        </span>
-      }
-    >
-      {picks.length === 0 ? (
-        <p className="text-sm text-(--color-muted)">対象なし。スキップ推奨。</p>
-      ) : (
-        <RowsTable rows={picks} finish={finish} highlight={finishKey} />
       )}
     </Card>
   );

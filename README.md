@@ -81,7 +81,7 @@ cp .env.example .env
 
 ### オッズパーク認証 (任意 / 自動投票で使う)
 
-実弾自動購入 (`make bet`) 用。`.env` に追記:
+実弾自動購入 (`make bet`) / Web UI の自動投票 (自動ログイン) 用。`.env` に追記:
 
 ```
 ODDSPARK_ID=...
@@ -90,6 +90,10 @@ ODDSPARK_PIN=...
 ```
 
 PIN は普段使ってない端末でログイン時に oddspark が追加認証として要求するため。
+
+`make run` / `make bet` / `make api` はいずれも起動時に `.env` を `python-dotenv` で読み込むので、ここに書けば
+Web UI (watch-auto ページ) の **自動ログイントグル** でも認証情報が daemon に継承される (env が空だと daemon は
+手動ログインにフォールバックしてブラウザを開いたまま待つ)。認証情報はコード / ログ / コミットに残さない。
 
 ### フロントエンド
 
@@ -205,7 +209,7 @@ make record RACE=20260521-521-1 ORDER=5,2,7 PAYOUT=25400
 make calibrate
 ```
 
-dashboard (`/`) / 履歴 (`/calibrate`) に **Claude 回収優先 / 的中優先** の hit_rate + ROI (見送り除外) が出る。
+dashboard (`/`) / 確率較正 (`/calibrate`) に **回収優先 / 的中優先 AI** の hit_rate + ROI (見送り除外) が出る。
 
 ### FastAPI バックエンド + フロント (UI)
 
@@ -217,10 +221,10 @@ make web          # next dev :3788 (keirin web 3000 と被らないように)
 
 ブラウザで http://localhost:3788
 
-- **ダッシュボード (`/`)**: watch-auto 稼働状況 + 集計レース数 + Claude 回収率 / 的中率 + 的中優先 (おまけ) 回収率 / 的中率
-- **履歴 (`/calibrate`)**: tier 整合 + race 毎の 2 列 grid。見送りはグレー bg で視覚的に区別
-- **予測詳細 (`/predictions/<race_id>`)**: 全 bet type EV table + 2 bundle 推奨 (full Kelly + ½ Kelly 併記) + 適性 / 馬体 / 馬場
-- **watch-auto (`/watch-auto`)**: 開始 / 停止 + 直近履歴 (回収優先 / 的中優先 picks)
+- **ダッシュボード (`/`)**: watch-auto 稼働状況 + 集計レース数 + **回収優先AI** (実弾で買う・的中率/回収率) セクションと **回収優先のみのチャート** (累積収支 / 回収率推移 / 結果分布 / bet 種別)。その下に **的中優先AI** (おまけ計測・買わない) セクションと専用チャート (緑系・bet 種別含む)
+- **確率較正 (`/calibrate`)**: tier ratio (実hit/予測P) + 回収優先 / 的中優先 bundle の実績集計 + race 毎の 2 列 grid (見送りはグレー bg、回収優先=青バッジ / 的中優先=緑バッジ)。※旧 Plan A/B/C 別テーブルは廃止
+- **予測詳細 (`/predictions/<race_id>`)**: 回収優先まとめ買い (Claude 選定 / full Kelly + ½ Kelly 併記) + **的中優先まとめ買い** (おまけ計測・緑系) + 全 bet type EV table + 適性 / 馬体 / 馬場
+- **watch-auto (`/watch-auto`)**: 開始 / 停止 + 直近履歴 (回収優先 / 的中優先 picks) + **オッズパーク自動投票トグル** (カート投入) と **自動ログイントグル** (env 認証で daemon が自動ログイン / OFF は手動)
 
 ### 過去レース一括取得 (学習データ蓄積)
 

@@ -25,7 +25,16 @@ import hmac
 import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
+
+# .env を読み込む (src/analyze.py と同じ挙動)。これがないと `make api` (uvicorn) の env に
+# ODDSPARK_ID/PASSWORD/PIN が乗らず、Web UI から起動した投票 daemon の自動ログインが失敗する。
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except ImportError:
+    pass
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
