@@ -175,7 +175,7 @@ def build_bundle(
     kelly_fraction: float = 1.0,
     pxo_floor: float = PXO_FLOOR,
     max_legs: int = 12,
-    hit_max_legs: int = 5,
+    hit_max_legs: int = 20,
     min_stake: int = 100,
     stake_unit: int = 100,
     avoid_torigami: bool = True,
@@ -189,7 +189,7 @@ def build_bundle(
 
     prioritize="yield" (既定): 回収優先 = pool を個別 Kelly fraction (`_kelly_ind`) 降順で
         絞る。長期 E[log W] 最適 = ROI 最大化志向。
-    prioritize="hit" : 的中優先 = **EV 関係なく想定P降順で上位 hit_max_legs 点**を選び
+    prioritize="hit" : 的中優先 = **EV 関係なく全券種から想定P降順で上位 hit_max_legs(=20) 点**を選び
         (px_o floor 撤廃 = -EV でも P が高ければ採用)、**想定P比例**で予算配分する
         (**Kelly 不使用** — Kelly は -EV 脚に賭け金 0 を割り当てるので「当たりやすい物を
         買う」と両立しない)。ただし下のトリガミ防止ループは残すので、どの脚が当たっても

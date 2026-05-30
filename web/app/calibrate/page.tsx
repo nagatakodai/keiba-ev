@@ -146,13 +146,13 @@ export default async function CalibratePage({
               // 見送り (Claude 総合オススメが空束) は plan_X_hit が偶然立っていても
               // 「賭けて当たった」ではないので的中扱いせず、row 自体をグレー bg に。
               const bundleSkipped = r.bundle_participated === false;
-              const anyHit =
-                !bundleSkipped &&
-                (!!r.bundle_hit || !!r.bundle_hit_first_hit);
+              // 「的中」ラベルは **回収優先AI のみ**で判定 (2026-05-30 ユーザ指示)。
+              // 的中優先AI は買わないおまけ計測なので当たっても race を的中扱いしない。
+              const anyHit = !bundleSkipped && !!r.bundle_hit;
               const rowBg = bundleSkipped
                 ? "bg-(--color-panel-2)"          // 見送り = グレー系
                 : anyHit
-                  ? "bg-(--color-good)/5"        // 的中 = 緑薄
+                  ? "bg-(--color-good)/5"        // 的中 (回収優先) = 緑薄
                   : "";                           // 不的中 = 通常
               return (
                 <Link
@@ -173,14 +173,17 @@ export default async function CalibratePage({
                   <div className="flex gap-1 flex-wrap items-center shrink-0">
                     {bundleSkipped ? (
                       <Badge tone="muted">見送り</Badge>
-                    ) : anyHit ? (
-                      <>
-                        {/* 色は dashboard 規約に統一: 回収優先=青(info) / 的中優先=緑(good) */}
-                        {r.bundle_hit && <Badge tone="info">回収優先</Badge>}
-                        {r.bundle_hit_first_hit && <Badge tone="good">的中優先</Badge>}
-                      </>
                     ) : (
-                      <Badge tone="muted">不的中</Badge>
+                      <>
+                        {/* 的中ラベルは回収優先のみ。的中優先 hit は参考バッジ (緑) として
+                            併記するが「的中」判定には含めない。色: 回収優先=青 / 的中優先=緑 */}
+                        {r.bundle_hit ? (
+                          <Badge tone="info">回収優先</Badge>
+                        ) : (
+                          <Badge tone="muted">不的中</Badge>
+                        )}
+                        {r.bundle_hit_first_hit && <Badge tone="good">的中優先(参考)</Badge>}
+                      </>
                     )}
                   </div>
                 </Link>

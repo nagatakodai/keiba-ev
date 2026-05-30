@@ -65,9 +65,17 @@ export default async function PredictionDetailPage({
   }
 
   const topByPxo = [...d.rows].sort((a, b) => b.px_o - a.px_o).slice(0, 30);
-  const topByProb = [...d.rows]
-    .sort((a, b) => b.prob - a.prob)
-    .slice(0, 20);
+  // 推定当選率ランキング: 3連単だけでなく **全券種** から推定P上位20 (2026-05-30 ユーザ指示)。
+  // bet_tables_hit (全券種・prob 降順・EV 不問。trifecta も含む) を flatten。
+  // 古い snapshot で bet_tables_hit が無ければ従来どおり 3連単 (d.rows) を使う。
+  const hitTables = d.bet_tables_hit;
+  const allProbRows: RankedRow[] =
+    hitTables && Object.keys(hitTables).length > 0
+      ? Object.entries(hitTables).flatMap(([bt, rows]) =>
+          rows.map((r) => ({ betType: bt, ...r })),
+        )
+      : d.rows.map((r) => ({ betType: "trifecta", ...r }));
+  const topByProb = [...allProbRows].sort((a, b) => b.prob - a.prob).slice(0, 20);
 
   const finish = d.result?.finish_order;
 
@@ -569,9 +577,11 @@ function BundleCard({
   const driftPct = margin > 1 ? Math.round((1 - 1 / margin) * 100) : 0;
   // タイトル/色は dashboard 規約に統一: 回収優先=highlight / 的中優先=緑(good)。
   const titleColor = isHit ? "text-(--color-good)" : "text-(--color-highlight)";
+  // 回収優先 (yield) は検証状態に関わらず「回収優先AI」に統一 (的中優先AI と並列)。
+  // Claude 検証済かどうかは右側の magenta バッジで示す。
   const titleLabel = isHit
     ? "的中優先AI — まとめ買い"
-    : `${validated ? "Claude 総合オススメ" : "総合オススメ (モデル)"} — まとめ買い`;
+    : "回収優先AI — まとめ買い";
   return (
     <Card
       // 的中優先は「買わない」おまけ計測なので alert ハイライトせず default で従属表示。
@@ -691,20 +701,23 @@ function pxoEvaluation(pxo: number): { label: string; tone: BadgeTone } {
   return { label: "—", tone: "muted" };
 }
 
+// 全券種ランキング行 (推定P上位20)。BetEvRow に bet_type を付与したもの。
+type RankedRow = BetEvRow & { betType: string };
+
 function ProbRankingTable({
   rows,
   finish,
 }: {
-  rows: PredictionRow[];
+  rows: RankedRow[];
   finish?: number[];
 }) {
-  const finishKey = finish ? finish.join("-") : null;
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm tabnum table-zebra">
         <thead className="text-left text-(--color-muted) text-xs">
           <tr className="border-b border-(--color-line)">
             <th className="py-2 pr-3 text-right">#</th>
+            <th className="py-2 pr-3">種別</th>
             <th className="py-2 pr-3">買い目</th>
             <th className="py-2 pr-3 text-right">推定 P</th>
             <th className="py-2 pr-3 text-right">市場率</th>
@@ -718,15 +731,18 @@ function ProbRankingTable({
         <tbody>
           {rows.map((r, i) => {
             const k = fmtKey(r.key);
-            const hit = finishKey === k;
+            const hit = betHits(r.betType, r.key, finish);
             const marketRate = r.odds > 0 ? 100 / r.odds : 0;
             const evaluation = pxoEvaluation(r.px_o);
             return (
               <tr
-                key={k}
+                key={`${r.betType}:${k}`}
                 className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
               >
                 <td className="py-1.5 pr-3 text-right text-(--color-muted)">{i + 1}</td>
+                <td className="py-1.5 pr-3">
+                  <Badge tone={BET_TYPE_TONE[r.betType] ?? "muted"}>{betLabel(r.betType)}</Badge>
+                </td>
                 <td className="py-1.5 pr-3 font-medium mono">
                   {k}
                   {hit && <span className="ml-2 text-(--color-good)">●</span>}

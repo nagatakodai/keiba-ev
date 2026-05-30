@@ -127,9 +127,10 @@ export function PredictionsList({
                 // **bundleSkipped は anyHit より優先**: 賭けていない race は plan_X_hit (理論値) が
                 // 偶然立っていても「的中」ではない (見送り = 不参加)。
                 const bundleSkipped = !!(hit && hit.bundle_participated === false);
+                // 「的中」ラベルは **回収優先AI のみ**で判定 (2026-05-30 ユーザ指示)。
+                // 的中優先AI (おまけ計測・買わない) は当たっても race を的中扱いしない。
                 const anyHit =
-                  !bundleSkipped &&
-                  !!(hit && (hit.bundle_hit || hit.bundle_hit_first_hit));
+                  !bundleSkipped && !!(hit && hit.bundle_hit);
                 const rowBg = hit
                   ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
                   : raceTimingRowBg(timing.tone);
@@ -201,7 +202,7 @@ export function PredictionsList({
                             // 見送り (Claude 総合オススメが空束) は「不的中」ではなく「見送り」表示
                             <Badge tone="muted">束 見送り</Badge>
                           )}
-                          {hit.bundle_hit_first_hit && <Badge tone="info">的中 Claude</Badge>}
+                          {hit.bundle_hit_first_hit && <Badge tone="info">的中優先(参考)</Badge>}
                           {hit.payout > 0 && (
                             <>
                               <span className="text-(--color-muted)">·</span>
