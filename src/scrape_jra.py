@@ -203,8 +203,13 @@ def _rank(out: dict, bet_type: str) -> list[BetOdds]:
 # --------------------------------------------------------------- discovery --
 
 def _parse_racelist_token(tok: str) -> dict | None:
-    """段1 (開催) token pw15orl1<vv3><yyyy><kk><dd><yyyymmdd>/CK → fields。"""
-    m = re.match(r"pw15orl1(\d{3})(\d{4})(\d{2})(\d{2})(\d{8})/", tok)
+    """段1 (開催) token pw15orl<flag><vv><yyyy><kk><dd><yyyymmdd>/CK → fields。
+
+    flag は開催の世代印 (2026-05 時点: 今週=0 / 過去=1)、桁数も venue 桁数も
+    JRA 側でしれっと変わる (旧: orl1+vv3, 現: orl0+vv3=実質 orl+00+vv2)。
+    `(20\\d{2})` で年をアンカーし、その直前2桁を venue として flag 幅に依存せず拾う。
+    """
+    m = re.match(r"pw15orl.*?(\d{2})(20\d{2})(\d{2})(\d{2})(\d{8})/", tok)
     if not m:
         return None
     return {"venue": f"{int(m.group(1)):02d}", "year": m.group(2),
@@ -212,8 +217,12 @@ def _parse_racelist_token(tok: str) -> dict | None:
 
 
 def _parse_odds_token(tok: str) -> dict | None:
-    """段2 token pw15<bt>ou1<vv3><yyyy><kk><dd><RR><yyyymmdd>Z?/CK → fields。"""
-    m = re.match(r"pw15(\d)ou1(\d{3})(\d{4})(\d{2})(\d{2})(\d{2})(\d{8})", tok)
+    """段2 token pw15<bt>ou<flag><vv><yyyy><kk><dd><RR><yyyymmdd>Z?/CK → fields。
+
+    旧 `ou1<vv3>` / 現 `ouS3<vv2>` どちらも flag・venue 桁が違うので、年アンカー
+    `(20\\d{2})` の直前2桁を venue とし RR は年の後ろ2桁で拾う (flag 幅非依存)。
+    """
+    m = re.match(r"pw15(\d)ou.*?(\d{2})(20\d{2})(\d{2})(\d{2})(\d{2})(\d{8})", tok)
     if not m:
         return None
     return {"bt": m.group(1), "venue": f"{int(m.group(2)):02d}", "year": m.group(3),
@@ -374,9 +383,10 @@ def fetch_jra_result(netkeiba_rid: str) -> dict | None:
     except Exception:  # noqa: BLE001
         return None
     # 段1/段2 の結果トークンは doAction('accessS',...) 形式とは限らないので raw 抽出する。
+    # flag (今週=0 / 過去=1) と venue 桁数が token 種別ごとに違うので年アンカーで拾う。
     kaisai_tok = None
-    for tok in re.findall(r"pw01srl1[0-9A-Za-z/]+", top):
-        m = re.match(r"pw01srl1(\d{3})(\d{4})(\d{2})(\d{2})\d{8}/", tok)
+    for tok in re.findall(r"pw01srl[0-9A-Za-z/]+", top):
+        m = re.match(r"pw01srl.*?(\d{2})(20\d{2})(\d{2})(\d{2})\d{8}/", tok)
         if m and f"{int(m.group(1)):02d}" == venue and m.group(2) == year \
                 and m.group(3) == kai and m.group(4) == day:
             kaisai_tok = tok
@@ -388,8 +398,8 @@ def fetch_jra_result(netkeiba_rid: str) -> dict | None:
     except Exception:  # noqa: BLE001
         return None
     race_tok = None
-    for tok in re.findall(r"pw01sde1[0-9A-Za-z/]+", rl):
-        m = re.match(r"pw01sde1(\d{3})(\d{4})(\d{2})(\d{2})(\d{2})\d{8}", tok)
+    for tok in re.findall(r"pw01sde[0-9A-Za-z/]+", rl):
+        m = re.match(r"pw01sde.*?(\d{2})(20\d{2})(\d{2})(\d{2})(\d{2})\d{8}", tok)
         if m and f"{int(m.group(5)):02d}" == rr:
             race_tok = tok
             break
