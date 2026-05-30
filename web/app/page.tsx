@@ -526,15 +526,25 @@ export default async function DashboardPage() {
       {/* watch-auto stat はダッシュボードから削除 (2026-05-29 ユーザ指示)。
           状態は header の WatchPill で確認可能。 */}
 
-      {/* 一番上の段: 総合レース数 / 的中レース数 / 見送りレース数 / 収支 (全て回収優先AI 基準) */}
+      {/* 一番上の段: 参加レース数 / 見送りレース数 / 的中レース数 / 収支 (全て回収優先AI 基準) */}
       <div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat
-            label="総合レース数"
-            value={cal?.race_count ?? 0}
+            label="参加レース数"
+            value={claudeBundle?.participated_races ?? 0}
             hint={
               claudeBundle
-                ? `参加 ${claudeBundle.participated_races} / 見送り ${claudeBundle.skipped_races}`
+                ? `総合 ${claudeBundle.races} / 見送り ${claudeBundle.skipped_races}`
+                : "—"
+            }
+            accentTone="muted"
+          />
+          <Stat
+            label="見送りレース数"
+            value={claudeBundle?.skipped_races ?? 0}
+            hint={
+              claudeBundle && claudeBundle.races > 0
+                ? `見送り率 ${Math.round((claudeBundle.skipped_races / claudeBundle.races) * 100)}%`
                 : "—"
             }
             accentTone="muted"
@@ -550,16 +560,6 @@ export default async function DashboardPage() {
             // 値は黒文字 (default)。左 border のみ緑で AI 種別を示す (2026-05-29 ユーザ指示)
             tone="default"
             accentTone="good"
-          />
-          <Stat
-            label="見送りレース数"
-            value={claudeBundle?.skipped_races ?? 0}
-            hint={
-              claudeBundle && claudeBundle.races > 0
-                ? `見送り率 ${Math.round((claudeBundle.skipped_races / claudeBundle.races) * 100)}%`
-                : "—"
-            }
-            accentTone="muted"
           />
           <Stat
             label="収支"
