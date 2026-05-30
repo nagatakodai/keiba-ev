@@ -10,6 +10,7 @@ import {
 export const metadata: Metadata = { title: "予測分析履歴" };
 import { Page, PageHeader, savedAtDate, todayJST } from "@/components/ui";
 import { PredictionsList } from "@/components/PredictionsList";
+import { AutoRefresh } from "@/components/AutoRefresh";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,7 @@ export default async function PredictionsPage({
 
   return (
     <Page>
+      <AutoRefresh seconds={60} />
       <PageHeader
         title="予測分析履歴"
         subtitle={`本日 ${today} 分のみ表示 (会場ごと / R 番号順)。`}
