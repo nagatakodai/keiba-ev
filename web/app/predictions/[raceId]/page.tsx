@@ -140,7 +140,12 @@ export default async function PredictionDetailPage({
           古い snapshot で recommended_bundle_hit が欠落 / 束が空なら出さない。 */}
       {d.recommended_bundle_hit &&
         (d.recommended_bundle_hit.legs?.length ?? 0) > 0 && (
-          <BundleCard bundle={d.recommended_bundle_hit} finish={finish} variant="hit" />
+          <BundleCard
+            bundle={d.recommended_bundle_hit}
+            finish={finish}
+            variant="hit"
+            finalOdds={d.result?.final_odds}
+          />
         )}
 
       {d.result && (() => {
@@ -429,7 +434,13 @@ function TopRecommendationCard({
   // 厳密版 (backend joint Kelly) があればそれを描画。無い古い snapshot は
   // frontend 近似 Kelly ランキングに fallback。
   if (d.recommended_bundle) {
-    return <BundleCard bundle={d.recommended_bundle} finish={finish} />;
+    return (
+      <BundleCard
+        bundle={d.recommended_bundle}
+        finish={finish}
+        finalOdds={d.result?.final_odds}
+      />
+    );
   }
   const cands = collectEfficientCandidates(d, finish);
   const top = cands.slice(0, 8);
@@ -497,7 +508,17 @@ function TopRecommendationCard({
   );
 }
 
-function BundleLegsTable({ legs, finish }: { legs: BundleLeg[]; finish?: number[] }) {
+function BundleLegsTable({
+  legs,
+  finish,
+  finalOdds,
+}: {
+  legs: BundleLeg[];
+  finish?: number[];
+  // result.final_odds: `"<bet_type>:<key-with-->"` → 最終確定オッズ。無ければ「—」。
+  finalOdds?: Record<string, number>;
+}) {
+  const hasFinal = !!finalOdds && Object.keys(finalOdds).length > 0;
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm tabnum table-zebra">
@@ -505,7 +526,8 @@ function BundleLegsTable({ legs, finish }: { legs: BundleLeg[]; finish?: number[
           <tr className="border-b border-(--color-line)">
             <th className="py-2 pr-3">種別</th>
             <th className="py-2 pr-3">買い目</th>
-            <th className="py-2 pr-3 text-right">オッズ</th>
+            <th className="py-2 pr-3 text-right">予想 O</th>
+            {hasFinal && <th className="py-2 pr-3 text-right">最終 O</th>}
             <th className="py-2 pr-3 text-right">推定 P</th>
             <th className="py-2 pr-3 text-right">P×O</th>
             <th className="py-2 pr-3 text-right">Kelly</th>
@@ -518,6 +540,16 @@ function BundleLegsTable({ legs, finish }: { legs: BundleLeg[]; finish?: number[
           {legs.map((l) => {
             const k = l.key.join("-");
             const hit = betHits(l.bet_type, l.key, finish);
+            const fo = finalOdds?.[`${l.bet_type}:${k}`];
+            // 予想→最終で乖離した方向に色付け (上昇=緑/下落=赤)。
+            const foTone =
+              fo == null || fo <= 0
+                ? ""
+                : fo > l.odds
+                  ? "text-(--color-good)"
+                  : fo < l.odds
+                    ? "text-(--color-bad)"
+                    : "";
             return (
               <tr
                 key={`${l.bet_type}:${k}`}
@@ -531,6 +563,11 @@ function BundleLegsTable({ legs, finish }: { legs: BundleLeg[]; finish?: number[
                   {hit && <span className="ml-2 text-(--color-good)">●</span>}
                 </td>
                 <td className="py-1.5 pr-3 text-right">{l.odds.toFixed(1)}</td>
+                {hasFinal && (
+                  <td className={`py-1.5 pr-3 text-right ${foTone}`}>
+                    {fo != null && fo > 0 ? fo.toFixed(1) : "—"}
+                  </td>
+                )}
                 <td className="py-1.5 pr-3 text-right">{fmtPct(l.prob, 2)}</td>
                 <td className="py-1.5 pr-3 text-right">
                   <Badge tone={pxoTone(l.px_o)}>{l.px_o.toFixed(2)}</Badge>
@@ -556,11 +593,14 @@ function BundleCard({
   bundle,
   finish,
   variant = "yield",
+  finalOdds,
 }: {
   bundle: RecommendedBundle;
   finish?: number[];
   // "yield" = 回収優先 (実弾で買う対象・highlight) / "hit" = 的中優先 (おまけ計測・買わない・緑)
   variant?: "yield" | "hit";
+  // result.final_odds (leg_id → 最終確定オッズ)。legs テーブルで 予想/最終 を併記。
+  finalOdds?: Record<string, number>;
 }) {
   const isHit = variant === "hit";
   const legs = bundle.legs ?? [];
@@ -656,7 +696,7 @@ function BundleCard({
               }
             />
           </div>
-          <BundleLegsTable legs={legs} finish={finish} />
+          <BundleLegsTable legs={legs} finish={finish} finalOdds={finalOdds} />
           {bundle.llm_review?.validated && (bundle.llm_review.summary || (bundle.llm_review.cuts?.length ?? 0) > 0) && (
             <div className="mt-3 rounded-md border border-(--color-magenta)/30 bg-(--color-magenta)/5 p-3 text-xs">
               <span className="font-bold text-(--color-magenta)">claude -p 調査:</span>{" "}

@@ -42,11 +42,12 @@ export default async function CalibratePage({
   const confidence = calibrationConfidence(cal.race_count);
   const lastUpdated = fmtRelativeFromNow(cal.last_updated_at);
   const yb = cal.claude_bundle;       // 回収優先 (実弾で買う)
-  const roiPct = (b?: { roi: number } | null) =>
-    b ? `${Math.round(b.roi * 100)}%` : "—";
+  // 回収率は **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
+  const roiPct = (b?: { roi: number; roi_final?: number } | null) =>
+    b ? `${Math.round((b.roi_final ?? b.roi) * 100)}%` : "—";
   // 回収率: 100% 未満 → 赤文字 (損失)、100% 以上 → 黒 (default)
-  const roiTone = (b?: { participated_races: number; roi: number } | null) =>
-    !b || b.participated_races === 0 ? "default" : b.roi >= 1 ? "default" : "bad";
+  const roiTone = (b?: { participated_races: number; roi: number; roi_final?: number } | null) =>
+    !b || b.participated_races === 0 ? "default" : (b.roi_final ?? b.roi) >= 1 ? "default" : "bad";
   // 的中率: 30% 未満 → 赤文字、30% 以上 → 黒 (default)
   const hitTone = (b?: { participated_races: number; hit_rate: number } | null) =>
     !b || b.participated_races === 0 ? "default" : b.hit_rate < 0.3 ? "bad" : "default";
@@ -82,7 +83,7 @@ export default async function CalibratePage({
             value={roiPct(yb)}
             hint={
               yb && yb.participated_races > 0
-                ? `賭金 ${fmtYen(yb.stake)} → 払戻 ${fmtYen(yb.payout)} · 見送り ${yb.skipped_races}`
+                ? `賭金 ${fmtYen(yb.stake)} → 払戻(最終) ${fmtYen(yb.payout_final ?? yb.payout)} · 見送り ${yb.skipped_races}`
                 : "賭けたレースなし"
             }
             tone={roiTone(yb)}

@@ -204,7 +204,13 @@ export type PredictionDetail = {
   bet_tables_hit?: Record<string, BetEvRow[]>;
   evidence?: { evidence_by_key?: Record<string, { count: number; reasons?: string[] }>; cuts?: string[]; final_plan?: unknown };
   evidence_rows?: PredictionRow[];
-  result?: { finish_order: number[]; trifecta_payout?: number; note?: string };
+  result?: {
+    finish_order: number[];
+    trifecta_payout?: number;
+    note?: string;
+    // 最終確定オッズ: `"<bet_type>:<key-with-->"` → odds。result fetch 時に保存。
+    final_odds?: Record<string, number>;
+  };
 };
 
 export type JobInfo = {

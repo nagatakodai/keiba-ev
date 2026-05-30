@@ -815,7 +815,7 @@ def parse_result(html: str) -> dict | None:
     if len(finish_order) < 3:
         return None
 
-    # 2) 払戻金テーブルから 3 連単を探す
+    # 2) 払戻金テーブルから 3 連単を探す (従来どおり payout の主ソース)
     payout = 0
     for row in soup.select("table.Payout_Detail_Table tr, table.PayoutTable tr"):
         cells = row.find_all(["th", "td"])
@@ -823,7 +823,6 @@ def parse_result(html: str) -> dict | None:
             continue
         head = _text_of(cells[0])
         if "三連単" in head or "3連単" in head:
-            # 払戻金額 (例: "12,340円")
             for c in cells[1:]:
                 m = re.search(r"([\d,]+)\s*円", _text_of(c))
                 if m:
@@ -831,11 +830,80 @@ def parse_result(html: str) -> dict | None:
                     break
             break
 
+    # 3) 全券種の最終確定オッズ (払戻 / 100) を flat dict 化。収支を予想オッズでなく
+    #    実払戻ベースにするため (2026-05-30 ユーザ指示)。
+    final_odds = _parse_payout_table(soup)
+
     return {
         "finish_order": finish_order[:3],
         "payout": payout,
+        "final_odds": final_odds,
         "source": "netkeiba-html",
     }
+
+
+# 払戻テーブルの券種ラベル → (bet_type, 順序付きか)。枠連/枠単は本リポジトリ非対応で skip。
+_PAYOUT_BET_MAP: dict[str, tuple[str, bool]] = {
+    "単勝": ("win", True),
+    "複勝": ("place", True),
+    "馬連": ("quinella", False),
+    "ワイド": ("wide", False),
+    "馬単": ("exacta", True),
+    "3連複": ("trio", False),
+    "三連複": ("trio", False),
+    "3連単": ("trifecta", True),
+    "三連単": ("trifecta", True),
+}
+
+
+def _parse_payout_table(soup) -> dict[str, float]:
+    """netkeiba 結果の払戻テーブル → flat `{leg_id: 最終オッズ}` (払戻金 / 100)。
+
+    leg_id 形式は portfolio/llm.leg_id と一致: `"<bet_type>:<key-joined-by-->"`。
+    順不同 (馬連/ワイド/3連複) は key を昇順に正規化。複勝/ワイドは複数組を行で持つ。
+    """
+    out: dict[str, float] = {}
+    for row in soup.select("table.Payout_Detail_Table tr"):
+        th = row.find("th")
+        res = row.select_one("td.Result")
+        pay = row.select_one("td.Payout")
+        if not th or not res or not pay:
+            continue
+        label = th.get_text(strip=True).replace("３", "3").replace("２", "2").replace("１", "1")
+        mapping = _PAYOUT_BET_MAP.get(label)
+        if mapping is None:
+            continue
+        bet_type, ordered = mapping
+        n_per = 1 if bet_type in ("win", "place") else 2 if bet_type in ("quinella", "wide", "exacta") else 3
+        combos = _payout_combos(res, n_per)
+        amounts = [int(m.replace(",", "")) for m in re.findall(r"([\d,]+)\s*円", pay.get_text())]
+        for i, combo in enumerate(combos):
+            if i >= len(amounts) or len(combo) != n_per:
+                continue
+            key = combo if ordered else sorted(combo)
+            odds = amounts[i] / 100.0
+            if odds > 0:
+                out[f"{bet_type}:{'-'.join(str(k) for k in key)}"] = odds
+    return out
+
+
+def _payout_combos(res_cell, n_per: int) -> list[list[int]]:
+    """払戻 Result セル → 組番リスト。<ul> ベース (1 ul=1 組) と <div> ベース
+    (単勝/複勝, 数字 1 個=1 組) の両形式に対応。空 span は無視。"""
+    uls = res_cell.select("ul")
+    combos: list[list[int]] = []
+    if uls:
+        for ul in uls:
+            nums = [int(t) for li in ul.select("li")
+                    if (t := li.get_text(strip=True)).isdigit()]
+            if nums:
+                combos.append(nums)
+        return combos
+    nums = [int(t) for sp in res_cell.select("span")
+            if (t := sp.get_text(strip=True)).isdigit()]
+    if n_per == 1:
+        return [[n] for n in nums]
+    return [nums[i:i + n_per] for i in range(0, len(nums), n_per)]
 
 
 # --- 開催一覧 (race_list.html?kaisai_date=...) ---

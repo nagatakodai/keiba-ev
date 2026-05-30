@@ -74,7 +74,8 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   const series = sorted.map((r) => {
     if (r.bundle_participated) {
       yieldStakeAcc += r.bundle_stake ?? 0;
-      yieldPayoutAcc += r.bundle_payout ?? 0;
+      // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
+      yieldPayoutAcc += r.bundle_payout_final ?? r.bundle_payout ?? 0;
     }
     return {
       yieldNet: yieldPayoutAcc - yieldStakeAcc,
@@ -201,7 +202,8 @@ function HitCharts({ races }: { races: RaceHit[] }) {
   const series = sorted.map((r) => {
     if (r.bundle_hit_first_participated) {
       hitStakeAcc += r.bundle_hit_first_stake ?? 0;
-      hitPayoutAcc += r.bundle_hit_first_payout ?? 0;
+      // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
+      hitPayoutAcc += r.bundle_hit_first_payout_final ?? r.bundle_hit_first_payout ?? 0;
     }
     return {
       hitNet: hitPayoutAcc - hitStakeAcc,
@@ -562,26 +564,35 @@ export default async function DashboardPage() {
           />
           <Stat
             label="収支"
+            // 収支は **最終オッズ基準** (実払戻に近い)。最終オッズが無い旧 result は
+            // backend が予想オッズに fallback 済 (payout_final = payout) (2026-05-30 ユーザ指示)。
             value={
               !claudeBundle
                 ? "—"
-                : `${claudeBundle.payout - claudeBundle.stake >= 0 ? "+" : ""}${fmtYen(claudeBundle.payout - claudeBundle.stake)}`
+                : (() => {
+                    const pay = claudeBundle.payout_final ?? claudeBundle.payout;
+                    const pl = pay - claudeBundle.stake;
+                    return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
+                  })()
             }
             hint={
               claudeBundle
-                ? `賭金 ${fmtYen(claudeBundle.stake)} → 払戻 ${fmtYen(claudeBundle.payout)}`
+                ? `賭金 ${fmtYen(claudeBundle.stake)} → 払戻(最終) ${fmtYen(claudeBundle.payout_final ?? claudeBundle.payout)}`
                 : "—"
             }
             tone={
               // 収支: マイナスなら赤、プラスは黒 (default) (2026-05-29 ユーザ指示)
               !claudeBundle
                 ? "default"
-                : claudeBundle.payout - claudeBundle.stake < 0
+                : (claudeBundle.payout_final ?? claudeBundle.payout) - claudeBundle.stake < 0
                 ? "bad"
                 : "default"
             }
             accentTone={
-              !claudeBundle || claudeBundle.payout - claudeBundle.stake >= 0 ? "info" : "bad"
+              !claudeBundle ||
+              (claudeBundle.payout_final ?? claudeBundle.payout) - claudeBundle.stake >= 0
+                ? "info"
+                : "bad"
             }
           />
         </div>
@@ -631,21 +642,22 @@ export default async function DashboardPage() {
         />
         <Stat
           label="回収率"
+          // 回収率も **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
           value={
             !claudeBundle || claudeBundle.participated_races === 0
               ? "—"
-              : fmtRoiPct(claudeBundle.roi)
+              : fmtRoiPct(claudeBundle.roi_final ?? claudeBundle.roi)
           }
           hint={
             claudeBundle && claudeBundle.participated_races > 0
-              ? `${claudeBundle.participated_races} 参加 / ${claudeBundle.skipped_races} 見送り · 賭金 ${fmtYen(claudeBundle.stake)} → 払戻 ${fmtYen(claudeBundle.payout)}`
+              ? `${claudeBundle.participated_races} 参加 / ${claudeBundle.skipped_races} 見送り · 賭金 ${fmtYen(claudeBundle.stake)} → 払戻(最終) ${fmtYen(claudeBundle.payout_final ?? claudeBundle.payout)}`
               : "賭けたレースなし"
           }
           // 回収率: 100% 超 → 黒 (default)、それ以外 → 赤 (損失) (2026-05-29 ユーザ指示)
           tone={
             !claudeBundle || claudeBundle.participated_races === 0
               ? "default"
-              : claudeBundle.roi > 1
+              : (claudeBundle.roi_final ?? claudeBundle.roi) > 1
               ? "default"
               : "bad"
           }
@@ -694,21 +706,22 @@ export default async function DashboardPage() {
         />
         <Stat
           label="回収率"
+          // 最終オッズ基準 (roi_final)。最終が無い旧 result は roi に fallback。
           value={
             !claudeBundleHit || claudeBundleHit.participated_races === 0
               ? "—"
-              : fmtRoiPct(claudeBundleHit.roi)
+              : fmtRoiPct(claudeBundleHit.roi_final ?? claudeBundleHit.roi)
           }
           hint={
             claudeBundleHit && claudeBundleHit.participated_races > 0
-              ? `${claudeBundleHit.participated_races} 参加 / 賭金 ${fmtYen(claudeBundleHit.stake)} → 払戻 ${fmtYen(claudeBundleHit.payout)}`
+              ? `${claudeBundleHit.participated_races} 参加 / 賭金 ${fmtYen(claudeBundleHit.stake)} → 払戻(最終) ${fmtYen(claudeBundleHit.payout_final ?? claudeBundleHit.payout)}`
               : "新スキーマ待ち (本日以降の analyze から蓄積)"
           }
           // 回収率: 100% 超 → 黒、それ以外 → 赤
           tone={
             !claudeBundleHit || claudeBundleHit.participated_races === 0
               ? "default"
-              : claudeBundleHit.roi > 1
+              : (claudeBundleHit.roi_final ?? claudeBundleHit.roi) > 1
               ? "default"
               : "bad"
           }
