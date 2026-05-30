@@ -13,8 +13,8 @@ def _patch_build_bundle(monkeypatch):
     """build_bundle を「渡された脚をそのまま legs に並べる」スタブに差し替え。"""
     monkeypatch.setattr(
         pf, "build_bundle",
-        lambda legs, probs: {"legs": [{"bet_type": c["bet_type"], "key": list(c["key"])}
-                                      for c in legs]})
+        lambda legs, probs, **kw: {"legs": [{"bet_type": c["bet_type"], "key": list(c["key"])}
+                                            for c in legs]})
 
 
 CANDS = [

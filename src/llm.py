@@ -282,8 +282,12 @@ def build_bundle_selection_prompt(
     r = rd.race
     legs = bundle.get("legs", [])
     horse_name = {h.number: h.name for h in r.horses}
-    # 候補は P×O 降順で上位 max_candidates 件 (= モデルの +EV 出力)
-    pool = sorted(candidates, key=lambda c: c.get("px_o", 0.0), reverse=True)[:max_candidates]
+    is_hit_mode = (prioritize == "hit")
+    # 候補の並び: 回収優先=P×O 降順 (+EV 効率) / 的中優先=想定P 降順 (EV 関係なく当て率)。
+    if is_hit_mode:
+        pool = sorted(candidates, key=lambda c: c.get("prob", 0.0), reverse=True)[:max_candidates]
+    else:
+        pool = sorted(candidates, key=lambda c: c.get("px_o", 0.0), reverse=True)[:max_candidates]
     bundle_ids = {leg_id(leg) for leg in legs}
     # 束採用 leg (★) が pool に含まれない (joint Kelly が低P×O脚を組み入れるケース) ことが
     # あり、その場合 claude に「★ で示されたが表に無い leg」が見え不整合になる。
@@ -299,11 +303,11 @@ def build_bundle_selection_prompt(
         kaisai_date = _dt.datetime.fromtimestamp(r.start_at).strftime("%Y-%m-%d")
     else:
         kaisai_date = "当日"
-    is_hit_mode = (prioritize == "hit")
     mode_label = "**的中優先**" if is_hit_mode else "**回収優先**"
     mode_explain = (
-        "確率の高い目を抑えて『当たる頻度』を上げる戦略。回収率 (P×O) は break-even (1.0) 以上であれば許容。"
-        "回収最大化 (P×O 上位選抜) より、当て率を取りに行きます。**実弾は買いません (おまけ計測)**。"
+        "**EV (回収率) は一切見ず**、想定P (当たりやすさ) が高い目だけを選ぶ戦略。"
+        "P×O が 1 未満 (-EV) でも当て率が高ければ採用します。配分は Kelly を使わず想定P比例 "
+        "(ただしトリガミ防止で収支プラスは確保)。**実弾は買いません (おまけ計測)**。"
         if is_hit_mode else
         "joint Kelly で E[log(資金)] を最大化する EV 最適 (回収率最大化) 戦略。**実弾で買う対象**。"
     )
@@ -318,18 +322,21 @@ def build_bundle_selection_prompt(
         "**Brave Search / Tavily** で各脚の馬・騎手・コース適性・取消/体調を検証し、"
         "補強根拠の量と質で picks (買う) / cuts (外す) を判断してください。"
         + (
-            "\n**的中優先モードでは:** 確率の高い脚 (prob 上位) を優先しつつ、補強根拠で外せる目を cuts に。"
-            "回収率最適化ではないので Kelly fraction より確率順位を重視してください。"
+            "\n**的中優先モードでは:** EV (P×O) は一切判断材料にしないでください。"
+            "想定P (当たりやすさ) が高い脚だけを残し、補強根拠で危ない目 (取消/体調/不適性) を cuts に。"
+            "P×O が低くても (=-EV でも) P が高ければ採用します。"
             if is_hit_mode else ""
         ),
         "",
-        f"## モデルの joint Kelly 束 ({mode_label}) ★が束採用",
+        f"## モデルの{'想定P比例' if is_hit_mode else 'joint Kelly'}束 ({mode_label}) ★が束採用",
         f"投資総額 ¥{bundle.get('total_stake', 0):,} / 束の的中率(1点以上) "
         f"{bundle.get('bundle_hit_prob', 0) * 100:.1f}% / min払戻比 "
         f"{bundle.get('min_payout_ratio', 0):.2f}",
         f"束採用 leg ids: {bundle_ids_list}",
         "",
-        "## モデルの +EV 候補 (P×O 降順, 全 bet type 横断)",
+        ("## モデルの候補 (想定P 降順, 全 bet type 横断 — EV 不問)"
+         if is_hit_mode else
+         "## モデルの +EV 候補 (P×O 降順, 全 bet type 横断)"),
         "| id | 種別 | 買い目 | オッズ | 推定P | P×O | Kelly | 束 |",
         "|---|---|---|---|---|---|---|---|",
     ]

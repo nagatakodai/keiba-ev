@@ -175,6 +175,7 @@ def build_bundle(
     kelly_fraction: float = 1.0,
     pxo_floor: float = PXO_FLOOR,
     max_legs: int = 12,
+    hit_max_legs: int = 5,
     min_stake: int = 100,
     stake_unit: int = 100,
     avoid_torigami: bool = True,
@@ -188,9 +189,13 @@ def build_bundle(
 
     prioritize="yield" (既定): 回収優先 = pool を個別 Kelly fraction (`_kelly_ind`) 降順で
         絞る。長期 E[log W] 最適 = ROI 最大化志向。
-    prioritize="hit" : 的中優先 = pool を prob 降順で絞る + pxo_floor を 1.0 に緩和。
-        確率高い目を残すので Kelly 配分後も「当て率」が高い束になる (= 回収率はやや劣るが
-        当たり頻度を上げる)。実戦では「回収優先 を主軸 + 的中優先 をおまけ」が定石。
+    prioritize="hit" : 的中優先 = **EV 関係なく想定P降順で上位 hit_max_legs 点**を選び
+        (px_o floor 撤廃 = -EV でも P が高ければ採用)、**想定P比例**で予算配分する
+        (**Kelly 不使用** — Kelly は -EV 脚に賭け金 0 を割り当てるので「当たりやすい物を
+        買う」と両立しない)。ただし下のトリガミ防止ループは残すので、どの脚が当たっても
+        払戻 ≥ 投資総額×margin = **収支プラス**を保証する (= 当たりやすさ優先だが損はしない
+        範囲で、profit を出せない低オッズ脚は drop される)。実戦では「回収優先 を主軸 +
+        的中優先 をおまけ計測」が定石。
 
     avoid_torigami=True のとき「トリガミ防止」フィルタを適用する。束を丸ごと買った
     ときの投資総額 S に対し、payout(= odds×stake) < S × torigami_margin の脚を除去
@@ -199,21 +204,27 @@ def build_bundle(
     保証される。margin>1 はオッズ下振れ (締切直前のドリフト / 複勝・ワイドのレンジ幅) に
     対する緩衝で、保存オッズから ~(1−1/margin) 下振れしても収支マイナスにならない。
     """
-    # prioritize="hit" は break-even (1.0) で足切り、回収優先より緩い (確率を取りたい)。
-    effective_floor = 1.0 if prioritize == "hit" else pxo_floor
-    pool = [
-        c for c in candidates
-        if c.get("odds", 0) > 1.0 and c.get("px_o", 0.0) >= effective_floor
-    ]
-    for c in pool:
-        o = c["odds"]
-        c["_kelly_ind"] = (c["px_o"] - 1.0) / (o - 1.0)
-    # 並べ替えキー: yield=個別 Kelly 降順 (= EV 効率) / hit=prob 降順 (= 的中率)
+    # prioritize で候補プールの作り方が根本的に違う:
+    #   hit  : **EV 関係なく** 想定P降順で上位 hit_max_legs 点 (px_o floor 撤廃)。
+    #          配分は後段で「想定P比例 + トリガミ防止」(Kelly 不使用)。
+    #   yield: +EV (px_o≥floor) のみ → 個別 Kelly 効率降順 → joint Kelly 配分。
     if prioritize == "hit":
+        pool = [
+            c for c in candidates
+            if c.get("odds", 0) > 1.0 and c.get("prob", 0.0) > 0.0
+        ]
         pool.sort(key=lambda c: c.get("prob", 0.0), reverse=True)
+        pool = pool[:hit_max_legs]
     else:
+        pool = [
+            c for c in candidates
+            if c.get("odds", 0) > 1.0 and c.get("px_o", 0.0) >= pxo_floor
+        ]
+        for c in pool:
+            o = c["odds"]
+            c["_kelly_ind"] = (c["px_o"] - 1.0) / (o - 1.0)
         pool.sort(key=lambda c: c["_kelly_ind"], reverse=True)
-    pool = pool[:max_legs]
+        pool = pool[:max_legs]
 
     base = {
         "objective": "joint_kelly",
@@ -253,7 +264,17 @@ def build_bundle(
     n_dropped_torigami = 0
     while active:
         H = H_full[active]
-        f_opt = _optimize(p, H)
+        if prioritize == "hit":
+            # 的中優先: Kelly 不使用。想定P比例で配分 (-EV 脚も P が高ければ残す)。
+            # トリガミ防止ループ (下記) は yield と共通で回るので、profit を出せない
+            # 低オッズ脚は drop され、残った脚で「収支プラス」が保証される。
+            w = np.array(
+                [max(pool[a].get("prob", 0.0), 0.0) for a in active],
+                dtype=np.float64,
+            )
+            f_opt = w / w.sum() if w.sum() > 0 else w
+        else:
+            f_opt = _optimize(p, H)
         # kelly_fraction>1 でスケール後に Σf>cap になり得るので必ず再射影する
         # (再射影しないと floor 丸めでも総額が bankroll を超える)。≤1 では no-op。
         f = _project(f_opt * float(kelly_fraction))

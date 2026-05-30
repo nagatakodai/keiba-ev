@@ -502,7 +502,7 @@ def _validate_and_update_bundle(
         return
 
     review = llm_mod.parse_bundle_review("".join(chunks))
-    bundle, applied = _decide_selection_bundle(review, cands, probs, bundle)
+    bundle, applied = _decide_selection_bundle(review, cands, probs, bundle, prioritize=prioritize)
     if not applied:
         # picks/cuts を適用できなかった (picks が候補 id に一致しない / 旧形式で picks も
         # cuts も無い)。モデル束を維持し validated バッジは付けない (未検証扱い)。
@@ -516,7 +516,9 @@ def _validate_and_update_bundle(
     _update_snapshot_bundle(race_id, bundle, prioritize=prioritize)
 
 
-def _decide_selection_bundle(review: dict, cands: list, probs, model_bundle: dict) -> tuple[dict, bool]:
+def _decide_selection_bundle(
+    review: dict, cands: list, probs, model_bundle: dict, *, prioritize: str = "yield"
+) -> tuple[dict, bool]:
     """claude の選定 (review) から最終束を決める。戻り値 (bundle, applied)。
 
     - picks 明示 (list):
@@ -537,15 +539,15 @@ def _decide_selection_bundle(review: dict, cands: list, probs, model_bundle: dic
         selected = [c for c in cands
                     if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) in pick_set]
         if not picks:                       # 明示的な見送り (賭けない)
-            return pf_mod.build_bundle([], probs), True
+            return pf_mod.build_bundle([], probs, prioritize=prioritize), True
         if selected:                        # 有効な picks → その脚で再構築
-            return pf_mod.build_bundle(selected, probs), True
+            return pf_mod.build_bundle(selected, probs, prioritize=prioritize), True
         return model_bundle, False          # picks が全て候補 id に不一致 → 適用不可
     if review.get("cuts"):                  # 後方互換: cuts のみ
         cut_set = set(review["cuts"])
         kept = [c for c in cands
                 if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) not in cut_set]
-        return pf_mod.build_bundle(kept, probs), True
+        return pf_mod.build_bundle(kept, probs, prioritize=prioritize), True
     return model_bundle, False
 
 
@@ -603,11 +605,8 @@ def _save_prediction_snapshot(
         # 的中優先 EV table (per bet type, prob 降順, px_o>=1.0)
         try:
             bet_tables_hit_serial = _serialize_bet_tables(ev_mod.build_all_bet_tables_hit(rd, probs))
-            # 3連単 (rd.trifecta 由来) も的中優先 table を追加
-            tri_hit = sorted(
-                (r for r in rows if r.px_o >= 1.0),
-                key=lambda r: r.prob, reverse=True,
-            )[:30]
+            # 3連単 (rd.trifecta 由来) も的中優先 table を追加 (EV 関係なく prob 降順)
+            tri_hit = sorted(rows, key=lambda r: r.prob, reverse=True)[:30]
             if tri_hit:
                 bet_tables_hit_serial["trifecta"] = [
                     {"key": list(r.key), "odds": r.odds, "popularity": r.popularity,

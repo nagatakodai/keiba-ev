@@ -625,21 +625,20 @@ def build_all_bet_tables(
 
 
 def build_all_bet_tables_hit(
-    rd: RaceData, probs: Probabilities, *, min_pxo: float = 1.0
+    rd: RaceData, probs: Probabilities, *, min_pxo: float = 0.0
 ) -> dict[str, list[BetEvRow]]:
-    """**的中優先版** EV table: 各 bet type を **prob 降順** に並べ替え、px_o ≥ min_pxo で
-    最低ライン (= 賭けても期待値マイナスでない) を確保。
+    """**的中優先版** EV table: 各 bet type を **prob 降順** に並べ替える。
 
     回収優先版 (build_all_bet_tables) は P×O 降順なので、当て率が低い大穴が優位になりがち。
-    的中優先は確率高い順に並べることで「賭けが当たりやすい」picks を抽出する用途。
-    min_pxo=1.0 でブレイクイーブン未満を除外 (賭ければ理論期待値で損する目は外す)。
+    的中優先は **EV 関係なく確率の高い順**に並べることで「賭けが当たりやすい」picks を
+    抽出する用途 (2026-05-30 ユーザ指示: 的中優先は EV を見ない)。既定 min_pxo=0.0 = 足切りなし。
     """
     out: dict[str, list[BetEvRow]] = {}
     for bt, bets in (rd.other_bets or {}).items():
         if not bets:
             continue
         table = build_bet_table(bets, probs, bet_type=bt)
-        # px_o フィルタ (期待値ブレイクイーブン以上)
+        # px_o フィルタ (既定 0.0 = 足切りなし。的中優先は EV を見ない)
         filtered = [r for r in table if r.px_o >= min_pxo]
         # prob 降順に並べ替え
         filtered.sort(key=lambda r: r.prob, reverse=True)
