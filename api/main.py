@@ -252,8 +252,9 @@ async def api_job_stream(job_id: str, since: int = 0) -> EventSourceResponse:
 # --- watch-auto ---
 
 class WatchAutoStartRequest(BaseModel):
-    window: int = 5
-    tolerance: int = 4
+    # window/tolerance は分。0 で締切ちょうどまで受け付け、小数可 (例 0.5)。ge=0 で負値拒否。
+    window: float = Field(default=5, ge=0)
+    tolerance: float = Field(default=4, ge=0)
     interval_sec: int = 60
     ev_max: float | None = None
     min_prob: float | None = None
@@ -261,6 +262,8 @@ class WatchAutoStartRequest(BaseModel):
     aptitude_top: int | None = None
     with_exacta: bool = False
     with_trio: bool = False
+    # claude -p (回収優先の束選定 + 的中優先評価) を一切使わず確率モデルのみで snapshot 保存。
+    no_llm: bool = False
     # race detection を行う JST 時間帯 (HH:MM-HH:MM)。
     # 範囲外は result fetch のみ動かして race detection はスキップ。
     # JRA 土日 ~9:50-17:00 + NAR ナイター ~14:00-21:00 + ばんえい 等の遅レースを含めて広め。
@@ -299,6 +302,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         aptitude_top=req.aptitude_top,
         with_exacta=req.with_exacta,
         with_trio=req.with_trio,
+        no_llm=req.no_llm,
         active_hours=req.active_hours,
         bet_oddspark=req.bet_oddspark,
         bet_auto_login=req.bet_auto_login,

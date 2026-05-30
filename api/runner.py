@@ -376,8 +376,8 @@ class WatchAutoManager:
     async def start(
         self,
         *,
-        window: int = 5,
-        tolerance: int = 4,
+        window: float = 5,
+        tolerance: float = 4,
         interval_sec: int = 60,
         ev_max: float | None = None,
         min_prob: float | None = None,
@@ -385,6 +385,7 @@ class WatchAutoManager:
         aptitude_top: int | None = None,
         with_exacta: bool = False,
         with_trio: bool = False,
+        no_llm: bool = False,
         active_hours: str = "09:00-23:45",
         bet_oddspark: bool = False,
         bet_auto_purchase: bool = False,
@@ -398,7 +399,7 @@ class WatchAutoManager:
                 window=window, tolerance=tolerance, interval_sec=interval_sec,
                 ev_max=ev_max, min_prob=min_prob, market_blend=market_blend,
                 aptitude_top=aptitude_top, with_exacta=with_exacta,
-                with_trio=with_trio, active_hours=active_hours,
+                with_trio=with_trio, no_llm=no_llm, active_hours=active_hours,
                 bet_oddspark=bet_oddspark,
                 bet_auto_purchase=bet_auto_purchase,
                 bet_daily_cap=bet_daily_cap,
@@ -410,8 +411,8 @@ class WatchAutoManager:
     async def _start_locked(
         self,
         *,
-        window: int,
-        tolerance: int,
+        window: float,
+        tolerance: float,
         interval_sec: int,
         ev_max: float | None,
         min_prob: float | None,
@@ -419,6 +420,7 @@ class WatchAutoManager:
         aptitude_top: int | None,
         with_exacta: bool,
         with_trio: bool,
+        no_llm: bool = False,
         active_hours: str,
         bet_oddspark: bool = False,
         bet_auto_purchase: bool = False,
@@ -452,6 +454,8 @@ class WatchAutoManager:
             inner.append("--with-exacta")
         if with_trio:
             inner.append("--with-trio")
+        if no_llm:
+            inner.append("--no-llm")
         if bet_oddspark:
             inner.append("--bet-oddspark")
         cmd = [
@@ -471,6 +475,7 @@ class WatchAutoManager:
             "aptitude_top": aptitude_top,
             "with_exacta": with_exacta,
             "with_trio": with_trio,
+            "no_llm": no_llm,
             "bet_oddspark": bet_oddspark,
             "bet_auto_purchase": bet_auto_purchase,
             "bet_daily_cap": bet_daily_cap,
@@ -567,8 +572,8 @@ class WatchAutoManager:
         cfg = state.get("config") or {}
         try:
             return await self.start(
-                window=int(cfg.get("window", 5)),
-                tolerance=int(cfg.get("tolerance", 4)),
+                window=float(cfg.get("window", 5)),
+                tolerance=float(cfg.get("tolerance", 4)),
                 interval_sec=int(cfg.get("interval_sec", 60)),
                 ev_max=cfg.get("ev_max"),
                 min_prob=cfg.get("min_prob"),
@@ -576,6 +581,7 @@ class WatchAutoManager:
                 aptitude_top=cfg.get("aptitude_top"),
                 with_exacta=bool(cfg.get("with_exacta")),
                 with_trio=bool(cfg.get("with_trio")),
+                no_llm=bool(cfg.get("no_llm")),
                 active_hours=cfg.get("active_hours", "09:00-23:45"),
                 bet_oddspark=bool(cfg.get("bet_oddspark")),
                 bet_auto_purchase=bool(cfg.get("bet_auto_purchase")),

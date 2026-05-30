@@ -54,6 +54,8 @@ export default function WatchAutoPage() {
   const [activeHours, setActiveHours] = useState("09:00-23:45");
   const [withExacta, setWithExacta] = useState(false);
   const [withTrio, setWithTrio] = useState(false);
+  // claude -p (回収優先の束選定 + 的中優先評価) を使わず確率モデルのみで分析。
+  const [noLlm, setNoLlm] = useState(false);
   // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) が起動し、人がログイン。
   const [betOddspark, setBetOddspark] = useState(false);
   // 自動ログイン: ON で env 認証 (ODDSPARK_ID/PASSWORD/PIN) で自動ログイン。OFF は人が手でログイン。
@@ -86,6 +88,7 @@ export default function WatchAutoPage() {
     if (c.active_hours != null) setActiveHours(String(c.active_hours));
     if (c.with_exacta != null) setWithExacta(!!c.with_exacta);
     if (c.with_trio != null) setWithTrio(!!c.with_trio);
+    if (c.no_llm != null) setNoLlm(!!c.no_llm);
     if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
     if (c.bet_auto_login != null) setBetAutoLogin(!!c.bet_auto_login);
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
@@ -127,8 +130,9 @@ export default function WatchAutoPage() {
     setError(null);
     try {
       await api.startWatch({
-        window: parseInt(windowMin) || 5,
-        tolerance: parseInt(tolerance) || 4,
+        // 0 (締切ちょうどまで受け付け) と小数を許容。NaN のときだけ既定に戻す。
+        window: Number.isFinite(parseFloat(windowMin)) ? parseFloat(windowMin) : 5,
+        tolerance: Number.isFinite(parseFloat(tolerance)) ? parseFloat(tolerance) : 4,
         interval_sec: parseInt(intervalSec) || 60,
         ev_max: evMax === "" ? null : parseFloat(evMax),
         min_prob: minProb === "" ? null : parseFloat(minProb),
@@ -137,6 +141,7 @@ export default function WatchAutoPage() {
         active_hours: activeHours.trim() || "09:00-23:45",
         with_exacta: withExacta,
         with_trio: withTrio,
+        no_llm: noLlm,
         bet_oddspark: betOddspark,
         bet_auto_login: betAutoLogin,
         bet_auto_purchase: betAutoPurchase,
@@ -281,13 +286,19 @@ export default function WatchAutoPage() {
           <>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Input
-                label="WINDOW (締切までの目標分)"
+                label="WINDOW (締切までの目標分 / 0=締切ちょうどまで・小数可)"
+                type="number"
+                step="0.5"
+                min="0"
                 value={windowMin}
                 onChange={(e) => setWindowMin(e.target.value)}
                 disabled={running}
               />
               <Input
-                label="TOLERANCE (+分のみ / 締切 window〜window+tol 分前 = 発走 +2分の lead)"
+                label="TOLERANCE (+分のみ / 締切 window〜window+tol 分前・小数可)"
+                type="number"
+                step="0.5"
+                min="0"
                 value={tolerance}
                 onChange={(e) => setTolerance(e.target.value)}
                 disabled={running}
@@ -354,6 +365,16 @@ export default function WatchAutoPage() {
                   className="accent-(--color-accent)"
                 />
                 <span>3 連複も取得 (jiku iter / fetch +40s)</span>
+              </label>
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={noLlm}
+                  onChange={(e) => setNoLlm(e.target.checked)}
+                  disabled={running}
+                  className="accent-(--color-accent)"
+                />
+                <span>LLM を使わない (確率モデルのみ / claude -p 省略)</span>
               </label>
               <label className="inline-flex items-center gap-2 cursor-pointer">
                 <input

@@ -231,6 +231,8 @@ export type WatchAutoStatus = {
     aptitude_top?: number | null;
     with_exacta?: boolean;
     with_trio?: boolean;
+    // claude -p (回収優先の束選定 + 的中優先評価) を使わず確率モデルのみ。
+    no_llm?: boolean;
     // race detection を行う JST 時間帯 (HH:MM-HH:MM)。
     // backend (api/main.py:WatchAutoStartRequest) の default は "09:00-23:45"。
     active_hours?: string;
@@ -434,6 +436,7 @@ export const api = {
     aptitude_top?: number | null;
     with_exacta?: boolean;
     with_trio?: boolean;
+    no_llm?: boolean;
     active_hours?: string;
     bet_oddspark?: boolean;
     bet_auto_login?: boolean;

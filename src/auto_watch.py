@@ -138,7 +138,7 @@ def _recently_failed(race_id: str, now_ts: int, cooldown_sec: int = FAILED_RETRY
     return False
 
 
-def _list_due_races(window_min: int, tolerance_min: int, now_ts: int) -> list[dict]:
+def _list_due_races(window_min: float, tolerance_min: float, now_ts: int) -> list[dict]:
     """その日 (JST) の開催一覧を **公式ソース** から取得し、締切 N±M 分のレースを抽出。
 
     - NAR: **oddspark** の当日 race list (netkeiba_rid + 発走時刻、netkeiba 不要)。
@@ -254,7 +254,7 @@ def _normalize_race_id(netkeiba_rid: str) -> str:
 
 def _dispatch_keibago(netkeiba_rid: str, start_at: int = 0,
                       *, market_blend: float | None = None,
-                      aptitude_top: int | None = None) -> int:
+                      aptitude_top: int | None = None, no_llm: bool = False) -> int:
     """NAR: keiba.go.jp の全6券種オッズで解析し snapshot を保存。"""
     cmd = [sys.executable, "-m", "src.scrape_keibago", netkeiba_rid,
            "--snapshot", f"--start-at={start_at}"]
@@ -262,6 +262,8 @@ def _dispatch_keibago(netkeiba_rid: str, start_at: int = 0,
         cmd.append(f"--market-blend={market_blend}")
     if aptitude_top is not None:
         cmd.append(f"--aptitude-top={aptitude_top}")
+    if no_llm:
+        cmd.append("--no-llm")
     console.print(f"[bold cyan]→ keiba.go.jp analyze:[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
@@ -269,7 +271,7 @@ def _dispatch_keibago(netkeiba_rid: str, start_at: int = 0,
 
 def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
                        *, market_blend: float | None = None,
-                       aptitude_top: int | None = None) -> int:
+                       aptitude_top: int | None = None, no_llm: bool = False) -> int:
     """NAR: oddspark オッズで解析し snapshot を保存 (keibago 不可時)。"""
     cmd = [sys.executable, "-m", "src.scrape_oddspark", netkeiba_rid,
            "--snapshot", f"--start-at={start_at}"]
@@ -277,6 +279,8 @@ def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
         cmd.append(f"--market-blend={market_blend}")
     if aptitude_top is not None:
         cmd.append(f"--aptitude-top={aptitude_top}")
+    if no_llm:
+        cmd.append("--no-llm")
     console.print(f"[bold cyan]→ oddspark analyze:[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
@@ -284,7 +288,7 @@ def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
 
 def _dispatch_jra(netkeiba_rid: str, start_at: int = 0,
                   *, market_blend: float | None = None,
-                  aptitude_top: int | None = None) -> int:
+                  aptitude_top: int | None = None, no_llm: bool = False) -> int:
     """JRA: 公式 (accessO.html token walk) で全7券種オッズを取得して snapshot 保存。"""
     cmd = [sys.executable, "-m", "src.scrape_jra", netkeiba_rid,
            "--snapshot", f"--start-at={start_at}"]
@@ -292,6 +296,8 @@ def _dispatch_jra(netkeiba_rid: str, start_at: int = 0,
         cmd.append(f"--market-blend={market_blend}")
     if aptitude_top is not None:
         cmd.append(f"--aptitude-top={aptitude_top}")
+    if no_llm:
+        cmd.append("--no-llm")
     console.print(f"[bold cyan]→ JRA 公式 analyze:[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
@@ -299,7 +305,7 @@ def _dispatch_jra(netkeiba_rid: str, start_at: int = 0,
 
 def _dispatch_nar_fallback(netkeiba_rid: str, start_at: int = 0,
                            *, market_blend: float | None = None,
-                           aptitude_top: int | None = None) -> int:
+                           aptitude_top: int | None = None, no_llm: bool = False) -> int:
     """NAR フォールバック: keiba.go.jp (全6券種・組合せ明示) を優先、失敗時 oddspark。
 
     keiba.go.jp は馬連/ワイド/馬単/3連複/3連単 を組合せ明示で取れるので oddspark
@@ -307,11 +313,11 @@ def _dispatch_nar_fallback(netkeiba_rid: str, start_at: int = 0,
     keiba.go.jp が解決できない (場名/開催) 場合のみ oddspark に落ちる。
     """
     rc = _dispatch_keibago(netkeiba_rid, start_at,
-                           market_blend=market_blend, aptitude_top=aptitude_top)
+                           market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm)
     if rc != 0:
         console.print("[yellow]keiba.go.jp 不可 → oddspark にフォールバック[/yellow]")
         rc = _dispatch_oddspark(netkeiba_rid, start_at,
-                                market_blend=market_blend, aptitude_top=aptitude_top)
+                                market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm)
     return rc
 
 
@@ -353,8 +359,8 @@ def _in_active_hours(now: datetime, active_hours: str) -> bool:
 
 @app.command()
 def main(
-    window_min: int = typer.Option(5, "--window", help="**締切までの**目標リード時間 (分)。締切=発走2分前固定なので、発走基準より +2 分の lead になる"),
-    tolerance_min: int = typer.Option(2, "--tolerance", help="window からの + 側許容 (分)。締切 window〜window+tolerance 分前で検出 (= 発走 window+2〜window+tolerance+2 分前)"),
+    window_min: float = typer.Option(5, "--window", help="**締切までの**目標リード時間 (分)。締切=発走2分前固定。0 で締切0分前 (締切ちょうど) まで受け付け。小数可 (例 0.5)"),
+    tolerance_min: float = typer.Option(2, "--tolerance", help="window からの + 側許容 (分)。締切 window〜window+tolerance 分前で検出。小数可"),
     ev_max: float = typer.Option(None, "--ev-max"),
     min_prob: float = typer.Option(None, "--min-prob"),
     market_blend: float = typer.Option(None, "--market-blend"),
@@ -369,6 +375,11 @@ def main(
         False, "--bet-oddspark",
         help="束(legs)が出た発走前 NAR レースを oddspark betting queue に投入する。別途 "
              "`python -m src.oddspark_bet --session` を起動しログインしておくこと (購入確定は人)。",
+    ),
+    no_llm: bool = typer.Option(
+        False, "--no-llm",
+        help="claude -p による束選定 (回収優先) と 的中優先 claude 評価を一切行わず、"
+             "確率モデルのみで snapshot を保存する (API/課金/レイテンシを節約)。",
     ),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
@@ -387,7 +398,7 @@ def main(
         return
 
     console.print(
-        f"[dim]{now_str}[/dim] 締切 {window_min}〜{window_min + tolerance_min} 分前のレースを検索中... (= 発走 {window_min + 2}〜{window_min + tolerance_min + 2} 分前)"
+        f"[dim]{now_str}[/dim] 締切 {window_min:g}〜{window_min + tolerance_min:g} 分前のレースを検索中... (= 発走 {window_min + 2:g}〜{window_min + tolerance_min + 2:g} 分前)"
     )
     try:
         due = _list_due_races(window_min, tolerance_min, now_ts)
@@ -430,12 +441,12 @@ def main(
         if race.get("source") == "keibabook":
             rc = _dispatch_jra(
                 race["netkeiba_race_id"], race.get("start_at", 0),
-                market_blend=market_blend, aptitude_top=aptitude_top,
+                market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
             )
         else:
             rc = _dispatch_nar_fallback(
                 race["netkeiba_race_id"], race.get("start_at", 0),
-                market_blend=market_blend, aptitude_top=aptitude_top,
+                market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
             )
         finished_at = int(time.time())
         if rc == 0:
