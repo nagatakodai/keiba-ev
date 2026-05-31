@@ -178,12 +178,13 @@ TOLERANCE ?= 1.5
 SCORE_WINDOW ?= 5
 SCORE_TOLERANCE ?= 2
 LLM_BLEND ?=
+BET_LEAD_SEC ?= 60
 INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
 BET_ODDSPARK ?=
 BET_IPAT ?=
 BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,)
-BAND_ARGS := --window $(WINDOW) --tolerance $(TOLERANCE) --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE) $(if $(LLM_BLEND),--llm-blend $(LLM_BLEND),)
+BAND_ARGS := --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE) --bet-lead-sec $(BET_LEAD_SEC) $(if $(LLM_BLEND),--llm-blend $(LLM_BLEND),)
 watch-auto:
 	@echo "watch-auto: SCORE $(SCORE_WINDOW)〜$(SCORE_TOLERANCE)分 / BET $(WINDOW)±$(TOLERANCE)分 / $(INTERVAL_SEC)秒おき / Ctrl+C で終了"
 	@while true; do \

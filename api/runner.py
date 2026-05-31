@@ -392,6 +392,7 @@ class WatchAutoManager:
         score_window: float = 5,
         score_tolerance: float = 2,
         llm_blend: float | None = None,
+        bet_lead_sec: int = 60,
         interval_sec: int = 60,
         ev_max: float | None = None,
         min_prob: float | None = None,
@@ -413,7 +414,7 @@ class WatchAutoManager:
             return await self._start_locked(
                 window=window, tolerance=tolerance,
                 score_window=score_window, score_tolerance=score_tolerance,
-                llm_blend=llm_blend, interval_sec=interval_sec,
+                llm_blend=llm_blend, bet_lead_sec=bet_lead_sec, interval_sec=interval_sec,
                 ev_max=ev_max, min_prob=min_prob, market_blend=market_blend,
                 aptitude_top=aptitude_top, with_exacta=with_exacta,
                 with_trio=with_trio, no_llm=no_llm, active_hours=active_hours,
@@ -434,6 +435,7 @@ class WatchAutoManager:
         score_window: float = 5,
         score_tolerance: float = 2,
         llm_blend: float | None = None,
+        bet_lead_sec: int = 60,
         interval_sec: int,
         ev_max: float | None,
         min_prob: float | None,
@@ -477,6 +479,7 @@ class WatchAutoManager:
             "--tolerance", str(tolerance),
             "--score-window", str(score_window),
             "--score-tolerance", str(score_tolerance),
+            "--bet-lead-sec", str(bet_lead_sec),
             "--active-hours", active_hours,
         ]
         if llm_blend is not None:
@@ -511,6 +514,7 @@ class WatchAutoManager:
             "score_window": score_window,
             "score_tolerance": score_tolerance,
             "llm_blend": llm_blend,
+            "bet_lead_sec": bet_lead_sec,
             "active_hours": active_hours,
             "interval_sec": interval_sec,
             "ev_max": ev_max,
@@ -677,6 +681,7 @@ class WatchAutoManager:
                 score_tolerance=float(cfg.get("score_tolerance", 2)),
                 llm_blend=(float(cfg["llm_blend"])
                            if cfg.get("llm_blend") is not None else None),
+                bet_lead_sec=int(cfg.get("bet_lead_sec", 60)),
                 interval_sec=int(cfg.get("interval_sec", 60)),
                 ev_max=cfg.get("ev_max"),
                 min_prob=cfg.get("min_prob"),

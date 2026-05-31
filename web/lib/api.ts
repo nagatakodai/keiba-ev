@@ -238,6 +238,8 @@ export type WatchAutoStatus = {
     score_tolerance?: number;
     // Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ, null=既定0.5)。
     llm_blend?: number | null;
+    // 締切の何秒前に投票を発火するか (score 完了で予約 → この秒数で発火)。既定 60。
+    bet_lead_sec?: number;
     interval_sec?: number;
     ev_max?: number | null;
     min_prob?: number | null;
@@ -449,6 +451,7 @@ export const api = {
     score_window?: number;
     score_tolerance?: number;
     llm_blend?: number | null;
+    bet_lead_sec?: number;
     interval_sec?: number;
     ev_max?: number | null;
     min_prob?: number | null;

@@ -264,6 +264,8 @@ class WatchAutoStartRequest(BaseModel):
     # Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ)。
     # None で各 analyze の既定 (ev.LLM_BLEND_DEFAULT=0.5)。
     llm_blend: float | None = Field(default=None, ge=0.0, le=1.0)
+    # 締切の何秒前に投票を発火するか (score 完了で予約、この秒数で発火)。既定 60=締切1分前。
+    bet_lead_sec: int = Field(default=60, ge=0, le=600)
     interval_sec: int = 60
     ev_max: float | None = None
     min_prob: float | None = None
@@ -312,6 +314,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         score_window=req.score_window,
         score_tolerance=req.score_tolerance,
         llm_blend=req.llm_blend,
+        bet_lead_sec=req.bet_lead_sec,
         interval_sec=req.interval_sec,
         ev_max=req.ev_max,
         min_prob=req.min_prob,

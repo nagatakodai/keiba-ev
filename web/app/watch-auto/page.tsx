@@ -42,12 +42,11 @@ export default function WatchAutoPage() {
   // 設定/制御パネルはデフォルト閉。ユーザがプルダウンを開いたときだけ展開。
   const [showSettings, setShowSettings] = useState(false);
 
-  // 2段パイプライン: BET 帯 (締切 window〜+tolerance 分前) で投票、SCORE 帯
-  // (締切 score_window〜+score_tolerance 分前) で Claude 考察→各馬指数キャッシュ。
-  const [windowMin, setWindowMin] = useState("1");
-  const [tolerance, setTolerance] = useState("1.5");
+  // 2段パイプライン: SCORE 帯 (締切 score_window〜+tol 分前) で Claude 考察→各馬指数を
+  // キャッシュ + 投票を予約 → 締切 bet_lead_sec 秒前に自動発火 (最新オッズ→束→投票)。
   const [scoreWindow, setScoreWindow] = useState("5");
   const [scoreTolerance, setScoreTolerance] = useState("2");
+  const [betLeadSec, setBetLeadSec] = useState("60");
   // 空 = backend 既定 (ev.LLM_BLEND_DEFAULT=0.5)。Claude 指数 vs モデルの合成重み。
   const [llmBlend, setLlmBlend] = useState("");
   const [intervalSec, setIntervalSec] = useState("60");
@@ -86,10 +85,9 @@ export default function WatchAutoPage() {
   if (!prefilled && status?.config) {
     const c = status.config;
     setPrefilled(true);
-    if (c.window != null) setWindowMin(String(c.window));
-    if (c.tolerance != null) setTolerance(String(c.tolerance));
     if (c.score_window != null) setScoreWindow(String(c.score_window));
     if (c.score_tolerance != null) setScoreTolerance(String(c.score_tolerance));
+    if (c.bet_lead_sec != null) setBetLeadSec(String(c.bet_lead_sec));
     setLlmBlend(c.llm_blend != null ? String(c.llm_blend) : "");
     if (c.interval_sec != null) setIntervalSec(String(c.interval_sec));
     setEvMax(c.ev_max != null ? String(c.ev_max) : "");
@@ -142,11 +140,9 @@ export default function WatchAutoPage() {
     setError(null);
     try {
       await api.startWatch({
-        // 0 (締切ちょうどまで受け付け) と小数を許容。NaN のときだけ既定に戻す。
-        window: Number.isFinite(parseFloat(windowMin)) ? parseFloat(windowMin) : 1,
-        tolerance: Number.isFinite(parseFloat(tolerance)) ? parseFloat(tolerance) : 1.5,
         score_window: Number.isFinite(parseFloat(scoreWindow)) ? parseFloat(scoreWindow) : 5,
         score_tolerance: Number.isFinite(parseFloat(scoreTolerance)) ? parseFloat(scoreTolerance) : 2,
+        bet_lead_sec: parseInt(betLeadSec) || 60,
         llm_blend: llmBlend === "" ? null : parseFloat(llmBlend),
         interval_sec: parseInt(intervalSec) || 60,
         ev_max: evMax === "" ? null : parseFloat(evMax),
@@ -250,10 +246,10 @@ export default function WatchAutoPage() {
           tone={running ? "good" : "default"}
         />
         <Stat
-          label="検出帯 (締切まで / score→bet)"
+          label="考察→投票 (締切まで)"
           value={
-            status?.config?.window != null
-              ? `考察 ${status.config.score_window ?? "?"}〜${(status.config.score_window ?? 0) + (status.config.score_tolerance ?? 0)} → 投票 ${status.config.window}〜${status.config.window + (status.config.tolerance ?? 0)} 分前`
+            status?.config?.score_window != null
+              ? `考察 ${status.config.score_window}〜${(status.config.score_window ?? 0) + (status.config.score_tolerance ?? 0)}分前 → 投票 締切${status.config.bet_lead_sec ?? 60}秒前`
               : "—"
           }
         />
@@ -302,21 +298,12 @@ export default function WatchAutoPage() {
           <>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Input
-                label="BET WINDOW (締切までの目標分 / 投票。0=締切ちょうど・小数可)"
+                label="BET LEAD (締切の何秒前に投票発火 / 既定 60=締切1分前)"
                 type="number"
-                step="0.5"
+                step="10"
                 min="0"
-                value={windowMin}
-                onChange={(e) => setWindowMin(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="BET TOLERANCE (+分 / 締切 window〜window+tol 分前で投票)"
-                type="number"
-                step="0.5"
-                min="0"
-                value={tolerance}
-                onChange={(e) => setTolerance(e.target.value)}
+                value={betLeadSec}
+                onChange={(e) => setBetLeadSec(e.target.value)}
                 disabled={running}
               />
               <Input
@@ -552,7 +539,7 @@ export default function WatchAutoPage() {
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: 発走${status?.config?.window}〜${(status?.config?.window ?? 0) + (status?.config?.tolerance ?? 0)}分前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
+              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 60}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
               : "停止中。タイトルをクリックして設定を展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>

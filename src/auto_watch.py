@@ -62,6 +62,56 @@ def _mark_analyzed(race_id: str, phase: str = "bet") -> None:
         fh.write(race_id + "\n")
 
 
+# 2段パイプライン: score 完了で「このレースを締切 BET_LEAD_SEC 秒前に投票せよ」を予約し、
+# bet は band スキャンせず**予約時刻が来たら発火**する (= 締切1分前を探さず締切1分前に撃つ)。
+BET_SCHEDULE_DIR = ROOT / "data/cache/auto_watch_bet_schedule"
+# 締切の何秒前に投票を発火するか (既定 60 = 締切1分前)。poll 間隔ぶん遅れ得るので、daemon の
+# カート投入+確定が締切に間に合うよう余裕を見て調整可 (--bet-lead-sec)。
+BET_LEAD_SEC_DEFAULT = 60
+
+
+def _write_bet_schedule(race: dict) -> None:
+    """score 完了レースを bet 予約に書く (close_at をキーに後で時刻発火)。"""
+    import json
+    BET_SCHEDULE_DIR.mkdir(parents=True, exist_ok=True)
+    rid = race["race_id"]
+    entry = {
+        "race_id": rid,
+        "netkeiba_race_id": race.get("netkeiba_race_id", rid),
+        "source": race.get("source"),
+        "url": race.get("url"),
+        "venue": race.get("venue"),
+        "race_no": race.get("race_no"),
+        "start_at": race.get("start_at", 0),
+        "close_at": race.get("close_at", 0),
+    }
+    tmp = BET_SCHEDULE_DIR / f".{rid}.tmp"
+    tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(BET_SCHEDULE_DIR / f"{rid}.json")
+
+
+def _read_bet_schedule() -> list[dict]:
+    import json
+    if not BET_SCHEDULE_DIR.exists():
+        return []
+    out = []
+    for p in sorted(BET_SCHEDULE_DIR.glob("*.json")):
+        try:
+            out.append(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _remove_bet_schedule(race_id: str) -> None:
+    try:
+        (BET_SCHEDULE_DIR / f"{race_id}.json").unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _append_history(record: dict) -> None:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
@@ -456,39 +506,44 @@ def main(
     ),
     no_llm: bool = typer.Option(
         False, "--no-llm",
-        help="claude -p による束選定 (回収優先) と 的中優先 claude 評価を一切行わず、"
-             "確率モデルのみで snapshot を保存する (API/課金/レイテンシを節約)。",
+        help="claude -p による各馬指数 (考察) を行わず確率モデルのみで snapshot を保存する。"
+             "予約・締切発火の枠組みは同じ (bet はモデルのみで撃つ)。",
+    ),
+    bet_lead_sec: int = typer.Option(
+        BET_LEAD_SEC_DEFAULT, "--bet-lead-sec",
+        help="締切の何秒前に投票を発火するか (既定 60=締切1分前)。score 完了で予約し、この秒数に "
+             "達した tick で発火する。poll 間隔ぶん遅れ得るので daemon の確定が間に合うよう調整可。",
     ),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """1 巡だけ実行。2段パイプライン: score 帯 (考察→指数キャッシュ) → bet 帯 (指数+最新オッズ→束→enqueue)。"""
+    """1 巡だけ実行。2段: score 帯で考察→指数キャッシュ+**締切前 bet を予約** → 予約時刻 (締切
+    bet_lead_sec 秒前) が来た bet を**自動発火** (最新オッズ→束→enqueue)。"""
     now_dt = datetime.now()
     now_ts = int(now_dt.timestamp())
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     _drain_pending(label="pre-analyze")
 
+    # 予約済 bet の発火は active-hours 外でも行う (締切は時刻で来るため)。result fetch も継続。
+    _fire_due_bets(
+        now_ts, bet_lead_sec=bet_lead_sec,
+        market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
+        llm_blend=llm_blend, bet_oddspark=bet_oddspark, bet_ipat=bet_ipat, dry_run=dry_run,
+    )
+
     if not _in_active_hours(now_dt, active_hours):
         console.print(
             f"[dim]{now_str}[/dim] off-hours ({active_hours} 外): "
-            "race detection skip、result fetch のみ"
+            "race detection skip、bet 発火/result fetch のみ"
         )
         return
 
-    _ = (ev_max, min_prob, with_exacta, with_trio)   # 受け取るが現状未配線 (no-op)
+    _ = (ev_max, min_prob, with_exacta, with_trio, window_min, tolerance_min)   # 未配線 (no-op)
 
-    # Stage 1: score 帯 (締切 score_window〜+tol 分前)。Claude 考察で各馬指数をキャッシュ。
-    # --no-llm のときは指数を作れないので score 帯はスキップ (bet 帯がモデルのみで動く=従来挙動)。
-    if not no_llm:
-        _run_phase(
-            "score", score_window, score_tolerance, now_ts,
-            market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
-            bet_oddspark=False, bet_ipat=False, dry_run=dry_run, llm_blend=llm_blend,
-        )
-
-    # Stage 2: bet 帯 (締切 window〜+tol 分前)。キャッシュ指数+最新オッズで束→enqueue。
+    # score 帯 (締切 score_window〜+tol 分前): Claude 考察で各馬指数をキャッシュし、
+    # 同時に「締切 bet_lead_sec 秒前に投票」を予約する。bet はその予約時刻に発火 (上の _fire_due_bets)。
     _run_phase(
-        "bet", window_min, tolerance_min, now_ts,
+        "score", score_window, score_tolerance, now_ts,
         market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
         bet_oddspark=bet_oddspark, bet_ipat=bet_ipat, dry_run=dry_run, llm_blend=llm_blend,
     )
@@ -551,6 +606,17 @@ def _run_phase(
         if rc == 0:
             _mark_analyzed(rid, phase)
             analyzed.add(rid)
+            # score 完了 → このレースを「締切 BET_LEAD_SEC 秒前に投票」予約する。
+            # bet はこの予約時刻が来たら発火する (band スキャンしない)。
+            if phase == "score":
+                try:
+                    _write_bet_schedule(race)
+                    cl = race.get("close_at", 0)
+                    when = (datetime.fromtimestamp(cl - BET_LEAD_SEC_DEFAULT).strftime("%H:%M:%S")
+                            if cl else "?")
+                    console.print(f"  [cyan]→ bet 予約: {rid} を 締切前に発火 (≈ {when})[/cyan]")
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[red]bet 予約失敗: {e}[/red]")
             # enqueue + result fetch は bet 帯のみ (score 帯は指数キャッシュだけ)。
             if phase == "bet":
                 if bet_oddspark:
@@ -594,6 +660,76 @@ def _run_phase(
             "close_at": race["close_at"],
             "rc": rc,
         })
+
+
+def _fire_due_bets(
+    now_ts: int, *, bet_lead_sec: int, market_blend, aptitude_top, no_llm: bool,
+    llm_blend, bet_oddspark: bool, bet_ipat: bool, dry_run: bool,
+) -> None:
+    """bet 予約を読み、**締切 bet_lead_sec 秒前に達したレースを発火** (最新オッズで束→enqueue)。
+
+    band スキャンせず予約時刻ベース。締切を過ぎた予約は破棄 (撃っても不成立)。発火済 (rc==0)
+    は予約を消し analyzed_bet で二重防止。未発走 (まだ時刻でない) はそのまま残す。
+    """
+    sched = _read_bet_schedule()
+    if not sched:
+        return
+    analyzed = _load_analyzed("bet")
+    for race in sched:
+        rid = race["race_id"]
+        close_at = int(race.get("close_at") or 0)
+        if rid in analyzed:
+            _remove_bet_schedule(rid)
+            continue
+        if not close_at:
+            continue
+        # 締切を過ぎた予約は破棄 (発火しても締切後で不成立)
+        if now_ts >= close_at:
+            console.print(f"[dim]bet 予約破棄 (締切経過): {rid}[/dim]")
+            _remove_bet_schedule(rid)
+            continue
+        # まだ発火時刻 (締切 bet_lead_sec 秒前) に達していない
+        if close_at - now_ts > bet_lead_sec:
+            continue
+        secs = close_at - now_ts
+        tag = f"{race.get('venue')} {race.get('race_no')}R 締切まで {secs}s"
+        console.print(f"[bold green]bet 発火:[/bold green] {tag} ({rid})")
+        if dry_run:
+            console.print(f"  [dim]dry-run: {race.get('url')}[/dim]")
+            continue
+        nkrid = race.get("netkeiba_race_id", rid)
+        if race.get("source") == "keibabook":
+            rc = _dispatch_jra(nkrid, race.get("start_at", 0),
+                               market_blend=market_blend, aptitude_top=aptitude_top,
+                               no_llm=no_llm, phase="bet", llm_blend=llm_blend)
+        else:
+            rc = _dispatch_nar_fallback(nkrid, race.get("start_at", 0),
+                                        market_blend=market_blend, aptitude_top=aptitude_top,
+                                        no_llm=no_llm, phase="bet", llm_blend=llm_blend)
+        if rc != 0:
+            console.print(f"[red]bet 発火 analyze 失敗 rc={rc} race={rid} (次tickで再試行)[/red]")
+            continue   # 予約は残す (締切前なら次tickで再試行)
+        _mark_analyzed(rid, "bet")
+        _remove_bet_schedule(rid)
+        if bet_oddspark:
+            try:
+                if _enqueue_oddspark_bet(rid, nkrid):
+                    console.print(f"  [magenta]→ oddspark betting queue に投入:[/magenta] {rid}")
+            except Exception as e:  # noqa: BLE001
+                console.print(f"[red]oddspark enqueue 失敗: {e}[/red]")
+        if bet_ipat:
+            try:
+                if _enqueue_ipat_bet(rid, nkrid):
+                    console.print(f"  [magenta]→ 即PAT betting queue に投入:[/magenta] {rid}")
+            except Exception as e:  # noqa: BLE001
+                console.print(f"[red]ipat enqueue 失敗: {e}[/red]")
+        try:
+            p = schedule_result_fetch(rid, race.get("url", ""), race.get("start_at", 0))
+            if p.status == "pending":
+                console.print(f"  [cyan]→ result fetch scheduled:[/cyan] {rid}")
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[red]schedule_result_fetch 失敗: {e}[/red]")
+        _drain_pending(label="post-bet")
 
 
 if __name__ == "__main__":
