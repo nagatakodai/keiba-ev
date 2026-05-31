@@ -61,15 +61,18 @@ _LOGIN_URL = f"{_BASE}/"
 # 式別選択 → 馬番選択 → 金額入力 → セット → 入力終了 → 購入予定リスト → (合計金額/件数を
 # 確認用に再入力) → 購入する → 完了。下記は best-effort。実機ログイン後に DevTools で確定する。
 SELECTORS = {
-    # --- ログイン (4 要素: INET-ID → 加入者番号/P-ARS/暗証番号) ---
-    # IPAT は INET-ID を先に入れる画面と、加入者番号+P-ARS+暗証番号を入れる画面が分かれる
-    # ことがある。両方のフィールドを placeholder で持ち、存在するものだけ埋める実装にする。
-    "login_inetid": 'input[name="inetid"]',          # 要確認
-    "login_inetid_submit": 'button[type="submit"], input[type="submit"]',  # 要確認
+    # --- ログイン (2 段: INET-ID 画面 → 加入者番号/P-ARS/暗証番号 画面) ---
+    # 段1 INET-ID 画面 (実機 DOM 確認済 2026-05-31): form name=FORM1 onsubmit=fSend()。
+    #   <input type="text" name="inetid" maxlength="12"> + ログインは
+    #   <a onclick="javascript:send();return false;" title="ログイン"> (submit ボタンではない)。
+    #   send() が inetid 検証 → FORM1.submit()。
+    "login_inetid": 'input[name="inetid"]',          # 確定 (実機DOM)
+    "login_inetid_submit": 'a[title="ログイン"]',    # 確定 (<a onclick=send()>)、JS fallback send()
+    # 段2 加入者番号/P-ARS/暗証番号 画面 (**要実機 DOM 確認** — 次に DOM を貼ってもらう):
     "login_subscriber": 'input[name="i"]',           # 加入者番号 要確認
     "login_pars": 'input[name="p"]',                 # P-ARS番号 要確認
     "login_pin": 'input[name="r"]',                  # 暗証番号 要確認
-    "login_submit": 'button[type="submit"], input[type="submit"]',  # 要確認
+    "login_submit": 'button[type="submit"], input[type="submit"], a[title="ログイン"]',  # 要確認
     "logged_in_marker": "text=ログアウト",            # 要確認 (メニューに存在する想定)
     # --- 通常投票への遷移 ---
     "normal_vote_link": 'text=通常投票',              # 要確認
@@ -327,12 +330,19 @@ class BettingSession:
         creds = _creds()
         p = self.page
         try:
-            # 段1: INET-ID
+            # 段1: INET-ID (送信は <a onclick=send()>。click → 失敗時 JS send() fallback)
             if p.locator(SELECTORS["login_inetid"]).count() > 0:
                 p.fill(SELECTORS["login_inetid"], creds["inetid"])
                 _shot(p, "login_inetid")
-                p.click(SELECTORS["login_inetid_submit"])
-                p.wait_for_timeout(1500)
+                try:
+                    p.click(SELECTORS["login_inetid_submit"], timeout=4000)
+                except Exception:  # noqa: BLE001
+                    # link click が効かない場合は page の send() を直接呼ぶ (FORM1.submit())
+                    p.evaluate("() => (typeof send === 'function') && send()")
+                try:
+                    p.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:  # noqa: BLE001
+                    p.wait_for_timeout(2500)
             # 段2: 加入者番号 / P-ARS / 暗証番号
             if p.locator(SELECTORS["login_subscriber"]).count() > 0:
                 p.fill(SELECTORS["login_subscriber"], creds["subscriber"])
