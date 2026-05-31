@@ -185,6 +185,9 @@ BET_ODDSPARK ?=
 BET_IPAT ?=
 BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,)
 BAND_ARGS := --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE) --bet-lead-sec $(BET_LEAD_SEC) $(if $(LLM_BLEND),--llm-blend $(LLM_BLEND),)
+# 投票発火の専用デーモン (watch-auto の poll とは独立に締切 BET_LEAD_SEC 秒前ちょうどに撃つ)。
+# market-blend/llm-blend は `=` 形 (bet_scheduler は = で parse)。--bet-oddspark/--bet-ipat は各 target で付与。
+SCHED_ARGS := --bet-lead-sec=$(BET_LEAD_SEC) $(if $(LLM_BLEND),--llm-blend=$(LLM_BLEND),) $(if $(MARKET_BLEND),--market-blend=$(MARKET_BLEND),) $(if $(APTITUDE_TOP),--aptitude-top=$(APTITUDE_TOP),)
 watch-auto:
 	@echo "watch-auto: SCORE $(SCORE_WINDOW)〜$(SCORE_TOLERANCE)分 / BET $(WINDOW)±$(TOLERANCE)分 / $(INTERVAL_SEC)秒おき / Ctrl+C で終了"
 	@while true; do \
@@ -206,6 +209,7 @@ watch-auto-bet:
 	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。**"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.oddspark_bet --session $(SESSION_ARGS) & \
+		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-oddspark & \
 		while true; do \
 			$(PY) -m src.auto_watch \
 				$(BAND_ARGS) \
@@ -224,6 +228,7 @@ watch-auto-ipat-bet:
 	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。**"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.ipat_bet --session $(SESSION_ARGS) & \
+		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-ipat & \
 		while true; do \
 			$(PY) -m src.auto_watch \
 				$(BAND_ARGS) \

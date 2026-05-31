@@ -351,6 +351,9 @@ class WatchAutoManager:
         # JRA 即PAT 投票 daemon (headful ブラウザ・人がログイン)。bet_ipat=True のとき起動。
         # oddspark (NAR) と独立に持てる (土日 JRA 開催日に JRA ブラウザも一緒に立てる用途)。
         self.ipat_bet_job: Job | None = None
+        # 投票発火デーモン (bet_scheduler)。betting (oddspark/ipat) ON のとき起動。
+        # watch poll とは独立に締切 bet_lead_sec 秒前に精密発火する。
+        self.scheduler_job: Job | None = None
         # 前回使った設定を persist 済 state file から復元しておく。停止中 / API 再起動後
         # でも status.config に「前回値」が乗るので、frontend がそれを form の default に
         # 使える (watch-auto 設定パネルの prefill)。
@@ -379,6 +382,10 @@ class WatchAutoManager:
     @property
     def ipat_bet_running(self) -> bool:
         return self.ipat_bet_job is not None and self.ipat_bet_job.status == "running"
+
+    @property
+    def scheduler_running(self) -> bool:
+        return self.scheduler_job is not None and self.scheduler_job.status == "running"
 
     @property
     def config(self) -> dict[str, Any]:
@@ -469,6 +476,14 @@ class WatchAutoManager:
                 await self._start_ipat_daemon(
                     auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
                     stake_multiplier=bet_stake_multiplier, auto_login=bet_auto_login)
+            if (bet_oddspark or bet_ipat) and not self.scheduler_running:
+                await self._start_scheduler(
+                    bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
+                    bet_lead_sec=int(self._config.get("bet_lead_sec", 60)),
+                    market_blend=self._config.get("market_blend"),
+                    aptitude_top=self._config.get("aptitude_top"),
+                    no_llm=bool(self._config.get("no_llm")),
+                    llm_blend=self._config.get("llm_blend"))
             return self.job
 
         # Python ラッパで while ループを回す (api/_watch_loop.py)。
@@ -570,7 +585,51 @@ class WatchAutoManager:
                     if cfg.get("bet_stake_multiplier") is not None else 1.0,
                 auto_login=bool(cfg.get("bet_auto_login")),
             )
+        # 投票発火デーモン (締切 bet_lead_sec 秒前に精密発火, watch poll とは独立)。
+        # betting (oddspark/ipat) が ON のときだけ起動する。
+        if bet_oddspark or bet_ipat:
+            await self._start_scheduler(
+                bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
+                bet_lead_sec=int(self._config.get("bet_lead_sec", 60)),
+                market_blend=self._config.get("market_blend"),
+                aptitude_top=self._config.get("aptitude_top"),
+                no_llm=bool(self._config.get("no_llm")),
+                llm_blend=self._config.get("llm_blend"),
+            )
         return self.job
+
+    async def _start_scheduler(self, *, bet_oddspark: bool, bet_ipat: bool,
+                               bet_lead_sec: int = 60, market_blend=None,
+                               aptitude_top=None, no_llm: bool = False,
+                               llm_blend=None) -> None:
+        """bet_scheduler (締切 bet_lead_sec 秒前に精密発火) を別 subprocess で起動。
+
+        watch-auto は毎 tick フレッシュ subprocess なので精密タイマを持てない。発火だけを
+        この常駐デーモンに分離し、poll/tick に縛られず締切1分前ちょうどに投票を撃つ。
+        """
+        if self.scheduler_job is not None and self.scheduler_job.status in ("pending", "running"):
+            return
+        cmd = [PY, "-m", "src.bet_scheduler", f"--bet-lead-sec={bet_lead_sec}"]
+        if bet_oddspark:
+            cmd.append("--bet-oddspark")
+        if bet_ipat:
+            cmd.append("--bet-ipat")
+        if market_blend is not None:
+            cmd.append(f"--market-blend={market_blend}")
+        if aptitude_top is not None:
+            cmd.append(f"--aptitude-top={aptitude_top}")
+        if llm_blend is not None:
+            cmd.append(f"--llm-blend={llm_blend}")
+        if no_llm:
+            cmd.append("--no-llm")
+        self.scheduler_job = Job(
+            job_id=f"bet-scheduler-{int(time.time())}",
+            label="bet-scheduler",
+            cmd=cmd,
+        )
+        if self._registry is not None:
+            self._registry.add(self.scheduler_job)
+        await self.scheduler_job.start()
 
     async def _start_ipat_daemon(self, *, auto_purchase: bool = False,
                                  daily_cap: int = 50000,
@@ -659,6 +718,8 @@ class WatchAutoManager:
 
     async def stop(self) -> None:
         async with self._ensure_lock():
+            if self.scheduler_job:
+                await self.scheduler_job.cancel()   # 投票発火デーモンも止める
             if self.bet_job:
                 await self.bet_job.cancel()   # 投票ブラウザも一緒に閉じる
             if self.ipat_bet_job:

@@ -334,6 +334,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "ipat_bet_running": WATCH.ipat_bet_running,
+            "scheduler_running": WATCH.scheduler_running,
             "config": WATCH.config, "job": job.to_dict()}
 
 
@@ -341,7 +342,8 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
 async def api_watch_stop() -> dict[str, Any]:
     await WATCH.stop()
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
-            "ipat_bet_running": WATCH.ipat_bet_running, "config": WATCH.config}
+            "ipat_bet_running": WATCH.ipat_bet_running,
+            "scheduler_running": WATCH.scheduler_running, "config": WATCH.config}
 
 
 @app.get("/api/watch-auto/status")
@@ -350,6 +352,7 @@ def api_watch_status() -> dict[str, Any]:
         "running": WATCH.running,
         "bet_running": WATCH.bet_running,
         "ipat_bet_running": WATCH.ipat_bet_running,
+            "scheduler_running": WATCH.scheduler_running,
         "config": WATCH.config,
         "job": WATCH.job.to_dict() if WATCH.job else None,
         "bet_job": WATCH.bet_job.to_dict() if WATCH.bet_job else None,
