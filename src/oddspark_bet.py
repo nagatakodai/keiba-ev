@@ -98,6 +98,12 @@ SELECTORS = {
     # これらのいずれかが body テキストに出れば購入成功とみなし daily_stake を加算する。
     # 必ず複数 marker で OR 判定 (1つの marker だけだと文言改訂で全件 failed になる)。
     "purchase_success_markers": ("投票申込完了", "受け付けました", "成立組数"),
+    # ⚠ 不成立 (購入失敗) の証跡。完了画面 (VoteCompleteOpcoin.do) は **締切後/オッズ無効等で
+    # 全脚 不成立 でも** 上記 success markers (h2 "投票申込完了" / "受け付けました" / "成立組数")
+    # を全て出す (実機確認 2026-05-31 水沢2R: 全3脚 受付欄 ✕, 成立組数 0通り, 成立合計金額 0円,
+    # body に「投票申込不成立商品があります」)。よって success markers だけでは偽陽性 →
+    # 下記 reject markers を検出したら **failed 扱いで daily_stake を加算しない**。
+    "purchase_reject_markers": ("不成立", "成立した投票はありません"),
 }
 # 当方 bet_type → オッズパーク betType コード (betTypeSelect value, 実機確認済)。
 _BET_TYPE_CODE = {
@@ -423,6 +429,36 @@ def _save_daily_stake_map(d: dict[str, int]) -> None:
 def get_today_stake() -> int:
     """本日(JST)の累計購入額(円)。日跨ぎで自動的に 0 に戻る (キーが変わるため)。"""
     return _load_daily_stake_map().get(_today_jst(), 0)
+
+
+def _detect_purchase_reject(body_txt: str) -> str | None:
+    """完了画面 (VoteCompleteOpcoin.do) の body テキストから **不成立 (購入失敗)** を検出。
+
+    戻り値: 不成立なら理由文字列、成立 (正常購入) なら None。
+
+    完了画面は締切後/オッズ無効等で全脚不成立でも success markers
+    (h2 "投票申込完了" / "受け付けました" / "成立組数") を出すため、これだけでは
+    偽陽性になる。実機 (2026-05-31 水沢2R) の不成立画面は:
+      - body に「投票申込不成立商品があります」
+      - 成立組数 **0通り** / 成立合計金額 **0円**
+      - 各脚の受付欄に ✕
+    → ① reject marker (不成立 等) を含む ② "成立合計金額 …0円" / "成立組数 …0通り"
+       のいずれかが取れたら不成立とみなす (二段で取りこぼし防止)。
+    """
+    if not body_txt:
+        return None
+    for m in SELECTORS["purchase_reject_markers"]:
+        if m in body_txt:
+            return f"reject marker '{m}' を検出"
+    # 成立組数 0通り / 成立合計金額 0円 を数値で確認 (marker 文言が変わっても効く保険)。
+    import re
+    m_cnt = re.search(r"成立組数[^0-9]*([0-9,]+)\s*通り", body_txt)
+    if m_cnt and int(m_cnt.group(1).replace(",", "")) == 0:
+        return "成立組数 0通り"
+    m_sum = re.search(r"成立合計金額[^0-9]*([0-9,]+)\s*円", body_txt)
+    if m_sum and int(m_sum.group(1).replace(",", "")) == 0:
+        return "成立合計金額 0円"
+    return None
 
 
 def record_daily_stake(amount: int) -> int:
@@ -940,7 +976,13 @@ class BettingSession:
         # URL 遷移が起きていない時は server 確定が無いとみなし failed (safe)。URL 遷移済なら
         # h2/body のどちらか一方でも検知できれば success として daily_stake 加算 (under-count 防止)。
         # render 完了を許容するため check の前に 1 秒追加待機 + 不足分は最大 6 秒まで polling する。
+        # ⚠ 「完了画面に遷移 + success marker 検出」だけでは不十分: 締切後/オッズ無効等で
+        #    **全脚 不成立** でも完了画面は同じ markers (h2 "投票申込完了"/"受け付けました"/
+        #    "成立組数") を出す (実機 2026-05-31 水沢2R: 成立組数 0通り/成立合計金額 0円/全脚✕)。
+        #    → reject marker (不成立) または 成立合計金額==0 を検出したら failed 扱いで
+        #      daily_stake を加算しない (偽陽性 = 未購入なのに cap を消費するのを防ぐ)。
         success = False
+        reject_reason = None
         import time as _t
         deadline = _t.time() + 6.0
         while _t.time() < deadline:
@@ -955,11 +997,17 @@ class BettingSession:
                     "() => document.body ? document.body.innerText || '' : ''")
                 has_marker = any(m in body_txt for m in SELECTORS["purchase_success_markers"])
                 if has_h2 or has_marker:
-                    success = True
+                    # 完了画面には来た。ここで 不成立 を判定 (成立合計金額==0 / "不成立")。
+                    reject_reason = _detect_purchase_reject(body_txt)
+                    success = reject_reason is None
                     break
             except Exception:  # noqa: BLE001
                 pass
             self.page.wait_for_timeout(500)
+        if reject_reason is not None:
+            return ("failed",
+                    f"投票不成立 — 購入されていません ({reject_reason})。締切後/オッズ無効/資金不足等。"
+                    " daily_stake は加算しない (purchase_after_click screenshot 参照)")
         if not success:
             return ("failed",
                     "成功検知失敗 (URL=VoteComplete... に遷移 + h2/body marker のいずれか必須) "
