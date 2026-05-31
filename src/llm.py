@@ -483,6 +483,164 @@ def select_bundle_stream(
             yield ev
 
 
+def build_horse_score_prompt(
+    rd: RaceData,
+    *,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+) -> str:
+    """各馬に **0-100 の強さ指数** (高い=強い=1位,2位…) を付けさせる prompt。
+
+    2段パイプラインの score ステージで使う。web 検索で各馬の適性/状態/取消を調べ、
+    確率モデルに合成する「Claude 考察由来の強さ指数」を出力させる。picks/cuts は出さない
+    (買い目はモデル+joint Kelly が決める)。検索ルールは CLAUDE.md 準拠。
+    """
+    import datetime as _dt
+    r = rd.race
+    apt = aptitudes or {}
+    horses = [h for h in r.horses if not h.absent]
+    if r.start_at:
+        kaisai_date = _dt.datetime.fromtimestamp(r.start_at).strftime("%Y-%m-%d")
+    else:
+        kaisai_date = "当日"
+    lines = [
+        f"# レース: {r.venue_name} {r.race_number}R ({r.race_class}) "
+        f"{r.surface}{r.distance}m {r.weather_text}",
+        f"開催日: {kaisai_date}",
+        "",
+        "あなたは競馬の考察家です。下の出走馬について **web 検索 (Brave/Tavily)** で "
+        "各馬の直近5走・距離/コース/馬場適性・騎手・取消/体調を調べ、**各馬の「強さ指数」"
+        "(0-100, 高いほど強い = 1着に近い)** を付けてください。これは確率モデルの fundamental "
+        "に合成され、最終的に市場オッズとブレンドされます。**買い目 (picks) は決めません** — "
+        "あなたの仕事は各馬を相対評価して数値化することだけです。",
+        "",
+        "## 出走馬 (馬番 / 馬名 / 適性総合 / 単勝オッズ)",
+        "| 馬番 | 馬名 | 適性総合 | 単勝 |",
+        "|---|---|---|---|",
+    ]
+    for h in horses:
+        a = apt.get(h.number)
+        atot = f"{getattr(a, 'total', 0):.0f}" if a is not None else "-"
+        wo = f"{h.win_odds:.1f}" if getattr(h, "win_odds", 0) else "-"
+        lines.append(f"| {h.number} | {h.name or '?'} | {atot} | {wo} |")
+    lines += [
+        "",
+        "## 検索 MCP の運用ルール (CLAUDE.md 準拠)",
+        "**検索すべき情報**(優先度順): ①直近5走の着順詳細・距離適性・コース実績 "
+        "②騎手の当該コース成績/乗り替わり ③当日の馬場状態と適性 ④厩舎調整/馬体重変化 "
+        "⑤取消・除外・体調不安。",
+        "**検索すべきでない**: 既に上表にある数値 (オッズ/適性)、競馬の基本ルール、1か月以上前の汎用情報。",
+        "**検索予算**: 1レース**最大6クエリ** (Brave+Tavily 合算)。各クエリ前に「何が決まるか」を1行説明。",
+        "**クエリ例**: \"<馬名>\" 直近5走 / \"<馬名>\" <距離>m <芝|ダ> / \"<騎手名>\" <場名> 成績 / "
+        "<場名> 馬場状態 <YYYYMMDD> / \"<馬名>\" 取消 OR 体調",
+        "",
+        "## 指数の付け方",
+        "- 0-100 の相対評価。**最も強い馬を高く**、勝ち目の薄い馬を低く。同点でも構わないが差をつける。",
+        "- 距離/コース/馬場適性◎・直近好走・騎手得意 → 加点。馬体重大幅増減・不適性・展開不利 → 減点。",
+        "- **取消/除外/重度の体調不安**が確認できた馬は指数 0 にする (絡む目をモデルが落とせるよう)。",
+        "- 補強根拠が無い馬は適性総合・オッズの常識的水準に留め、過度に動かさない (楽観バイアス警戒)。",
+        "",
+        "## 出力",
+        "全出走馬の 馬番→指数 を必ず網羅し、最後に以下の JSON を ```json ... ``` で出力:",
+        "```json",
+        '{"scores": {"7": 82, "2": 64, "11": 40},'
+        ' "notes": {"7": "補強3件: 距離適性◎/騎手当該場勝率18%/直近3走連対"},'
+        ' "summary": "考察の総評", "confidence": "high|mid|low"}',
+        "```",
+    ]
+    return "\n".join(lines)
+
+
+def score_horses_stream(
+    rd: RaceData,
+    *,
+    model: str = "opus",
+    timeout: int = 300,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+) -> Iterator[tuple[str, Any]]:
+    """各馬の強さ指数を web 検索付きで出させる stream-json。select_bundle_stream と
+    同じ spawn/event 形式。出力は parse_horse_scores で {scores,...} に正規化する。
+    """
+    if not is_available():
+        yield ("error", "claude CLI が見つかりません")
+        return
+    horses = [h for h in rd.race.horses if not h.absent]
+    if not horses:
+        yield ("result", "")
+        return
+    prompt = build_horse_score_prompt(
+        rd, aptitudes=aptitudes, market_signals=market_signals,
+        horse_best_times=horse_best_times,
+    )
+    cmd = [
+        "claude", "-p", prompt,
+        "--model", model,
+        "--output-format", "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--permission-mode", "bypassPermissions",
+        "--allowedTools", ",".join(ALLOWED_TOOLS),
+        "--disallowedTools", DISALLOWED_TOOLS,
+    ]
+    proc = subprocess.Popen(
+        cmd, cwd=str(ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=_claude_env(),
+    )
+    assert proc.stdout is not None
+    timer, timed_out = _start_kill_timer(proc, timeout)
+    try:
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = ev.get("type")
+            if etype == "assistant":
+                for block in ev.get("message", {}).get("content", []) or []:
+                    if block.get("type") == "tool_use":
+                        yield ("tool_use", {"name": block.get("name", ""), "input": block.get("input", {})})
+                    elif block.get("type") == "text" and block.get("text"):
+                        yield ("text", block["text"])
+            elif etype == "result":
+                yield ("result", ev.get("result", "") or "")
+            elif etype == "error":
+                yield ("error", ev.get("message", "unknown error"))
+    except Exception as e:  # noqa: BLE001
+        yield ("error", f"stream parse error: {e}")
+    finally:
+        for ev in _finalize_claude_proc(proc, timer, timed_out):
+            yield ev
+
+
+def parse_horse_scores(text: str) -> dict:
+    """score 出力の JSON を {"scores":{int:float}, "notes":{}, "summary":str, "confidence":str}
+    に正規化。壊れた/空出力は scores 空で返す (raise しない)。
+    """
+    raw = parse_evidence(text)
+    if not isinstance(raw, dict):
+        return {"scores": {}, "notes": {}, "summary": "", "confidence": ""}
+    scores: dict[int, float] = {}
+    for k, v in (raw.get("scores") or {}).items():
+        try:
+            scores[int(k)] = float(v)
+        except (ValueError, TypeError):
+            continue
+    notes = raw.get("notes") if isinstance(raw.get("notes"), dict) else {}
+    return {
+        "scores": scores,
+        "notes": notes,
+        "summary": str(raw.get("summary", "")),
+        "confidence": str(raw.get("confidence", "")),
+    }
+
+
 def parse_bundle_review(text: str) -> dict:
     """選定出力の JSON ブロックを {picks,cuts,notes,summary,confidence} に正規化。
 

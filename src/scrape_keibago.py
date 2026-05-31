@@ -23,6 +23,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 
+from .ev import LLM_BLEND_DEFAULT
 from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
 from .parse import VENUE_CODE, _split_race_id, is_nar_race_id
 
@@ -463,7 +464,8 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
 
 def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
                     with_llm: bool = True, market_blend: float = 0.78,
-                    aptitude_top: int = 6) -> dict:
+                    aptitude_top: int = 6, phase: str = "bet",
+                    llm_blend: float = LLM_BLEND_DEFAULT) -> dict:
     """NAR race を keiba.go.jp の全6券種オッズで解析 (netkeiba/oddspark の上位互換)。
 
     出馬表/馬柱は data/raw の netkeiba cache があれば使い (確率モデルが効く)、無ければ
@@ -523,10 +525,36 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     rd.other_bets = {bt: v for bt, v in other.items() if v}
     rd.trifecta = trifecta
 
+    from . import analyze as az_mod
+    from .aptitude import compute_aptitudes
+    from .features import build_features
+    race_id = f"{rd.race.cup_id}-{rd.race.schedule_index}-{rd.race.race_number}"
+    has_past = any(h.past_runs for h in rd.race.horses)
+    feats = build_features(rd) if (used_cache or has_past) else None
+    aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
+    try:
+        from .market_signal import compute_market_signals
+        market_signals = compute_market_signals(rd)
+    except Exception:  # noqa: BLE001
+        market_signals = None
+    best_times = az_mod._serialize_best_times(rd, feats) if feats else []
+
+    # 2段パイプライン score ステージ: Claude 指数をキャッシュし即 return。
+    if phase == "score":
+        if with_llm:
+            az_mod._run_score_stage(
+                race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
+                horse_best_times=best_times, model="opus")
+        return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
+
+    # bet ステージ: キャッシュ指数を合成して estimate_probs。
+    llm_index, llm_scored_at = az_mod._load_llm_scores(race_id)
+
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
     s = sum(1.0 / o for o in win_odds.values()) or 1.0
     mwp = {n: (1.0 / o) / s for n, o in win_odds.items()}
-    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp)
+    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp,
+                                  llm_win_index=llm_index, llm_blend=llm_blend)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     tri_table = ev_mod.build_table(rd, probs) if rd.trifecta else []
@@ -545,46 +573,23 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     tables["trifecta"] = tri_table
 
     if save_snapshot:
-        from . import analyze as az_mod
-        from .aptitude import compute_aptitudes
-        from .features import build_features
-        race_id = f"{rd.race.cup_id}-{rd.race.schedule_index}-{rd.race.race_number}"
-        has_past = any(h.past_runs for h in rd.race.horses)
-        feats = build_features(rd) if (used_cache or has_past) else None
-        aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
         apt_top = az_mod._aptitude_top_horses(aptitudes, n=aptitude_top) if aptitudes else None
         plan_rows = ev_mod.apply_caps(tri_table)
         # keiba.go.jp の馬連/ワイド/馬単/3連複は組合せ明示で信頼できる (consistency NG 時は
-        # 既に [] に落としてある) ので、束だけでなく EV table も snapshot に載せる
-        # (単複のみだった oddspark の制限は流用しない。netkeiba 経路と同じく全券種表示)。
+        # 既に [] に落としてある) ので、束だけでなく EV table も snapshot に載せる。
         snap_bet_tables = {k: v for k, v in tables.items()
                            if k in ("win", "place", "quinella", "wide", "exacta", "trio") and v}
-        try:
-            from .market_signal import compute_market_signals
-            market_signals = compute_market_signals(rd)
-        except Exception:  # noqa: BLE001
-            market_signals = None
-        best_times = az_mod._serialize_best_times(rd, feats) if feats else []
         try:
             az_mod._save_prediction_snapshot(
                 race_id, rd, tri_table, plan_rows, aptitudes, snap_bet_tables, apt_top,
                 market_signals, feats=feats, lgbm_info=ev_mod.lgbm_status(),
                 hit_points=3, probs=probs,
+                llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
             )
             _tag_snapshot_source(race_id, "keibago")
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_keibago] snapshot 保存失敗: {ex}")
-        if with_llm:
-            # 回収優先 (recommended_bundle) の claude 選定。終了後 detached で 的中優先 を別 process spawn。
-            try:
-                az_mod._validate_and_update_bundle(
-                    race_id, rd, probs, tri_table, snap_bet_tables,
-                    aptitudes=aptitudes, market_signals=market_signals,
-                    horse_best_times=best_times, model="opus",
-                )
-                az_mod._spawn_hit_bundle_claude(race_id)
-            except Exception as ex:  # noqa: BLE001
-                print(f"[analyze_keibago] bundle 検証失敗: {ex}")
+        # picks/cuts 選定は廃止 (指数ステップ一本化)。束は probs から build_bundle 済。
 
     return {"rd": rd, "probs": probs, "loc": loc, "used_cache": used_cache,
             "tables": tables, "bundle": bundle, "consistency": cons}
@@ -705,6 +710,8 @@ def _main() -> None:
     start_at = 0
     market_blend = 0.78
     aptitude_top = 6
+    phase = "bet"
+    llm_blend = LLM_BLEND_DEFAULT
     for a in sys.argv:
         if a.startswith("--start-at="):
             start_at = int(a.split("=", 1)[1] or 0)
@@ -713,6 +720,13 @@ def _main() -> None:
                 market_blend = float(a.split("=", 1)[1])
             except ValueError:
                 pass
+        elif a.startswith("--llm-blend="):
+            try:
+                llm_blend = float(a.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif a.startswith("--phase="):
+            phase = a.split("=", 1)[1].strip() or "bet"
         elif a.startswith("--aptitude-top="):
             try:
                 aptitude_top = int(a.split("=", 1)[1])
@@ -722,11 +736,16 @@ def _main() -> None:
         try:
             res = analyze_keibago(rid, save_snapshot=True, start_at=start_at,
                                   with_llm="--no-llm" not in sys.argv,
-                                  market_blend=market_blend, aptitude_top=aptitude_top)
+                                  market_blend=market_blend, aptitude_top=aptitude_top,
+                                  phase=phase, llm_blend=llm_blend)
         except KeibagoError as ex:
             print(f"keiba.go.jp 解析不能 ({rid}): {ex}")
             raise SystemExit(1)
-        loc, c = res["loc"], res["consistency"]
+        loc = res["loc"]
+        if res.get("phase") == "score":
+            print(f"=== keiba.go.jp {loc.venue} {loc.race_no}R score ステージ完了 (指数キャッシュ) ===")
+            return
+        c = res["consistency"]
         has_past = any(h.past_runs for h in res["rd"].race.horses)
         src = ("cache 出馬表+馬柱" if res["used_cache"]
                else "公式出馬表+馬柱" if has_past else "馬リストのみ(市場主導)")

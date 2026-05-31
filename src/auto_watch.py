@@ -38,16 +38,28 @@ console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
 
-def _load_analyzed() -> set[str]:
-    if not CACHE_FILE.exists():
+# 2段パイプライン: score / bet で dedup 名前空間を分ける。同一 race を score で済ませても
+# bet 帯で skip されないようにする (= 共有すると bet が全 skip され賭けが走らない致命バグ)。
+# bet は既存ファイルを使い後方互換、score は別ファイル。
+CACHE_FILE_SCORE = ROOT / "data/cache/auto_watch_analyzed_score.txt"
+
+
+def _analyzed_file(phase: str):
+    return CACHE_FILE_SCORE if phase == "score" else CACHE_FILE
+
+
+def _load_analyzed(phase: str = "bet") -> set[str]:
+    f = _analyzed_file(phase)
+    if not f.exists():
         return set()
-    return {line.strip() for line in CACHE_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
+    return {line.strip() for line in f.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
-def _mark_analyzed(race_id: str) -> None:
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with CACHE_FILE.open("a", encoding="utf-8") as f:
-        f.write(race_id + "\n")
+def _mark_analyzed(race_id: str, phase: str = "bet") -> None:
+    f = _analyzed_file(phase)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(race_id + "\n")
 
 
 def _append_history(record: dict) -> None:
@@ -290,27 +302,43 @@ def _normalize_race_id(netkeiba_rid: str) -> str:
     return f"{cup_id}-{schedule_index}-{race_number}"
 
 
+def _phase_args(phase: str, llm_blend: float | None) -> list[str]:
+    """dispatch subprocess に渡す共通 phase 引数 (--phase / --llm-blend)。"""
+    args = [f"--phase={phase}"]
+    if llm_blend is not None:
+        args.append(f"--llm-blend={llm_blend}")
+    return args
+
+
 def _dispatch_keibago(netkeiba_rid: str, start_at: int = 0,
                       *, market_blend: float | None = None,
-                      aptitude_top: int | None = None, no_llm: bool = False) -> int:
-    """NAR: keiba.go.jp の全6券種オッズで解析し snapshot を保存。"""
+                      aptitude_top: int | None = None, no_llm: bool = False,
+                      phase: str = "bet", llm_blend: float | None = None) -> int:
+    """NAR: keiba.go.jp の全6券種オッズで解析し snapshot を保存 (phase=score で指数キャッシュ)。"""
     cmd = [sys.executable, "-m", "src.scrape_keibago", netkeiba_rid,
-           "--snapshot", f"--start-at={start_at}"]
+           "--snapshot", f"--start-at={start_at}", *_phase_args(phase, llm_blend)]
     if market_blend is not None:
         cmd.append(f"--market-blend={market_blend}")
     if aptitude_top is not None:
         cmd.append(f"--aptitude-top={aptitude_top}")
     if no_llm:
         cmd.append("--no-llm")
-    console.print(f"[bold cyan]→ keiba.go.jp analyze:[/bold cyan] {netkeiba_rid}")
+    console.print(f"[bold cyan]→ keiba.go.jp analyze ({phase}):[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
 
 def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
                        *, market_blend: float | None = None,
-                       aptitude_top: int | None = None, no_llm: bool = False) -> int:
-    """NAR: oddspark オッズで解析し snapshot を保存 (keibago 不可時)。"""
+                       aptitude_top: int | None = None, no_llm: bool = False,
+                       phase: str = "bet", llm_blend: float | None = None) -> int:
+    """NAR: oddspark オッズで解析し snapshot を保存 (keibago 不可時)。
+
+    oddspark の analyze は phase 非対応 (指数合成しない)。score 帯では何もしない (=skip, rc 0)。
+    bet 帯ではモデル+市場のみで snapshot を出す (= 従来挙動。指数はこの fallback では効かない)。
+    """
+    if phase == "score":
+        return 0
     cmd = [sys.executable, "-m", "src.scrape_oddspark", netkeiba_rid,
            "--snapshot", f"--start-at={start_at}"]
     if market_blend is not None:
@@ -326,24 +354,26 @@ def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
 
 def _dispatch_jra(netkeiba_rid: str, start_at: int = 0,
                   *, market_blend: float | None = None,
-                  aptitude_top: int | None = None, no_llm: bool = False) -> int:
+                  aptitude_top: int | None = None, no_llm: bool = False,
+                  phase: str = "bet", llm_blend: float | None = None) -> int:
     """JRA: 公式 (accessO.html token walk) で全7券種オッズを取得して snapshot 保存。"""
     cmd = [sys.executable, "-m", "src.scrape_jra", netkeiba_rid,
-           "--snapshot", f"--start-at={start_at}"]
+           "--snapshot", f"--start-at={start_at}", *_phase_args(phase, llm_blend)]
     if market_blend is not None:
         cmd.append(f"--market-blend={market_blend}")
     if aptitude_top is not None:
         cmd.append(f"--aptitude-top={aptitude_top}")
     if no_llm:
         cmd.append("--no-llm")
-    console.print(f"[bold cyan]→ JRA 公式 analyze:[/bold cyan] {netkeiba_rid}")
+    console.print(f"[bold cyan]→ JRA 公式 analyze ({phase}):[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
 
 def _dispatch_nar_fallback(netkeiba_rid: str, start_at: int = 0,
                            *, market_blend: float | None = None,
-                           aptitude_top: int | None = None, no_llm: bool = False) -> int:
+                           aptitude_top: int | None = None, no_llm: bool = False,
+                           phase: str = "bet", llm_blend: float | None = None) -> int:
     """NAR フォールバック: keiba.go.jp (全6券種・組合せ明示) を優先、失敗時 oddspark。
 
     keiba.go.jp は馬連/ワイド/馬単/3連複/3連単 を組合せ明示で取れるので oddspark
@@ -351,11 +381,13 @@ def _dispatch_nar_fallback(netkeiba_rid: str, start_at: int = 0,
     keiba.go.jp が解決できない (場名/開催) 場合のみ oddspark に落ちる。
     """
     rc = _dispatch_keibago(netkeiba_rid, start_at,
-                           market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm)
+                           market_blend=market_blend, aptitude_top=aptitude_top,
+                           no_llm=no_llm, phase=phase, llm_blend=llm_blend)
     if rc != 0:
         console.print("[yellow]keiba.go.jp 不可 → oddspark にフォールバック[/yellow]")
         rc = _dispatch_oddspark(netkeiba_rid, start_at,
-                                market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm)
+                                market_blend=market_blend, aptitude_top=aptitude_top,
+                                no_llm=no_llm, phase=phase, llm_blend=llm_blend)
     return rc
 
 
@@ -397,8 +429,11 @@ def _in_active_hours(now: datetime, active_hours: str) -> bool:
 
 @app.command()
 def main(
-    window_min: float = typer.Option(5, "--window", help="**締切までの**目標リード時間 (分)。締切=発走2分前固定。0 で締切0分前 (締切ちょうど) まで受け付け。小数可 (例 0.5)"),
-    tolerance_min: float = typer.Option(2, "--tolerance", help="window からの + 側許容 (分)。締切 window〜window+tolerance 分前で検出。小数可"),
+    window_min: float = typer.Option(1, "--window", help="**bet 帯** 締切までの目標リード時間 (分)。締切=発走2分前固定。発走前 bet 用に既定 1 分 (=締切1分前にオッズ取得+購入)。小数可"),
+    tolerance_min: float = typer.Option(1.5, "--tolerance", help="bet 帯 window からの + 側許容 (分)。締切 window〜window+tolerance 分前で検出。小数可"),
+    score_window: float = typer.Option(5, "--score-window", help="**score 帯** 締切までのリード (分)。Claude 考察で各馬指数を出しキャッシュする早回し。既定 5 分前"),
+    score_tolerance: float = typer.Option(2, "--score-tolerance", help="score 帯の + 側許容 (分)。締切 score_window〜+tolerance 分前で考察。小数可"),
+    llm_blend: float = typer.Option(None, "--llm-blend", help="Claude 指数と model fundamental の合成重み (未指定なら各 analyze の既定 0.5)"),
     ev_max: float = typer.Option(None, "--ev-max"),
     min_prob: float = typer.Option(None, "--min-prob"),
     market_blend: float = typer.Option(None, "--market-blend"),
@@ -426,7 +461,7 @@ def main(
     ),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """1 巡だけ実行。"""
+    """1 巡だけ実行。2段パイプライン: score 帯 (考察→指数キャッシュ) → bet 帯 (指数+最新オッズ→束→enqueue)。"""
     now_dt = datetime.now()
     now_ts = int(now_dt.timestamp())
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -440,92 +475,116 @@ def main(
         )
         return
 
+    _ = (ev_max, min_prob, with_exacta, with_trio)   # 受け取るが現状未配線 (no-op)
+
+    # Stage 1: score 帯 (締切 score_window〜+tol 分前)。Claude 考察で各馬指数をキャッシュ。
+    # --no-llm のときは指数を作れないので score 帯はスキップ (bet 帯がモデルのみで動く=従来挙動)。
+    if not no_llm:
+        _run_phase(
+            "score", score_window, score_tolerance, now_ts,
+            market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
+            bet_oddspark=False, bet_ipat=False, dry_run=dry_run, llm_blend=llm_blend,
+        )
+
+    # Stage 2: bet 帯 (締切 window〜+tol 分前)。キャッシュ指数+最新オッズで束→enqueue。
+    _run_phase(
+        "bet", window_min, tolerance_min, now_ts,
+        market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
+        bet_oddspark=bet_oddspark, bet_ipat=bet_ipat, dry_run=dry_run, llm_blend=llm_blend,
+    )
+
+
+def _run_phase(
+    phase: str, window_min: float, tolerance_min: float, now_ts: int,
+    *, market_blend, aptitude_top, no_llm: bool,
+    bet_oddspark: bool, bet_ipat: bool, dry_run: bool, llm_blend,
+) -> None:
+    """1 巡分の race 検出→dispatch を 1 phase 実行する。phase=score は指数キャッシュのみ、
+    phase=bet は束生成+enqueue+result fetch スケジュール。dedup は phase 名前空間で独立。
+    """
+    label = "考察(score)" if phase == "score" else "投票(bet)"
     console.print(
-        f"[dim]{now_str}[/dim] 締切 {window_min:g}〜{window_min + tolerance_min:g} 分前のレースを検索中... (= 発走 {window_min + 2:g}〜{window_min + tolerance_min + 2:g} 分前)"
+        f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim] [{label}] 締切 "
+        f"{window_min:g}〜{window_min + tolerance_min:g} 分前を検索中... "
+        f"(= 発走 {window_min + 2:g}〜{window_min + tolerance_min + 2:g} 分前)"
     )
     try:
         due = _list_due_races(window_min, tolerance_min, now_ts)
     except Exception as e:
         console.print(f"[red]race_list 取得失敗: {e}[/red]")
         return
-
     if not due:
-        console.print("[dim]該当レースなし[/dim]")
+        console.print(f"[dim]該当レースなし ({label})[/dim]")
         return
 
-    analyzed = _load_analyzed()
-    # 公式ソース (keibago) は単複/馬連/ワイド/馬単/3連複/3連単 を組合せ明示で常時 fetch する
-    # ため --with-exacta/--with-trio は no-op。--ev-max/--min-prob は keibago の plan filter に
-    # まだ通っていない (TODO: 必要なら scrape_keibago に --min-prob を足す)。
-    # 効くのは --market-blend / --aptitude-top (下の _dispatch_nar_fallback で渡す)。
-    _ = (ev_max, min_prob, with_exacta, with_trio)   # 受け取るが現状未配線 (no-op)
-
+    analyzed = _load_analyzed(phase)
     for race in due:
         rid = race["race_id"]
-        mins = race["delta_sec"] / 60.0   # 締切までの分数 (発走 - 2 分 - 現在)
+        mins = race["delta_sec"] / 60.0
         tag = f"{race['venue']} {race['race_no']}R 締切まで {mins:.1f}分 (発走まで {mins + 2:.1f}分)"
         if rid in analyzed:
-            console.print(f"[dim]skip (already analyzed): {tag} {rid}[/dim]")
+            console.print(f"[dim]skip ({phase} 済): {tag} {rid}[/dim]")
             continue
         if _recently_failed(rid, int(time.time())):
             console.print(
                 f"[dim]skip (recently failed, cooldown {FAILED_RETRY_COOLDOWN_SEC}s): {tag} {rid}[/dim]"
             )
             continue
-        console.print(f"[bold green]match:[/bold green] {tag} ({rid})")
+        console.print(f"[bold green]match ({phase}):[/bold green] {tag} ({rid})")
         if dry_run:
             console.print(f"  [dim]dry-run: {race['url']}[/dim]")
             continue
         started_at = int(time.time())
-        # 公式ソース dispatch:
-        #   NAR (source=oddspark)  → keiba.go.jp (全6券種) 優先・oddspark フォールバック
-        #   JRA (source=keibabook) → JRA 公式 accessO.html (全7券種)
-        # netkeiba live は一切使わない。
         if race.get("source") == "keibabook":
             rc = _dispatch_jra(
                 race["netkeiba_race_id"], race.get("start_at", 0),
                 market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
+                phase=phase, llm_blend=llm_blend,
             )
         else:
             rc = _dispatch_nar_fallback(
                 race["netkeiba_race_id"], race.get("start_at", 0),
                 market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
+                phase=phase, llm_blend=llm_blend,
             )
         finished_at = int(time.time())
         if rc == 0:
-            _mark_analyzed(rid)
-            analyzed.add(rid)  # 同 tick 内の重複 rid (oddspark+netkeiba 両経路等) を二重 dispatch しない
-            if bet_oddspark:
+            _mark_analyzed(rid, phase)
+            analyzed.add(rid)
+            # enqueue + result fetch は bet 帯のみ (score 帯は指数キャッシュだけ)。
+            if phase == "bet":
+                if bet_oddspark:
+                    try:
+                        if _enqueue_oddspark_bet(rid, race.get("netkeiba_race_id", rid)):
+                            console.print(
+                                f"  [magenta]→ oddspark betting queue に投入:[/magenta] {rid} "
+                                "(--session daemon がカート投入。確定は人)")
+                    except Exception as e:  # noqa: BLE001
+                        console.print(f"[red]oddspark enqueue 失敗: {e}[/red]")
+                if bet_ipat:
+                    try:
+                        if _enqueue_ipat_bet(rid, race.get("netkeiba_race_id", rid)):
+                            console.print(
+                                f"  [magenta]→ 即PAT betting queue に投入:[/magenta] {rid} "
+                                "(--session daemon がカート投入。確定は人)")
+                    except Exception as e:  # noqa: BLE001
+                        console.print(f"[red]ipat enqueue 失敗: {e}[/red]")
                 try:
-                    if _enqueue_oddspark_bet(rid, race.get("netkeiba_race_id", rid)):
+                    p = schedule_result_fetch(rid, race["url"], race["start_at"])
+                    if p.status == "pending":
                         console.print(
-                            f"  [magenta]→ oddspark betting queue に投入:[/magenta] {rid} "
-                            "(--session daemon がカート投入。確定は人)")
-                except Exception as e:  # noqa: BLE001
-                    console.print(f"[red]oddspark enqueue 失敗: {e}[/red]")
-            if bet_ipat:
-                try:
-                    if _enqueue_ipat_bet(rid, race.get("netkeiba_race_id", rid)):
-                        console.print(
-                            f"  [magenta]→ 即PAT betting queue に投入:[/magenta] {rid} "
-                            "(--session daemon がカート投入。確定は人)")
-                except Exception as e:  # noqa: BLE001
-                    console.print(f"[red]ipat enqueue 失敗: {e}[/red]")
-            try:
-                p = schedule_result_fetch(rid, race["url"], race["start_at"])
-                if p.status == "pending":
-                    console.print(
-                        f"  [cyan]→ result fetch scheduled:[/cyan] "
-                        f"{rid} at {datetime.fromtimestamp(p.due_at).strftime('%H:%M:%S')}"
-                    )
-            except Exception as e:
-                console.print(f"[red]schedule_result_fetch 失敗: {e}[/red]")
-            _drain_pending(label="post-analyze")
+                            f"  [cyan]→ result fetch scheduled:[/cyan] "
+                            f"{rid} at {datetime.fromtimestamp(p.due_at).strftime('%H:%M:%S')}"
+                        )
+                except Exception as e:
+                    console.print(f"[red]schedule_result_fetch 失敗: {e}[/red]")
+                _drain_pending(label="post-analyze")
         else:
-            console.print(f"[red]analyze 失敗 rc={rc} race={rid}[/red]")
+            console.print(f"[red]analyze 失敗 rc={rc} race={rid} ({phase})[/red]")
         _append_history({
             "started_at": started_at,
             "finished_at": finished_at,
+            "phase": phase,
             "race_id": rid,
             "netkeiba_race_id": race.get("netkeiba_race_id", rid),
             "url": race["url"],

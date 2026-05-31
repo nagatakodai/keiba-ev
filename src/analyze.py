@@ -77,6 +77,8 @@ def main(
     aptitude_top: int = typer.Option(6, "--aptitude-top", help="Plan G の適性 top N (頭数)"),
     with_exacta: bool = typer.Option(False, "--with-exacta", help="馬単 (b5) も fetch (jiku iteration で重い)"),
     with_trio: bool = typer.Option(False, "--with-trio", help="3 連複 (b6) も fetch (jiku iteration で重い)"),
+    phase: str = typer.Option("bet", "--phase", help="score = Claude 考察で各馬指数を出しキャッシュ / bet = 指数+市場でP→束→snapshot (既定)"),
+    llm_blend: float = typer.Option(ev_mod.LLM_BLEND_DEFAULT, "--llm-blend", help="Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ)"),
 ):
     """URL (netkeiba) を渡して P×O ランキングと Plan A/B/C を出力。"""
     if not (url or html_file):
@@ -123,6 +125,21 @@ def main(
     aptitudes = compute_aptitudes(rd, feats=feats)
     apt_top = _aptitude_top_horses(aptitudes, n=aptitude_top)
     market_signals = compute_market_signals(rd)
+
+    # 2段パイプライン score ステージ: Claude に各馬の強さ指数を出させてキャッシュし即終了。
+    # (estimate_probs / 束 / snapshot / enqueue はしない。bet ステージが指数を読む)
+    if phase == "score":
+        _print_race_header(rd)
+        best_times_for_score = _serialize_best_times(rd, feats) if feats else []
+        _run_score_stage(
+            race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
+            horse_best_times=best_times_for_score, model=llm_model,
+        )
+        return
+
+    # bet ステージ: score ステージのキャッシュ指数を読んで estimate_probs に合成する。
+    llm_index, llm_scored_at = _load_llm_scores(race_id)
+
     lgbm_info = ev_mod.lgbm_status()
     if lgbm_info.get("available"):
         n_feat = lgbm_info["n_features"]
@@ -142,7 +159,10 @@ def main(
     # CV / sliding-window で overfit と判明し Phase 22/23 で revert (詳細
     # CLAUDE.md)。BLEND_HIT_PURE / BLEND_APTITUDE_GATE 定数は実験用に ev.py
     # に残置、CLI の --market-blend で 1 回限り試せる。
-    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_floor=market_floor)
+    probs = ev_mod.estimate_probs(
+        rd, market_blend=market_blend, market_floor=market_floor,
+        llm_win_index=llm_index, llm_blend=llm_blend,
+    )
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
 
     _print_race_header(rd)
@@ -163,6 +183,7 @@ def main(
         _save_prediction_snapshot(
             race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
             feats=feats, lgbm_info=lgbm_info, hit_points=hit_points, probs=probs,
+            llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -188,22 +209,14 @@ def main(
     _print_bet_tables(bet_tables, aptitude_top_horses=apt_top)
     _print_judgment_notes(rd, rows)
 
-    initial_eval = ""   # 3連単 evidence は廃止 (refresh の context 用に空のまま渡す)
-    if not no_llm:
-        # claude による評価は **総合オススメ束(全 bet type 横断)に対する web 検索補強のみ**。
-        # 3連単 単独の evidence (旧 _print_llm_evaluation + parse_evidence) は廃止し、
-        # 1 race = 1 claude call に集約 (search 込みの bundle 選定)。
-        best_times_for_llm = _serialize_best_times(rd, feats) if feats else []
-        if not no_cache:
-            _validate_and_update_bundle(
-                race_id, rd, probs, rows, bet_tables,
-                aptitudes=aptitudes, market_signals=market_signals,
-                horse_best_times=best_times_for_llm, model=llm_model,
-            )
-            # 回収優先 (recommended_bundle) の選定+更新が終わったので、ここから先 (auto_watch が
-            # snapshot を見て enqueue → daemon が購入開始) と並行で **的中優先 (recommended_bundle_hit)
-            # を別 process で claude 選定**。analyze は即終了する。
-            _spawn_hit_bundle_claude(race_id)
+    initial_eval = ""   # refresh の context 用に空のまま渡す
+    # 2段パイプライン (指数ステップ一本化): bet ステージは Claude の picks/cuts 選定を呼ばない。
+    # 買い目は score ステージの指数を合成した probs から build_bundle (joint Kelly + トリガミ防止)
+    # が決める。Claude の考察は estimate_probs に既に入っている (llm_win_index)。
+    if llm_index is not None:
+        console.print(f"[cyan]Claude 指数を合成済 (llm_blend={llm_blend}, {len(llm_index)} 頭)[/cyan]")
+    elif not no_llm:
+        console.print("[yellow]Claude 指数キャッシュ無し — モデルのみで束生成 (score ステージ未完?)[/yellow]")
 
     if refresh:
         if not url:
@@ -571,6 +584,116 @@ def _update_snapshot_bundle(race_id: str, bundle: dict, *, prioritize: str = "yi
     console.print(f"[dim]{label} 更新 (LLM 検証反映)[/dim]")
 
 
+def _llm_scores_path(race_id: str) -> Path:
+    return ROOT / "data" / "predictions" / f"{race_id}.llm.json"
+
+
+def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
+    """score ステージの Claude 指数を `<race_id>.llm.json` に保存 (bet ステージが読む)。"""
+    out = _llm_scores_path(race_id)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "race_id": race_id,
+        "scored_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "model": model,
+        "scores": {str(k): v for k, v in (parsed.get("scores") or {}).items()},
+        "notes": parsed.get("notes") or {},
+        "summary": parsed.get("summary", ""),
+        "confidence": parsed.get("confidence", ""),
+    }
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    console.print(f"[dim]llm scores: {out.relative_to(ROOT)} ({len(payload['scores'])} 頭)[/dim]")
+
+
+def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
+    """`<race_id>.llm.json` を読み (scores: dict[int,float], scored_at) を返す。
+
+    無い / 壊れている / 古すぎる (max_age_sec 超過) なら (None, None) を返し、bet ステージは
+    モデルのみにフォールバックする。stale な race_id 衝突を弾くため scored_at の鮮度も見る。
+    """
+    p = _llm_scores_path(race_id)
+    if not p.exists():
+        return None, None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    scored_at = d.get("scored_at")
+    if scored_at:
+        try:
+            age = (dt.datetime.now() - dt.datetime.fromisoformat(scored_at)).total_seconds()
+            if age > max_age_sec:
+                return None, scored_at
+        except ValueError:
+            pass
+    scores = {}
+    for k, v in (d.get("scores") or {}).items():
+        try:
+            scores[int(k)] = float(v)
+        except (ValueError, TypeError):
+            continue
+    return (scores or None), scored_at
+
+
+def _run_score_stage(
+    race_id: str, rd, *, aptitudes=None, market_signals=None,
+    horse_best_times=None, model: str = "opus",
+) -> dict | None:
+    """score ステージ: Claude に各馬の強さ指数を出させて `<race_id>.llm.json` にキャッシュ。
+
+    3 経路 (netkeiba analyze / scrape_jra / scrape_keibago) から共通で呼ぶ。返り値は
+    parse_horse_scores の dict (scores 空なら保存しない)。Claude 不可/未完了なら None。
+    """
+    if not llm_mod.is_available():
+        console.print("[yellow]claude CLI 不可 — score ステージ skip[/yellow]")
+        return None
+    console.rule(f"[bold]Claude 考察: 各馬の強さ指数 (score ステージ, web 検索補強)[/bold]")
+    chunks: list[str] = []
+    saw_result = False
+    tool_count = 0
+    try:
+        for etype, payload in llm_mod.score_horses_stream(
+            rd, model=model, aptitudes=aptitudes,
+            market_signals=market_signals, horse_best_times=horse_best_times,
+        ):
+            if etype == "text":
+                chunks.append(payload)
+                console.print(payload, end="")
+            elif etype == "tool_use":
+                tool_count += 1
+                name = (payload or {}).get("name", "?")
+                inp = (payload or {}).get("input") or {}
+                q = inp.get("query") or inp.get("q") or inp.get("url") or ""
+                label = name.replace("mcp__", "").replace("__", "/")
+                if q:
+                    qshort = q if len(q) <= 70 else q[:67] + "..."
+                    console.print(f"[dim]  🔍 {label}: {qshort}[/dim]")
+                else:
+                    console.print(f"[dim]  ⚙ {label}[/dim]")
+            elif etype == "result":
+                saw_result = True
+                if payload:
+                    chunks.append(payload)
+            elif etype == "error":
+                console.print(f"[red]score エラー: {payload}[/red]")
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[yellow]score ステージ失敗: {ex}[/yellow]")
+        return None
+    if tool_count:
+        console.print(f"[dim](検索/ツール呼び出し計 {tool_count} 回)[/dim]")
+    if not saw_result:
+        console.print("[yellow]score 未完了 — 指数キャッシュせず (bet はモデルのみ)[/yellow]")
+        return None
+    parsed = llm_mod.parse_horse_scores("".join(chunks))
+    if parsed.get("scores"):
+        _save_llm_scores(race_id, parsed, model=model)
+        console.print(f"[cyan]score 完了 → {len(parsed['scores'])} 頭に指数付与[/cyan]")
+    else:
+        console.print("[yellow]score 出力に scores 無し — キャッシュせず[/yellow]")
+        return None
+    return parsed
+
+
 def _save_prediction_snapshot(
     race_id: str,
     rd,
@@ -584,6 +707,9 @@ def _save_prediction_snapshot(
     lgbm_info: dict | None = None,
     hit_points: int = 3,
     probs=None,
+    llm_win_index: dict[int, float] | None = None,
+    llm_blend: float | None = None,
+    llm_scored_at: str | None = None,
 ) -> None:
     # **新スキーマ (2026-05-29 後半)**: Plan A/B は廃止 (3連単 を「他の券種と同じ」EV table
     # 扱いに集約)。代わりに 2 つの bundle を計算する:
@@ -670,6 +796,13 @@ def _save_prediction_snapshot(
         # recommended_bundle_hit  : 的中優先 (おまけ計測のみ、買わない)
         "recommended_bundle": recommended_bundle,
         "recommended_bundle_hit": recommended_bundle_hit,
+        # 2段パイプライン: Claude 考察由来の各馬指数を model fundamental に合成した痕跡。
+        # llm_win_index=null は score 未完了/未実施 (= モデルのみ) のフォールバックを意味する。
+        "llm_win_index": ({str(k): v for k, v in llm_win_index.items()}
+                          if llm_win_index else None),
+        "llm_blend": llm_blend,
+        "llm_scored_at": llm_scored_at,
+        "llm_fallback": llm_win_index is None,
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

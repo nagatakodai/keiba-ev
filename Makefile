@@ -170,18 +170,25 @@ watch:
 		$(PY) -m src.analyze "$$url" --refresh --llm-model opus $(CAP_ARGS) || true; \
 	done
 
-WINDOW ?= 5
-TOLERANCE ?= 4
+# 2段パイプライン: SCORE 帯 (締切 SCORE_WINDOW〜+SCORE_TOLERANCE 分前) で Claude 考察→各馬指数を
+# キャッシュ → BET 帯 (締切 WINDOW〜+TOLERANCE 分前) で最新オッズ+指数→束→投票。BET 帯は締切
+# 直前 (既定 1〜2.5 分前)、SCORE 帯はその手前 (既定 5〜7 分前) で重ならないように分離する。
+WINDOW ?= 1
+TOLERANCE ?= 1.5
+SCORE_WINDOW ?= 5
+SCORE_TOLERANCE ?= 2
+LLM_BLEND ?=
 INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
 BET_ODDSPARK ?=
 BET_IPAT ?=
 BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,)
+BAND_ARGS := --window $(WINDOW) --tolerance $(TOLERANCE) --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE) $(if $(LLM_BLEND),--llm-blend $(LLM_BLEND),)
 watch-auto:
-	@echo "watch-auto: 締切 $(WINDOW)±$(TOLERANCE) 分 / $(INTERVAL_SEC) 秒おき / Ctrl+C で終了"
+	@echo "watch-auto: SCORE $(SCORE_WINDOW)〜$(SCORE_TOLERANCE)分 / BET $(WINDOW)±$(TOLERANCE)分 / $(INTERVAL_SEC)秒おき / Ctrl+C で終了"
 	@while true; do \
 		$(PY) -m src.auto_watch \
-			--window $(WINDOW) --tolerance $(TOLERANCE) \
+			$(BAND_ARGS) \
 			--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) $(BET_ARGS) || true; \
 		echo "[next poll in $(INTERVAL_SEC)s]"; \
 		sleep $(INTERVAL_SEC); \
@@ -200,7 +207,7 @@ watch-auto-bet:
 		$(PY) -m src.oddspark_bet --session $(SESSION_ARGS) & \
 		while true; do \
 			$(PY) -m src.auto_watch \
-				--window $(WINDOW) --tolerance $(TOLERANCE) \
+				$(BAND_ARGS) \
 				--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) --bet-oddspark || true; \
 			echo "[next poll in $(INTERVAL_SEC)s]"; \
 			sleep $(INTERVAL_SEC); \
@@ -218,23 +225,26 @@ watch-auto-ipat-bet:
 		$(PY) -m src.ipat_bet --session $(SESSION_ARGS) & \
 		while true; do \
 			$(PY) -m src.auto_watch \
-				--window $(WINDOW) --tolerance $(TOLERANCE) \
+				$(BAND_ARGS) \
 				--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) --bet-ipat || true; \
 			echo "[next poll in $(INTERVAL_SEC)s]"; \
 			sleep $(INTERVAL_SEC); \
 		done'
 
 # --- 推奨デフォルトで watch-auto-bet を起動するショートカット ---
-# `make bet` 一発で:
-#   WINDOW=1 (締切1分前=発走3分前 dispatch), TOLERANCE=4, INTERVAL_SEC=60,
-#   ACTIVE_HOURS=09:00-23:45, MARKET_BLEND=0.8 (市場やや寄せ),
+# `make bet` 一発で 2段パイプライン:
+#   SCORE 帯 5〜7分前 (Claude 考察→各馬指数) → BET 帯 1〜2.5分前 (最新オッズ+指数→束→投票),
+#   INTERVAL_SEC=60, ACTIVE_HOURS=09:00-23:45, MARKET_BLEND=0.8 (市場やや寄せ),
 #   MIN_PROB=0.5, APTITUDE_TOP=6, --stake-multiplier=2, 投票資金支払,
 #   env 自動ログイン (ODDSPARK_ID/PASSWORD/PIN 必須), 実弾自動購入, daily_cap=¥50,000
-# 個別上書き例: `make bet WINDOW=3` / `make bet SESSION_ARGS="..."`
+# 個別上書き例: `make bet WINDOW=3` / `make bet LLM_BLEND=0.7` / `make bet SESSION_ARGS="..."`
 bet:
 	$(MAKE) watch-auto-bet \
 		WINDOW=$(if $(filter command line,$(origin WINDOW)),$(WINDOW),1) \
-		TOLERANCE=$(if $(filter command line,$(origin TOLERANCE)),$(TOLERANCE),4) \
+		TOLERANCE=$(if $(filter command line,$(origin TOLERANCE)),$(TOLERANCE),1.5) \
+		SCORE_WINDOW=$(if $(filter command line,$(origin SCORE_WINDOW)),$(SCORE_WINDOW),5) \
+		SCORE_TOLERANCE=$(if $(filter command line,$(origin SCORE_TOLERANCE)),$(SCORE_TOLERANCE),2) \
+		$(if $(filter command line,$(origin LLM_BLEND)),LLM_BLEND=$(LLM_BLEND),) \
 		INTERVAL_SEC=$(if $(filter command line,$(origin INTERVAL_SEC)),$(INTERVAL_SEC),60) \
 		ACTIVE_HOURS=$(if $(filter command line,$(origin ACTIVE_HOURS)),$(ACTIVE_HOURS),09:00-23:45) \
 		MARKET_BLEND=$(if $(filter command line,$(origin MARKET_BLEND)),$(MARKET_BLEND),0.8) \
