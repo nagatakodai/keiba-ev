@@ -336,7 +336,7 @@ class BettingSession:
     """
 
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
-                 max_total_stake: int = 10_000, login_wait_sec: int = 600,
+                 max_total_stake: int = 20_000, login_wait_sec: int = 600,
                  auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                  stake_multiplier: float = 1.0):
         self.headful = headful
@@ -754,7 +754,7 @@ def _add_leg_to_buylist(page, leg: CartLeg) -> None:
 # ── one-shot ─────────────────────────────────────────────────────────────────────────
 def fill_cart(netkeiba_rid: str, legs: list[CartLeg], *,
               headful: bool = True, manual_login: bool = True,
-              max_total_stake: int = 10_000) -> None:
+              max_total_stake: int = 20_000) -> None:
     """1 レースをカート投入して人が確定するまでブラウザを開いたまま待機 (one-shot)。"""
     total = sum(l.stake for l in legs)
     if total > max_total_stake:
@@ -779,7 +779,7 @@ def fill_cart(netkeiba_rid: str, legs: list[CartLeg], *,
 
 # ── 常駐 daemon ───────────────────────────────────────────────────────────────────
 def run_session(*, headful: bool = True, manual_login: bool = True,
-                max_total_stake: int = 10_000, poll_sec: int = 5,
+                max_total_stake: int = 20_000, poll_sec: int = 5,
                 clear_existing: bool = False,
                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                 stake_multiplier: float = 1.0) -> None:

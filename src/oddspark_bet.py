@@ -216,7 +216,7 @@ def fill_cart(
     *,
     headful: bool = True,
     manual_login: bool = False,
-    max_total_stake: int = 10_000,
+    max_total_stake: int = 20_000,
 ) -> None:
     """ログイン → 対象 race の投票 → 各買い目をカート投入手前まで。**確定は押さない**。
 
@@ -730,7 +730,7 @@ class BettingSession:
     """
 
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
-                 max_total_stake: int = 10_000, login_wait_sec: int = 600,
+                 max_total_stake: int = 20_000, login_wait_sec: int = 600,
                  auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                  stake_multiplier: float = 1.0,
                  payment_method: str = PAYMENT_OPCOIN) -> None:
@@ -1050,7 +1050,7 @@ class BettingSession:
 
 
 def run_session(*, headful: bool = True, manual_login: bool = True,
-                max_total_stake: int = 10_000, poll_sec: int = 5,
+                max_total_stake: int = 20_000, poll_sec: int = 5,
                 clear_existing: bool = False,
                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                 stake_multiplier: float = 1.0,
