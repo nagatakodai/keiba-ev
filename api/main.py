@@ -100,7 +100,9 @@ app.add_middleware(
 )
 
 JOBS = JobRegistry()
-WATCH = WatchAutoManager()
+# JOBS を渡すと投票 daemon (oddspark/ipat) の Job が /api/jobs に載り、Web UI から
+# daemon ログ (ブラウザ起動 / X server エラー / ログイン待ち) を閲覧できる。
+WATCH = WatchAutoManager(registry=JOBS)
 
 
 # --- predictions ---

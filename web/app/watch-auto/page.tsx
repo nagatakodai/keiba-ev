@@ -537,6 +537,48 @@ export default function WatchAutoPage() {
         )}
       </Card>
 
+      {(status?.bet_job || status?.ipat_bet_job) && (
+        <Card
+          title={
+            <span className="flex items-center gap-2">
+              <span>投票ブラウザ daemon ログ</span>
+              <span className="text-xs text-(--color-muted)">
+                (ブラウザ起動 / ログイン待ち / X server エラー等)
+              </span>
+            </span>
+          }
+        >
+          {status?.bet_job && (
+            <div className="mb-4">
+              <div className="mb-1 text-xs flex items-center gap-2">
+                <span>オッズパーク</span>
+                <Badge tone={status.bet_running ? "warn" : "muted"}>{status.bet_job.status}</Badge>
+              </div>
+              <LogStream
+                key={status.bet_job.id}
+                url={`/api/jobs/${status.bet_job.id}/stream`}
+                height="h-[30vh]"
+                emptyHint="(ログ待機中...)"
+              />
+            </div>
+          )}
+          {status?.ipat_bet_job && (
+            <div>
+              <div className="mb-1 text-xs flex items-center gap-2">
+                <span>JRA 即PAT</span>
+                <Badge tone={status.ipat_bet_running ? "warn" : "muted"}>{status.ipat_bet_job.status}</Badge>
+              </div>
+              <LogStream
+                key={status.ipat_bet_job.id}
+                url={`/api/jobs/${status.ipat_bet_job.id}/stream`}
+                height="h-[30vh]"
+                emptyHint="(ログ待機中...)"
+              />
+            </div>
+          )}
+        </Card>
+      )}
+
       <Card
         title="未取得結果 (手動 record)"
       >

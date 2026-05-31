@@ -338,7 +338,11 @@ class WatchAutoManager:
     で前回の設定で再起動できる。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, registry: "JobRegistry | None" = None) -> None:
+        # 投票 daemon の Job を共有レジストリに登録するための参照 (main.py が JOBS を渡す)。
+        # 登録すると /api/jobs/<id> でログを取得/stream でき、Web UI から daemon の
+        # 「ブラウザでログインしてください」や X server エラーが見える (未登録だと無言だった)。
+        self._registry = registry
         self.job: Job | None = None
         # オッズパーク投票 daemon (headful ブラウザ・人がログイン)。bet_oddspark=True の時だけ
         # 起動し、watch-auto 停止で一緒に倒す。watch loop は毎tick フレッシュ subprocess で
@@ -584,6 +588,8 @@ class WatchAutoManager:
             label="ipat-bet-session" + label_extra,
             cmd=cmd,
         )
+        if self._registry is not None:
+            self._registry.add(self.ipat_bet_job)   # /api/jobs でログ閲覧可に
         await self.ipat_bet_job.start()
 
     async def _start_betting_daemon(self, *, auto_purchase: bool = False,
@@ -628,6 +634,8 @@ class WatchAutoManager:
             label="oddspark-bet-session" + label_extra,
             cmd=cmd,
         )
+        if self._registry is not None:
+            self._registry.add(self.bet_job)   # /api/jobs でログ閲覧可に
         await self.bet_job.start()
 
     async def stop(self) -> None:
