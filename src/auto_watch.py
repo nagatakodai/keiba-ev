@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CACHE_FILE = ROOT / "data/cache/auto_watch_analyzed.txt"
 HISTORY_FILE = ROOT / "data/cache/auto_watch_history.jsonl"
 BET_QUEUE_DIR = ROOT / "data/cache/oddspark_bet_queue"   # = oddspark_bet.QUEUE_DIR
+IPAT_BET_QUEUE_DIR = ROOT / "data/cache/ipat_bet_queue"  # = ipat_bet.QUEUE_DIR (JRA 投票)
 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -95,6 +96,43 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
     BET_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     req = BET_QUEUE_DIR / f"{netkeiba_rid}.req"
     if req.exists() or (BET_QUEUE_DIR / f"{netkeiba_rid}.done").exists():
+        return False   # 既に投入/処理済
+    tmp = req.with_suffix(".tmp")
+    tmp.write_text(json.dumps({
+        "netkeiba_rid": netkeiba_rid, "race_id": race_id, "legs": len(legs),
+        "total_stake": sum(int(l.get("stake", 0)) for l in legs),
+        "enqueued_at": int(time.time()),
+    }, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(req)   # atomic
+    return True
+
+
+def _enqueue_ipat_bet(race_id: str, netkeiba_rid: str) -> bool:
+    """snapshot に束(legs)があれば JRA 即PAT 常駐 betting セッションの queue に投入する。
+
+    `--bet-ipat` 時のみ呼ぶ。`ipat_bet --session` daemon が <rid>.req を拾ってカート投入する
+    (購入確定は人、--auto-purchase で全自動)。**JRA レース (venue 01-10) のみ**・束が非空のみ・
+    未投入のみ enqueue。oddspark (NAR) の対になる JRA 専用経路。**賭金は動かない**。
+    """
+    if not (netkeiba_rid.isdigit() and len(netkeiba_rid) == 12):
+        return False
+    from .ipat_bet import _is_jra_rid
+    if not _is_jra_rid(netkeiba_rid):
+        return False   # NAR / 未対応 → IPAT では投票しない
+    snap = ROOT / "data/predictions" / f"{race_id}.json"
+    if not snap.exists():
+        return False
+    try:
+        d = json.loads(snap.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    legs = [l for l in ((d.get("recommended_bundle") or {}).get("legs") or [])
+            if int(l.get("stake", 0)) > 0]
+    if not legs:
+        return False   # 見送り (束が空) は投入しない
+    IPAT_BET_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    req = IPAT_BET_QUEUE_DIR / f"{netkeiba_rid}.req"
+    if req.exists() or (IPAT_BET_QUEUE_DIR / f"{netkeiba_rid}.done").exists():
         return False   # 既に投入/処理済
     tmp = req.with_suffix(".tmp")
     tmp.write_text(json.dumps({
@@ -376,6 +414,11 @@ def main(
         help="束(legs)が出た発走前 NAR レースを oddspark betting queue に投入する。別途 "
              "`python -m src.oddspark_bet --session` を起動しログインしておくこと (購入確定は人)。",
     ),
+    bet_ipat: bool = typer.Option(
+        False, "--bet-ipat",
+        help="束(legs)が出た発走前 JRA レースを 即PAT betting queue に投入する。別途 "
+             "`python -m src.ipat_bet --session` を起動しログインしておくこと (購入確定は人)。",
+    ),
     no_llm: bool = typer.Option(
         False, "--no-llm",
         help="claude -p による束選定 (回収優先) と 的中優先 claude 評価を一切行わず、"
@@ -460,6 +503,14 @@ def main(
                             "(--session daemon がカート投入。確定は人)")
                 except Exception as e:  # noqa: BLE001
                     console.print(f"[red]oddspark enqueue 失敗: {e}[/red]")
+            if bet_ipat:
+                try:
+                    if _enqueue_ipat_bet(rid, race.get("netkeiba_race_id", rid)):
+                        console.print(
+                            f"  [magenta]→ 即PAT betting queue に投入:[/magenta] {rid} "
+                            "(--session daemon がカート投入。確定は人)")
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[red]ipat enqueue 失敗: {e}[/red]")
             try:
                 p = schedule_result_fetch(rid, race["url"], race["start_at"])
                 if p.status == "pending":

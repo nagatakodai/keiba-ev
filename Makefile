@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet bet
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet watch-auto-ipat-bet bet
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -175,7 +175,8 @@ TOLERANCE ?= 4
 INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
 BET_ODDSPARK ?=
-BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,)
+BET_IPAT ?=
+BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,)
 watch-auto:
 	@echo "watch-auto: 締切 $(WINDOW)±$(TOLERANCE) 分 / $(INTERVAL_SEC) 秒おき / Ctrl+C で終了"
 	@while true; do \
@@ -201,6 +202,24 @@ watch-auto-bet:
 			$(PY) -m src.auto_watch \
 				--window $(WINDOW) --tolerance $(TOLERANCE) \
 				--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) --bet-oddspark || true; \
+			echo "[next poll in $(INTERVAL_SEC)s]"; \
+			sleep $(INTERVAL_SEC); \
+		done'
+
+# --- JRA 即PAT 版: 投票ブラウザ(IPAT) + watch-auto を 1 コマンド (--bet-ipat 強制) ---
+# ipat_bet 常駐 daemon (headful・人がブラウザでログイン → poll 検出) を background 起動しつつ
+# watch-auto ループを回す。発走前 JRA の束が常駐ブラウザの購入予定リストに積まれ続け、
+# **購入確定は人が目視で押す** (AUTO_PURCHASE_VERIFIED=False の間は --auto-purchase でも実弾停止)。
+# 認証は env (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。SESSION_ARGS で daemon に追加引数。
+watch-auto-ipat-bet:
+	@echo "watch-auto-ipat-bet: 即PAT 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
+	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。**"
+	@bash -c 'trap "kill 0" EXIT INT TERM; \
+		$(PY) -m src.ipat_bet --session $(SESSION_ARGS) & \
+		while true; do \
+			$(PY) -m src.auto_watch \
+				--window $(WINDOW) --tolerance $(TOLERANCE) \
+				--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) --bet-ipat || true; \
 			echo "[next poll in $(INTERVAL_SEC)s]"; \
 			sleep $(INTERVAL_SEC); \
 		done'
