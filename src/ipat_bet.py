@@ -302,6 +302,13 @@ def check_daily_cap(prospective_stake: int, daily_cap: int) -> tuple[bool, str]:
     return (True, f"daily_cap OK: → ¥{projected:,} / 上限¥{daily_cap:,}")
 
 
+def _is_xserver_error(ex: Exception) -> bool:
+    """playwright の headful 起動失敗が X server / DISPLAY 不在によるものか判定。"""
+    s = str(ex)
+    return ("XServer" in s or "X server" in s or "$DISPLAY" in s
+            or "Missing X server" in s or "has been closed" in s)
+
+
 def safe_dialog_accept(d) -> None:
     """confirm ダイアログを自動承認 (削除確認等)。購入確定は別ロジックが制御する。"""
     try:
@@ -736,7 +743,12 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
     try:
         sess.start(clear_existing=clear_existing)
     except Exception as ex:  # noqa: BLE001
-        print(f"[ipat_bet] セッション開始失敗: {ex}")
+        print(f"[ipat_bet] セッション開始失敗: {ex}", flush=True)
+        if _is_xserver_error(ex):
+            print("[ipat_bet] ⚠ headful ブラウザを開く X server / DISPLAY がありません。"
+                  f"(現在 DISPLAY={os.environ.get('DISPLAY') or '未設定'})。"
+                  " Web UI から起動する場合は **`make api` を DISPLAY のある端末 (WSLg 等) で**"
+                  " 起動してください。あるいは CLI `make watch-auto-ipat-bet` を端末で実行。", flush=True)
         sess.close()
         return
     print(f"[ipat_bet] ログイン完了。queue 監視開始: {QUEUE_DIR}")

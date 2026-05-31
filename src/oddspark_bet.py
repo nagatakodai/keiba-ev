@@ -1038,7 +1038,12 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
     try:
         sess.start(clear_existing=clear_existing)
     except Exception as ex:  # noqa: BLE001
-        print(f"[oddspark_bet] セッション開始失敗: {ex}")
+        print(f"[oddspark_bet] セッション開始失敗: {ex}", flush=True)
+        s = str(ex)
+        if any(m in s for m in ("XServer", "X server", "$DISPLAY", "has been closed")):
+            print("[oddspark_bet] ⚠ headful ブラウザを開く X server / DISPLAY がありません "
+                  f"(現在 DISPLAY={os.environ.get('DISPLAY') or '未設定'})。Web UI から起動する場合は "
+                  "**`make api` を DISPLAY のある端末 (WSLg 等) で**起動してください。", flush=True)
         sess.close()
         return
     print(f"[oddspark_bet] ログイン完了。queue 監視開始: {QUEUE_DIR}")
