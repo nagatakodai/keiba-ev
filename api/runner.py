@@ -441,7 +441,20 @@ class WatchAutoManager:
     ) -> Job:
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
+        # ただし**投票ブラウザ daemon が死んでいれば貼り直す**: resume (startup の should_run)
+        # でループが先に起動済の状態で「開始」を押す/ブラウザを閉じた後に再度「開始」を押した
+        # ときに、early-return だけだと**ブラウザが出ない**ため (ユーザ報告: 開始してもブラウザが
+        # 起動しない)。ループ稼働中でも要求された daemon が未稼働なら起動だけ補う。
         if self.job is not None and self.job.status in ("pending", "running"):
+            if bet_oddspark and not self.bet_running:
+                await self._start_betting_daemon(
+                    auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
+                    stake_multiplier=bet_stake_multiplier,
+                    payment_method=bet_payment_method, auto_login=bet_auto_login)
+            if bet_ipat and not self.ipat_bet_running:
+                await self._start_ipat_daemon(
+                    auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
+                    stake_multiplier=bet_stake_multiplier, auto_login=bet_auto_login)
             return self.job
 
         # Python ラッパで while ループを回す (api/_watch_loop.py)。
