@@ -190,89 +190,6 @@ function BetTypeBars({
   );
 }
 
-// 的中優先AI 専用チャート (おまけ計測 / 買わない)。回収優先とは別系列なので独立コンポーネント。
-// 緑系で統一し、的中優先AI スタッツの直下に置く。
-function HitCharts({ races }: { races: RaceHit[] }) {
-  const sorted = [...races].sort((a, b) =>
-    (a.saved_at ?? "").localeCompare(b.saved_at ?? ""),
-  );
-  // 累積収支 (的中優先): bundle_hit_first_* を使用。参加レースのみ加算。
-  let hitStakeAcc = 0;
-  let hitPayoutAcc = 0;
-  const series = sorted.map((r) => {
-    if (r.bundle_hit_first_participated) {
-      hitStakeAcc += r.bundle_hit_first_stake ?? 0;
-      // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
-      hitPayoutAcc += r.bundle_hit_first_payout_final ?? r.bundle_hit_first_payout ?? 0;
-    }
-    return {
-      hitNet: hitPayoutAcc - hitStakeAcc,
-      hitRoi: hitStakeAcc > 0 ? hitPayoutAcc / hitStakeAcc : 0,
-    };
-  });
-  const hitNetSeries = series.map((s) => s.hitNet);
-  const hitRoiSeries = series.map((s) => s.hitRoi);
-
-  const hitHits = races.filter((r) => r.bundle_hit_first_hit).length;
-  const hitMisses = races.filter(
-    (r) => r.bundle_hit_first_participated && !r.bundle_hit_first_hit,
-  ).length;
-  const hitSkips = races.filter(
-    (r) => r.bundle_hit_first_participated === false,
-  ).length;
-
-  // bet type 別 hit 内訳 (的中優先)
-  const betTypeHits: Record<string, number> = {};
-  for (const r of races) {
-    for (const bt of r.bundle_hit_first_bet_types ?? []) {
-      betTypeHits[bt] = (betTypeHits[bt] ?? 0) + 1;
-    }
-  }
-  const totalRaces = races.length;
-
-  // 計測データがまだ無い (全レース未参加) なら描画しない。
-  if (hitHits + hitMisses === 0) {
-    return (
-      <p className="px-1 text-xs text-(--color-muted)">
-        的中優先AI のチャートは新スキーマ蓄積後に表示されます (本日以降の analyze から)。
-      </p>
-    );
-  }
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-      <Card title="累積収支 (的中優先)">
-        <LineChart
-          seriesA={hitNetSeries}
-          labelA="的中優先"
-          colorA="#10b981"
-          yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
-        />
-      </Card>
-      <Card title="累積回収率 推移 (的中優先)">
-        <LineChart
-          seriesA={hitRoiSeries.map((v) => v * 100)}
-          labelA="的中優先"
-          colorA="#10b981"
-          yFmt={(v) => `${v.toFixed(0)}%`}
-          referenceY={100}
-        />
-      </Card>
-      <Card title="結果分布 (的中優先)">
-        <DistroBar
-          label="的中優先AI"
-          hits={hitHits}
-          misses={hitMisses}
-          skips={hitSkips}
-        />
-      </Card>
-      <Card title="bet 種別 (的中優先)">
-        <BetTypeBars betTypeHits={betTypeHits} totalRaces={totalRaces} />
-      </Card>
-    </div>
-  );
-}
-
 function LineChart({
   seriesA, seriesB, labelA, labelB, colorA, colorB, yFmt, referenceY,
 }: {
@@ -459,7 +376,6 @@ function PredictionRowItem({
             </span>
             <span className="text-(--color-muted)">·</span>
             {hit.bundle_hit && <Badge tone="good">回収 Claude</Badge>}
-            {hit.bundle_hit_first_hit && <Badge tone="info">的中優先(参考)</Badge>}
             {hit.payout > 0 && (
               <>
                 <span className="text-(--color-muted)">·</span>
@@ -500,7 +416,6 @@ export default async function DashboardPage() {
   ]);
 
   const claudeBundle = cal?.claude_bundle;
-  const claudeBundleHit = cal?.claude_bundle_hit;
 
   const raceHitMap = new Map<string, RaceHit>();
   for (const r of cal?.races ?? []) raceHitMap.set(r.race_id, r);
@@ -670,67 +585,6 @@ export default async function DashboardPage() {
       {cal && cal.races.length > 0 && (
         <DashboardCharts races={cal.races} />
       )}
-
-      {/* 的中優先AI セクション (おまけ計測 / 買わない) — 的中率系=緑。
-          実弾で買う対象でないため、チャート (回収優先のみ) の下に配置。 */}
-      <section className="space-y-2">
-        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
-          <span className="inline-block w-1 h-4 bg-(--color-good) translate-y-0.5" />
-          <span className="text-base">的中優先AI</span>
-          <span className="text-xs font-normal text-(--color-muted)">
-            prob 降順 pool / おまけ計測・買わない
-          </span>
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <Stat
-          label="的中率"
-          value={
-            !claudeBundleHit || claudeBundleHit.participated_races === 0
-              ? "—"
-              : fmtPct(claudeBundleHit.hit_rate, 1)
-          }
-          hint={
-            claudeBundleHit && claudeBundleHit.participated_races > 0
-              ? `${claudeBundleHit.hits} 的中 / ${claudeBundleHit.participated_races} 参加`
-              : "新スキーマ待ち (本日以降の analyze から蓄積)"
-          }
-          // 的中率: 30% 未満 → 赤、それ以外 → 黒
-          tone={
-            !claudeBundleHit || claudeBundleHit.participated_races === 0
-              ? "default"
-              : claudeBundleHit.hit_rate < 0.3
-              ? "bad"
-              : "default"
-          }
-          accentTone="good"
-        />
-        <Stat
-          label="回収率"
-          // 最終オッズ基準 (roi_final)。最終が無い旧 result は roi に fallback。
-          value={
-            !claudeBundleHit || claudeBundleHit.participated_races === 0
-              ? "—"
-              : fmtRoiPct(claudeBundleHit.roi_final ?? claudeBundleHit.roi)
-          }
-          hint={
-            claudeBundleHit && claudeBundleHit.participated_races > 0
-              ? `${claudeBundleHit.participated_races} 参加 / 賭金 ${fmtYen(claudeBundleHit.stake)} → 払戻(最終) ${fmtYen(claudeBundleHit.payout_final ?? claudeBundleHit.payout)}`
-              : "新スキーマ待ち (本日以降の analyze から蓄積)"
-          }
-          // 回収率: 100% 超 → 黒、それ以外 → 赤
-          tone={
-            !claudeBundleHit || claudeBundleHit.participated_races === 0
-              ? "default"
-              : (claudeBundleHit.roi_final ?? claudeBundleHit.roi) > 1
-              ? "default"
-              : "bad"
-          }
-          accentTone="info"
-        />
-        </div>
-        {/* 的中優先AI 専用チャート (回収優先とは別系列) */}
-        {cal && cal.races.length > 0 && <HitCharts races={cal.races} />}
-      </section>
     </Page>
   );
 }

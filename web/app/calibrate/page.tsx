@@ -176,14 +176,11 @@ export default async function CalibratePage({
                       <Badge tone="muted">見送り</Badge>
                     ) : (
                       <>
-                        {/* 的中ラベルは回収優先のみ。的中優先 hit は参考バッジ (緑) として
-                            併記するが「的中」判定には含めない。色: 回収優先=青 / 的中優先=緑 */}
                         {r.bundle_hit ? (
                           <Badge tone="info">回収優先</Badge>
                         ) : (
                           <Badge tone="muted">不的中</Badge>
                         )}
-                        {r.bundle_hit_first_hit && <Badge tone="good">的中優先(参考)</Badge>}
                       </>
                     )}
                   </div>

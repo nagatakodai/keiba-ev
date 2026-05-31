@@ -199,9 +199,7 @@ export type PredictionDetail = {
   //   recommended_bundle      : 回収優先 (実弾で買う、joint Kelly EV 最適)
   //   recommended_bundle_hit  : 的中優先 (おまけ計測、prob 降順 pool で Kelly)
   recommended_bundle?: RecommendedBundle | null;
-  recommended_bundle_hit?: RecommendedBundle | null;
   // 的中優先 EV table (per bet type, prob 降順, px_o>=1.0 で足切り)。
-  bet_tables_hit?: Record<string, BetEvRow[]>;
   evidence?: { evidence_by_key?: Record<string, { count: number; reasons?: string[] }>; cuts?: string[]; final_plan?: unknown };
   evidence_rows?: PredictionRow[];
   result?: {
@@ -386,12 +384,6 @@ export type CalibrationRaceItem = {
   bundle_payout?: number;              // 予想オッズ基準
   bundle_payout_final?: number;        // 最終オッズ基準 (result.final_odds × stake)
   // 的中優先 bundle (おまけ計測) の的中。古い snapshot で欠落あり。
-  bundle_hit_first_hit?: boolean;
-  bundle_hit_first_bet_types?: string[];
-  bundle_hit_first_participated?: boolean;
-  bundle_hit_first_stake?: number;
-  bundle_hit_first_payout?: number;
-  bundle_hit_first_payout_final?: number;
   // 最終オッズ取得済 race か (frontend で「予想/最終」両表示の discriminator)
   has_final_odds?: boolean;
   // snapshot 保存時刻 (ISO8601 JST naive)。チャートでの時系列ソート / 表示用。
@@ -411,7 +403,6 @@ export type CalibrationReport = {
   // Claude 選定 回収優先 bundle (recommended_bundle) の集計
   claude_bundle?: ClaudeBundleAggregate;
   // Claude 選定 的中優先 bundle (recommended_bundle_hit) の集計 (おまけ計測)
-  claude_bundle_hit?: ClaudeBundleAggregate;
   races: CalibrationRaceItem[];
 };
 

@@ -65,16 +65,8 @@ export default async function PredictionDetailPage({
   }
 
   const topByPxo = [...d.rows].sort((a, b) => b.px_o - a.px_o).slice(0, 30);
-  // 推定当選率ランキング: 3連単だけでなく **全券種** から推定P上位20 (2026-05-30 ユーザ指示)。
-  // bet_tables_hit (全券種・prob 降順・EV 不問。trifecta も含む) を flatten。
-  // 古い snapshot で bet_tables_hit が無ければ従来どおり 3連単 (d.rows) を使う。
-  const hitTables = d.bet_tables_hit;
-  const allProbRows: RankedRow[] =
-    hitTables && Object.keys(hitTables).length > 0
-      ? Object.entries(hitTables).flatMap(([bt, rows]) =>
-          rows.map((r) => ({ betType: bt, ...r })),
-        )
-      : d.rows.map((r) => ({ betType: "trifecta", ...r }));
+  // 推定当選率ランキング: 3連単 (d.rows) から推定P上位20。
+  const allProbRows: RankedRow[] = d.rows.map((r) => ({ betType: "trifecta", ...r }));
   const topByProb = [...allProbRows].sort((a, b) => b.prob - a.prob).slice(0, 20);
 
   const finish = d.result?.finish_order;
@@ -136,28 +128,13 @@ export default async function PredictionDetailPage({
 
       <TopRecommendationCard d={d} finish={finish} />
 
-      {/* 的中優先AI まとめ買い (おまけ計測・買わない)。回収優先の直下に従属表示。
-          古い snapshot で recommended_bundle_hit が欠落 / 束が空なら出さない。 */}
-      {d.recommended_bundle_hit &&
-        (d.recommended_bundle_hit.legs?.length ?? 0) > 0 && (
-          <BundleCard
-            bundle={d.recommended_bundle_hit}
-            finish={finish}
-            variant="hit"
-            finalOdds={d.result?.final_odds}
-          />
-        )}
-
       {d.result && (() => {
-        // 新スキーマ: Plan A/B 廃止。表示判定は 2 つの bundle のみ。
+        // 表示判定は回収優先 bundle のみ (的中優先は廃止)。
         const bundleLegs = d.recommended_bundle?.legs;
         const bundleEmpty = Array.isArray(bundleLegs) && bundleLegs.length === 0;
         const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
           bundleLegs.some((l) => betHits(l.bet_type, l.key, finish)));
-        const bundleHitFirstLegs = d.recommended_bundle_hit?.legs;
-        const bundleHitFirstHit = !!(finish && bundleHitFirstLegs && bundleHitFirstLegs.length > 0 &&
-          bundleHitFirstLegs.some((l) => betHits(l.bet_type, l.key, finish)));
-        const anyHit = bundleHit || bundleHitFirstHit;
+        const anyHit = bundleHit;
         const headlineBadge = bundleEmpty
           ? <Badge tone="muted">見送り</Badge>
           : anyHit
@@ -188,16 +165,9 @@ export default async function PredictionDetailPage({
               {bundleEmpty ? (
                 <Badge tone="muted">見送り (賭けず)</Badge>
               ) : (
-                <>
-                  <Badge tone={bundleHit ? "good" : "muted"}>
-                    回収優先 {bundleHit ? "✓ 的中" : "× 不的中"}
-                  </Badge>
-                  {bundleHitFirstLegs && bundleHitFirstLegs.length > 0 && (
-                    <Badge tone={bundleHitFirstHit ? "info" : "muted"}>
-                      的中優先 {bundleHitFirstHit ? "✓ 的中" : "× 不的中"} (おまけ)
-                    </Badge>
-                  )}
-                </>
+                <Badge tone={bundleHit ? "good" : "muted"}>
+                  回収優先 {bundleHit ? "✓ 的中" : "× 不的中"}
+                </Badge>
               )}
             </div>
           </Card>

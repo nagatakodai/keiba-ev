@@ -202,7 +202,6 @@ export function PredictionsList({
                             // 見送り (Claude 総合オススメが空束) は「不的中」ではなく「見送り」表示
                             <Badge tone="muted">束 見送り</Badge>
                           )}
-                          {hit.bundle_hit_first_hit && <Badge tone="info">的中優先(参考)</Badge>}
                           {hit.payout > 0 && (
                             <>
                               <span className="text-(--color-muted)">·</span>
