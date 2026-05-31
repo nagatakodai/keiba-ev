@@ -140,7 +140,13 @@ EV (回収率) = 的中率 × 平均オッズ ÷ 点数
    - **oddspark**: グリッドの位置推定で誤オッズ (別記)。
    - → 信頼できるのは **単複 (b1, 単一馬明示) + 3連単 (b8, 組合せ明示)** のみ。実オッズ照合に通る解法が確立したら復活させる。
 4. **Plan G (適性ゲート → EV 足切り)**: 適性総合 top N 頭 (デフォルト 6) の集合内で生成される買い目のみ → P×O ≥ 1.02 で足切り。EV-first の Plan A/B/C と並列で提案される、競馬独自の「適性で選んで EV で確認」戦略。
-5. **検索 MCP 補強(総合オススメ束のみ)**: LLM (`claude -p`) がモデルの joint Kelly 束 + 全 +EV 候補 + 適性を受け取り、**Brave/Tavily で per-leg に補強根拠を集めて** picks/cuts を決める。**3連単単独の evidence は廃止**(以前の `_print_llm_evaluation` + `parse_evidence` 経路は削除済) — 1 race = 1 claude call に集約し、検索リソースを束の選定に集中させる。
+5. **Claude 考察 → 各馬指数 (2段パイプライン, 2026-05-31〜)**: LLM (`claude -p`) の役割を「最終買い目の picks/cuts 選定」から **「各馬の強さ指数 (0-100, 高い=1位) を出す」** へ変更し、その指数を確率モデルの fundamental に合成する。
+   - **score ステージ** (締切5-7分前): `llm.score_horses_stream` が Brave/Tavily/WebFetch で各馬の適性・状態・取消を調べ `data/predictions/<race_id>.llm.json` に指数キャッシュ。`analyze._run_score_stage` が3経路 (netkeiba/JRA/keibago) 共通で呼ぶ。
+   - **bet ステージ** (締切1-2.5分前): `_load_llm_scores` で指数を読み `estimate_probs(llm_win_index=..., llm_blend=0.5)` に渡す → `ev._combine_llm_index` が `softmax(指数/T_LLM=25)` を model fundamental と loglinear 合成 → さらに市場とブレンド (β=0.78)。最新オッズで束→enqueue→自動購入。
+   - **picks/cuts 選定は撤去** (`_validate_and_update_bundle`/`_spawn_hit_bundle_claude` は bet 経路で呼ばない)。買い目は合成済 probs から `build_bundle` (joint Kelly + トリガミ防止) が決める。
+   - **2段の配線**: `auto_watch._run_phase` が score/bet を**別 dedup 名前空間** (`auto_watch_analyzed_score.txt` / `..._bet.txt`) で2回実行。`--score-window/-tolerance` (既定5/2) と `--window/-tolerance` (bet 既定1/1.5)、`--llm-blend`。Makefile は `BAND_ARGS`。
+   - **フォールバック**: 指数キャッシュ無し (score 未完/間に合わず/`--no-llm`) → `estimate_probs` の合成が no-op = モデルのみで bet (従来挙動)。snapshot に `llm_win_index`/`llm_blend`/`llm_scored_at`/`llm_fallback` を残す。
+   - **要チューニング**: `T_LLM` (指数→確率の鋭さ。生 0-100 softmax は過尖鋭化するので温度で平坦化) と `LLM_BLEND_DEFAULT` (指数 vs モデル) は `ev.py` 定数。arm 前にレース蓄積で sweep 推奨。
 
 snapshot に保存される主要フィールド:
 - `horse_aptitude`: 各馬の指数 + 内訳 (total 降順)
