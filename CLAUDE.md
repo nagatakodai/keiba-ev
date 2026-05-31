@@ -85,8 +85,11 @@ oddspark のオッズ表構造 (採用 = 組合せが HTML に明示・実オッ
 - **実機 DOM 確認状況 (2026-05-31)**: ログイン〜投票画面〜購入予定リストまで**実機 DOM 取得済**で `SELECTORS` を実値化した。IPAT は **AngularJS SPA** (ui-router, hash route `#!/bet/basic`)。各ステップで `data/cache/ipat_step_*.png` にスクショ。
   - **ログイン (確定)**: 段1 INET-ID (`input[name=inetid]` + `<a onclick=send()>`)、段2 加入者情報 (`name=i` 加入者番号 / `name=p` 暗証番号 / `name=r` P-ARS、送信 `<a onclick=ToModernMenu()>`)。端末登録後にログイン画面へ戻される挙動は再ログインで突破 (oddspark 同様)。ログイン判定 `text=ログアウト` (`a[ui-sref=logout]`)。
   - **投票 (確定)**: 通常投票 `button[ui-sref=bet.basic]` → 場 `.places button`(has-text 場名) → R `.races button`(R 完全一致) → 式別 `select#bet-basic-type` (option ラベルで選択, ３連複/３連単は**全角３**) → 馬番チェック `#no{N}` → 金額 `.selection-amount input[ng-model=vm.nUnit]`(100円単位) → セット `button[ng-click=vm.onSet()]` → 入力終了 `button[ng-click=vm.onShowBetList()]` → 購入予定リスト → 合計金額入力 `input[ng-model=vm.cAmountTotal]` → 購入する `button[ng-click=vm.clickPurchase()]`。
-- **現状の対応範囲**: **単勝/複勝 (単一列 `#no{N}`) のみ投入可** (`_SINGLE_COLUMN_BETS`)。**馬連/ワイド/馬単/3連複/3連単 は馬番複数列 (軸/相手・着順) の DOM が未取得のため中止**(実機でその式別を選んだ画面の DOM を取れば実装可)。JRA 束はワイド/複勝/馬連 が支配的なので、現状フル自動で投入できるのは複勝中心。
-- **安全フラグ**: **`AUTO_PURCHASE_VERIFIED=False`** (購入確定の最終遷移/success marker 未検証なので fail-safe で実弾を撃たない) + **`_ORDERED_BETS_VERIFIED=False`**。実機で購入完了画面を検証したら True にする。
+- **対応式別 (全7券種, 実機 DOM 確認済 2026-05-31)**: 馬番選択は2系統:
+  - **単一列 checkbox `#no{N}`** (単勝/複勝/馬連/ワイド/3連複, `_SINGLE_COLUMN_BETS`): 選んだ馬だけ check (馬連/ワイド=2頭で1組、3連複=3頭で1組)。方式=通常。
+  - **着順列 radio `#horse{pos}_no{N}`** (馬単=2列/3連単=3列, `_ORDERED_BETS`): key 順に 1着/2着(/3着) を選択。方式=通常 (`_ORDERED_BETS_VERIFIED=True`)。
+  - 各 leg で式別 select → 方式=通常 (前 leg の ながし/ボックス を正す) → 馬番 → 金額 → セット。
+- **安全フラグ**: **`AUTO_PURCHASE_VERIFIED=False`** (購入確定の最終遷移/success marker 未検証なので fail-safe で実弾を撃たない)。実機で購入完了画面 (受付番号が出る画面) を検証したら True にする。`_ORDERED_BETS_VERIFIED=True` (馬単/3連単 radio 確認済)。
 - **⚠ 事前入金 (チャージ) が必須**: 即PAT は購入限度額 0 円だと投票不可。未入金だとレース選択/購入時に「投票の前に入金してください」ダイアログ (`_dismiss_deposit_dialog` が『このまま進む』で閉じるが、資金が無ければ最終購入は弾かれる)。運用前に手で入金しておく。
 
 **watch-auto との連携 (常駐セッション + キュー)**: watch-auto は `_watch_loop.py` が interval 毎に `auto_watch.main()` を**毎回フレッシュ subprocess** で起動する構造なので、ブラウザを巡をまたいで保持できない。そこで **ログイン済みの持続ブラウザを別プロセス (`BettingSession`/`run_session`) で持ち**、watch-auto は queue 経由で「このレースを入れて」と渡す:

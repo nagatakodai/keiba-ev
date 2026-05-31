@@ -94,10 +94,16 @@ SELECTORS = {
     # 式別: <select id="bet-basic-type"> option=単勝/複勝/枠連/馬連/ワイド/馬単/３連複/３連単。
     #   option value は "object:NNNN" (Angular 参照で不安定) なので **ラベル(表示名)で選ぶ**。
     "bet_type_select": 'select#bet-basic-type',      # 確定 (select_option(label=式別名))
+    # 方式 select (馬連/ワイド/馬単/3連複/3連単 で出現): 通常/ながし/ボックス/フォーメーション。
+    # 通常 = 選んだ馬で1組 (馬連/ワイドは2頭=1組、3連複は3頭=1組)。既定は通常だが明示選択して
+    # 前 leg の ながし/ボックス 残りを防ぐ。
+    "method_select": 'select#bet-basic-method',      # 確定 (select_option(label=通常))
     "multi_checkbox": '.vote-type input[ng-model="vm.bMulti"]',  # 確定 (マルチ。馬単/3連単のながし)
-    # 馬番: 単勝/複勝 は単一列のチェックボックス <input id="no{馬番}" name="racer{馬番}">。
-    #   ★ 馬連/ワイド/馬単/3連複/3連単 の複数列 (1着/2着/3着 や 軸/相手) の DOM は未取得 ★
-    "horse_check": '#no{umaban}',                    # 確定 (単勝/複勝)。複数列は要 DOM
+    # 馬番 (実機 DOM 全式別確認済 2026-05-31):
+    #   単一列 (単勝/複勝/馬連/ワイド/3連複): checkbox <input id="no{馬番}"> を check (選んだ馬で組成)。
+    #   順序付き (馬単=2列/3連単=3列): radio <input id="horse{pos}_no{馬番}"> (pos=1着/2着/3着)。
+    "horse_check": '#no{umaban}',                    # 確定 (単勝/複勝/馬連/ワイド/3連複)
+    "ordered_horse_check": '#horse{pos}_no{umaban}',  # 確定 (馬単/3連単 着順列 radio)
     # 金額/セット (select-list コンポーネント):
     "amount_input": '.selection-amount input[ng-model="vm.nUnit"]',  # 確定 (金額, 100円単位 "00円")
     "set_button": 'button[ng-click="vm.onSet()"]',   # 確定 (セット → 購入予定リストへ追加)
@@ -142,7 +148,7 @@ _SHIKIBETSU = {
 }
 # 順序付き (馬単/3連単) の自動投入可否。**実機未検証なので False** (fail-safe)。
 # IPAT の馬単/3連単 は 1着/2着(/3着) 列に置けば 1 順列のはず。実機で確認したら True に。
-_ORDERED_BETS_VERIFIED = False
+_ORDERED_BETS_VERIFIED = True   # 馬単(2列)/3連単(3列) radio 実機 DOM 確認済 2026-05-31
 
 # 全自動 (購入確定まで自動) の安全フラグ。**実機 DOM 未検証なので False** (fail-safe)。
 # oddspark と同じく、確認画面の最終ボタン DOM / 二重確認入力 / success marker を 1 度実機で
@@ -578,9 +584,10 @@ _IPAT_BET_LABEL = {
     "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
     "exacta": "馬単", "trio": "３連複", "trifecta": "３連単",
 }
-# 単一列 (1着列のチェックボックス #no{N}) で投入できる券種。馬連/ワイド/馬単/3連複/3連単 は
-# 複数列 (軸/相手 や 1着/2着/3着) で、その馬番選択列の DOM がまだ未取得なので未対応。
-_SINGLE_COLUMN_BETS = {"win", "place"}
+# 単一列 (checkbox #no{N}) で投入できる券種: 選んだ馬で組成 (馬連/ワイド=2頭, 3連複=3頭)。
+_SINGLE_COLUMN_BETS = {"win", "place", "quinella", "wide", "trio"}
+# 順序付き (着順列 radio #horse{pos}_no{N}): 馬単=1着/2着, 3連単=1着/2着/3着。
+_ORDERED_BETS = {"exacta", "trifecta"}
 
 
 def _dismiss_deposit_dialog(page) -> None:
@@ -628,30 +635,48 @@ def _select_course_race(page, venue: str | None, race_no: int) -> None:
 def _add_leg_to_buylist(page, leg: CartLeg) -> None:
     """1 脚を IPAT 通常投票 (bet.basic) で購入予定リストに積む。場・レースは選択済前提。
 
-    実機 DOM 準拠 (2026-05-31): 式別 select → 馬番チェック (#no{N}) → 金額 (vm.nUnit) → セット。
-    単勝/複勝 (単一列) のみ対応。馬連/ワイド/馬単/3連複/3連単 は **馬番複数列の DOM 未取得**のため中止。
-    順序付き (馬単/3連単) は _ORDERED_BETS_VERIFIED=False の間も中止 (誤発注防止)。
+    実機 DOM 準拠 (2026-05-31, 全7式別確認済): 式別 select → 方式=通常 → 馬番 → 金額 → セット。
+    - 単一列 (単勝/複勝/馬連/ワイド/3連複): checkbox #no{N} を選んだ馬だけ check (= 1組)。
+    - 順序付き (馬単=2列/3連単=3列): radio #horse{pos}_no{N} を key 順に 1着/2着/3着 選択。
     """
-    if leg.bet_type in ("exacta", "trifecta") and not _ORDERED_BETS_VERIFIED:
+    ordered = leg.bet_type in _ORDERED_BETS
+    if ordered and not _ORDERED_BETS_VERIFIED:
         raise IpatBetError(
             f"{leg.bet_type} は順序付きだが _ORDERED_BETS_VERIFIED=False (実機検証まで中止)")
-    if leg.bet_type not in _SINGLE_COLUMN_BETS:
-        raise IpatBetError(
-            f"{leg.bet_type} は複数列 (軸/相手・着順) の馬番選択 DOM が未取得のため未対応 "
-            "(現状 単勝/複勝 のみ投入可)")
+    if leg.bet_type not in _SINGLE_COLUMN_BETS and not ordered:
+        raise IpatBetError(f"未対応 bet_type: {leg.bet_type}")
     label = _IPAT_BET_LABEL.get(leg.bet_type)
     if label is None:
         raise IpatBetError(f"未対応 bet_type: {leg.bet_type}")
     # 式別 (option ラベルで選択。value=object:NNNN は不安定なので使わない)
     page.select_option(SELECTORS["bet_type_select"], label=label)
     page.wait_for_timeout(600)
-    # 馬番 (単勝/複勝 は単一列 #no{N} を check)
-    for umaban in leg.key:
-        chk = page.locator(SELECTORS["horse_check"].format(umaban=umaban))
-        if chk.count() == 0:
-            raise IpatBetError(f"馬番チェック不検出 (#no{umaban}) — 取消馬/DOM 変化の可能性")
-        chk.first.check()
-        page.wait_for_timeout(200)
+    # 方式=通常 (馬連/ワイド/馬単/3連複/3連単 で出現。前 leg の ながし/ボックス 残りを正す)
+    try:
+        ms = page.locator(SELECTORS["method_select"])
+        if ms.count() > 0:
+            page.select_option(SELECTORS["method_select"], label="通常")
+            page.wait_for_timeout(500)
+    except Exception:  # noqa: BLE001 — 通常 option が無い式別は既定のまま
+        pass
+    # 馬番選択
+    if ordered:
+        # 馬単/3連単: key[i] を (i+1)着列の radio で選ぶ (#horse{pos}_no{N})
+        for pos, umaban in enumerate(leg.key, 1):
+            sel = SELECTORS["ordered_horse_check"].format(pos=pos, umaban=umaban)
+            r = page.locator(sel)
+            if r.count() == 0:
+                raise IpatBetError(f"着順 radio 不検出 ({sel}) — 取消馬/DOM 変化の可能性")
+            r.first.check()
+            page.wait_for_timeout(200)
+    else:
+        # 単勝/複勝/馬連/ワイド/3連複: 選んだ馬の checkbox #no{N} を check
+        for umaban in leg.key:
+            chk = page.locator(SELECTORS["horse_check"].format(umaban=umaban))
+            if chk.count() == 0:
+                raise IpatBetError(f"馬番チェック不検出 (#no{umaban}) — 取消馬/DOM 変化の可能性")
+            chk.first.check()
+            page.wait_for_timeout(200)
     # 金額 (100円単位 = stake/100 を入力)
     amt = page.locator(SELECTORS["amount_input"])
     amt.first.fill(str(leg.stake // 100))
