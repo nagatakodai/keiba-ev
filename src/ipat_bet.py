@@ -38,6 +38,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# 認証情報は .env から読む (analyze.py / oddspark_bet と同じ流儀)。OS env が優先。
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
+
 _SHOT_DIR = ROOT / "data" / "cache"
 # watch-auto → 常駐 betting セッション の受け渡しキュー (oddspark とは別 namespace)。
 # watch-auto が JRA レースの <netkeiba_rid>.req を置き、--session daemon が拾って snapshot の
@@ -152,18 +160,34 @@ class CartLeg:
     stake: int   # 円 (100円単位前提)
 
 
+def _env_any(*names: str) -> str:
+    """複数の env 名を順に試し最初に見つかった非空値を返す (.env の別名表記を吸収)。"""
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return ""
+
+
 def _creds() -> dict:
-    """環境変数から認証情報を取得 (無ければエラー)。コードには残さない。"""
-    inetid = os.environ.get("IPAT_INETID")
-    sub = os.environ.get("IPAT_SUBSCRIBER")
-    pars = os.environ.get("IPAT_PARS")
-    pin = os.environ.get("IPAT_PIN")
+    """環境変数 (.env 含む) から認証情報を取得 (無ければエラー)。コードには残さない。
+
+    .env 例:
+        IPAT_INETID=...        (INET-ID)
+        IPAT_SUBSCRIBER=...    (加入者番号、別名 IPAT_SUBSCRIBER_NO)
+        IPAT_PARS=...          (P-ARS番号、別名 IPAT_PARS_NO)
+        IPAT_PIN=...           (暗証番号)
+    """
+    inetid = _env_any("IPAT_INETID", "IPAT_INET_ID")
+    sub = _env_any("IPAT_SUBSCRIBER", "IPAT_SUBSCRIBER_NO", "IPAT_KANYUSHA")
+    pars = _env_any("IPAT_PARS", "IPAT_PARS_NO", "IPAT_PARS_NUMBER")
+    pin = _env_any("IPAT_PIN", "IPAT_PASSWORD")
     missing = [k for k, v in
                (("IPAT_INETID", inetid), ("IPAT_SUBSCRIBER", sub),
                 ("IPAT_PARS", pars), ("IPAT_PIN", pin)) if not v]
     if missing:
         raise IpatBetError(
-            f"認証情報が不足: {', '.join(missing)} を環境変数で渡してください (コミット禁止)")
+            f"認証情報が不足: {', '.join(missing)} を .env か環境変数で渡してください (コミット禁止)")
     return {"inetid": inetid, "subscriber": sub, "pars": pars, "pin": pin}
 
 

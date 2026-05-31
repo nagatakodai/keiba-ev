@@ -3,10 +3,11 @@
 **重要 / 安全方針:**
   - これは「買い目をカートに入れる」までを自動化し、**購入確定ボタンは絶対に押さない**。
     最終確定は必ず人間が headful ブラウザで目視して行う (誤発注の最終ゲート)。
-  - ログイン情報は **環境変数のみ** から読む。コード/ログ/コミットには絶対残さない:
-        ODDSPARK_ID        オッズパーク会員ID (加入者番号)
-        ODDSPARK_PASSWORD  パスワード
-        ODDSPARK_PIN       投票暗証番号 (要る場合のみ)
+  - ログイン情報は **`.env` / 環境変数のみ** から読む (load_dotenv)。コード/ログ/コミットには
+    絶対残さない (`.env` は .gitignore 済):
+        ODDS_PARK_ID        オッズパーク会員ID (加入者番号)  ※旧 ODDSPARK_ID も fallback
+        ODDS_PARK_PASSWORD  パスワード                      ※旧 ODDSPARK_PASSWORD も fallback
+        ODDS_PARK_PIN       投票暗証番号 (要る場合のみ)      ※旧 ODDSPARK_PIN も fallback
   - オッズパークの利用規約は自動化を制限している可能性がある。**自己責任**で、
     あくまで「カート投入支援 + 人が確定」の半自動に留める。
 
@@ -32,6 +33,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# 認証情報は .env から読む (analyze.py と同じ流儀)。OS env が優先 (load_dotenv は上書きしない)。
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
+
 _SHOT_DIR = ROOT / "data" / "cache"
 # watch-auto → 常駐 betting セッション の受け渡しキュー。watch-auto が <netkeiba_rid>.req を
 # 置き、--session daemon が拾って snapshot の束をカート投入する (処理後 .done に rename)。
@@ -148,14 +157,27 @@ class CartLeg:
     stake: int   # 円 (100円単位前提)
 
 
+def _env_any(*names: str) -> str:
+    """複数の env 名を順に試し最初に見つかった非空値を返す (.env の別名表記を吸収)。"""
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return ""
+
+
 def _creds() -> dict:
-    """環境変数から認証情報を取得 (無ければエラー)。コードには残さない。"""
-    cid = os.environ.get("ODDSPARK_ID")
-    pw = os.environ.get("ODDSPARK_PASSWORD")
+    """環境変数 (.env 含む) から認証情報を取得 (無ければエラー)。コードには残さない。
+
+    .env は `ODDS_PARK_ID` / `ODDS_PARK_PASSWORD` 表記、旧 `ODDSPARK_*` も fallback で受ける。
+    """
+    cid = _env_any("ODDS_PARK_ID", "ODDSPARK_ID")
+    pw = _env_any("ODDS_PARK_PASSWORD", "ODDSPARK_PASSWORD")
     if not cid or not pw:
         raise OddsparkBetError(
-            "ODDSPARK_ID / ODDSPARK_PASSWORD を環境変数で渡してください (コミット禁止)")
-    return {"id": cid, "password": pw, "pin": os.environ.get("ODDSPARK_PIN", "")}
+            "ODDS_PARK_ID / ODDS_PARK_PASSWORD を .env か環境変数で渡してください (コミット禁止)")
+    return {"id": cid, "password": pw,
+            "pin": _env_any("ODDS_PARK_PIN", "ODDSPARK_PIN")}
 
 
 def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
