@@ -186,8 +186,17 @@ def _creds() -> dict:
             "pin": _env_any("ODDS_PARK_PIN", "ODDSPARK_PIN")}
 
 
-def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
-    """snapshot の recommended_bundle.legs → CartLeg。(legs, race_label) を返す。"""
+# 締切までに最低これだけの余裕 (秒) が無ければ投票しない。カート投入+確定 POST に要する時間
+# 分を見込み、投票が締切を跨いで「全脚不成立」になるのを防ぐ (実機: 締切20分後の stale な
+# queue を投入し全7脚 不成立 = 0通り/0円 になった事故の再発防止)。
+CLOSE_GUARD_SEC = 20
+
+
+def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str, int | None]:
+    """snapshot の recommended_bundle.legs → CartLeg。(legs, race_label, close_at) を返す。
+
+    close_at は締切 unix 秒 (snapshot に無ければ None)。daemon は締切後の投票を防ぐのに使う。
+    """
     from .parse import _split_race_id
     venue, si, rn, cup = _split_race_id(netkeiba_rid)
     rid = f"{cup}-{si}-{rn}"
@@ -200,7 +209,8 @@ def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
             for l in (bundle.get("legs") or []) if int(l.get("stake", 0)) > 0]
     if not legs:
         raise OddsparkBetError("recommended_bundle に脚が無い (見送り or 未生成)")
-    return legs, f"{venue} {rn}R"
+    close_at = snap.get("close_at")
+    return legs, f"{venue} {rn}R", (int(close_at) if close_at else None)
 
 
 def _shot(page, name: str) -> None:
@@ -1123,7 +1133,17 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
         rid = req.stem
         terminal = True   # 処理確定 (.done に落とす) か。一過性失敗のみ False で .req 残置
         try:
-            legs, label = _legs_from_snapshot(rid)
+            legs, label, close_at = _legs_from_snapshot(rid)
+            # 締切ガード: 締切後 (or 締切まで CLOSE_GUARD_SEC 未満) なら投票しない。stale な queue
+            # を投入すると全脚 不成立 (0通り/0円) になるだけなので skip して .done に落とす。
+            if close_at is not None:
+                remain = close_at - time.time()
+                if remain < CLOSE_GUARD_SEC:
+                    cl = time.strftime("%H:%M:%S", time.localtime(close_at))
+                    print(f"[oddspark_bet] {rid} skip: 締切ガード (締切 {cl}, "
+                          f"残り {remain:.0f}s < {CLOSE_GUARD_SEC}s) — 締切後/直前のため投票せず")
+                    req.rename(req.with_suffix(".done"))
+                    continue
             status, _ok = sess.add_race(rid, legs, label=label)
             if status == "dup":
                 print(f"[oddspark_bet] {rid} は投入済 (skip)")
@@ -1216,7 +1236,7 @@ def _main() -> None:
         raise SystemExit(2)
     try:
         rid = _to_netkeiba_rid(args[0])
-        legs, label = _legs_from_snapshot(rid)
+        legs, label, _close_at = _legs_from_snapshot(rid)
         print(f"[oddspark_bet] {label}: snapshot から {len(legs)} 点")
         fill_cart(rid, legs,
                   headful="--headless" not in sys.argv,
