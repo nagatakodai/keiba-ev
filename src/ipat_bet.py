@@ -83,31 +83,44 @@ SELECTORS = {
     # ※ vm.bIsBetInActiveOrZeroAvailableNum で disabled になる (発売前 / 購入可能件数0 / 未入金)。
     #    IPAT は **事前に銀行口座から入金 (チャージ) しないと投票不可** (購入限度額が0だと不可)。
     "normal_vote_link": 'button[ui-sref="bet.basic"]',  # 確定 (通常投票)、text=通常 は fallback
-    # --- 開催(場) / レース 選択 ---
-    # IPAT は 場名ボタン (例 "東京") + R 番号ボタン。値は場名/数字でマッチさせる想定。
-    "venue_button": 'text="{venue}"',                # 要確認 (場名でマッチ)
-    "race_button": 'text="{race_no}R"',              # 要確認
-    # --- 式別 (bet type) ---
-    "bet_type_radio": 'input[name="bet_type"][value="{code}"]',  # 要確認
-    # --- 馬番 / 金額 / セット ---
-    # 馬番は着順列 (1着/2着/3着) のグリッド。oddspark と同様 pos=1/2/3 で着順列を表す想定。
-    "horse_cell": 'td[name="horse{pos}"] a, [data-pos="{pos}"] [data-umaban="{umaban}"]',  # 要確認
-    "umaban_reset": 'text=クリア',                   # 各脚前にクリア (累積防止) 要確認
-    "amount_input": 'input[name="amount"]',          # 金額 (100円単位 = 1 で 100円の系もある) 要確認
-    "set_button": 'text=セット',                     # 買い目を購入予定リストに積む 要確認
-    "finish_input": 'text=入力終了',                 # 購入予定リストへ 要確認
-    # --- 購入予定リスト (人が目視する画面) ---
-    "buylist": '#purchaseList',                      # 要確認
-    "delete_all": 'text=全て取消',                   # 開始時クリア用 要確認
-    "combo_count_text": 'text=/合計\\s*([0-9,]+)\\s*件/',  # 件数読み取り 要確認
-    # --- 全自動 (実弾) のみ: 購入確定 ---
-    # IPAT は購入確定前に「合計金額」「合計件数」を確認入力させる二重確認がある (誤発注防止)。
-    # placeholder。実機で確定したら confirm_amount/confirm_count/confirm_purchase を直す。
-    "confirm_amount": 'input[name="totalAmount"]',   # 要確認 (合計金額の確認入力)
-    "confirm_count": 'input[name="totalCount"]',     # 要確認 (合計件数の確認入力)
-    "confirm_purchase": 'text=購入する',             # 半自動はここで人が止まる 要確認
-    "confirm_final_candidates": [                    # 確認ダイアログ/画面の最終ボタン 要確認
-        'text=OK', 'text=購入を確定', 'button#submit',
+    # --- 開催(場) / レース 選択 (実機 DOM 確認済 2026-05-31, bet.basic Angular 画面) ---
+    # 場名: <div class="places"> 内の <button ng-click="vm.selectCourse(id)"> 中に "東京（日）" 等。
+    #   選択中は class に "on" + img.checked。場名は全角括弧付き ("東京（日）") なので部分一致で拾う。
+    "venue_button": '.ipat-select-course-race .places button',   # 確定: 場名でフィルタ (has-text)
+    # レース: <div class="races"> 内の <button ng-click="vm.selectRace(N)"> 中に "<N>R (締切時刻)"。
+    #   "1R" が "11R" に部分一致するので **完全一致**で選ぶ (コード側で .race-no テキスト照合)。
+    "race_button": '.ipat-select-course-race .races button',     # 確定: R番号でフィルタ (完全一致)
+    # --- 式別 (bet type) / 馬番 / 個別金額 / セット (実機 DOM 確認済 2026-05-31) ---
+    # 式別: <select id="bet-basic-type"> option=単勝/複勝/枠連/馬連/ワイド/馬単/３連複/３連単。
+    #   option value は "object:NNNN" (Angular 参照で不安定) なので **ラベル(表示名)で選ぶ**。
+    "bet_type_select": 'select#bet-basic-type',      # 確定 (select_option(label=式別名))
+    "multi_checkbox": '.vote-type input[ng-model="vm.bMulti"]',  # 確定 (マルチ。馬単/3連単のながし)
+    # 馬番: 単勝/複勝 は単一列のチェックボックス <input id="no{馬番}" name="racer{馬番}">。
+    #   ★ 馬連/ワイド/馬単/3連複/3連単 の複数列 (1着/2着/3着 や 軸/相手) の DOM は未取得 ★
+    "horse_check": '#no{umaban}',                    # 確定 (単勝/複勝)。複数列は要 DOM
+    # 金額/セット (select-list コンポーネント):
+    "amount_input": '.selection-amount input[ng-model="vm.nUnit"]',  # 確定 (金額, 100円単位 "00円")
+    "set_button": 'button[ng-click="vm.onSet()"]',   # 確定 (セット → 購入予定リストへ追加)
+    "expand_set_button": 'button[ng-click="vm.onOpenSet()"]',  # 確定 (展開セット = ながし)
+    "finish_input": 'button[ng-click="vm.onShowBetList()"]',   # 確定 (入力終了 → 購入予定リスト)
+    "combi_confirm": 'button[ng-click="vm.onHorseCombiConfirm()"]',  # 確定 (組合せ確認)
+    # 入金(チャージ)未実施だと「投票の前に入金してください」ダイアログが出る (このまま進む/戻る)。
+    "deposit_dialog_proceed": '.ipat-error-window button.btn-ok',  # 確定 (このまま進む)
+    # --- 購入予定リスト (bet-list-cart, 実機 DOM 確認済 2026-05-31) ---
+    "open_cart": 'button.btn-vote-list',             # 確定 (vm.toggleBetList() 購入予定リストを開く)
+    "buylist": '.ipat-vote-list',                    # 確定
+    "delete_all": 'a[ng-click="vm.confirmDeleteAllBetData()"]',   # 確定 (全て削除)
+    "clear_amounts": 'a[ng-click="vm.confirmClearAllUnit()"]',    # 確定 (金額をクリア)
+    "cart_amount_each": 'input[ng-model="vm.cAmount"]',          # 確定 (一括/予算セット用 個別金額)
+    "cart_set_each": 'button[ng-click="vm.setEach()"]',          # 確定 (一括セット)
+    "cart_set_budget": 'button[ng-click="vm.setBudget()"]',      # 確定 (予算セット)
+    # --- 購入確定 (二重確認: 合計金額入力 → 購入する) ---
+    # IPAT は cAmountTotal (合計金額) を確認入力させてから 購入する を押す (誤発注防止)。
+    "confirm_amount": 'input[ng-model="vm.cAmountTotal"]',       # 確定 (合計金額の確認入力)
+    "total_amount_display": '[ng-bind="vm.getCalcTotalAmount() | number"]',  # 確定 (合計金額の計算値)
+    "confirm_purchase": 'button[ng-click="vm.clickPurchase()"]', # 確定 (購入する。半自動はここで人が止まる)
+    "confirm_final_candidates": [                    # 購入後の確認ダイアログ最終ボタン 要確認
+        'text=OK', 'text=購入を確定', 'button.btn-ok',
     ],
     # 購入成功の証跡 (要確認)。複数 marker で OR 判定。
     "purchase_success_markers": ("投票を受け付けました", "受け付けました", "購入完了", "投票完了"),
@@ -420,11 +433,13 @@ class BettingSession:
                 f"レース合計 ¥{total:,} > 上限 ¥{self.max_total_stake:,} — 投入しない (誤入力防止)")
         venue = _jra_venue_name(netkeiba_rid)
         rno = _race_no(netkeiba_rid)
+        # 場・レースは1回だけ選択 (式別を変えても racecard は維持される)
+        _select_course_race(self.page, venue, rno)
         ok = 0
         staked = 0
         for i, leg in enumerate(legs, 1):
             try:
-                _add_leg_to_buylist(self.page, leg, venue, rno)
+                _add_leg_to_buylist(self.page, leg)
                 print(f"  + [{label or netkeiba_rid}] {leg.bet_type} "
                       f"{'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
                 ok += 1
@@ -478,18 +493,28 @@ class BettingSession:
         if not allowed:
             return ("skipped", msg)
         p = self.page
-        # 1) IPAT の購入確認の二重入力 (合計金額/件数) があれば埋める
+        # 0) 購入予定リストを開く (add_race の入力終了で開いている想定だが念のため)
         try:
-            if p.locator(SELECTORS["confirm_amount"]).count() > 0:
-                p.fill(SELECTORS["confirm_amount"], str(race_stake))
-            # 件数は厳密に算出できないと危険 → 入力欄があっても自動では空に留め、人手前提。
-            # (誤った件数で確定が通ると過剰購入のため、実機検証時に件数計算を確定する)
+            if p.locator('.ipat-vote-list-inner:visible').count() == 0:
+                oc = p.locator(SELECTORS["open_cart"])
+                if oc.count() > 0:
+                    oc.first.click()
+                    p.wait_for_timeout(1000)
+        except Exception:  # noqa: BLE001
+            pass
+        # 1) IPAT の二重確認入力: 合計金額入力 (vm.cAmountTotal, 単位=円) に合計を入れる
+        try:
+            ca = p.locator(SELECTORS["confirm_amount"])
+            if ca.count() > 0:
+                ca.first.fill(str(race_stake))
+                p.wait_for_timeout(300)
         except Exception:  # noqa: BLE001
             pass
         # 2) 購入する
         try:
             p.click(SELECTORS["confirm_purchase"])
             p.wait_for_timeout(2500)
+            _dismiss_deposit_dialog(p)   # 未入金だと入金案内が出る
         except Exception as ex:  # noqa: BLE001
             _shot(p, "purchase_gotobuy_failed")
             return ("failed", f"購入するボタン click 失敗: {ex}")
@@ -547,69 +572,93 @@ def _apply_stake_multiplier(legs: list[CartLeg], multiplier: float) -> list[Cart
     return out
 
 
-def _reset_umaban(page) -> None:
-    """各脚の前に馬番選択をクリア (累積/トグル防止)。oddspark の教訓を IPAT でも適用。"""
+# 当方 bet_type → IPAT 式別 select の option ラベル (実機 DOM の表示名と完全一致, 全角注意)。
+# ３連複/３連単 は **全角 "３"** (select option が "３連複"/"３連単")。
+_IPAT_BET_LABEL = {
+    "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
+    "exacta": "馬単", "trio": "３連複", "trifecta": "３連単",
+}
+# 単一列 (1着列のチェックボックス #no{N}) で投入できる券種。馬連/ワイド/馬単/3連複/3連単 は
+# 複数列 (軸/相手 や 1着/2着/3着) で、その馬番選択列の DOM がまだ未取得なので未対応。
+_SINGLE_COLUMN_BETS = {"win", "place"}
+
+
+def _dismiss_deposit_dialog(page) -> None:
+    """「投票の前に入金してください」等の error-window が出ていたら『このまま進む』で閉じる。
+
+    IPAT は未入金 (購入限度額0) だとレース選択時に入金案内ダイアログを出す。カート投入を
+    続けるため閉じる (実際の購入は資金が無いと最終段で弾かれる = 安全側)。
+    """
     try:
-        r = page.locator(SELECTORS["umaban_reset"])
-        if r.count() > 0:
-            r.first.click()
-            page.wait_for_timeout(300)
+        dlg = page.locator('.ipat-error-window .dialog:visible')
+        if dlg.count() == 0:
+            return
+        btn = page.locator(SELECTORS["deposit_dialog_proceed"])
+        if btn.count() > 0:
+            btn.first.click()
+            page.wait_for_timeout(500)
     except Exception:  # noqa: BLE001
         pass
 
 
-def _add_leg_to_buylist(page, leg: CartLeg, venue: str | None, race_no: int) -> None:
-    """1 脚を IPAT 通常投票フローで購入予定リストに積む。**SELECTORS placeholder = 要実機調整**。
+def _select_course_race(page, venue: str | None, race_no: int) -> None:
+    """通常投票 (bet.basic) で 場名 + レース番号 を選択する (レース毎に1回)。実機 DOM 準拠。
 
-    順序付き (馬単/3連単) は _ORDERED_BETS_VERIFIED=False の間は中止 (誤発注防止)。
+    場名: `.places button` で表示名 (例 "東京（日）") に venue ("東京") を含むものを click。
+    レース: `.races button` で `.race-no .text` が race_no 完全一致のものを click ("1R"⊂"11R" 対策)。
+    """
+    # 場名 (部分一致で venue を含むボタン)
+    if venue:
+        vb = page.locator('.ipat-select-course-race .places button',
+                          has_text=venue)
+        if vb.count() > 0:
+            vb.first.click()
+            page.wait_for_timeout(600)
+    _dismiss_deposit_dialog(page)
+    # レース番号 (完全一致)
+    rb = page.locator('.ipat-select-course-race .races button').filter(
+        has=page.locator('.race-no .text', has_text=re.compile(rf'^{race_no}$')))
+    if rb.count() == 0:
+        raise IpatBetError(f"レースボタン不検出 (R{race_no}) — 締切/未発売 or DOM 変化")
+    rb.first.click()
+    page.wait_for_timeout(900)
+    _dismiss_deposit_dialog(page)
+
+
+def _add_leg_to_buylist(page, leg: CartLeg) -> None:
+    """1 脚を IPAT 通常投票 (bet.basic) で購入予定リストに積む。場・レースは選択済前提。
+
+    実機 DOM 準拠 (2026-05-31): 式別 select → 馬番チェック (#no{N}) → 金額 (vm.nUnit) → セット。
+    単勝/複勝 (単一列) のみ対応。馬連/ワイド/馬単/3連複/3連単 は **馬番複数列の DOM 未取得**のため中止。
+    順序付き (馬単/3連単) は _ORDERED_BETS_VERIFIED=False の間も中止 (誤発注防止)。
     """
     if leg.bet_type in ("exacta", "trifecta") and not _ORDERED_BETS_VERIFIED:
         raise IpatBetError(
             f"{leg.bet_type} は順序付きだが _ORDERED_BETS_VERIFIED=False (実機検証まで中止)")
-    code = _BET_TYPE_CODE.get(leg.bet_type)
-    if code is None:
+    if leg.bet_type not in _SINGLE_COLUMN_BETS:
+        raise IpatBetError(
+            f"{leg.bet_type} は複数列 (軸/相手・着順) の馬番選択 DOM が未取得のため未対応 "
+            "(現状 単勝/複勝 のみ投入可)")
+    label = _IPAT_BET_LABEL.get(leg.bet_type)
+    if label is None:
         raise IpatBetError(f"未対応 bet_type: {leg.bet_type}")
-    # 場 / R 選択
-    if venue:
-        try:
-            vb = page.locator(SELECTORS["venue_button"].format(venue=venue))
-            if vb.count() > 0:
-                vb.first.click()
-                page.wait_for_timeout(400)
-        except Exception:  # noqa: BLE001
-            pass
-    try:
-        rb = page.locator(SELECTORS["race_button"].format(race_no=race_no))
-        if rb.count() > 0:
-            rb.first.click()
-            page.wait_for_timeout(400)
-    except Exception:  # noqa: BLE001
-        pass
-    # 式別
-    try:
-        bt = page.locator(SELECTORS["bet_type_radio"].format(code=code))
-        if bt.count() > 0:
-            bt.first.check()
-            page.wait_for_timeout(300)
-    except Exception:  # noqa: BLE001
-        pass
-    # 馬番 (順不同は着順列に各1頭ずつ = 1組、順序付きは key 順に 1/2/3着列)
-    _reset_umaban(page)
-    ordered = leg.bet_type in ("exacta", "trifecta")
-    for idx, umaban in enumerate(leg.key, 1):
-        pos = idx if ordered else 1  # 順不同は全部 1着列扱い (1組), 順序付きは 1/2/3着列
-        sel = SELECTORS["horse_cell"].format(pos=pos, umaban=umaban)
-        cell = page.locator(sel)
-        if cell.count() == 0:
-            raise IpatBetError(f"馬番セル不検出 (pos={pos} umaban={umaban}) — SELECTORS 要確認")
-        cell.first.click()
+    # 式別 (option ラベルで選択。value=object:NNNN は不安定なので使わない)
+    page.select_option(SELECTORS["bet_type_select"], label=label)
+    page.wait_for_timeout(600)
+    # 馬番 (単勝/複勝 は単一列 #no{N} を check)
+    for umaban in leg.key:
+        chk = page.locator(SELECTORS["horse_check"].format(umaban=umaban))
+        if chk.count() == 0:
+            raise IpatBetError(f"馬番チェック不検出 (#no{umaban}) — 取消馬/DOM 変化の可能性")
+        chk.first.check()
         page.wait_for_timeout(200)
-    # 金額 (IPAT は 100円単位。"amount" の単位が円か100円かは実機で確認)
-    page.fill(SELECTORS["amount_input"], str(leg.stake // 100))
+    # 金額 (100円単位 = stake/100 を入力)
+    amt = page.locator(SELECTORS["amount_input"])
+    amt.first.fill(str(leg.stake // 100))
     page.wait_for_timeout(200)
-    # セット
+    # セット (購入予定リストへ追加)
     page.click(SELECTORS["set_button"])
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(700)
 
 
 # ── one-shot ─────────────────────────────────────────────────────────────────────────
