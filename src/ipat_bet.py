@@ -234,16 +234,11 @@ def _race_no(netkeiba_rid: str) -> int:
     return int(netkeiba_rid[10:12])
 
 
-# 締切までに最低これだけの余裕 (秒) が無ければ投票しない (締切跨ぎの全脚不成立を防ぐ)。
-CLOSE_GUARD_SEC = 20
-
-
-def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str, int | None]:
-    """snapshot の recommended_bundle.legs → CartLeg。(legs, race_label, close_at) を返す。
+def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
+    """snapshot の recommended_bundle.legs → CartLeg。(legs, race_label) を返す。
 
     snapshot ファイル名は内部 race_id `<cup>-<si>-<rn>` (odds 源非依存で共通)。netkeiba 12桁 rid →
     内部 race_id 変換は `parse._split_race_id` を使う (oddspark_bet._legs_from_snapshot と同形)。
-    close_at は締切 unix 秒 (snapshot に無ければ None)。daemon は締切後の投票を防ぐのに使う。
     """
     from .parse import _split_race_id
     venue, si, rn, cup = _split_race_id(netkeiba_rid)
@@ -257,8 +252,7 @@ def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str, int | No
             for l in (bundle.get("legs") or []) if int(l.get("stake", 0)) > 0]
     if not legs:
         raise IpatBetError("recommended_bundle に脚が無い (見送り or 未生成)")
-    close_at = snap.get("close_at")
-    return legs, f"{venue} {rn}R", (int(close_at) if close_at else None)
+    return legs, f"{venue} {rn}R"
 
 
 def _shot(page, name: str) -> None:
@@ -836,17 +830,7 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
         rid = req.stem
         terminal = True
         try:
-            legs, label, close_at = _legs_from_snapshot(rid)
-            # 締切ガード: 締切後 (or 締切まで CLOSE_GUARD_SEC 未満) は投票しない。stale な queue を
-            # 投入すると締切跨ぎで全脚不成立になるだけ → skip して .done に落とす (実弾の無駄撃ち防止)。
-            if close_at is not None:
-                remain = close_at - time.time()
-                if remain < CLOSE_GUARD_SEC:
-                    cl = time.strftime("%H:%M:%S", time.localtime(close_at))
-                    print(f"[ipat_bet] {rid} skip: 締切ガード (締切 {cl}, "
-                          f"残り {remain:.0f}s < {CLOSE_GUARD_SEC}s) — 締切後/直前のため投票せず")
-                    req.rename(req.with_suffix(".done"))
-                    continue
+            legs, label = _legs_from_snapshot(rid)
             status, _ok = sess.add_race(rid, legs, label=label)
             if status == "dup":
                 print(f"[ipat_bet] {rid} は投入済 (skip)")
@@ -921,7 +905,7 @@ def _main() -> None:
         rid = _to_netkeiba_rid(args[0])
         if not _is_jra_rid(rid):
             raise IpatBetError(f"JRA レースではありません (IPAT 投票対象外): {rid}")
-        legs, label, _close_at = _legs_from_snapshot(rid)
+        legs, label = _legs_from_snapshot(rid)
         print(f"[ipat_bet] {label}: snapshot から {len(legs)} 点")
         fill_cart(rid, legs,
                   headful="--headless" not in sys.argv,
