@@ -68,6 +68,54 @@ def test_build_jra_racedata_populates_names_from_horse_info():
     assert by[3].jockey_name and by[3].body_weight == 480
 
 
+# accessU 馬詳細の競走成績テーブル (実機 2026-05-31 の最小再現)。
+_ACCESSU_HIST = (
+    '<table class="basic narrow-xy striped"><tbody>'
+    '<tr><th>年月日</th><th>場</th><th>レース名</th><th>距離</th><th>馬場</th>'
+    '<th>頭数</th><th>人気</th><th>着順</th><th>騎手名</th><th>負担重量</th>'
+    '<th>馬体重</th><th>タイム</th><th>Rt</th><th>1着馬</th></tr>'
+    '<tr><td class="date">2026年5月16日</td><td>新潟</td>'
+    '<td class="race"><a href="#">3歳未勝利</a></td><td>ダ1200</td><td>良</td>'
+    '<td>15</td><td>9</td><td>7</td>'
+    '<td class="jockey"><a href="#">古川 奈穂</a></td><td>53.0</td><td>426</td>'
+    '<td>1:14.2</td><td class="rate"></td><td class="horse">シュヴァルツシルト</td></tr>'
+    '<tr><td class="date">2026年2月1日</td><td>東京</td>'
+    '<td class="race"><a href="#">3歳新馬</a></td><td>芝1600</td><td>良</td>'
+    '<td>16</td><td>3</td><td>2</td>'
+    '<td class="jockey"><a href="#">戸崎 圭太</a></td><td>55.0</td><td>432</td>'
+    '<td>1:37.3</td><td class="rate"></td><td class="horse">アスクイキゴミ</td></tr>'
+    '</tbody></table>'
+)
+
+
+def test_parse_jra_past_runs():
+    runs = jra.parse_jra_past_runs(_ACCESSU_HIST)
+    assert len(runs) == 2
+    r0 = runs[0]
+    assert r0.date == "2026.5.16" and r0.venue == "新潟"
+    assert r0.surface == "ダ" and r0.distance == 1200 and r0.going == "良"
+    assert r0.field_size == 15 and r0.popularity == 9
+    assert r0.finish_pos is None                       # 4着以下は None (1/2/3 のみ int)
+    assert "古川" in r0.jockey and r0.body_weight == 426
+    assert abs(r0.own_time_sec - 74.2) < 1e-6          # 自走時計
+    assert runs[1].finish_pos == 2                     # 2着 → int
+
+
+_HEADER_HTML = (
+    '<div class="type">'
+    '<div class="cell category">3歳</div><div class="cell class">未勝利</div>'
+    '<div class="cell rule">[指定]</div><div class="cell weight">馬齢</div>'
+    '<div class="cell course"><span class="cap">コース：</span>1,400'
+    '<span class="unit">メートル</span>（ダート・左）</div></div>'
+)
+
+
+def test_parse_jra_race_header():
+    h = jra.parse_jra_race_header(_HEADER_HTML)
+    assert h["distance"] == 1400 and h["surface"] == "ダ"
+    assert h["race_class"] == "3歳未勝利"
+
+
 _QUINELLA = (
     "<caption>1</caption><tbody>"
     '<tr><th scope="row">2</th><td>5.7</td></tr>'

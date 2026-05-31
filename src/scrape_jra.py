@@ -22,8 +22,8 @@ import urllib.request
 from dataclasses import dataclass
 
 from .ev import LLM_BLEND_DEFAULT
-from .models import BetOdds, Horse, Race, RaceData, TrifectaOdds
-from .parse import _split_race_id
+from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
+from .parse import _parse_time_to_sec, _split_race_id
 
 _BASE = "https://www.jra.go.jp/JRADB"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -350,6 +350,100 @@ def parse_jra_horses(html: str) -> dict[int, dict]:
     return out
 
 
+# accessU 馬詳細ページの競走成績テーブル (1 番目の table.basic.narrow-xy.striped)。
+# 列: 年月日 / 場 / レース名 / 距離(芝|ダ|障+m) / 馬場 / 頭数 / 人気 / 着順 / 騎手名 /
+#     負担重量 / 馬体重 / タイム(自走) / Rt / 1着馬。実機確認 2026-05-31。
+_JRA_HIST_DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+_JRA_HIST_TABLE_RE = re.compile(
+    r'<table class="basic narrow-xy striped">(.*?)</table>', re.DOTALL)
+
+
+def parse_jra_past_runs(html: str, *, limit: int = 12) -> list[PastRun]:
+    """accessU (馬詳細) HTML → 競走成績 [PastRun] (新しい順)。
+
+    タイム列は馬の自走時計なので winner_time_sec=own / time_diff_sec=0 で格納
+    (own_time_sec プロパティがそのまま自走時計になる、keibago 馬柱と同じ規約)。
+    着順は 1/2/3 のみ int・他は None (netkeiba/keibago の学習分布と整合)。
+    上3F/通過順/着差は accessU に無いので 0/""。
+    """
+    import html as _htmlmod
+
+    m = _JRA_HIST_TABLE_RE.search(html)
+    if not m:
+        return []
+    out: list[PastRun] = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", m.group(1), re.DOTALL):
+        cells = [_htmlmod.unescape(re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, re.DOTALL)]
+        if len(cells) < 12:
+            continue
+        dm = _JRA_HIST_DATE_RE.search(cells[0])
+        if not dm:                       # ヘッダ行 (年月日) 等は skip
+            continue
+        sdm = re.match(r"(芝|ダ|障)?\s*(\d{3,4})", cells[3])
+        if not sdm:
+            continue
+        date = f"{int(dm.group(1))}.{int(dm.group(2))}.{int(dm.group(3))}"
+        fin = int(cells[7]) if cells[7] in ("1", "2", "3") else None
+        out.append(PastRun(
+            date=date,
+            venue=cells[1],
+            race_class=cells[2],
+            surface={"芝": "芝", "ダ": "ダ", "障": "障"}.get(sdm.group(1) or "", "ダ"),
+            distance=int(sdm.group(2)),
+            going=cells[4],
+            field_size=int(cells[5]) if cells[5].isdigit() else 0,
+            popularity=int(cells[6]) if cells[6].isdigit() else 0,
+            finish_pos=fin,
+            jockey=cells[8],
+            weight_kg=float(cells[9]) if re.fullmatch(r"[\d.]+", cells[9]) else 0.0,
+            body_weight=int(cells[10]) if cells[10].isdigit() else 0,
+            winner_time_sec=_parse_time_to_sec(cells[11]),
+            time_diff_sec=0.0,
+        ))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def fetch_jra_past_runs(horse_id: str, *, limit: int = 12) -> list[PastRun]:
+    """accessU CNAME (= 単複ページの horse_id) → 競走成績 [PastRun]。失敗時 []。"""
+    if not horse_id:
+        return []
+    try:
+        html = _post("accessU.html", horse_id)
+    except Exception:  # noqa: BLE001
+        return []
+    return parse_jra_past_runs(html, limit=limit)
+
+
+def parse_jra_race_header(html: str) -> dict:
+    """単複ページ → {distance, surface, race_class}。実機ヘッダ (2026-05-31):
+    `<div class="txt">3歳未勝利 ... コース： 1,400 メートル （ダート・左）`。
+    surface は features の past_runs と同じ語彙 (芝/ダ/障) に正規化。
+    """
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    out: dict = {}
+    m = re.search(r"コース：\s*([\d,]+)\s*メートル\s*（\s*(芝|ダート|障害)", text)
+    if m:
+        try:
+            out["distance"] = int(m.group(1).replace(",", ""))
+        except ValueError:
+            pass
+        out["surface"] = {"芝": "芝", "ダート": "ダ", "障害": "障"}[m.group(2)]
+    # race_class = レース条件セル (例 category "3歳" + class "未勝利" → "3歳未勝利")。
+    # 実機: <div class="cell category">3歳</div><div class="cell class">未勝利</div>。
+    parts = []
+    for cell in ("category", "class"):
+        cm = re.search(rf'<div class="cell {cell}">\s*(.*?)\s*</div>', html, re.DOTALL)
+        if cm:
+            parts.append(re.sub(r"<[^>]+>", "", cm.group(1)).strip())
+    rc = "".join(p for p in parts if p)
+    if rc:
+        out["race_class"] = rc
+    return out
+
+
 def fetch_jra_bets(loc: JraLoc) -> dict:
     """全券種を段2 POST で取得 → {other_bets, trifecta, consistency, horse_info}。"""
     win: list[BetOdds] = []
@@ -357,6 +451,7 @@ def fetch_jra_bets(loc: JraLoc) -> dict:
     other: dict[str, list[BetOdds]] = {}
     trifecta: list[TrifectaOdds] = []
     horse_info: dict[int, dict] = {}
+    race_header: dict = {}
     for name, tok in loc.odds_tokens.items():
         try:
             html = _post("accessO.html", tok)
@@ -368,6 +463,10 @@ def fetch_jra_bets(loc: JraLoc) -> dict:
                 horse_info = parse_jra_horses(html)
             except Exception:  # noqa: BLE001 — 馬情報パースは best-effort (odds は壊さない)
                 horse_info = {}
+            try:
+                race_header = parse_jra_race_header(html)
+            except Exception:  # noqa: BLE001
+                race_header = {}
         elif name == "quinella":
             other["quinella"] = parse_quinella(html)
         elif name == "wide":
@@ -381,7 +480,7 @@ def fetch_jra_bets(loc: JraLoc) -> dict:
     other_bets = {"win": win, "place": place, **other}
     return {"other_bets": other_bets, "trifecta": trifecta,
             "consistency": check_consistency(other_bets, trifecta),
-            "horse_info": horse_info}
+            "horse_info": horse_info, "race_header": race_header}
 
 
 def check_consistency(other_bets: dict, trifecta: list) -> dict:
@@ -499,17 +598,59 @@ def _flatten_final_odds_jra(bets: dict) -> dict[str, float]:
     return out
 
 
-def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
-                       horse_info: dict[int, dict] | None = None) -> RaceData:
-    """cache 出馬表が無い場合の RaceData (JRA 単勝の馬番リスト由来、past_runs なし)。
+def _pastruns_cache_path(netkeiba_rid: str):
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "data" / "cache" /
+            "jra_pastruns" / f"{netkeiba_rid}.json")
 
-    JRA 公式の馬柱 (accessU) パースは未実装なので past_runs は空 = 市場ブレンド主導。
-    cache に netkeiba 馬柱があれば analyze_jra 側でそちらを使う (確率モデルがフル稼働)。
-    `horse_info` (= 単複ページから拾った 馬名/騎手/性齢/馬体重/斤量) を渡すと各馬に乗せる
-    → Claude 考察 (score) が馬名で web 検索でき、馬体重増減等も判断材料にできる。
+
+def _load_jra_pastruns(netkeiba_rid: str) -> dict[int, list[PastRun]] | None:
+    import json
+    p = _pastruns_cache_path(netkeiba_rid)
+    if not p.exists():
+        return None
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        return {int(k): [PastRun(**r) for r in runs] for k, runs in raw.items()}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _save_jra_pastruns(netkeiba_rid: str, by_num: dict[int, list[PastRun]]) -> None:
+    import dataclasses
+    import json
+    p = _pastruns_cache_path(netkeiba_rid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    data = {str(n): [dataclasses.asdict(r) for r in runs] for n, runs in by_num.items()}
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _date_key_jra(s: str) -> tuple[int, int, int]:
+    parts = re.split(r"[./]", s.strip())
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except (IndexError, ValueError):
+        return (0, 0, 0)
+
+
+def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
+                       horse_info: dict[int, dict] | None = None,
+                       race_header: dict | None = None, *,
+                       fetch_past: bool = False,
+                       target_date: tuple[int, int, int] | None = None) -> RaceData:
+    """cache 出馬表が無い場合の RaceData (JRA 公式オッズ + accessU 由来)。
+
+    `horse_info` (単複ページ): 馬名/騎手/性齢/馬体重/斤量 → 各馬に乗せる。
+    `race_header` (単複ページ): distance/surface/race_class → Race に乗せる
+      (Claude 考察の距離・馬場欠損を解消、distance/surface_fit 特徴量も効く)。
+    `fetch_past=True`: accessU を馬ごとに引いて past_runs を構築・キャッシュ
+      (`data/cache/jra_pastruns/<rid>.json`)。score ステージで実行 (時間に余裕)、
+      bet ステージは fetch_past=False でキャッシュのみ読む (締切直前の latency 回避)。
+    `target_date`: leakage 防止。この日付**以降**の run は除外 + 直近5走に制限。
     """
     venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
     info = horse_info or {}
+    hdr = race_header or {}
     horses = []
     for b in win_bets:
         n = b.key[0]
@@ -521,9 +662,27 @@ def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
             jockey_name=d.get("jockey_name", ""), trainer_name=d.get("trainer_name", ""),
             horse_id=d.get("horse_id", ""),
         ))
+    # past_runs: キャッシュ → (score 帯のみ) accessU fetch → 無し
+    by_num = _load_jra_pastruns(netkeiba_rid)
+    if by_num is None and fetch_past:
+        by_num = {}
+        for h in horses:
+            hid = info.get(h.number, {}).get("horse_id", "")
+            if hid:
+                by_num[h.number] = fetch_jra_past_runs(hid)
+        if by_num:
+            _save_jra_pastruns(netkeiba_rid, by_num)
+    if by_num:
+        for h in horses:
+            runs = by_num.get(h.number, [])
+            if target_date:   # leakage: 対象 race 日以降を除外
+                runs = [r for r in runs if _date_key_jra(r.date) < target_date]
+            h.past_runs = runs[:5]
     race = Race(cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
                 venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
-                venue_name=venue, race_class="", distance=0, horses=horses)
+                venue_name=venue, race_class=hdr.get("race_class", ""),
+                distance=hdr.get("distance", 0), surface=hdr.get("surface", ""),
+                horses=horses)
     return RaceData(race=race, trifecta=[], other_bets={})
 
 
@@ -581,7 +740,17 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
                 h.past_runs = runs.get(h.number, [])
         used_cache = True
     else:
-        rd = build_jra_racedata(netkeiba_rid, other["win"], horse_info)
+        # leakage 防止用の対象 race 日付 (start_at から JST 日付)。live (発走前) は全履歴が
+        # 過去なので実質 no-op。past_runs (accessU) は score 帯のみ fetch+cache し、bet 帯は
+        # cache を読むだけ (締切直前の latency 回避)。
+        target_date = None
+        if start_at:
+            import datetime as _dt
+            d = _dt.datetime.fromtimestamp(start_at)
+            target_date = (d.year, d.month, d.day)
+        rd = build_jra_racedata(
+            netkeiba_rid, other["win"], horse_info, res.get("race_header") or {},
+            fetch_past=(phase == "score"), target_date=target_date)
 
     if start_at and not rd.race.start_at:
         from .parse import close_at_for_start
