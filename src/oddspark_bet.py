@@ -127,7 +127,23 @@ AUTO_PURCHASE_VERIFIED = True
 # デイリー上限の既定値 (円)。1 日の累計賭金がここを超えると _confirm_purchase が "skipped"
 # を返し、カートはそのまま (人が判断)。日跨ぎ (JST 00:00) で自動的に counter が 0 に戻る。
 DAILY_CAP_DEFAULT = 50_000
+# per-race ハードリミットの基準値 (円)。`--max-stake=N` で明示指定でき、未指定なら
+# stake_multiplier に連動 (= 基準値 × 倍率) して自動スケールする。倍率を上げたのに上限が
+# 据え置きで全 race が reject される事故 (実機: 5x → ¥26,500 > ¥10,000 で skip) を防ぐ。
+PER_RACE_BASE_DEFAULT = 10_000
 DAILY_STAKE_FILE = ROOT / "data" / "cache" / "oddspark_daily_stake.json"
+
+
+def _resolve_max_stake(explicit: int | None, multiplier: float) -> tuple[int, str]:
+    """per-race 上限を決める。明示指定があればそれ、無ければ基準値×倍率 (100円丸め)。
+
+    戻り値 (max_total_stake, 由来の説明文)。
+    """
+    if explicit is not None:
+        return explicit, f"明示指定 ¥{explicit:,}"
+    scaled = int(round(PER_RACE_BASE_DEFAULT * max(1.0, multiplier) / 100.0)) * 100
+    return scaled, (f"基準¥{PER_RACE_BASE_DEFAULT:,}×倍率{multiplier:g} = ¥{scaled:,}"
+                    if multiplier != 1.0 else f"既定 ¥{scaled:,}")
 # 当方 bet_type → オッズパーク式別の表示値/コード (要確認)。
 _SHIKIBETSU = {
     "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
@@ -216,7 +232,7 @@ def fill_cart(
     *,
     headful: bool = True,
     manual_login: bool = False,
-    max_total_stake: int = 20_000,
+    max_total_stake: int = 10_000,
 ) -> None:
     """ログイン → 対象 race の投票 → 各買い目をカート投入手前まで。**確定は押さない**。
 
@@ -730,7 +746,7 @@ class BettingSession:
     """
 
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
-                 max_total_stake: int = 20_000, login_wait_sec: int = 600,
+                 max_total_stake: int = 10_000, login_wait_sec: int = 600,
                  auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                  stake_multiplier: float = 1.0,
                  payment_method: str = PAYMENT_OPCOIN) -> None:
@@ -1050,7 +1066,7 @@ class BettingSession:
 
 
 def run_session(*, headful: bool = True, manual_login: bool = True,
-                max_total_stake: int = 20_000, poll_sec: int = 5,
+                max_total_stake: int = 10_000, poll_sec: int = 5,
                 clear_existing: bool = False,
                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                 stake_multiplier: float = 1.0,
@@ -1163,9 +1179,15 @@ def _main() -> None:
         poll = 5
         daily_cap = DAILY_CAP_DEFAULT
         stake_multiplier = 1.0
+        max_stake_explicit: int | None = None
         payment_method = PAYMENT_OPCOIN
         for a in argv:
-            if a.startswith("--poll="):
+            if a.startswith("--max-stake="):
+                try:
+                    max_stake_explicit = max(0, int(a.split("=", 1)[1]))
+                except ValueError:
+                    print(f"[oddspark_bet] --max-stake 値が不正 ({a}) → 倍率連動に fallback")
+            elif a.startswith("--poll="):
                 try:
                     poll = max(1, int(a.split("=", 1)[1]))
                 except ValueError:
@@ -1196,11 +1218,14 @@ def _main() -> None:
                 else:
                     print(f"[oddspark_bet] --payment 値が不正 ({a}) → 既定 {payment_method} "
                           f"(opcoin | buylimit)")
+        max_total_stake, src = _resolve_max_stake(max_stake_explicit, stake_multiplier)
+        print(f"[oddspark_bet] per-race 上限: {src}")
         run_session(
             headful="--headless" not in argv,
             auto_purchase="--auto-purchase" in argv,
             daily_cap=daily_cap,
             stake_multiplier=stake_multiplier,
+            max_total_stake=max_total_stake,
             payment_method=payment_method,
             manual_login="--auto-login" not in argv,   # 既定は人がログイン
             poll_sec=poll,
@@ -1212,7 +1237,9 @@ def _main() -> None:
         print("usage:\n"
               "  one-shot: python -m src.oddspark_bet <netkeiba_nar_race_id|race_id> "
               "[--headless] [--manual-login]\n"
-              "  常駐    : python -m src.oddspark_bet --session [--auto-login] [--poll=5] [--clear]")
+              "  常駐    : python -m src.oddspark_bet --session [--auto-login] [--poll=5] [--clear] "
+              "[--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000]\n"
+              "    per-race 上限: --max-stake=N で明示指定。未指定なら基準¥10,000×倍率に連動")
         raise SystemExit(2)
     try:
         rid = _to_netkeiba_rid(args[0])

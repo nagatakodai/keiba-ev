@@ -167,7 +167,19 @@ AUTO_PURCHASE_VERIFIED = True
 # デイリー上限の既定値 (円)。1 日の累計賭金がここを超えると _confirm_purchase が "skipped"。
 # JST 00:00 で counter リセット。oddspark とは別ファイルで独立管理。
 DAILY_CAP_DEFAULT = 50_000
+# per-race ハードリミットの基準値 (円)。`--max-stake=N` で明示指定でき、未指定なら
+# stake_multiplier に連動 (= 基準値 × 倍率) して自動スケールする (oddspark と同設計)。
+PER_RACE_BASE_DEFAULT = 10_000
 DAILY_STAKE_FILE = ROOT / "data" / "cache" / "ipat_daily_stake.json"
+
+
+def _resolve_max_stake(explicit: int | None, multiplier: float) -> tuple[int, str]:
+    """per-race 上限を決める。明示指定があればそれ、無ければ基準値×倍率 (100円丸め)。"""
+    if explicit is not None:
+        return explicit, f"明示指定 ¥{explicit:,}"
+    scaled = int(round(PER_RACE_BASE_DEFAULT * max(1.0, multiplier) / 100.0)) * 100
+    return scaled, (f"基準¥{PER_RACE_BASE_DEFAULT:,}×倍率{multiplier:g} = ¥{scaled:,}"
+                    if multiplier != 1.0 else f"既定 ¥{scaled:,}")
 
 # IPAT 投票対象は JRA 10 場のみ (netkeiba venue code 01-10)。
 JRA_VENUE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
@@ -336,7 +348,7 @@ class BettingSession:
     """
 
     def __init__(self, *, headful: bool = True, manual_login: bool = True,
-                 max_total_stake: int = 20_000, login_wait_sec: int = 600,
+                 max_total_stake: int = 10_000, login_wait_sec: int = 600,
                  auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                  stake_multiplier: float = 1.0):
         self.headful = headful
@@ -754,7 +766,7 @@ def _add_leg_to_buylist(page, leg: CartLeg) -> None:
 # ── one-shot ─────────────────────────────────────────────────────────────────────────
 def fill_cart(netkeiba_rid: str, legs: list[CartLeg], *,
               headful: bool = True, manual_login: bool = True,
-              max_total_stake: int = 20_000) -> None:
+              max_total_stake: int = 10_000) -> None:
     """1 レースをカート投入して人が確定するまでブラウザを開いたまま待機 (one-shot)。"""
     total = sum(l.stake for l in legs)
     if total > max_total_stake:
@@ -779,7 +791,7 @@ def fill_cart(netkeiba_rid: str, legs: list[CartLeg], *,
 
 # ── 常駐 daemon ───────────────────────────────────────────────────────────────────
 def run_session(*, headful: bool = True, manual_login: bool = True,
-                max_total_stake: int = 20_000, poll_sec: int = 5,
+                max_total_stake: int = 10_000, poll_sec: int = 5,
                 clear_existing: bool = False,
                 auto_purchase: bool = False, daily_cap: int = DAILY_CAP_DEFAULT,
                 stake_multiplier: float = 1.0) -> None:
@@ -867,8 +879,14 @@ def _main() -> None:
         poll = 5
         daily_cap = DAILY_CAP_DEFAULT
         stake_multiplier = 1.0
+        max_stake_explicit: int | None = None
         for a in argv:
-            if a.startswith("--poll="):
+            if a.startswith("--max-stake="):
+                try:
+                    max_stake_explicit = max(0, int(a.split("=", 1)[1]))
+                except ValueError:
+                    print(f"[ipat_bet] --max-stake 値が不正 ({a}) → 倍率連動に fallback")
+            elif a.startswith("--poll="):
                 try:
                     poll = max(1, int(a.split("=", 1)[1]))
                 except ValueError:
@@ -884,11 +902,14 @@ def _main() -> None:
                     stake_multiplier = v if 0 < v <= 100 else 1.0
                 except ValueError:
                     pass
+        max_total_stake, src = _resolve_max_stake(max_stake_explicit, stake_multiplier)
+        print(f"[ipat_bet] per-race 上限: {src}")
         run_session(
             headful="--headless" not in argv,
             auto_purchase="--auto-purchase" in argv,
             daily_cap=daily_cap,
             stake_multiplier=stake_multiplier,
+            max_total_stake=max_total_stake,
             manual_login="--auto-login" not in argv,
             poll_sec=poll,
             clear_existing="--clear" in argv,
@@ -899,7 +920,8 @@ def _main() -> None:
         print("usage:\n"
               "  one-shot: python -m src.ipat_bet <netkeiba_jra_race_id|race_id> [--manual-login]\n"
               "  常駐    : python -m src.ipat_bet --session [--auto-login] [--auto-purchase] "
-              "[--poll=5] [--clear] [--daily-cap=50000]")
+              "[--poll=5] [--clear] [--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000]\n"
+              "    per-race 上限: --max-stake=N で明示指定。未指定なら基準¥10,000×倍率に連動")
         raise SystemExit(2)
     try:
         rid = _to_netkeiba_rid(args[0])
