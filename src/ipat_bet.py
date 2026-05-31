@@ -68,14 +68,21 @@ SELECTORS = {
     #   send() が inetid 検証 → FORM1.submit()。
     "login_inetid": 'input[name="inetid"]',          # 確定 (実機DOM)
     "login_inetid_submit": 'a[title="ログイン"]',    # 確定 (<a onclick=send()>)、JS fallback send()
-    # 段2 加入者番号/P-ARS/暗証番号 画面 (**要実機 DOM 確認** — 次に DOM を貼ってもらう):
-    "login_subscriber": 'input[name="i"]',           # 加入者番号 要確認
-    "login_pars": 'input[name="p"]',                 # P-ARS番号 要確認
-    "login_pin": 'input[name="r"]',                  # 暗証番号 要確認
-    "login_submit": 'button[type="submit"], input[type="submit"], a[title="ログイン"]',  # 要確認
-    "logged_in_marker": "text=ログアウト",            # 要確認 (メニューに存在する想定)
-    # --- 通常投票への遷移 ---
-    "normal_vote_link": 'text=通常投票',              # 要確認
+    # 段2 加入者情報入力 画面 (実機 DOM 確認済 2026-05-31)。フィールド名に注意:
+    #   name="i" = 加入者番号(8桁) / name="p" = 暗証番号(password,4桁) / name="r" = P-ARS番号(4桁)。
+    #   ログインは <a onclick="ToModernMenu()" title="ネット投票メニューへ"> (submit ボタンではない)。
+    #   ToModernMenu() が FORM1.i / FORM2.p / FORM3.r を読んで送信。
+    "login_subscriber": 'input[name="i"]',           # 確定: 加入者番号
+    "login_pin": 'input[name="p"]',                  # 確定: 暗証番号 (type=password)
+    "login_pars": 'input[name="r"]',                 # 確定: P-ARS番号
+    "login_submit": 'a[title="ネット投票メニューへ"]',  # 確定 (<a onclick=ToModernMenu()>)
+    # ログイン後メニュー (実機 DOM 確認済 2026-05-31)。投票画面は AngularJS SPA
+    # (ui-router, hash route #!/...)。ログイン判定はメニューの <a ui-sref="logout">ログアウト</a>。
+    "logged_in_marker": "text=ログアウト",            # 確定 (a[ui-sref=logout])
+    # --- 通常投票への遷移 (実機 DOM 確認済): <button ui-sref="bet.basic" href="#!/bet/basic"> ---
+    # ※ vm.bIsBetInActiveOrZeroAvailableNum で disabled になる (発売前 / 購入可能件数0 / 未入金)。
+    #    IPAT は **事前に銀行口座から入金 (チャージ) しないと投票不可** (購入限度額が0だと不可)。
+    "normal_vote_link": 'button[ui-sref="bet.basic"]',  # 確定 (通常投票)、text=通常 は fallback
     # --- 開催(場) / レース 選択 ---
     # IPAT は 場名ボタン (例 "東京") + R 番号ボタン。値は場名/数字でマッチさせる想定。
     "venue_button": 'text="{venue}"',                # 要確認 (場名でマッチ)
