@@ -288,6 +288,11 @@ class WatchAutoStartRequest(BaseModel):
     # 支払方法: opcoin (OPコイン残, 既定) | buylimit (投票資金残, 会員入金)
     # Literal で API 境界で値検証 (任意文字列を入れて子プロセスのラベルに垂れ流すのを防ぐ)。
     bet_payment_method: Literal["opcoin", "buylimit"] = "opcoin"
+    # JRA 即PAT 自動投票 (カート投入)。ON で auto_watch に --bet-ipat を付け、JRA 投票 daemon
+    # (headful ブラウザ・人がログイン) を起動。土日 JRA 開催日に JRA ブラウザも一緒に立てる用途。
+    # **headful なので `make api` は DISPLAY のある端末で起動**。認証は env
+    # (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。bet_oddspark と独立に ON 可。
+    bet_ipat: bool = False
 
 
 @app.post("/api/watch-auto/start")
@@ -310,15 +315,18 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_daily_cap=req.bet_daily_cap,
         bet_stake_multiplier=req.bet_stake_multiplier,
         bet_payment_method=req.bet_payment_method,
+        bet_ipat=req.bet_ipat,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
+            "ipat_bet_running": WATCH.ipat_bet_running,
             "config": WATCH.config, "job": job.to_dict()}
 
 
 @app.post("/api/watch-auto/stop")
 async def api_watch_stop() -> dict[str, Any]:
     await WATCH.stop()
-    return {"running": WATCH.running, "bet_running": WATCH.bet_running, "config": WATCH.config}
+    return {"running": WATCH.running, "bet_running": WATCH.bet_running,
+            "ipat_bet_running": WATCH.ipat_bet_running, "config": WATCH.config}
 
 
 @app.get("/api/watch-auto/status")
@@ -326,9 +334,11 @@ def api_watch_status() -> dict[str, Any]:
     return {
         "running": WATCH.running,
         "bet_running": WATCH.bet_running,
+        "ipat_bet_running": WATCH.ipat_bet_running,
         "config": WATCH.config,
         "job": WATCH.job.to_dict() if WATCH.job else None,
         "bet_job": WATCH.bet_job.to_dict() if WATCH.bet_job else None,
+        "ipat_bet_job": WATCH.ipat_bet_job.to_dict() if WATCH.ipat_bet_job else None,
     }
 
 

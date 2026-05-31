@@ -10,13 +10,15 @@ from src import oddspark_bet as ob
 
 
 def test_creds_requires_env(monkeypatch):
-    monkeypatch.delenv("ODDSPARK_ID", raising=False)
-    monkeypatch.delenv("ODDSPARK_PASSWORD", raising=False)
+    # .env を load_dotenv で読むため新名 (ODDS_PARK_*) + 旧名 (ODDSPARK_*) を両方クリア。
+    for k in ("ODDS_PARK_ID", "ODDS_PARK_PASSWORD", "ODDS_PARK_PIN",
+              "ODDSPARK_ID", "ODDSPARK_PASSWORD", "ODDSPARK_PIN"):
+        monkeypatch.delenv(k, raising=False)
     with pytest.raises(ob.OddsparkBetError):
         ob._creds()
-    monkeypatch.setenv("ODDSPARK_ID", "u")
-    monkeypatch.setenv("ODDSPARK_PASSWORD", "p")
-    monkeypatch.setenv("ODDSPARK_PIN", "1234")
+    monkeypatch.setenv("ODDS_PARK_ID", "u")
+    monkeypatch.setenv("ODDS_PARK_PASSWORD", "p")
+    monkeypatch.setenv("ODDS_PARK_PIN", "1234")
     c = ob._creds()
     assert c == {"id": "u", "password": "p", "pin": "1234"}
 

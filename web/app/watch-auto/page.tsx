@@ -58,6 +58,8 @@ export default function WatchAutoPage() {
   const [noLlm, setNoLlm] = useState(false);
   // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) が起動し、人がログイン。
   const [betOddspark, setBetOddspark] = useState(false);
+  // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) が起動 (土日 JRA 用)。
+  const [betIpat, setBetIpat] = useState(false);
   // 自動ログイン: ON で env 認証 (ODDSPARK_ID/PASSWORD/PIN) で自動ログイン。OFF は人が手でログイン。
   const [betAutoLogin, setBetAutoLogin] = useState(false);
   // **自動購入 (実弾)** モード: ON で #gotobuy → 確認画面 → 確定 まで自動 (人の介入なし)。
@@ -90,6 +92,7 @@ export default function WatchAutoPage() {
     if (c.with_trio != null) setWithTrio(!!c.with_trio);
     if (c.no_llm != null) setNoLlm(!!c.no_llm);
     if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
+    if (c.bet_ipat != null) setBetIpat(!!c.bet_ipat);
     if (c.bet_auto_login != null) setBetAutoLogin(!!c.bet_auto_login);
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
@@ -143,6 +146,7 @@ export default function WatchAutoPage() {
         with_trio: withTrio,
         no_llm: noLlm,
         bet_oddspark: betOddspark,
+        bet_ipat: betIpat,
         bet_auto_login: betAutoLogin,
         bet_auto_purchase: betAutoPurchase,
         // 0 を許容 (cap=0 で無効化を意図的に表現できる)。NaN/負値だけ既定に戻す。
@@ -386,6 +390,16 @@ export default function WatchAutoPage() {
                 />
                 <span>オッズパーク自動投票 (カート投入・要ログイン)</span>
               </label>
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={betIpat}
+                  onChange={(e) => setBetIpat(e.target.checked)}
+                  disabled={running}
+                  className="accent-(--color-accent)"
+                />
+                <span>JRA 即PAT 自動投票 (カート投入・要ログイン / 土日 JRA 開催日)</span>
+              </label>
             </div>
             {betOddspark && (
               <>
@@ -480,9 +494,17 @@ export default function WatchAutoPage() {
             {error && <div className="mt-3 text-sm text-(--color-bad)">{error}</div>}
             {running && status?.config?.bet_oddspark && (
               <p className="mt-2 text-xs">
-                投票ブラウザ:{" "}
+                投票ブラウザ (オッズパーク):{" "}
                 {status?.bet_running
                   ? <span className="text-(--color-accent)">稼働中 — ブラウザでログイン後、束がカートに積まれます (確定は人)</span>
+                  : <span className="text-(--color-bad)">未起動 — DISPLAY 不在等で daemon が落ちた可能性 (ライブログ参照)</span>}
+              </p>
+            )}
+            {running && status?.config?.bet_ipat && (
+              <p className="mt-2 text-xs">
+                投票ブラウザ (JRA 即PAT):{" "}
+                {status?.ipat_bet_running
+                  ? <span className="text-(--color-accent)">稼働中 — ブラウザでログイン後、JRA の束がカートに積まれます (確定は人)</span>
                   : <span className="text-(--color-bad)">未起動 — DISPLAY 不在等で daemon が落ちた可能性 (ライブログ参照)</span>}
               </p>
             )}
@@ -493,7 +515,7 @@ export default function WatchAutoPage() {
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: 発走${status?.config?.window}〜${(status?.config?.window ?? 0) + (status?.config?.tolerance ?? 0)}分前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}`
+              ? `稼働中: 発走${status?.config?.window}〜${(status?.config?.window ?? 0) + (status?.config?.tolerance ?? 0)}分前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
               : "停止中。タイトルをクリックして設定を展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>

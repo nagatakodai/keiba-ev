@@ -227,6 +227,8 @@ export type WatchAutoStatus = {
   running: boolean;
   // オッズパーク投票 daemon (headful ブラウザ) が稼働中か。
   bet_running?: boolean;
+  // JRA 即PAT 投票 daemon (headful ブラウザ) が稼働中か。
+  ipat_bet_running?: boolean;
   config: {
     window?: number;
     tolerance?: number;
@@ -253,9 +255,12 @@ export type WatchAutoStatus = {
     bet_stake_multiplier?: number;
     // 支払方法: "opcoin" (OPコイン残, 既定) | "buylimit" (投票資金残, 会員入金)
     bet_payment_method?: "opcoin" | "buylimit";
+    // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) を起動。
+    bet_ipat?: boolean;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
+  ipat_bet_job?: JobInfo | null;
 };
 
 export type PendingItem = {
@@ -450,8 +455,9 @@ export const api = {
     bet_daily_cap?: number;
     bet_stake_multiplier?: number;
     bet_payment_method?: "opcoin" | "buylimit";
+    bet_ipat?: boolean;
   }) =>
-    jsonFetch<{ running: boolean; bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
+    jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,
       { method: "POST", body: JSON.stringify(body) },
     ),

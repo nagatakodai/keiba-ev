@@ -344,6 +344,9 @@ class WatchAutoManager:
         # 起動し、watch-auto 停止で一緒に倒す。watch loop は毎tick フレッシュ subprocess で
         # ブラウザを保持できないため、ブラウザはこの別の常駐 daemon プロセスが持つ。
         self.bet_job: Job | None = None
+        # JRA 即PAT 投票 daemon (headful ブラウザ・人がログイン)。bet_ipat=True のとき起動。
+        # oddspark (NAR) と独立に持てる (土日 JRA 開催日に JRA ブラウザも一緒に立てる用途)。
+        self.ipat_bet_job: Job | None = None
         # 前回使った設定を persist 済 state file から復元しておく。停止中 / API 再起動後
         # でも status.config に「前回値」が乗るので、frontend がそれを form の default に
         # 使える (watch-auto 設定パネルの prefill)。
@@ -370,6 +373,10 @@ class WatchAutoManager:
         return self.bet_job is not None and self.bet_job.status == "running"
 
     @property
+    def ipat_bet_running(self) -> bool:
+        return self.ipat_bet_job is not None and self.ipat_bet_job.status == "running"
+
+    @property
     def config(self) -> dict[str, Any]:
         return dict(self._config)
 
@@ -393,6 +400,7 @@ class WatchAutoManager:
         bet_stake_multiplier: float = 1.0,
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
+        bet_ipat: bool = False,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -406,6 +414,7 @@ class WatchAutoManager:
                 bet_stake_multiplier=bet_stake_multiplier,
                 bet_payment_method=bet_payment_method,
                 bet_auto_login=bet_auto_login,
+                bet_ipat=bet_ipat,
             )
 
     async def _start_locked(
@@ -428,6 +437,7 @@ class WatchAutoManager:
         bet_stake_multiplier: float = 1.0,
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
+        bet_ipat: bool = False,
     ) -> Job:
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
@@ -458,6 +468,8 @@ class WatchAutoManager:
             inner.append("--no-llm")
         if bet_oddspark:
             inner.append("--bet-oddspark")
+        if bet_ipat:
+            inner.append("--bet-ipat")
         cmd = [
             PY, "-m", "api._watch_loop",
             "--interval", str(interval_sec),
@@ -482,6 +494,7 @@ class WatchAutoManager:
             "bet_stake_multiplier": bet_stake_multiplier,
             "bet_payment_method": bet_payment_method,
             "bet_auto_login": bet_auto_login,
+            "bet_ipat": bet_ipat,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -510,7 +523,55 @@ class WatchAutoManager:
                     if cfg.get("bet_payment_method") else "opcoin",
                 auto_login=bool(cfg.get("bet_auto_login")),
             )
+        # bet_ipat なら JRA 即PAT 投票 daemon を別 subprocess で起動 (土日 JRA 開催日用)。
+        if bet_ipat:
+            cfg = self._config
+            await self._start_ipat_daemon(
+                auto_purchase=bool(cfg.get("bet_auto_purchase")),
+                daily_cap=int(cfg["bet_daily_cap"])
+                    if cfg.get("bet_daily_cap") is not None else 50000,
+                stake_multiplier=float(cfg["bet_stake_multiplier"])
+                    if cfg.get("bet_stake_multiplier") is not None else 1.0,
+                auto_login=bool(cfg.get("bet_auto_login")),
+            )
         return self.job
+
+    async def _start_ipat_daemon(self, *, auto_purchase: bool = False,
+                                 daily_cap: int = 50000,
+                                 stake_multiplier: float = 1.0,
+                                 auto_login: bool = False) -> None:
+        """JRA 即PAT 投票 daemon (`ipat_bet --session`) を起動。oddspark daemon の JRA 版。
+
+        headful ブラウザを開き、ログイン → queue (ipat_bet_queue) を消費。
+        - auto_login=False (既定): 人が headful ブラウザで手でログイン (poll 検出, 最も安全)。
+        - auto_login=True: `--auto-login` を付け env 認証 (IPAT_INETID/SUBSCRIBER/PARS/PIN)。
+          uvicorn (`make api`) の env に設定しておくこと (未設定だと daemon が起動直後に失敗)。
+        - auto_purchase=False (既定): カート投入のみ、購入確定は人。True で実弾だが
+          `AUTO_PURCHASE_VERIFIED=False` の間は src 側 fail-safe で実弾を撃たない。
+        DISPLAY 継承のため `make api` を DISPLAY のある端末で起動しておくこと。
+        """
+        if self.ipat_bet_job is not None and self.ipat_bet_job.status in ("pending", "running"):
+            return
+        cmd = [PY, "-m", "src.ipat_bet", "--session", f"--daily-cap={daily_cap}"]
+        if auto_login:
+            cmd.append("--auto-login")
+        if auto_purchase:
+            cmd.append("--auto-purchase")
+        if stake_multiplier != 1.0:
+            cmd.append(f"--stake-multiplier={stake_multiplier}")
+        label_extra = ""
+        if auto_login:
+            label_extra += " [auto-login]"
+        if auto_purchase:
+            label_extra += " [auto-purchase]"
+        if stake_multiplier != 1.0:
+            label_extra += f" [×{stake_multiplier}]"
+        self.ipat_bet_job = Job(
+            job_id=f"ipat-session-{int(time.time())}",
+            label="ipat-bet-session" + label_extra,
+            cmd=cmd,
+        )
+        await self.ipat_bet_job.start()
 
     async def _start_betting_daemon(self, *, auto_purchase: bool = False,
                                     daily_cap: int = 50000,
@@ -560,6 +621,8 @@ class WatchAutoManager:
         async with self._ensure_lock():
             if self.bet_job:
                 await self.bet_job.cancel()   # 投票ブラウザも一緒に閉じる
+            if self.ipat_bet_job:
+                await self.ipat_bet_job.cancel()   # JRA 即PAT ブラウザも閉じる
             if self.job:
                 await self.job.cancel()
             _save_watch_state({"should_run": False, "config": self._config})
@@ -594,6 +657,7 @@ class WatchAutoManager:
                 bet_payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
                 bet_auto_login=bool(cfg.get("bet_auto_login")),
+                bet_ipat=bool(cfg.get("bet_ipat")),
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)
