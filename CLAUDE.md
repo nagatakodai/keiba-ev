@@ -71,6 +71,7 @@ oddspark のオッズ表構造 (採用 = 組合せが HTML に明示・実オッ
 - **token ↔ netkeiba JRA race_id**: 段1 `pw15orl1<vv><yyyy><kk><dd><date>`、段2 `pw15<bt>ou1<vv><yyyy><kk><dd><RR><date>`。`find_jra_race` が netkeiba rid (YYYY VV KK DD RR) を venue+kai+day+RR で walk して各券種 token を集める。`discover_jra_races` で直近開催を列挙。
 - **結果**: `fetch_jra_result` が `accessS` を walk (段2 結果 token `pw01sde1...` は doAction 形式でないので raw 抽出) → `td.place`+`td.num` の着順 + `li.tierce` の3連単配当。
 - **analyze_jra**: cache に netkeiba 出馬表/馬柱があれば確率モデルがフル稼働、無ければ単勝の馬リストで市場主導 (JRA 公式馬柱=accessU パースは未実装の宿題)。snapshot は `odds_source="jra"`。CLI `python -m src.scrape_jra <rid> [--snapshot]` / `--discover`。
+  - **馬名/騎手/性齢/馬体重/斤量 は accessO 単複ページから取得** (`parse_jra_horses`, 実機確認 2026-05-31)。単複オッズ表の各行は 馬名(`td.horse`の accessU リンク=horse_id)・性齢(`td.age`)・馬体重±増減(`td.h_weight`)・斤量(`td.weight`)・騎手(`td.jockey`)・調教師(`td.trainer`) を持つ。`build_jra_racedata(rid, win, horse_info)` がこれを Horse に乗せるので、netkeiba 出馬表 cache 無しの JRA でも **Claude 考察 (score ステージ) が馬名で web 検索でき**、馬体重増減・騎手・性齢も加減点に使える (馬柱=past_runs だけが accessU 宿題で空)。
 - **result fetch 統合**: `fetch_result.process_pending` は netkeiba block 失敗時、NAR→keiba.go.jp / **JRA→`fetch_jra_result`** で確定結果を fallback 取得して save (block 中も loop が閉じる)。実機検証: 東京/京都/新潟 12R の着順+3連単配当を取得、process_pending 経由で fallback→success 確認。
 - **宿題**: ①発走前 live odds の更新挙動 (開催日に要実機確認、確定版と同構造の見込み) ②JRA 公式馬柱 (accessU) パース ③watch-auto の block 中 JRA 自動 predict-dispatch (JRA 発走時刻ソースが必要)。
 

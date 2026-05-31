@@ -515,15 +515,20 @@ def build_horse_score_prompt(
         "に合成され、最終的に市場オッズとブレンドされます。**買い目 (picks) は決めません** — "
         "あなたの仕事は各馬を相対評価して数値化することだけです。",
         "",
-        "## 出走馬 (馬番 / 馬名 / 適性総合 / 単勝オッズ)",
-        "| 馬番 | 馬名 | 適性総合 | 単勝 |",
-        "|---|---|---|---|",
+        "## 出走馬 (馬番 / 馬名 / 性齢 / 騎手 / 馬体重(増減) / 適性総合 / 単勝オッズ)",
+        "| 馬番 | 馬名 | 性齢 | 騎手 | 馬体重 | 適性 | 単勝 |",
+        "|---|---|---|---|---|---|---|",
     ]
     for h in horses:
         a = apt.get(h.number)
         atot = f"{getattr(a, 'total', 0):.0f}" if a is not None else "-"
         wo = f"{h.win_odds:.1f}" if getattr(h, "win_odds", 0) else "-"
-        lines.append(f"| {h.number} | {h.name or '?'} | {atot} | {wo} |")
+        sa = getattr(h, "sex_age", "") or "-"
+        jk = getattr(h, "jockey_name", "") or "-"
+        bw = getattr(h, "body_weight", 0)
+        bwd = getattr(h, "body_weight_diff", 0)
+        bws = f"{bw}({bwd:+d})" if bw else "-"
+        lines.append(f"| {h.number} | {h.name or '?'} | {sa} | {jk} | {bws} | {atot} | {wo} |")
     lines += [
         "",
         "## 検索 MCP の運用ルール (CLAUDE.md 準拠)",

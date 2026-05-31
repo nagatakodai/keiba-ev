@@ -299,12 +299,64 @@ def discover_jra_races() -> list[dict]:
 
 # ------------------------------------------------------------------ fetch ---
 
+def parse_jra_horses(html: str) -> dict[int, dict]:
+    """単複ページ → {馬番: {name, sex_age, body_weight, body_weight_diff, weight_kg,
+    jockey_name, trainer_name, horse_id}}。
+
+    JRA 公式の単複オッズページは odds の他に **馬名/性齢/馬体重(増減)/斤量/騎手/調教師** を
+    同じ行に持つ (実機確認 2026-05-31)。netkeiba 出馬表 cache が無い JRA レースでも、ここから
+    馬名等を拾えば Claude 考察 (score ステージ) の web 検索が効くようになる。各フィールドは
+    取れなければ空のままにし、name が空でも壊さない (best-effort)。
+    """
+    import html as _htmlmod
+
+    def _clean(s: str) -> str:
+        return _htmlmod.unescape(re.sub(r"<[^>]+>", " ", s or "")).strip()
+
+    out: dict[int, dict] = {}
+    for row in re.findall(r"<tr>(.*?)</tr>", html, re.DOTALL):
+        nm = re.search(r'<t[hd] class="num"[^>]*>\s*(\d+)\s*</t[hd]>', row)
+        if not nm or 'class="horse"' not in row:
+            continue
+        num = int(nm.group(1))
+        info: dict = {}
+        hm = re.search(r'<td class="horse"[^>]*>(.*?)</td>', row, re.DOTALL)
+        if hm:
+            info["name"] = _clean(hm.group(1))
+            idm = re.search(r"CNAME=([\w/]+)", hm.group(1))
+            if idm:
+                info["horse_id"] = idm.group(1)
+        am = re.search(r'<td class="age"[^>]*>(.*?)</td>', row, re.DOTALL)
+        if am:
+            info["sex_age"] = _clean(am.group(1))
+        wm = re.search(r'<td class="h_weight"[^>]*>\s*(\d+)\s*(?:<span>\s*\(([+\-]?\d+)\))?', row, re.DOTALL)
+        if wm:
+            info["body_weight"] = int(wm.group(1))
+            if wm.group(2):
+                info["body_weight_diff"] = int(wm.group(2))
+        km = re.search(r'<td class="weight"[^>]*>\s*([\d.]+)\s*</td>', row, re.DOTALL)
+        if km:
+            try:
+                info["weight_kg"] = float(km.group(1))
+            except ValueError:
+                pass
+        jm = re.search(r'<td class="jockey"[^>]*>(.*?)</td>', row, re.DOTALL)
+        if jm:
+            info["jockey_name"] = _clean(jm.group(1))
+        tm = re.search(r'<td class="trainer"[^>]*>(.*?)</td>', row, re.DOTALL)
+        if tm:
+            info["trainer_name"] = _clean(tm.group(1))
+        out[num] = info
+    return out
+
+
 def fetch_jra_bets(loc: JraLoc) -> dict:
-    """全券種を段2 POST で取得 → {other_bets, trifecta, consistency}。"""
+    """全券種を段2 POST で取得 → {other_bets, trifecta, consistency, horse_info}。"""
     win: list[BetOdds] = []
     place: list[BetOdds] = []
     other: dict[str, list[BetOdds]] = {}
     trifecta: list[TrifectaOdds] = []
+    horse_info: dict[int, dict] = {}
     for name, tok in loc.odds_tokens.items():
         try:
             html = _post("accessO.html", tok)
@@ -312,6 +364,10 @@ def fetch_jra_bets(loc: JraLoc) -> dict:
             continue
         if name == "tanfuku":
             win, place = parse_tanfuku(html)
+            try:
+                horse_info = parse_jra_horses(html)
+            except Exception:  # noqa: BLE001 — 馬情報パースは best-effort (odds は壊さない)
+                horse_info = {}
         elif name == "quinella":
             other["quinella"] = parse_quinella(html)
         elif name == "wide":
@@ -324,7 +380,8 @@ def fetch_jra_bets(loc: JraLoc) -> dict:
             trifecta = parse_trifecta(html)
     other_bets = {"win": win, "place": place, **other}
     return {"other_bets": other_bets, "trifecta": trifecta,
-            "consistency": check_consistency(other_bets, trifecta)}
+            "consistency": check_consistency(other_bets, trifecta),
+            "horse_info": horse_info}
 
 
 def check_consistency(other_bets: dict, trifecta: list) -> dict:
@@ -442,14 +499,28 @@ def _flatten_final_odds_jra(bets: dict) -> dict[str, float]:
     return out
 
 
-def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds]) -> RaceData:
+def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
+                       horse_info: dict[int, dict] | None = None) -> RaceData:
     """cache 出馬表が無い場合の RaceData (JRA 単勝の馬番リスト由来、past_runs なし)。
 
     JRA 公式の馬柱 (accessU) パースは未実装なので past_runs は空 = 市場ブレンド主導。
     cache に netkeiba 馬柱があれば analyze_jra 側でそちらを使う (確率モデルがフル稼働)。
+    `horse_info` (= 単複ページから拾った 馬名/騎手/性齢/馬体重/斤量) を渡すと各馬に乗せる
+    → Claude 考察 (score) が馬名で web 検索でき、馬体重増減等も判断材料にできる。
     """
     venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
-    horses = [Horse(number=b.key[0], name="", win_odds=b.odds) for b in win_bets]
+    info = horse_info or {}
+    horses = []
+    for b in win_bets:
+        n = b.key[0]
+        d = info.get(n, {})
+        horses.append(Horse(
+            number=n, name=d.get("name", ""), win_odds=b.odds,
+            sex_age=d.get("sex_age", ""), weight_kg=d.get("weight_kg", 0.0),
+            body_weight=d.get("body_weight", 0), body_weight_diff=d.get("body_weight_diff", 0),
+            jockey_name=d.get("jockey_name", ""), trainer_name=d.get("trainer_name", ""),
+            horse_id=d.get("horse_id", ""),
+        ))
     race = Race(cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
                 venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
                 venue_name=venue, race_class="", distance=0, horses=horses)
@@ -491,6 +562,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
         raise JraError(f"JRA で {netkeiba_rid} の開催が見つからない (直近開催 JRA か)")
     res = fetch_jra_bets(loc)
     other, trifecta, cons = res["other_bets"], res["trifecta"], res["consistency"]
+    horse_info = res.get("horse_info") or {}
     if not other.get("win"):
         raise JraError("JRA オッズが空")
     if not cons["ok"]:
@@ -509,7 +581,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
                 h.past_runs = runs.get(h.number, [])
         used_cache = True
     else:
-        rd = build_jra_racedata(netkeiba_rid, other["win"])
+        rd = build_jra_racedata(netkeiba_rid, other["win"], horse_info)
 
     if start_at and not rd.race.start_at:
         from .parse import close_at_for_start

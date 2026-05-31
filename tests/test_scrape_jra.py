@@ -21,6 +21,53 @@ def test_parse_tanfuku():
     assert win[0].key[0] == 2 and win[0].popularity == 1            # 人気=オッズ昇順
 
 
+# 実機 (2026-05-31 accessO 単複) の行構造を模した最小 HTML。馬名/性齢/馬体重(増減)/斤量/
+# 騎手/調教師 + accessU CNAME (= horse_id) を同じ行から取れることを検証。
+_TANFUKU_FULL = (
+    '<tr><th class="num" scope="col">馬番</th><th class="horse" scope="col">馬名</th></tr>'
+    '<tr><td class="waku" rowspan="2"><img alt="枠1白"/></td><td class="num">1</td>'
+    '<td class="horse"><a href="/JRADB/accessU.html?CNAME=pw01dud002023104847/0B">フェアリーキャット</a></td>'
+    '<td class="odds_tan">132.0</td>'
+    '<td class="odds_fuku"><span class="min">15.9</span></td>'
+    '<td class="age">牝3</td><td class="h_weight"> 432<span>(+6)</span></td>'
+    '<td class="weight">52.0</td>'
+    '<td class="jockey"><span class="mark jockey">▲</span><a href="#">石神 深道</a></td>'
+    '<td class="trainer"><a href="#">鈴木 慎太郎</a></td></tr>'
+    '<tr><td class="num">3</td>'
+    '<td class="horse"><a href="/JRADB/accessU.html?CNAME=pw01dud00xyz/0B">ジュピターテソーロ</a></td>'
+    '<td class="odds_tan">4.3</td><td class="odds_fuku"><span class="min">1.5</span></td>'
+    '<td class="age">牡3</td><td class="h_weight"> 480<span>(-2)</span></td>'
+    '<td class="weight">57.0</td>'
+    '<td class="jockey"><a href="#">戸崎 圭太</a></td>'
+    '<td class="trainer"><a href="#">高木 登</a></td></tr>'
+)
+
+
+def test_parse_jra_horses_extracts_name_jockey_weight():
+    info = jra.parse_jra_horses(_TANFUKU_FULL)
+    assert set(info) == {1, 3}
+    h1 = info[1]
+    assert h1["name"] == "フェアリーキャット"
+    assert h1["sex_age"] == "牝3"
+    assert h1["weight_kg"] == 52.0
+    assert h1["body_weight"] == 432 and h1["body_weight_diff"] == 6
+    assert "石神" in h1["jockey_name"]            # 減量マークが付いていても名前が取れる
+    assert h1["horse_id"].startswith("pw01dud")
+    assert info[3]["body_weight_diff"] == -2      # マイナス増減
+
+
+def test_build_jra_racedata_populates_names_from_horse_info():
+    from src.models import BetOdds
+    win = [BetOdds(bet_type="win", key=(1,), odds=132.0, popularity=2),
+           BetOdds(bet_type="win", key=(3,), odds=4.3, popularity=1)]
+    info = jra.parse_jra_horses(_TANFUKU_FULL)
+    rd = jra.build_jra_racedata("202605021101", win, info)
+    names = {h.number: h.name for h in rd.race.horses}
+    assert names == {1: "フェアリーキャット", 3: "ジュピターテソーロ"}
+    by = {h.number: h for h in rd.race.horses}
+    assert by[3].jockey_name and by[3].body_weight == 480
+
+
 _QUINELLA = (
     "<caption>1</caption><tbody>"
     '<tr><th scope="row">2</th><td>5.7</td></tr>'
