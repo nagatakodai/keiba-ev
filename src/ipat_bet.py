@@ -125,11 +125,16 @@ SELECTORS = {
     "confirm_amount": 'input[ng-model="vm.cAmountTotal"]',       # 確定 (合計金額の確認入力)
     "total_amount_display": '[ng-bind="vm.getCalcTotalAmount() | number"]',  # 確定 (合計金額の計算値)
     "confirm_purchase": 'button[ng-click="vm.clickPurchase()"]', # 確定 (購入する。半自動はここで人が止まる)
-    "confirm_final_candidates": [                    # 購入後の確認ダイアログ最終ボタン 要確認
-        'text=OK', 'text=購入を確定', 'button.btn-ok',
+    # 購入する押下後に出る確認ダイアログ (error-window):
+    #   「投票内容と金額を送信してもよろしいですか？」 OK=<button class="btn-ok" ng-click="vm.dismiss()">
+    #   (キャンセル= vm.cancel() は nType===2 のときのみ)。OK を押すと投票が確定し投票結果画面へ。
+    "confirm_final_candidates": [                    # 実機 DOM 確認済 2026-05-31
+        '.ipat-error-window button.btn-ok',          # 確定 (確認ダイアログの OK)
+        'button.btn-ok',                             # 保険 (id 形が固有)
     ],
-    # 購入成功の証跡 (要確認)。複数 marker で OR 判定。
-    "purchase_success_markers": ("投票を受け付けました", "受け付けました", "購入完了", "投票完了"),
+    # 購入成功の証跡 (投票結果画面, 実機 DOM 確認済 2026-05-31)。複数 marker で OR 判定。
+    #   h2「お客様の投票を受け付けました。」/「投票結果」/「受付番号：NNNN」「受付時刻」。
+    "purchase_success_markers": ("投票を受け付けました", "受け付けました", "受付番号", "投票結果"),
 }
 
 # 当方 bet_type → IPAT 式別コード (要実機調整。表示名は確定)。
@@ -607,6 +612,12 @@ def _dismiss_deposit_dialog(page) -> None:
         dlg = page.locator('.ipat-error-window .dialog:visible')
         if dlg.count() == 0:
             return
+        # ⚠ 購入確定の確認ダイアログ (「投票内容と金額を送信してもよろしいですか？」) も同じ
+        #    error-window + button.btn-ok で出る。ここで OK を押すと購入が確定してしまうので、
+        #    **本文に「入金」を含む = 入金案内ダイアログのときだけ**閉じる (誤確定防止)。
+        body = (dlg.first.inner_text() or "")
+        if "入金" not in body:
+            return
         btn = page.locator(SELECTORS["deposit_dialog_proceed"])
         if btn.count() > 0:
             btn.first.click()
@@ -637,6 +648,43 @@ def _select_course_race(page, venue: str | None, race_no: int) -> None:
     rb.first.click()
     page.wait_for_timeout(900)
     _dismiss_deposit_dialog(page)
+
+
+def _check_horse_box(page, umaban: int) -> None:
+    """単一列 (単勝/複勝/馬連/ワイド/3連複) で1頭を選択し、**チェックが入ったことを確認**する。
+
+    実機 DOM (2026-05-31 ワイド):
+        <td class="racer-first">
+          <label for="no{N}">
+            <input type="checkbox" id="no{N}" ...>   ← 実 input は CSS で不可視
+            <span class="check"></span>              ← これが視覚上のチェックボックス
+          </label>
+        </td>
+    実 input を直接 `.check()` すると行中央あたりに着弾してトグルされず、ワイドの買い目が
+    購入予定リストに積まれない不具合があった (ユーザ報告)。→ 視覚要素 (span.check / label) を
+    click し、`is_checked()` で確認する。未チェックなら次候補→最後に force check する三段。
+    """
+    box = page.locator(f"#no{umaban}")
+    if box.count() == 0:
+        raise IpatBetError(f"馬番チェック不検出 (#no{umaban}) — 取消馬/DOM 変化の可能性")
+    box = box.first
+    if box.is_checked():
+        return
+    # span.check (視覚チェックボックス) → label の順で click。各 click 後に状態を確認。
+    for target in (f"#no{umaban} ~ span.check", f'label[for="no{umaban}"]'):
+        loc = page.locator(target)
+        if loc.count() == 0:
+            continue
+        loc.first.click()
+        page.wait_for_timeout(250)
+        if box.is_checked():
+            return
+    # fallback: 不可視 input を force でトグル
+    box.check(force=True)
+    page.wait_for_timeout(150)
+    if not box.is_checked():
+        raise IpatBetError(
+            f"馬番 {umaban} のチェックに失敗 (span.check / label / force 全て不発) — DOM 要確認")
 
 
 def _add_leg_to_buylist(page, leg: CartLeg) -> None:
@@ -679,11 +727,7 @@ def _add_leg_to_buylist(page, leg: CartLeg) -> None:
     else:
         # 単勝/複勝/馬連/ワイド/3連複: 選んだ馬の checkbox #no{N} を check
         for umaban in leg.key:
-            chk = page.locator(SELECTORS["horse_check"].format(umaban=umaban))
-            if chk.count() == 0:
-                raise IpatBetError(f"馬番チェック不検出 (#no{umaban}) — 取消馬/DOM 変化の可能性")
-            chk.first.check()
-            page.wait_for_timeout(200)
+            _check_horse_box(page, umaban)
     # 金額 (100円単位 = stake/100 を入力)
     amt = page.locator(SELECTORS["amount_input"])
     amt.first.fill(str(leg.stake // 100))
