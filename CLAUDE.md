@@ -89,7 +89,8 @@ oddspark のオッズ表構造 (採用 = 組合せが HTML に明示・実オッ
   - **単一列 checkbox `#no{N}`** (単勝/複勝/馬連/ワイド/3連複, `_SINGLE_COLUMN_BETS`): 選んだ馬だけ check (馬連/ワイド=2頭で1組、3連複=3頭で1組)。方式=通常。
   - **着順列 radio `#horse{pos}_no{N}`** (馬単=2列/3連単=3列, `_ORDERED_BETS`): key 順に 1着/2着(/3着) を選択。方式=通常 (`_ORDERED_BETS_VERIFIED=True`)。
   - 各 leg で式別 select → 方式=通常 (前 leg の ながし/ボックス を正す) → 馬番 → 金額 → セット。
-- **安全フラグ**: **`AUTO_PURCHASE_VERIFIED=False`** (購入確定の最終遷移/success marker 未検証なので fail-safe で実弾を撃たない)。実機で購入完了画面 (受付番号が出る画面) を検証したら True にする。`_ORDERED_BETS_VERIFIED=True` (馬単/3連単 radio 確認済)。
+- **安全フラグ**: **`AUTO_PURCHASE_VERIFIED=True`** (2026-05-31 実機検証済 — 購入する `vm.clickPurchase()` → 確認ダイアログ `error-window`「投票内容と金額を送信してもよろしいですか？」OK=`button.btn-ok[ng-click=vm.dismiss()]` → 投票結果画面「お客様の投票を受け付けました。/ 受付番号：NNNN」まで実 DOM で確認)。`--auto-purchase` で実弾、緊急時に False へ戻せば fail-safe で実弾停止。success 後は「続けて投票する」(`vm.clickContinue()`) で bet.basic へ戻し次レースを受ける。`_ORDERED_BETS_VERIFIED=True` (馬単/3連単 radio 確認済)。
+- **単一列の馬番選択 (重要)**: 単勝/複勝/馬連/ワイド/3連複 のチェックは `<label for=no{N}><input id=no{N}><span class=check></label>` で実 input が CSS 不可視・`span.check` が視覚要素。`input#no{N}` を直接 `.check()` すると行中央に着弾しトグルされず買い目が積まれない (実機: ワイドで再現)。→ `_check_horse_box` が `span.check`→`label`→force の三段で click し `is_checked()` で確認する。
 - **⚠ 事前入金 (チャージ) が必須**: 即PAT は購入限度額 0 円だと投票不可。未入金だとレース選択/購入時に「投票の前に入金してください」ダイアログ (`_dismiss_deposit_dialog` が『このまま進む』で閉じるが、資金が無ければ最終購入は弾かれる)。運用前に手で入金しておく。
 
 **watch-auto との連携 (常駐セッション + キュー)**: watch-auto は `_watch_loop.py` が interval 毎に `auto_watch.main()` を**毎回フレッシュ subprocess** で起動する構造なので、ブラウザを巡をまたいで保持できない。そこで **ログイン済みの持続ブラウザを別プロセス (`BettingSession`/`run_session`) で持ち**、watch-auto は queue 経由で「このレースを入れて」と渡す:

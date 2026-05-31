@@ -135,6 +135,9 @@ SELECTORS = {
     # 購入成功の証跡 (投票結果画面, 実機 DOM 確認済 2026-05-31)。複数 marker で OR 判定。
     #   h2「お客様の投票を受け付けました。」/「投票結果」/「受付番号：NNNN」「受付時刻」。
     "purchase_success_markers": ("投票を受け付けました", "受け付けました", "受付番号", "投票結果"),
+    # 投票結果画面 → 次レースのため bet.basic へ戻る (実機 DOM 確認済 2026-05-31):
+    #   <button class="btn btn-primary btn-lg" ng-click="vm.clickContinue();">続けて投票する</button>
+    "continue_vote": 'button[ng-click="vm.clickContinue();"]',   # 確定 (続けて投票する)
 }
 
 # 当方 bet_type → IPAT 式別コード (要実機調整。表示名は確定)。
@@ -155,10 +158,11 @@ _SHIKIBETSU = {
 # IPAT の馬単/3連単 は 1着/2着(/3着) 列に置けば 1 順列のはず。実機で確認したら True に。
 _ORDERED_BETS_VERIFIED = True   # 馬単(2列)/3連単(3列) radio 実機 DOM 確認済 2026-05-31
 
-# 全自動 (購入確定まで自動) の安全フラグ。**実機 DOM 未検証なので False** (fail-safe)。
-# oddspark と同じく、確認画面の最終ボタン DOM / 二重確認入力 / success marker を 1 度実機で
-# 検証してからフラグを True にする。False の間 `_confirm_purchase` は "skipped" を返し実弾は出ない。
-AUTO_PURCHASE_VERIFIED = False
+# 全自動 (購入確定まで自動) の安全フラグ。**実機 DOM 検証済 (2026-05-31)** なので True。
+# 検証内容: 購入する (vm.clickPurchase) → 確認ダイアログ (error-window「送信してもよろしい
+# ですか？」OK=button.btn-ok[ng-click=vm.dismiss()]) → 投票結果画面 (お客様の投票を受け付け
+# ました。/ 受付番号：NNNN) まで実 DOM で確認。緊急時に False へ戻せば fail-safe で実弾停止。
+AUTO_PURCHASE_VERIFIED = True
 
 # デイリー上限の既定値 (円)。1 日の累計賭金がここを超えると _confirm_purchase が "skipped"。
 # JST 00:00 で counter リセット。oddspark とは別ファイルで独立管理。
@@ -568,6 +572,16 @@ class BettingSession:
         if not success:
             return ("failed", "success marker 未検出 — ブラウザで購入状況を目視確認推奨")
         new_total = record_daily_stake(race_stake)
+        # 投票結果画面のオーバーレイが次レースの場名選択 click を遮るので「続けて投票する」で
+        # bet.basic へ戻す (失敗しても致命的でないので best-effort)。
+        try:
+            cont = p.locator(SELECTORS["continue_vote"])
+            if cont.count() > 0:
+                cont.first.click()
+                p.wait_for_timeout(1500)
+            _shot(p, "post_purchase_continue")
+        except Exception:  # noqa: BLE001
+            pass
         return ("ok", f"購入完了 ¥{race_stake:,} (clicked={clicked}, 本日累計 ¥{new_total:,})")
 
     def close(self) -> None:
