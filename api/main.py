@@ -254,9 +254,16 @@ async def api_job_stream(job_id: str, since: int = 0) -> EventSourceResponse:
 # --- watch-auto ---
 
 class WatchAutoStartRequest(BaseModel):
+    # 2段パイプライン: SCORE 帯 (締切 score_window〜+score_tolerance 分前) で Claude 考察→各馬
+    # 指数をキャッシュ → BET 帯 (締切 window〜+tolerance 分前) で最新オッズ+指数→束→投票。
     # window/tolerance は分。0 で締切ちょうどまで受け付け、小数可 (例 0.5)。ge=0 で負値拒否。
-    window: float = Field(default=5, ge=0)
-    tolerance: float = Field(default=4, ge=0)
+    window: float = Field(default=1, ge=0)        # BET 帯 (既定 締切1分前)
+    tolerance: float = Field(default=1.5, ge=0)
+    score_window: float = Field(default=5, ge=0)  # SCORE 帯 (既定 締切5分前で考察)
+    score_tolerance: float = Field(default=2, ge=0)
+    # Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ)。
+    # None で各 analyze の既定 (ev.LLM_BLEND_DEFAULT=0.5)。
+    llm_blend: float | None = Field(default=None, ge=0.0, le=1.0)
     interval_sec: int = 60
     ev_max: float | None = None
     min_prob: float | None = None
@@ -302,6 +309,9 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
     job = await WATCH.start(
         window=req.window,
         tolerance=req.tolerance,
+        score_window=req.score_window,
+        score_tolerance=req.score_tolerance,
+        llm_blend=req.llm_blend,
         interval_sec=req.interval_sec,
         ev_max=req.ev_max,
         min_prob=req.min_prob,

@@ -42,8 +42,14 @@ export default function WatchAutoPage() {
   // 設定/制御パネルはデフォルト閉。ユーザがプルダウンを開いたときだけ展開。
   const [showSettings, setShowSettings] = useState(false);
 
-  const [windowMin, setWindowMin] = useState("5");
-  const [tolerance, setTolerance] = useState("4");
+  // 2段パイプライン: BET 帯 (締切 window〜+tolerance 分前) で投票、SCORE 帯
+  // (締切 score_window〜+score_tolerance 分前) で Claude 考察→各馬指数キャッシュ。
+  const [windowMin, setWindowMin] = useState("1");
+  const [tolerance, setTolerance] = useState("1.5");
+  const [scoreWindow, setScoreWindow] = useState("5");
+  const [scoreTolerance, setScoreTolerance] = useState("2");
+  // 空 = backend 既定 (ev.LLM_BLEND_DEFAULT=0.5)。Claude 指数 vs モデルの合成重み。
+  const [llmBlend, setLlmBlend] = useState("");
   const [intervalSec, setIntervalSec] = useState("60");
   const [evMax, setEvMax] = useState("");
   const [minProb, setMinProb] = useState("2.0");
@@ -82,6 +88,9 @@ export default function WatchAutoPage() {
     setPrefilled(true);
     if (c.window != null) setWindowMin(String(c.window));
     if (c.tolerance != null) setTolerance(String(c.tolerance));
+    if (c.score_window != null) setScoreWindow(String(c.score_window));
+    if (c.score_tolerance != null) setScoreTolerance(String(c.score_tolerance));
+    setLlmBlend(c.llm_blend != null ? String(c.llm_blend) : "");
     if (c.interval_sec != null) setIntervalSec(String(c.interval_sec));
     setEvMax(c.ev_max != null ? String(c.ev_max) : "");
     setMinProb(c.min_prob != null ? String(c.min_prob) : "");
@@ -134,8 +143,11 @@ export default function WatchAutoPage() {
     try {
       await api.startWatch({
         // 0 (締切ちょうどまで受け付け) と小数を許容。NaN のときだけ既定に戻す。
-        window: Number.isFinite(parseFloat(windowMin)) ? parseFloat(windowMin) : 5,
-        tolerance: Number.isFinite(parseFloat(tolerance)) ? parseFloat(tolerance) : 4,
+        window: Number.isFinite(parseFloat(windowMin)) ? parseFloat(windowMin) : 1,
+        tolerance: Number.isFinite(parseFloat(tolerance)) ? parseFloat(tolerance) : 1.5,
+        score_window: Number.isFinite(parseFloat(scoreWindow)) ? parseFloat(scoreWindow) : 5,
+        score_tolerance: Number.isFinite(parseFloat(scoreTolerance)) ? parseFloat(scoreTolerance) : 2,
+        llm_blend: llmBlend === "" ? null : parseFloat(llmBlend),
         interval_sec: parseInt(intervalSec) || 60,
         ev_max: evMax === "" ? null : parseFloat(evMax),
         min_prob: minProb === "" ? null : parseFloat(minProb),
@@ -238,10 +250,10 @@ export default function WatchAutoPage() {
           tone={running ? "good" : "default"}
         />
         <Stat
-          label="窓 (発走まで)"
+          label="検出帯 (締切まで / score→bet)"
           value={
             status?.config?.window != null
-              ? `${status.config.window}〜${status.config.window + (status.config.tolerance ?? 0)} 分前`
+              ? `考察 ${status.config.score_window ?? "?"}〜${(status.config.score_window ?? 0) + (status.config.score_tolerance ?? 0)} → 投票 ${status.config.window}〜${status.config.window + (status.config.tolerance ?? 0)} 分前`
               : "—"
           }
         />
@@ -290,7 +302,7 @@ export default function WatchAutoPage() {
           <>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Input
-                label="WINDOW (締切までの目標分 / 0=締切ちょうどまで・小数可)"
+                label="BET WINDOW (締切までの目標分 / 投票。0=締切ちょうど・小数可)"
                 type="number"
                 step="0.5"
                 min="0"
@@ -299,12 +311,37 @@ export default function WatchAutoPage() {
                 disabled={running}
               />
               <Input
-                label="TOLERANCE (+分のみ / 締切 window〜window+tol 分前・小数可)"
+                label="BET TOLERANCE (+分 / 締切 window〜window+tol 分前で投票)"
                 type="number"
                 step="0.5"
                 min="0"
                 value={tolerance}
                 onChange={(e) => setTolerance(e.target.value)}
+                disabled={running}
+              />
+              <Input
+                label="SCORE WINDOW (締切までの目標分 / Claude 考察→指数。BET より手前に)"
+                type="number"
+                step="0.5"
+                min="0"
+                value={scoreWindow}
+                onChange={(e) => setScoreWindow(e.target.value)}
+                disabled={running}
+              />
+              <Input
+                label="SCORE TOLERANCE (+分 / 締切 score_window〜+tol 分前で考察)"
+                type="number"
+                step="0.5"
+                min="0"
+                value={scoreTolerance}
+                onChange={(e) => setScoreTolerance(e.target.value)}
+                disabled={running}
+              />
+              <Input
+                label="LLM 合成重み (空=既定0.5 / 0=モデルのみ 1=指数のみ)"
+                placeholder="0.0–1.0"
+                value={llmBlend}
+                onChange={(e) => setLlmBlend(e.target.value)}
                 disabled={running}
               />
               <Input

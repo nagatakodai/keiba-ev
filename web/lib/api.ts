@@ -230,8 +230,14 @@ export type WatchAutoStatus = {
   // JRA 即PAT 投票 daemon (headful ブラウザ) が稼働中か。
   ipat_bet_running?: boolean;
   config: {
+    // 2段パイプライン: BET 帯 (締切 window〜+tolerance 分前) で投票、SCORE 帯
+    // (締切 score_window〜+score_tolerance 分前) で Claude 考察→各馬指数キャッシュ。
     window?: number;
     tolerance?: number;
+    score_window?: number;
+    score_tolerance?: number;
+    // Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ, null=既定0.5)。
+    llm_blend?: number | null;
     interval_sec?: number;
     ev_max?: number | null;
     min_prob?: number | null;
@@ -440,6 +446,9 @@ export const api = {
   startWatch: (body: {
     window?: number;
     tolerance?: number;
+    score_window?: number;
+    score_tolerance?: number;
+    llm_blend?: number | null;
     interval_sec?: number;
     ev_max?: number | null;
     min_prob?: number | null;

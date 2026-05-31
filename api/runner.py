@@ -387,8 +387,11 @@ class WatchAutoManager:
     async def start(
         self,
         *,
-        window: float = 5,
-        tolerance: float = 4,
+        window: float = 1,
+        tolerance: float = 1.5,
+        score_window: float = 5,
+        score_tolerance: float = 2,
+        llm_blend: float | None = None,
         interval_sec: int = 60,
         ev_max: float | None = None,
         min_prob: float | None = None,
@@ -408,7 +411,9 @@ class WatchAutoManager:
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
-                window=window, tolerance=tolerance, interval_sec=interval_sec,
+                window=window, tolerance=tolerance,
+                score_window=score_window, score_tolerance=score_tolerance,
+                llm_blend=llm_blend, interval_sec=interval_sec,
                 ev_max=ev_max, min_prob=min_prob, market_blend=market_blend,
                 aptitude_top=aptitude_top, with_exacta=with_exacta,
                 with_trio=with_trio, no_llm=no_llm, active_hours=active_hours,
@@ -426,6 +431,9 @@ class WatchAutoManager:
         *,
         window: float,
         tolerance: float,
+        score_window: float = 5,
+        score_tolerance: float = 2,
+        llm_blend: float | None = None,
         interval_sec: int,
         ev_max: float | None,
         min_prob: float | None,
@@ -467,8 +475,12 @@ class WatchAutoManager:
             PY, "-m", "src.auto_watch",
             "--window", str(window),
             "--tolerance", str(tolerance),
+            "--score-window", str(score_window),
+            "--score-tolerance", str(score_tolerance),
             "--active-hours", active_hours,
         ]
+        if llm_blend is not None:
+            inner += ["--llm-blend", str(llm_blend)]
         if ev_max is not None:
             inner += ["--ev-max", str(ev_max)]
         if min_prob is not None:
@@ -496,6 +508,9 @@ class WatchAutoManager:
         self._config = {
             "window": window,
             "tolerance": tolerance,
+            "score_window": score_window,
+            "score_tolerance": score_tolerance,
+            "llm_blend": llm_blend,
             "active_hours": active_hours,
             "interval_sec": interval_sec,
             "ev_max": ev_max,
@@ -656,8 +671,12 @@ class WatchAutoManager:
         cfg = state.get("config") or {}
         try:
             return await self.start(
-                window=float(cfg.get("window", 5)),
-                tolerance=float(cfg.get("tolerance", 4)),
+                window=float(cfg.get("window", 1)),
+                tolerance=float(cfg.get("tolerance", 1.5)),
+                score_window=float(cfg.get("score_window", 5)),
+                score_tolerance=float(cfg.get("score_tolerance", 2)),
+                llm_blend=(float(cfg["llm_blend"])
+                           if cfg.get("llm_blend") is not None else None),
                 interval_sec=int(cfg.get("interval_sec", 60)),
                 ev_max=cfg.get("ev_max"),
                 min_prob=cfg.get("min_prob"),
