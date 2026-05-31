@@ -254,56 +254,86 @@ def fill_cart(
         sess.close()
 
 
+def _submit_login_form(page, creds: dict) -> None:
+    """ID/PW を入れて #btn-login (JS formSubmit() → LoginPc.jsp) を押す。"""
+    page.fill(SELECTORS["login_id"], creds["id"])
+    page.fill(SELECTORS["login_password"], creds["password"])
+    page.click(SELECTORS["login_submit"])
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:  # noqa: BLE001
+        page.wait_for_timeout(3000)
+
+
+def _submit_pin_form(page, pin: str) -> None:
+    """暗証番号 (追加認証) を name=INPUT_PIN にフィルして 確認 (name=送信) を押す。"""
+    page.fill(SELECTORS["pin_input"], pin)
+    page.click(SELECTORS["pin_submit"])
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:  # noqa: BLE001
+        page.wait_for_timeout(3000)
+
+
+def _is_logged_in(page) -> bool:
+    """ログイン成功判定: ログインフォームも PIN フォームも見えない (=マイページ等に居る)。"""
+    return (page.locator(SELECTORS["login_id"]).count() == 0
+            and page.locator(SELECTORS["pin_input"]).count() == 0)
+
+
 def _login(page, creds: dict) -> None:
     """ログイン (login セレクタは実機確認済)。送信は JS formSubmit() なので #btn-login click。
 
-    InputPinPc.jsp が間に挟まれた場合 (普段使ってない端末で「セキュリティ強化のための
-    追加認証」が要求される) は ODDSPARK_PIN を name="INPUT_PIN" にフィルして submit。
-    PIN 未設定で PIN ページに到達した場合は即 raise (黙って失敗で「セッション切れ」に
-    化けないよう明示エラーにする)。
+    追加認証 (PIN) の重要な実機挙動: 普段使ってない端末では InputPinPc.jsp で暗証番号を要求され、
+    **PIN 突破後に端末登録が走って一旦ログイン画面へ戻される** (= 「PIN 入力後にまたログイン画面」)。
+    この 2 回目のログインでは PIN は聞かれない (端末が信頼済になる) ので、login フォームが再出現
+    したら **ID/PW を入れ直して再ログイン**する。最大 3 パスまで試し、PIN 誤り/ロックや永続的な
+    login 残存は明示エラーにする (黙って「セッション切れ」に化けさせない)。
     """
     page.goto(_LOGIN_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(1000)
-    try:
-        page.fill(SELECTORS["login_id"], creds["id"])
-        page.fill(SELECTORS["login_password"], creds["password"])
-        page.click(SELECTORS["login_submit"])   # <a id=btn-login> → formSubmit() → LoginPc.jsp
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except Exception:  # noqa: BLE001
-            page.wait_for_timeout(3000)
-    except Exception as ex:  # noqa: BLE001
-        _shot(page, "login_failed")
-        raise OddsparkBetError(
-            f"ログイン送信に失敗 (login セレクタ確認): {ex}") from ex
-    # 追加認証 (PIN): /jsp/sso_filter/InputPinPc.jsp に飛ばされたら ODDSPARK_PIN で突破
-    if page.locator(SELECTORS["pin_input"]).count() > 0:
-        pin = (creds.get("pin") or "").strip()
-        if not pin:
-            _shot(page, "login_pin_required_no_env")
-            raise OddsparkBetError(
-                "追加認証 (PIN) を要求されたが ODDSPARK_PIN が未設定 — "
-                "環境変数 ODDSPARK_PIN を渡すか --manual-login で人が入力してください")
-        try:
-            page.fill(SELECTORS["pin_input"], pin)
-            page.click(SELECTORS["pin_submit"])
+    pin_attempted = False
+    # パス: ①ID/PW → ②PIN (要求時) → ③端末登録で login に戻れば再 ID/PW … を収束まで。
+    for _pass in range(3):
+        if _is_logged_in(page):
+            return
+        # login フォームが見えるなら ID/PW を投入
+        if page.locator(SELECTORS["login_id"]).count() > 0:
             try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:  # noqa: BLE001
-                page.wait_for_timeout(3000)
-        except Exception as ex:  # noqa: BLE001
-            _shot(page, "login_pin_failed")
-            raise OddsparkBetError(f"PIN 送信に失敗: {ex}") from ex
-        # PIN フォームがまだ残存 = PIN 誤り or ロック (一定回数誤入力でロック警告あり)
+                _submit_login_form(page, creds)
+            except Exception as ex:  # noqa: BLE001
+                _shot(page, "login_failed")
+                raise OddsparkBetError(f"ログイン送信に失敗 (login セレクタ確認): {ex}") from ex
+        # 追加認証 (PIN) ページなら突破
         if page.locator(SELECTORS["pin_input"]).count() > 0:
-            _shot(page, "login_pin_failed")
-            raise OddsparkBetError(
-                "PIN 送信後も PIN フォームが残存 — ODDSPARK_PIN 誤り or ロック警告 (一定回数誤入力)")
-    # ログイン成否判定: ログインフォームがまだ見える = 失敗 (ID/PW 誤り or ロック)
-    if page.locator(SELECTORS["login_id"]).count() > 0:
+            pin = (creds.get("pin") or "").strip()
+            if not pin:
+                _shot(page, "login_pin_required_no_env")
+                raise OddsparkBetError(
+                    "追加認証 (PIN) を要求されたが PIN が未設定 — "
+                    ".env の ODDS_PARK_PIN を設定するか --manual-login で人が入力してください")
+            if pin_attempted:
+                # 既に PIN を入れたのに再度 PIN ページ = PIN 誤り or ロック
+                _shot(page, "login_pin_failed")
+                raise OddsparkBetError(
+                    "PIN 再要求 — ODDS_PARK_PIN 誤り or ロック警告 (一定回数誤入力でロック)")
+            pin_attempted = True
+            try:
+                _submit_pin_form(page, pin)
+            except Exception as ex:  # noqa: BLE001
+                _shot(page, "login_pin_failed")
+                raise OddsparkBetError(f"PIN 送信に失敗: {ex}") from ex
+            # PIN 後は端末登録で login へ戻される場合がある → 次パスで再ログイン
+            _shot(page, "login_after_pin")
+            continue
+        # ここに来て logged_in なら成功、そうでなければ次パスで再試行
+        if _is_logged_in(page):
+            return
+    # 3 パスやっても login/PIN が残る = 失敗
+    if not _is_logged_in(page):
         _shot(page, "login_failed")
         raise OddsparkBetError(
-            "ログイン後もログインフォームが残存 — ID/PW 誤り・ロック・要セレクタ確認")
+            "ログイン未完了 (PIN 後の再ログインにも失敗) — ID/PW・PIN 誤り / ロック / 要セレクタ確認")
 
 
 PAYMENT_OPCOIN = "opcoin"        # 既定: OPコイン残から引落 → VoteConfirm/CompleteOpcoin.do フロー
@@ -743,6 +773,9 @@ class BettingSession:
         self.page.goto(_BASE, wait_until="domcontentloaded")
         print(f"[oddspark_bet] headful ブラウザでオッズパークにログインしてください "
               f"(検出まで最大 {self.login_wait_sec}s 待機)...", flush=True)
+        print("[oddspark_bet] ※ 暗証番号(PIN)による追加認証が出た端末では、PIN 入力後に"
+              "ログイン画面へ戻されることがあります。その場合は **もう一度 ID/PW でログイン**"
+              "してください (2 回目は PIN 不要)。", flush=True)
         for i in range(self.login_wait_sec):
             try:
                 if self.page.locator(SELECTORS["logged_in_marker"]).count() > 0:
