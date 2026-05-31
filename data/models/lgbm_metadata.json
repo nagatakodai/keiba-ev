@@ -1,8 +1,8 @@
 {
-  "trained_at": "2026-05-23T03:42:10",
-  "n_train_races": 1308,
-  "n_valid_races": 326,
-  "n_train_rows": 13628,
+  "trained_at": "2026-05-31T23:28:06",
+  "n_train_races": 5776,
+  "n_valid_races": 1443,
+  "n_train_rows": 59575,
   "feature_cols": [
     "speed_idx_weighted",
     "speed_idx_best",
@@ -49,61 +49,61 @@
     "bagging_freq": 5,
     "verbose": -1
   },
-  "best_iteration": 102,
+  "best_iteration": 107,
   "best_scores": {
     "train": {
-      "ndcg@1": 0.682908822443706,
-      "ndcg@3": 0.694892160864524,
-      "ndcg@5": 0.7548407397134885
+      "ndcg@1": 0.500206401188871,
+      "ndcg@3": 0.5708858566673556,
+      "ndcg@5": 0.652393394632193
     },
     "valid": {
-      "ndcg@1": 0.3657339224349533,
-      "ndcg@3": 0.4666215407118594,
-      "ndcg@5": 0.57181945593961
+      "ndcg@1": 0.38184873949579823,
+      "ndcg@3": 0.4865887884623004,
+      "ndcg@5": 0.5812496206459408
     }
   },
+  "softmax_temperature": 0.55,
+  "softmax_temperature_valid_log_loss": 1.9572296355820464,
   "top_features_by_gain": [
     {
       "name": "recent_form_score",
-      "gain": 8192.522268295288
+      "gain": 30715.44638633728
     },
     {
       "name": "last3f_idx_recent",
-      "gain": 3301.080018043518
-    },
-    {
-      "name": "popularity_outperformance",
-      "gain": 2950.838870048523
+      "gain": 9382.40205526352
     },
     {
       "name": "shrunk_show_rate",
-      "gain": 2899.013720035553
+      "gain": 9014.370411872864
+    },
+    {
+      "name": "popularity_outperformance",
+      "gain": 7563.990756988525
     },
     {
       "name": "body_weight",
-      "gain": 2169.23770570755
+      "gain": 5247.236704826355
     },
     {
       "name": "style_score",
-      "gain": 1285.635588645935
-    },
-    {
-      "name": "speed_idx_weighted",
-      "gain": 1285.0119051933289
-    },
-    {
-      "name": "speed_idx_last",
-      "gain": 1282.536319732666
-    },
-    {
-      "name": "shrunk_win_rate",
-      "gain": 1257.9144320487976
+      "gain": 3994.697147846222
     },
     {
       "name": "same_venue_count",
-      "gain": 1002.2064390182495
+      "gain": 3609.5519156455994
+    },
+    {
+      "name": "speed_idx_last",
+      "gain": 2558.0479288101196
+    },
+    {
+      "name": "shrunk_win_rate",
+      "gain": 2106.3471097946167
+    },
+    {
+      "name": "speed_idx_weighted",
+      "gain": 2046.3804998397827
     }
-  ],
-  "softmax_temperature": 0.45,
-  "softmax_temperature_valid_log_loss": 1.9524236301214386
+  ]
 }
