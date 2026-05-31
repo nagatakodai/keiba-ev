@@ -288,7 +288,6 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             }
 
         b_yield = _bundle_stats(pred.get("recommended_bundle"))
-        b_hit = _bundle_stats(pred.get("recommended_bundle_hit"))
 
         races.append(
             {
@@ -305,13 +304,6 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "bundle_stake": b_yield["stake"],
                 "bundle_payout": b_yield["payout"],
                 "bundle_payout_final": b_yield["payout_final"],
-                # 的中優先 bundle (おまけ計測のみ、古い snapshot で欠落することあり)
-                "bundle_hit_first_hit": b_hit["hit"],
-                "bundle_hit_first_bet_types": sorted({leg["bet_type"] for leg in b_hit["hit_legs"]}),
-                "bundle_hit_first_participated": b_hit["participated"],
-                "bundle_hit_first_stake": b_hit["stake"],
-                "bundle_hit_first_payout": b_hit["payout"],
-                "bundle_hit_first_payout_final": b_hit["payout_final"],
                 # 最終オッズが取れたかの discriminator (frontend で「予想/最終 切替表示」用)
                 "has_final_odds": bool(final_odds),
                 # LLM 評価有無の discriminator
@@ -388,15 +380,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             "roi_final_ci_high": roi_final_high,
         }
 
-    # 回収優先 (実弾で買う Claude 選定束)
+    # 回収優先 (実弾で買う Claude 選定束)。的中優先は廃止。
     claude_bundle = _bundle_agg(
         races, "bundle_participated", "bundle_hit",
         "bundle_stake", "bundle_payout", "bundle_payout_final",
-    )
-    # 的中優先 (おまけ計測のみ。古い snapshot で欠落あり)
-    claude_bundle_hit = _bundle_agg(
-        races, "bundle_hit_first_participated", "bundle_hit_first_hit",
-        "bundle_hit_first_stake", "bundle_hit_first_payout", "bundle_hit_first_payout_final",
     )
 
     return {
@@ -407,10 +394,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "evidence_race_count": evidence_count,
         "non_evidence_race_count": len(pairs) - evidence_count,
         "tiers": tiers_out,
-        # 旧 Plan A/B/C/F/G/H1/H2 は廃止。集計対象は claude_bundle と claude_bundle_hit のみ。
         "plans": [],
         "claude_bundle": claude_bundle,
-        "claude_bundle_hit": claude_bundle_hit,
         "races": races,
     }
 

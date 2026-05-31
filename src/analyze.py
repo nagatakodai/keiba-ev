@@ -711,36 +711,16 @@ def _save_prediction_snapshot(
     llm_blend: float | None = None,
     llm_scored_at: str | None = None,
 ) -> None:
-    # **新スキーマ (2026-05-29 後半)**: Plan A/B は廃止 (3連単 を「他の券種と同じ」EV table
-    # 扱いに集約)。代わりに 2 つの bundle を計算する:
-    #   - recommended_bundle      : 回収優先 (joint Kelly, EV 最適) — 実弾で買う対象
-    #   - recommended_bundle_hit  : 的中優先 (prob 降順 pool で Kelly 配分) — おまけ計測のみ
-    # bet_tables にも 3連単 を含めて表示する (frontend で他券種と並べる)。
+    # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
+    # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
     _ = hit_points   # 旧 Plan B 用 (現スキーマでは未使用)
     recommended_bundle = None
-    recommended_bundle_hit = None
-    bet_tables_hit_serial: dict[str, list] = {}
     if probs is not None:
         try:
             cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
             recommended_bundle = pf_mod.build_bundle(cands, probs, prioritize="yield")
-            # 的中優先 bundle: 同じ候補プールに prioritize="hit" を適用 (= prob 降順 + 1.0 floor)
-            recommended_bundle_hit = pf_mod.build_bundle(cands, probs, prioritize="hit")
         except Exception as ex:  # noqa: BLE001
             console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
-        # 的中優先 EV table (per bet type, prob 降順, px_o>=1.0)
-        try:
-            bet_tables_hit_serial = _serialize_bet_tables(ev_mod.build_all_bet_tables_hit(rd, probs))
-            # 3連単 (rd.trifecta 由来) も的中優先 table を追加 (EV 関係なく prob 降順)
-            tri_hit = sorted(rows, key=lambda r: r.prob, reverse=True)[:30]
-            if tri_hit:
-                bet_tables_hit_serial["trifecta"] = [
-                    {"key": list(r.key), "odds": r.odds, "popularity": r.popularity,
-                     "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
-                    for r in tri_hit
-                ]
-        except Exception as ex:  # noqa: BLE001
-            console.print(f"[yellow]bet_tables_hit 計算失敗: {ex}[/yellow]")
     # 回収優先 bet_tables に 3連単 (rows = P×O 降順 top 30) を含める
     bet_tables_serial = _serialize_bet_tables(bet_tables) if bet_tables else {}
     if rows:
@@ -783,19 +763,13 @@ def _save_prediction_snapshot(
         } if lgbm_info is not None else {"engine": "unknown"},
         # 回収優先 bet_tables (3連単 を含む全 7 券種、各 P×O 降順 top 30)
         "bet_tables": bet_tables_serial,
-        # 的中優先 bet_tables (新スキーマ 2026-05-29): 各 bet type を prob 降順、px_o>=1.0 で
-        # 足切り。実弾は 回収優先 のみで買い、的中優先は計測のみ (「おまけ」)。
-        "bet_tables_hit": bet_tables_hit_serial,
         "bet_tables_g": (
             _serialize_bet_tables_g(bet_tables, aptitude_top_horses)
             if bet_tables and aptitude_top_horses else {}
         ),
         "aptitude_top_horses": list(aptitude_top_horses or []),
-        # 「Claude 総合オススメ」= 全 bet type 横断の joint Kelly 最適まとめ買い束。
-        # recommended_bundle      : 回収優先 (実弾で買う)
-        # recommended_bundle_hit  : 的中優先 (おまけ計測のみ、買わない)
+        # 「Claude 総合オススメ」= 全 bet type 横断の joint Kelly 最適まとめ買い束 (回収優先, 実弾)。
         "recommended_bundle": recommended_bundle,
-        "recommended_bundle_hit": recommended_bundle_hit,
         # 2段パイプライン: Claude 考察由来の各馬指数を model fundamental に合成した痕跡。
         # llm_win_index=null は score 未完了/未実施 (= モデルのみ) のフォールバックを意味する。
         "llm_win_index": ({str(k): v for k, v in llm_win_index.items()}
@@ -808,69 +782,6 @@ def _save_prediction_snapshot(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     console.print(f"[dim]prediction snapshot: {out.relative_to(ROOT)}[/dim]")
-    # 的中優先 Claude 選定用の state を pickle で side-car 保存。analyze.py 終了後に
-    # detached `python -m src.evaluate_hit_bundle <race_id>` がこれを読んで claude を呼ぶ。
-    try:
-        _save_analyze_state_for_hit(
-            race_id, rd, probs, rows, bet_tables,
-            aptitudes=aptitudes, market_signals=market_signals, feats=feats,
-        )
-    except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]analyze_state 保存失敗 (的中 Claude 不可): {ex}[/yellow]")
-
-
-def _save_analyze_state_for_hit(
-    race_id: str, rd, probs, rows, bet_tables,
-    *, aptitudes=None, market_signals=None, feats=None,
-) -> None:
-    """的中優先 Claude 再評価 (`evaluate_hit_bundle`) 用に rd/probs/rows/bet_tables を
-    pickle で side-car 保存。detached subprocess が後で読み込んで claude を呼ぶ。"""
-    import pickle
-    state_dir = ROOT / "data" / "cache" / "analyze_state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    state = {
-        "rd": rd, "probs": probs, "rows": rows, "bet_tables": bet_tables,
-        "aptitudes": aptitudes, "market_signals": market_signals,
-        "horse_best_times": _serialize_best_times(rd, feats) if feats else [],
-    }
-    (state_dir / f"{race_id}.pkl").write_bytes(pickle.dumps(state))
-
-
-def _load_analyze_state_for_hit(race_id: str) -> dict | None:
-    """`evaluate_hit_bundle` で pickle を読み込む。読めなければ None。"""
-    import pickle
-    p = ROOT / "data" / "cache" / "analyze_state" / f"{race_id}.pkl"
-    if not p.exists():
-        return None
-    try:
-        return pickle.loads(p.read_bytes())
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _spawn_hit_bundle_claude(race_id: str) -> None:
-    """analyze flow の最後に呼ぶ。detached subprocess で 的中優先 Claude 選定を起動 (待たない)。
-
-    `python -m src.evaluate_hit_bundle <race_id>` を background 起動。stdout/stderr は
-    log file に redirect。これで:
-      ① analyze.py が即終了 → auto_watch が enqueue → daemon が回収優先 bundle を購入
-      ② parallel で 的中優先 claude が走り、終了後 snapshot を更新 (おまけ計測用)
-    の二段運用が成立する。
-    """
-    import subprocess
-    import sys
-    log_dir = ROOT / "data" / "cache" / "hit_bundle_logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log = (log_dir / f"{race_id}.log").open("a")
-    try:
-        subprocess.Popen(
-            [sys.executable, "-m", "src.evaluate_hit_bundle", race_id],
-            cwd=str(ROOT), start_new_session=True,
-            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-        )
-        console.print(f"[dim]的中優先 Claude 選定を background 起動 (PID 別、log: {log_dir / f'{race_id}.log'})[/dim]")
-    except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]的中優先 Claude spawn 失敗: {ex}[/yellow]")
 
 
 def _print_race_header(rd) -> None:
@@ -1263,21 +1174,13 @@ def _print_plans(
     total_budget: int = 10_000,
     aptitude_top_horses: list[int] | None = None,
 ) -> None:
-    """3連単 解析結果 (回収優先 + 的中優先) を 1 点単位で表示。
-
-    新スキーマ (2026-05-29 後半): Plan A/B/C/F/G/H1/H2 (旧) は廃止。3連単 を「他券種と
-    同じ EV 解析結果」として扱い、ここでは picks ではなく **回収優先 (P×O 上位 5)** と
-    **的中優先 (prob 上位 5、px_o≥1.0)** を参考表示するだけ。実際の購入は
-    recommended_bundle (回収優先) で行われ、的中優先は計測のみ。
+    """3連単 解析結果 (回収優先) を 1 点単位で参考表示するだけ (的中優先は廃止)。
+    実際の購入は recommended_bundle (回収優先 joint Kelly) で行われる。
     """
-    _ = (aptitude_top_horses, hit_budget_ratio)   # 旧互換 (CLI 引数受領)
+    _ = (aptitude_top_horses, hit_budget_ratio, hit_points)   # 旧互換 (CLI 引数受領)
     yield_picks = [r for r in rows if r.px_o >= PXO_FLOOR][:5]
-    hit_picks = sorted(
-        (r for r in rows if r.px_o >= 1.0), key=lambda r: r.prob, reverse=True,
-    )[:max(hit_points, 5)]
     for title, picks in (
         ("3連単・回収優先 (P×O 降順 top 5)", yield_picks),
-        ("3連単・的中優先 (prob 降順, px_o≥1.0)", hit_picks),
     ):
         if not picks:
             console.print(f"[bold]{title}:[/bold] [red]対象なし、スキップ推奨[/red]")
