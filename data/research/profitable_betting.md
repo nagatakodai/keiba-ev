@@ -325,3 +325,30 @@ snapshot の `bet_tables['place'/'wide']` の px_o≥1.02 (モデルの place/wi
 両提案とも配線基準 (ROI 95%CI 下限 > 100%) を満たさず **配線せず**。計測で「やらない方が良い」
 ことが分かったのが成果。唯一 actionable な発見は CLV −10% で、これは既存 margin=1.10 が
 吸収済 = production は既に妥当。
+
+---
+
+## 11. 提案1 (track-variant + pace 図表) を実装・検証した結論 (2026-06-01)
+
+「市場より当たる win 確率」を作るため、実データ駆動の speed 図表 v2 を実装して β-MLE で検証:
+- `build_par_table.py`: 全 past_runs (19,440 ユニーク過去 race) から per-condition の par
+  勝ち時計を実測 (ハードコード par を置換)。
+- `build_v2_features.py`: speed_v2 (par からの走破タイム差) + pace_v2 (上がり3F vs par_last3f
+  の終い脚) + trip (通過順の前後/位置取り変化) を全 (race,horse) で算出。
+- `test_speed_v2.py`: baseline (既存特徴量) vs v2 (既存+v2) で 3-fold β-MLE。
+
+結果 (holdout C, N=1434/1152):
+| seg | baseline β | v2 β | v2 holdout 単勝 | 市場 | log-loss |
+|---|---|---|---|---|---|
+| ALL | 1.000 | **1.000** | 81.5% | 81.3% | 1.587 (同一) |
+| NAR | 1.000 | 0.979 | 80.9% (<baseline 81.4) | 81.2% | 1.596 (同一) |
+
+**結論: v2 図表は市場を上回らない (本物の edge ではない)。** β は 1.0 に張り付いたまま (NAR の
+0.979 は OOS ROI が baseline より悪化・log-loss 同一 = MLE 誤差で実質無効)。par/pace/trip も
+**既に市場に織り込まれている**。我々の情報集合 ⊂ 市場の情報集合、が再確認された。
+
+含意: **公開データを上手く処理しても、この市場 (JRA/NAR とも) は上回れない。** 本物の edge は
+(a) 真に直交する情報 = 直前/軟情報 (Claude alerts に振った — 要 OOS 検証) か (b) 我々が持たない
+専有データ (区間タイム全通過点・GPS・厩舎私的情報) か (c) リベート (日本に無い) からしか出ない。
+v2 は production に統合しない (改善にならずノイズ/複雑さを足すだけ)。計測で「やっても無駄」と
+分かったのが成果 = -EV を確定的に避けられる。
