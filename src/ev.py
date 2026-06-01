@@ -59,7 +59,9 @@ LGBM_TEMPERATURE = 0.4
 #   - T_LLM: raw 指数 (0-100) を softmax(v / T_LLM) で 1着率分布に変換する温度。
 #            生値 (T=1) だと exp(100) で過尖鋭化し1頭に集中するため大きめの温度で平坦化する。
 #            T=25 なら 100 vs 50 の差が win 比 ~7倍 (model の spread と同程度)。
-LLM_BLEND_DEFAULT = 0.5
+# LLM_BLEND_DEFAULT=0.3: Claude 指数は未検証 heuristic なので保守的に開始 (market β=0.78 後の
+# モデル取り分 0.22 のうち w=0.3 だけ指数側)。レース蓄積後に実現的中率と照合して sweep する。
+LLM_BLEND_DEFAULT = 0.3
 T_LLM = 25.0
 
 
@@ -78,6 +80,8 @@ def estimate_probs(
     market_win_override: dict[int, float] | None = None,
     llm_win_index: dict[int, float] | None = None,
     llm_blend: float = LLM_BLEND_DEFAULT,
+    llm_support: dict[int, int] | None = None,
+    llm_scale: str = "prob",
 ) -> Probabilities:
     """Layer 1 特徴量 (features.py) + 市場ブレンド + Discounted Harville で Probabilities を作る。
 
@@ -116,7 +120,8 @@ def estimate_probs(
     # Claude 指数を model fundamental に合成 (市場ブレンドの前)。指数が無ければ no-op。
     if llm_win_index and llm_blend > 0:
         fundamental_win = _combine_llm_index(
-            fundamental_win, llm_win_index, llm_blend, market_floor)
+            fundamental_win, llm_win_index, llm_blend, market_floor,
+            support=llm_support, scale=llm_scale)
 
     # 市場ブレンド。market_win_override があれば trifecta より優先 (oddspark 単勝
     # フォールバック等、3連単オッズが無い経路で単勝オッズから市場率を渡す用途)。
@@ -248,39 +253,62 @@ def _fundamental_win_probs(horses, feats) -> dict[int, float]:
     return _linear_softmax_fallback(horses, feats)
 
 
+# 補強根拠件数 (support) → llm_blend に掛ける per-horse 係数。根拠の無い馬は 0 (= モデル/市場に
+# 委ねる)、根拠が増えるほど Claude の勝率を厚く採用する。3 件以上で満額。
+_SUPPORT_WEIGHT = {0: 0.0, 1: 0.5, 2: 0.8}
+
+
+def _support_mult(support: int | None) -> float:
+    if support is None:
+        return 1.0   # support 情報が無い (旧形式/未指定) → 一律 llm_blend
+    return _SUPPORT_WEIGHT.get(max(0, support), 1.0)
+
+
 def _combine_llm_index(
     fundamental: dict[int, float],
     llm_index: dict[int, float],
     llm_blend: float,
     floor: float,
+    *,
+    support: dict[int, int] | None = None,
+    scale: str = "prob",
 ) -> dict[int, float]:
-    """Claude の per-horse 指数 (raw, 高い=強い) を softmax(v/T_LLM) で 1着率分布に変換し、
-    model fundamental と loglinear 合成する。
+    """Claude の per-horse 勝率/指数を model fundamental と loglinear 合成する。
 
-        L_i = softmax(index_i / T_LLM)               (欠落馬は floor)
-        g_i = softmax((1-w)·log f_i + w·log L_i)      w = llm_blend
+    scale="prob" (新): llm_index は推定勝率 (%, Σ≈100)。正規化して L_i にそのまま使う
+        (温度不要 — 出力が既に確率)。
+    scale="strength" (旧): llm_index は 0-100 強さ指数。softmax(v/T_LLM) で確率化 (後方互換)。
 
-    market ブレンドと同じ代数 (softmax-of-log-probs) で一貫。Claude が一部の馬しか
-    スコアしていない場合、欠落馬は floor 扱い (= 弱い均一寄与)。Σ=1 に正規化して返す。
-    指数が空なら fundamental をそのまま返す。
+    合成は per-horse 重み付き loglinear:
+        g_i = softmax((1-w_i)·log f_i + w_i·log L_i)
+        w_i = clamp(llm_blend · support_mult(support_i))   (support 無し → w_i=llm_blend)
+
+    補強根拠 (support) が多い馬ほど w_i が大きく Claude の勝率を厚く採る。根拠 0 の馬は
+    w_i=0 で fundamental のまま (= 検索で動かした馬だけ反映)。空なら fundamental を返す。
     """
     import math
 
     keys = list(fundamental.keys())
     if not llm_index or not keys:
         return fundamental
-    # 1) raw 指数 → 温度付き softmax 分布 L_i
-    raw = {k: float(llm_index.get(k, 0.0)) for k in keys}
-    rm = max(raw.values())
-    exps = {k: math.exp((v - rm) / T_LLM) for k, v in raw.items()}
-    z = sum(exps.values()) or 1.0
-    L = {k: max(exps[k] / z, floor) for k in keys}
+
+    raw = {k: max(float(llm_index.get(k, 0.0)), 0.0) for k in keys}
+    if scale == "strength":
+        # 旧 0-100 指数 → 温度付き softmax で確率化
+        rm = max(raw.values()) if raw else 0.0
+        exps = {k: math.exp((v - rm) / T_LLM) for k, v in raw.items()}
+        z = sum(exps.values()) or 1.0
+        L = {k: max(exps[k] / z, floor) for k in keys}
+    else:
+        # 新: 勝率 % をそのまま正規化 (欠落/0 は floor)
+        L = {k: max(raw.get(k, 0.0), floor) for k in keys}
     ls = sum(L.values()) or 1.0
     L = {k: v / ls for k, v in L.items()}
-    # 2) loglinear 合成
-    w = max(min(llm_blend, 1.0), 0.0)
+
+    base_w = max(min(llm_blend, 1.0), 0.0)
     logs: dict[int, float] = {}
     for k in keys:
+        w = max(min(base_w * _support_mult(None if support is None else support.get(k, 0)), 1.0), 0.0)
         f = max(fundamental.get(k, 0.0), 1e-9)
         l = max(L.get(k, 0.0), 1e-9)
         logs[k] = (1.0 - w) * math.log(f) + w * math.log(l)

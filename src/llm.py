@@ -510,10 +510,10 @@ def build_horse_score_prompt(
         f"開催日: {kaisai_date}",
         "",
         "あなたは競馬の考察家です。下の出走馬について **web 検索 (Brave/Tavily)** で "
-        "各馬の直近5走・距離/コース/馬場適性・騎手・取消/体調を調べ、**各馬の「強さ指数」"
-        "(0-100, 高いほど強い = 1着に近い)** を付けてください。これは確率モデルの fundamental "
-        "に合成され、最終的に市場オッズとブレンドされます。**買い目 (picks) は決めません** — "
-        "あなたの仕事は各馬を相対評価して数値化することだけです。",
+        "各馬の直近5走・距離/コース/馬場適性・騎手・取消/体調を調べ、**各馬の「推定勝率 (%)」** "
+        "を出してください。これは確率モデルの fundamental に合成され、最終的に市場オッズと "
+        "ブレンドされます。**買い目 (picks) は決めません** — あなたの仕事は各馬の勝率を見積もる "
+        "ことだけです。",
         "",
         "## 出走馬 (馬番 / 馬名 / 性齢 / 騎手 / 馬体重(増減) / 適性総合 / 単勝オッズ)",
         "| 馬番 | 馬名 | 性齢 | 騎手 | 馬体重 | 適性 | 単勝 |",
@@ -536,20 +536,33 @@ def build_horse_score_prompt(
         "②騎手の当該コース成績/乗り替わり ③当日の馬場状態と適性 ④厩舎調整/馬体重変化 "
         "⑤取消・除外・体調不安。",
         "**検索すべきでない**: 既に上表にある数値 (オッズ/適性)、競馬の基本ルール、1か月以上前の汎用情報。",
-        "**検索予算**: 1レース**最大6クエリ** (Brave+Tavily 合算)。各クエリ前に「何が決まるか」を1行説明。",
+        f"**検索予算**: このレースは {len(horses)} 頭立て。**全馬を 1 頭あたり約 2 クエリ "
+        f"(合計 ~{len(horses) * 2} クエリ) まで** Brave/Tavily で補強してよい。各馬について最低 "
+        "1 回は直近走/適性を確認し、人気・評価が割れる馬は 2 回まで深掘りする。各クエリ前に "
+        "「何が決まるか」を 1 行説明。",
         "**クエリ例**: \"<馬名>\" 直近5走 / \"<馬名>\" <距離>m <芝|ダ> / \"<騎手名>\" <場名> 成績 / "
         "<場名> 馬場状態 <YYYYMMDD> / \"<馬名>\" 取消 OR 体調",
         "",
-        "## 指数の付け方",
-        "- 0-100 の相対評価。**最も強い馬を高く**、勝ち目の薄い馬を低く。同点でも構わないが差をつける。",
-        "- 距離/コース/馬場適性◎・直近好走・騎手得意 → 加点。馬体重大幅増減・不適性・展開不利 → 減点。",
-        "- **取消/除外/重度の体調不安**が確認できた馬は指数 0 にする (絡む目をモデルが落とせるよう)。",
-        "- 補強根拠が無い馬は適性総合・オッズの常識的水準に留め、過度に動かさない (楽観バイアス警戒)。",
+        "## 勝率の出し方 (重要)",
+        "- **市場の暗黙勝率 (≒ 1/単勝オッズ) を出発点**にする。検索で得た材料がある馬だけ、その分 "
+        "**上にも下にも**動かす。材料が無い馬は市場値からほぼ動かさない (楽観バイアス警戒)。",
+        "- **プラス材料** (上げる): 距離/コース/馬場適性◎・直近好走・騎手得意・展開有利。",
+        "- **マイナス材料** (下げる): 距離/コース/馬場の不適性・近走凡走・乗替りマイナス・馬体重大幅増減・"
+        "展開不利。市場が過剰人気と判断できれば市場より**低く**してよい。",
+        "- **取消/除外/重度の体調不安**が確認できた馬は勝率 0 にする (絡む目をモデルが落とせるよう)。",
+        "- 全馬の合計が **おおよそ 100% になるよう正規化**して出す (厳密でなくてよいが大きく外さない)。",
+        "",
+        "## 各馬の補強根拠件数 (support)",
+        "各馬について、勝率を市場から動かす **裏付けとなった検索根拠の件数** を 0-3+ で出す。"
+        "**プラス材料もマイナス材料も同じく 1 件として数える** (例: 距離適性◎=1 / 距離不適性が判明=1 / "
+        "直近2-3着率突出=1 / 近走大敗が続く=1 / 乗替りで実績薄=1)。支持が多い馬ほどモデルはあなたの "
+        "勝率 (上げ・下げ問わず) を厚く採用する。材料が無ければ 0 (市場どおり)。",
         "",
         "## 出力",
-        "全出走馬の 馬番→指数 を必ず網羅し、最後に以下の JSON を ```json ... ``` で出力:",
+        "全出走馬の 馬番→勝率(%) と support を必ず網羅し、最後に以下の JSON を ```json ... ``` で出力:",
         "```json",
-        '{"scores": {"7": 82, "2": 64, "11": 40},'
+        '{"win_prob": {"7": 28.0, "2": 18.5, "11": 6.0},'
+        ' "support": {"7": 3, "2": 1, "11": 0},'
         ' "notes": {"7": "補強3件: 距離適性◎/騎手当該場勝率18%/直近3走連対"},'
         ' "summary": "考察の総評", "confidence": "high|mid|low"}',
         "```",
@@ -625,21 +638,38 @@ def score_horses_stream(
 
 
 def parse_horse_scores(text: str) -> dict:
-    """score 出力の JSON を {"scores":{int:float}, "notes":{}, "summary":str, "confidence":str}
-    に正規化。壊れた/空出力は scores 空で返す (raise しない)。
+    """score 出力の JSON を正規化して
+    {"scores":{int:float}, "support":{int:int}, "scale":str, "notes":{}, "summary":str,
+     "confidence":str} で返す。壊れた/空出力は scores 空で返す (raise しない)。
+
+    新形式は `win_prob` (各馬の推定勝率 %) + `support` (補強根拠件数)。後方互換で旧 `scores`
+    (0-100 強さ指数) も拾い、その場合 scale="strength" を付ける (ev 側で温度パスに回す)。
     """
     raw = parse_evidence(text)
     if not isinstance(raw, dict):
-        return {"scores": {}, "notes": {}, "summary": "", "confidence": ""}
+        return {"scores": {}, "support": {}, "scale": "prob", "notes": {}, "summary": "", "confidence": ""}
+    src = raw.get("win_prob")
+    scale = "prob"
+    if not isinstance(src, dict) or not src:
+        src = raw.get("scores") or {}   # 後方互換 (旧 0-100 強さ指数)
+        scale = "strength"
     scores: dict[int, float] = {}
-    for k, v in (raw.get("scores") or {}).items():
+    for k, v in src.items():
         try:
             scores[int(k)] = float(v)
+        except (ValueError, TypeError):
+            continue
+    support: dict[int, int] = {}
+    for k, v in (raw.get("support") or {}).items():
+        try:
+            support[int(k)] = max(0, int(float(v)))
         except (ValueError, TypeError):
             continue
     notes = raw.get("notes") if isinstance(raw.get("notes"), dict) else {}
     return {
         "scores": scores,
+        "support": support,
+        "scale": scale,
         "notes": notes,
         "summary": str(raw.get("summary", "")),
         "confidence": str(raw.get("confidence", "")),

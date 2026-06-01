@@ -783,13 +783,14 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
         return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
-    llm_index, llm_scored_at = az_mod._load_llm_scores(race_id)
+    llm_index, llm_support, llm_scale, llm_scored_at = az_mod._load_llm_scores(race_id)
 
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
     s = sum(1.0 / o for o in win_odds.values()) or 1.0
     mwp = {n: (1.0 / o) / s for n, o in win_odds.items()}
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp,
-                                  llm_win_index=llm_index, llm_blend=llm_blend)
+                                  llm_win_index=llm_index, llm_blend=llm_blend,
+                                  llm_support=llm_support, llm_scale=llm_scale)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     tri_table = ev_mod.build_table(rd, probs) if rd.trifecta else []
@@ -812,7 +813,8 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
                 race_id, rd, tri_table, plan_rows, aptitudes, snap_bet_tables, apt_top,
                 market_signals, feats=feats, lgbm_info=ev_mod.lgbm_status(),
                 hit_points=3, probs=probs,
-                llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at)
+                llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
+                llm_support=llm_support, llm_scale=llm_scale)
             _tag_snapshot_source(race_id, "jra")
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_jra] snapshot 保存失敗: {ex}")

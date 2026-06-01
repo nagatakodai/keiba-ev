@@ -184,14 +184,15 @@ export type PredictionDetail = {
   llm_scored_at?: string | null;
   // Claude 指数が無い (score 未完/未実施 = モデルのみ) フォールバックか。
   llm_fallback?: boolean;
-  // Claude 指数 × 市場指数 を per-horse で併記 (差 = Claude − 市場、正 = Claude が市場より強気)。
-  // Claude 指数降順 (無ければ市場指数降順)。
+  // Claude 推定勝率 × 市場指数 を per-horse で併記 (差 = Claude − 市場、正 = Claude が強気)。
+  // Claude 値降順 (無ければ市場指数降順)。support = 補強根拠件数 (検索で動かした裏付け)。
   index_compare?: Array<{
     number: number;
     name: string;
     claude_index: number | null;
     market_index: number | null;
     diff: number | null;
+    support?: number | null;
   }>;
   // 市場乖離 (単勝 vs 複勝 implied prob 比率)。fetch されていなければ空配列。
   market_signals?: MarketSignal[];

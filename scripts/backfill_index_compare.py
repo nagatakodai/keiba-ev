@@ -30,9 +30,17 @@ def _market_index_from_signals(market_signals: list[dict]) -> dict[int, float]:
     return out
 
 
-def _build(market_signals: list[dict], llm_win_index: dict | None) -> tuple[dict, list]:
+def _build(
+    market_signals: list[dict], llm_win_index: dict | None, llm_support: dict | None
+) -> tuple[dict, list]:
     market = _market_index_from_signals(market_signals)
     claude = {int(k): float(v) for k, v in (llm_win_index or {}).items()}
+    support = {}
+    for k, v in (llm_support or {}).items():
+        try:
+            support[int(k)] = max(0, int(float(v)))
+        except (ValueError, TypeError):
+            continue
     names = {int(s["number"]): (s.get("name") or "") for s in market_signals}
     nums = (set(claude) | set(market)) & set(names)
     rows = []
@@ -45,6 +53,7 @@ def _build(market_signals: list[dict], llm_win_index: dict | None) -> tuple[dict
             "claude_index": (round(c, 1) if c is not None else None),
             "market_index": (mk if mk is not None else None),
             "diff": (round(c - mk, 1) if (c is not None and mk is not None) else None),
+            "support": (support[n] if n in support else None),
         })
     rows.sort(
         key=lambda r: (
@@ -72,7 +81,7 @@ def main() -> int:
         if not ms:
             n_skip += 1
             continue
-        market_idx, index_compare = _build(ms, d.get("llm_win_index"))
+        market_idx, index_compare = _build(ms, d.get("llm_win_index"), d.get("llm_support"))
         if not index_compare:
             n_skip += 1
             continue
