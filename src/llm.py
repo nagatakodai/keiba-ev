@@ -651,8 +651,11 @@ def parse_horse_scores(text: str) -> dict:
     src = raw.get("win_prob")
     scale = "prob"
     if not isinstance(src, dict) or not src:
-        src = raw.get("scores") or {}   # 後方互換 (旧 0-100 強さ指数)
-        scale = "strength"
+        legacy = raw.get("scores")
+        if isinstance(legacy, dict) and legacy:
+            src, scale = legacy, "strength"   # 後方互換 (旧 0-100 強さ指数)
+        else:
+            src = {}   # データ無し: 空のまま prob 既定 (空 scores は ev で no-op)
     scores: dict[int, float] = {}
     for k, v in src.items():
         try:

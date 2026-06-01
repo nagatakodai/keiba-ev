@@ -856,7 +856,12 @@ def _save_prediction_snapshot(
         "market_win_index": ({str(k): v for k, v in _market_win_index(rd).items()}
                              or None),
         # Claude 勝率 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場、support=補強件数)。
-        "index_compare": _build_index_compare(rd, llm_win_index, llm_support),
+        # 表示は勝率 % なので prob スケールの時だけ Claude 列を出す (旧 strength は市場指数のみ)。
+        "index_compare": _build_index_compare(
+            rd,
+            llm_win_index if llm_scale == "prob" else None,
+            llm_support if llm_scale == "prob" else None,
+        ),
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

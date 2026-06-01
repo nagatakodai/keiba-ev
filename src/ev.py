@@ -292,6 +292,9 @@ def _combine_llm_index(
     if not llm_index or not keys:
         return fundamental
 
+    # Claude が実際にスコアした馬の集合。未スコア馬は blend しない (w=0 で fundamental のまま)
+    # — そうしないと L=floor に引っ張られて未スコア馬が不当に抑制される。
+    scored = {k for k in keys if k in llm_index}
     raw = {k: max(float(llm_index.get(k, 0.0)), 0.0) for k in keys}
     if scale == "strength":
         # 旧 0-100 指数 → 温度付き softmax で確率化
@@ -308,7 +311,10 @@ def _combine_llm_index(
     base_w = max(min(llm_blend, 1.0), 0.0)
     logs: dict[int, float] = {}
     for k in keys:
-        w = max(min(base_w * _support_mult(None if support is None else support.get(k, 0)), 1.0), 0.0)
+        if k not in scored:
+            w = 0.0   # Claude が触れていない馬は動かさない
+        else:
+            w = max(min(base_w * _support_mult(None if support is None else support.get(k, 0)), 1.0), 0.0)
         f = max(fundamental.get(k, 0.0), 1e-9)
         l = max(L.get(k, 0.0), 1e-9)
         logs[k] = (1.0 - w) * math.log(f) + w * math.log(l)

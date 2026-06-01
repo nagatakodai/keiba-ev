@@ -81,13 +81,18 @@ def main() -> int:
         if not ms:
             n_skip += 1
             continue
-        market_idx, index_compare = _build(ms, d.get("llm_win_index"), d.get("llm_support"))
+        # Claude 列は新形式 (llm_scale="prob" = 推定勝率 %) の snapshot のみ表示する。旧 strength
+        # (0-100 指数) を「勝率 %」列に出すと誤表示になるため market 指数のみにする。
+        is_prob = d.get("llm_scale") == "prob"
+        claude = d.get("llm_win_index") if is_prob else None
+        support = d.get("llm_support") if is_prob else None
+        market_idx, index_compare = _build(ms, claude, support)
         if not index_compare:
             n_skip += 1
             continue
         d["market_win_index"] = market_idx or None
         d["index_compare"] = index_compare
-        if d.get("llm_win_index"):
+        if claude:
             n_claude += 1
         if not args.dry_run:
             f.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
