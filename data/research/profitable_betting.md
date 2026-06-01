@@ -352,3 +352,22 @@ snapshot の `bet_tables['place'/'wide']` の px_o≥1.02 (モデルの place/wi
 専有データ (区間タイム全通過点・GPS・厩舎私的情報) か (c) リベート (日本に無い) からしか出ない。
 v2 は production に統合しない (改善にならずノイズ/複雑さを足すだけ)。計測で「やっても無駄」と
 分かったのが成果 = -EV を確定的に避けられる。
+
+---
+
+## 12. NAR ダート「オッズ無視・速度図表に従う」検証 (2026-06-01)
+
+`scripts/nar_dirt_speed_strategy.py`。NAR ダート 5,111 race、選抜に人気/オッズを一切使わず
+速度図表で top-1 を買い、確定 win_odds で払戻。bootstrap 95%CI。
+
+| 戦略 | in-sample ROI | OOS(last20%) ROI | 判定 |
+|---|---|---|---|
+| 市場1番人気 | 80.6% | 83.3% [77.4,89.1] | -EV (baseline) |
+| speed_v2_best | 80.5% | 93.1% [75.8,112.4] | CI 巨大=有意でない |
+| speed_idx 系 | 74-80% | — | -EV |
+| model_score(β=0) | **105.7%** | **78.3%** [70.9,85.4] | **in-sample 記憶。OOS で市場以下** |
+
+**結論: NAR ダートでもオッズ無視の速度図表戦略は break-even を超えない。** model_score の
+in-sample 105.7% は学習レースの勝者記憶 (OOS で 78.3% に崩壊、market 83.3% 以下)。生図表は
+leakage 無いが全て CI が 100% を跨ぐ = 有意な +EV 無し。速度情報は NAR ダートでも市場に
+織り込み済。**教訓: in-sample の +EV は OOS で必ず検証する** (危うく偽陽性を報告しかけた)。
