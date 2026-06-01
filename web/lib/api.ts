@@ -176,6 +176,23 @@ export type PredictionDetail = {
   start_at: number | null;
   rows: PredictionRow[];
   horse_aptitude?: HorseAptitude[];
+  // Claude 各馬指数 (score ステージ由来 0-100)。score 未実施/フォールバック時は null。
+  llm_win_index?: Record<string, number> | null;
+  // 市場指数 (単勝オッズ de-vig → Claude 指数と同じ対数勝率スケール 0-100)。
+  market_win_index?: Record<string, number> | null;
+  // Claude 指数の取得時刻 (score ステージ)。
+  llm_scored_at?: string | null;
+  // Claude 指数が無い (score 未完/未実施 = モデルのみ) フォールバックか。
+  llm_fallback?: boolean;
+  // Claude 指数 × 市場指数 を per-horse で併記 (差 = Claude − 市場、正 = Claude が市場より強気)。
+  // Claude 指数降順 (無ければ市場指数降順)。
+  index_compare?: Array<{
+    number: number;
+    name: string;
+    claude_index: number | null;
+    market_index: number | null;
+    diff: number | null;
+  }>;
   // 市場乖離 (単勝 vs 複勝 implied prob 比率)。fetch されていなければ空配列。
   market_signals?: MarketSignal[];
   // 持ち時計 (同 venue × 同距離 × 同 surface での best own_time_sec)。速い順。

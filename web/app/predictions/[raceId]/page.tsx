@@ -174,6 +174,15 @@ export default async function PredictionDetailPage({
         );
       })()}
 
+      {d.index_compare && d.index_compare.length > 0 && (
+        <IndexCompareCard
+          items={d.index_compare}
+          finish={finish}
+          scoredAt={d.llm_scored_at}
+          hasClaude={!d.llm_fallback}
+        />
+      )}
+
       {d.horse_aptitude && d.horse_aptitude.length > 0 && (
         <AptitudeCard items={d.horse_aptitude} finish={finish} />
       )}
@@ -795,6 +804,96 @@ function factorCellClass(v: number): string {
   if (v >= 70) return "text-(--color-good)";
   if (v >= 50) return "";
   return "text-(--color-muted)";
+}
+
+function diffTone(diff: number | null): BadgeTone {
+  if (diff == null) return "muted";
+  if (diff >= 10) return "good";      // Claude が市場より強気
+  if (diff <= -10) return "bad";      // Claude が市場より弱気
+  return "muted";
+}
+
+function IndexCompareCard({
+  items,
+  finish,
+  scoredAt,
+  hasClaude,
+}: {
+  items: NonNullable<PredictionDetail["index_compare"]>;
+  finish?: number[];
+  scoredAt?: string | null;
+  hasClaude?: boolean;
+}) {
+  const finishSet = new Set(finish ?? []);
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <span>Claude 指数 × 市場指数</span>
+          <span className="text-xs text-(--color-muted) font-normal">
+            {hasClaude
+              ? "Claude 考察 (0-100) と 単勝オッズ由来の市場指数を併記 · 差 = Claude − 市場 (正 = Claude が強気)"
+              : "Claude 指数なし (score 未実施) · 市場指数のみ (1番人気=100 の相対勝率)"}
+          </span>
+        </span>
+      }
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabnum table-zebra">
+          <thead className="text-left text-(--color-muted) text-xs">
+            <tr className="border-b border-(--color-line)">
+              <th className="py-2 pr-3 text-right">馬</th>
+              <th className="py-2 pr-3">馬名</th>
+              <th className="py-2 pr-3 text-right" title="Claude 考察由来の強さ指数 0-100">Claude 指数</th>
+              <th className="py-2 pr-3 text-right" title="単勝オッズ de-vig を Claude と同じ対数勝率スケールに乗せた市場指数 0-100">市場指数</th>
+              <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((r) => {
+              const hit = finishSet.has(r.number);
+              return (
+                <tr
+                  key={r.number}
+                  className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                >
+                  <td className="py-1.5 pr-3 text-right font-bold">{r.number}</td>
+                  <td className="py-1.5 pr-3">
+                    {r.name}
+                    {hit && finish && (
+                      <span className="ml-2 text-(--color-good) text-xs">
+                        ●{finish.indexOf(r.number) + 1}着
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right">
+                    {r.claude_index != null ? r.claude_index.toFixed(1) : "—"}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right">
+                    {r.market_index != null ? r.market_index.toFixed(1) : "—"}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right">
+                    {r.diff != null ? (
+                      <Badge tone={diffTone(r.diff)}>
+                        {r.diff > 0 ? `+${r.diff.toFixed(1)}` : r.diff.toFixed(1)}
+                      </Badge>
+                    ) : (
+                      <span className="text-(--color-muted)">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-3 text-xs text-(--color-muted)">
+        市場指数は単勝オッズの de-vig 勝率を Claude 指数と同じ対数勝率スケール (温度 T=25) に乗せ、
+        市場1番人気を Claude 最高指数に揃えたもの。差が大きい馬ほど Claude と市場の評価が乖離。
+        {scoredAt ? ` · Claude 指数: ${fmtServerDateTime(scoredAt)}` : ""}
+      </p>
+    </Card>
+  );
 }
 
 function AptitudeCard({

@@ -694,6 +694,73 @@ def _run_score_stage(
     return parsed
 
 
+def _market_win_index(rd, llm_win_index: dict[int, float] | None) -> dict[int, float]:
+    """単勝オッズの de-vig 暗黙勝率を Claude 指数と同じ対数勝率スケール (T_LLM) に乗せた
+    「市場指数」(0-100) を返す。Claude 指数と並べて表示し差分で乖離を見るための列。
+
+    両指数を「指数 = T_LLM·log(勝率) + const」という同じ曲率に揃える。市場1番人気を
+    アンカー A に合わせるので、差 = Claude指数 − 市場指数 が「Claude が市場よりどれだけ
+    強気/弱気か」を Claude 指数のポイント単位でそのまま読める:
+      - A = max(Claude 指数) があればそれ (1番人気どうしを同じ高さに揃える) → 差は中位馬と
+        馬群形状の不一致を表す。
+      - Claude 指数が無ければ A=100 (市場単独、1番人気=100 の相対勝率指数)。
+    """
+    import math
+    from .ev import T_LLM, power_method_overround
+
+    horses = [h for h in rd.race.horses
+              if not h.absent and getattr(h, "win_odds", 0) and h.win_odds > 0]
+    if not horses:
+        return {}
+    raw = {h.number: 1.0 / float(h.win_odds) for h in horses}
+    s = sum(raw.values())
+    if s <= 0:
+        return {}
+    raw = {k: v / s for k, v in raw.items()}
+    market = power_method_overround(raw)
+    ms = sum(market.values())
+    if ms <= 0:
+        return {}
+    market = {k: v / ms for k, v in market.items()}
+    m_max = max(market.values())
+    if m_max <= 0:
+        return {}
+    anchor = max(llm_win_index.values()) if llm_win_index else 100.0
+    out: dict[int, float] = {}
+    for k, p in market.items():
+        idx = anchor - T_LLM * math.log(m_max / max(p, 1e-9))
+        out[k] = round(max(0.0, min(100.0, idx)), 1)
+    return out
+
+
+def _build_index_compare(rd, llm_win_index: dict[int, float] | None) -> list[dict]:
+    """Claude 指数 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。Claude 指数降順
+    (無ければ市場指数降順)。どちらか一方しか無い馬も含める。"""
+    market = _market_win_index(rd, llm_win_index)
+    claude = llm_win_index or {}
+    names = {h.number: (h.name or "") for h in rd.race.horses if not h.absent}
+    nums = (set(claude) | set(market)) & set(names)
+    rows_out: list[dict] = []
+    for n in nums:
+        c = claude.get(n)
+        mk = market.get(n)
+        rows_out.append({
+            "number": n,
+            "name": names.get(n, ""),
+            "claude_index": (round(float(c), 1) if c is not None else None),
+            "market_index": (mk if mk is not None else None),
+            "diff": (round(float(c) - mk, 1) if (c is not None and mk is not None) else None),
+        })
+    rows_out.sort(
+        key=lambda r: (
+            r["claude_index"] if r["claude_index"] is not None
+            else (r["market_index"] if r["market_index"] is not None else -1.0)
+        ),
+        reverse=True,
+    )
+    return rows_out
+
+
 def _save_prediction_snapshot(
     race_id: str,
     rd,
@@ -777,6 +844,11 @@ def _save_prediction_snapshot(
         "llm_blend": llm_blend,
         "llm_scored_at": llm_scored_at,
         "llm_fallback": llm_win_index is None,
+        # 市場指数 (単勝オッズ de-vig → Claude 指数と同じ対数勝率スケール 0-100)。
+        "market_win_index": ({str(k): v for k, v in _market_win_index(rd, llm_win_index).items()}
+                             or None),
+        # Claude 指数 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場)。
+        "index_compare": _build_index_compare(rd, llm_win_index),
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
