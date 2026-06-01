@@ -292,3 +292,36 @@ def drz_show_edge(rd) -> dict[int, float]:
 - **PTF / Marshall Gramm** (CAW late money, T O Elvis 30-1→5-1 の CLV 実例)
 - **日本控除率**: JRA「馬券のルール」, netkeiba コラム cid=27253, JRA-VAN, 競馬ナビ/競馬ディスカバリー (券種別控除率)
 - **日本データ派**: JRA-VAN データマイニング, note (人気順回収率, 距離短縮過小評価)
+
+---
+
+## 10. 検証結果 (提案3 Dr Z + CLV を実装・計測した結論, 2026-06-01)
+
+`scripts/clv_drz_analysis.py` でライブ snapshot (bet時オッズ) + 結果 168 race を計測。
+
+### CLV (締切→確定ドリフト) — 重要
+3連単の bet時オッズ → 確定払戻 ドリフト = **平均 −10.4% / 中央 −9.2% (95%CI[−14.3,−6.3])**。
+確定払戻が bet時オッズを上回るのは 39% だけ。= **締切~1分前に見えるオッズより確定払戻は
+約10%低い** (late money が人気サイドに入り配当が縮む / 小プールの NAR で顕著)。
+
+含意:
+- settled-odds バックテストは **確定オッズで払戻**しているので payout は正しい (楽観でない)。
+- ただし **bet時オッズで P×O を評価すると 3連単 EV を ~10% 過大評価**する。production の
+  `recommended_bundle` は bet時オッズで選抜するため、3連単脚の実 EV は ~10% 低い。
+- `portfolio.TORIGAMI_MARGIN = 1.10` が **この −10% をちょうど吸収**する (payout ≥ 1.10×stake を
+  bet時オッズで要求 = 確定で ~1.0 に縮んでもトリガミにならない)。既存 margin は妥当と検証された。
+
+### Dr Z place/wide overlay — 配線しない (実測 -EV)
+snapshot の `bet_tables['place'/'wide']` の px_o≥1.02 (モデルの place/wide +EV picks) を
+実際に買った時の ROI:
+- place: **48.9%** (95%CI[25.5,77.8], hit 27/206) = 大幅 -EV。
+- wide:  **68.5%** (95%CI[39.4,105.6], hit 46/1862) = -EV (CI 下限 39%)。
+しかも payout に bet時オッズを使った楽観値なので、CLV −10% を入れると更に悪い。
+→ **build_bundle への配線は見送り** (損をする)。研究の警告「win モデルの place EV は
+プール整合時は通常 -EV、overlay は pool 不整合からのみ」が実データで確認された。
+真の Dr Z は「win プールと place プールの**不整合**」を突くものでモデルの place EV ではない。
+
+### 結論
+両提案とも配線基準 (ROI 95%CI 下限 > 100%) を満たさず **配線せず**。計測で「やらない方が良い」
+ことが分かったのが成果。唯一 actionable な発見は CLV −10% で、これは既存 margin=1.10 が
+吸収済 = production は既に妥当。
