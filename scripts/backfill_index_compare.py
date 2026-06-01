@@ -4,9 +4,8 @@
 計算するが、保存済 snapshot には rd が無い。代わりに snapshot 内の `market_signals`
 (win_odds を持つ) と `llm_win_index` (Claude 指数) だけから同じ指数を再構築する。
 
-市場指数の定義は analyze.py と同一: 単勝オッズ de-vig 勝率を 0-100 にした Claude 独立な
-指数で、市場1番人気を 100 とする (Claude の値にはアンカーしない)。対数勝率スケール
-(T_LLM) は Claude と曲率を揃えるためで、値そのものは Claude と独立。
+市場指数の定義は analyze.py と同一: 単勝オッズ由来で、オッズによって変動し 1.0 倍で 100
+になる Claude 独立な指数 (市場指数 = 100 / 単勝オッズ = 市場暗黙1着率 %)。
 
 使い方: python scripts/backfill_index_compare.py [--dry-run]
 """
@@ -14,43 +13,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from src.ev import T_LLM, power_method_overround  # noqa: E402
 
 PRED_DIR = ROOT / "data" / "predictions"
 
 
 def _market_index_from_signals(market_signals: list[dict]) -> dict[int, float]:
-    odds = {
-        int(s["number"]): float(s["win_odds"])
-        for s in market_signals
-        if s.get("win_odds") and float(s["win_odds"]) > 0
-    }
-    if not odds:
-        return {}
-    raw = {k: 1.0 / v for k, v in odds.items()}
-    s = sum(raw.values())
-    if s <= 0:
-        return {}
-    raw = {k: v / s for k, v in raw.items()}
-    market = power_method_overround(raw)
-    ms = sum(market.values())
-    if ms <= 0:
-        return {}
-    market = {k: v / ms for k, v in market.items()}
-    m_max = max(market.values())
-    if m_max <= 0:
-        return {}
     out: dict[int, float] = {}
-    for k, p in market.items():
-        idx = 100.0 - T_LLM * math.log(m_max / max(p, 1e-9))
-        out[k] = round(max(0.0, min(100.0, idx)), 1)
+    for s in market_signals:
+        wo = s.get("win_odds")
+        if not wo or float(wo) <= 0:
+            continue
+        out[int(s["number"])] = round(max(0.0, min(100.0, 100.0 / float(wo))), 1)
     return out
 
 

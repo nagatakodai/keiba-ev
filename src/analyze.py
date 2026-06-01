@@ -695,38 +695,21 @@ def _run_score_stage(
 
 
 def _market_win_index(rd) -> dict[int, float]:
-    """単勝オッズの de-vig 暗黙勝率を 0-100 の「市場指数」にした dict を返す。
+    """単勝オッズ由来の市場指数 (0-100) を per-horse で返す。
 
-    Claude 指数とは **独立** な指数。市場1番人気を 100 とする自前スケール (Claude の値には
-    一切依存せずアンカーしない) で、`市場指数 = 100 − T_LLM·log(1番人気勝率 / 当該馬勝率)`。
-    対数勝率スケール (温度 T_LLM) を使うのは Claude 指数と曲率を揃えて並べやすくするためで、
-    値そのものは Claude と独立。両指数の最終的な統合は estimate_probs の市場ブレンドで行う
-    (この表示はあくまで独立な2指標の併記)。
+    Claude 指数とは **独立** な指標。**オッズによって変動し、単勝 1.0 倍 (= 市場暗黙1着率
+    100%) で 100** になる: `市場指数 = 100 / 単勝オッズ` (= 市場の暗黙1着率 %)。de-vig や
+    アンカーはせずオッズの素の暗黙率をそのまま 0-100 化する。両指数の最終的な統合は
+    estimate_probs の市場ブレンドで別途行う (この表示はあくまで独立な2指標の併記)。
     """
-    import math
-    from .ev import T_LLM, power_method_overround
-
-    horses = [h for h in rd.race.horses
-              if not h.absent and getattr(h, "win_odds", 0) and h.win_odds > 0]
-    if not horses:
-        return {}
-    raw = {h.number: 1.0 / float(h.win_odds) for h in horses}
-    s = sum(raw.values())
-    if s <= 0:
-        return {}
-    raw = {k: v / s for k, v in raw.items()}
-    market = power_method_overround(raw)
-    ms = sum(market.values())
-    if ms <= 0:
-        return {}
-    market = {k: v / ms for k, v in market.items()}
-    m_max = max(market.values())
-    if m_max <= 0:
-        return {}
     out: dict[int, float] = {}
-    for k, p in market.items():
-        idx = 100.0 - T_LLM * math.log(m_max / max(p, 1e-9))
-        out[k] = round(max(0.0, min(100.0, idx)), 1)
+    for h in rd.race.horses:
+        if h.absent:
+            continue
+        wo = getattr(h, "win_odds", 0)
+        if not wo or float(wo) <= 0:
+            continue
+        out[h.number] = round(max(0.0, min(100.0, 100.0 / float(wo))), 1)
     return out
 
 
