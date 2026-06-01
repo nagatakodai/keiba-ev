@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.request import Request, urlopen
 
+from .ev import MARKET_BLEND_LIVE
 from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
 from .parse import VENUE_CODE, _split_race_id, is_nar_race_id
 
@@ -635,7 +636,7 @@ def build_oddspark_racedata(
 
 
 def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
-                     with_llm: bool = True, market_blend: float = 0.78,
+                     with_llm: bool = True, market_blend: float = MARKET_BLEND_LIVE,
                      aptitude_top: int = 6) -> dict:
     """NAR race を oddspark の単複/3連単オッズで解析する (netkeiba block 中のフォールバック)。
 
@@ -806,7 +807,7 @@ def _cli() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     save = "--snapshot" in sys.argv
     start_at = 0
-    market_blend = 0.78
+    market_blend = MARKET_BLEND_LIVE
     aptitude_top = 6
     for a in sys.argv:
         if a.startswith("--start-at="):

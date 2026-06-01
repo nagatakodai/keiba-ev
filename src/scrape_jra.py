@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-from .ev import LLM_BLEND_DEFAULT
+from .ev import LLM_BLEND_DEFAULT, MARKET_BLEND_LIVE
 from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
 from .parse import _parse_time_to_sec, _split_race_id
 
@@ -701,7 +701,7 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
 
 
 def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
-                with_llm: bool = True, market_blend: float = 0.78,
+                with_llm: bool = True, market_blend: float = MARKET_BLEND_LIVE,
                 aptitude_top: int = 6, phase: str = "bet",
                 llm_blend: float = LLM_BLEND_DEFAULT) -> dict:
     """JRA race を JRA 公式の全券種オッズで解析 (netkeiba 非依存)。
@@ -838,7 +838,7 @@ def _main() -> None:
         return
     if "--snapshot" in sys.argv:
         start_at = 0
-        market_blend = 0.78
+        market_blend = MARKET_BLEND_LIVE
         aptitude_top = 6
         phase = "bet"
         llm_blend = LLM_BLEND_DEFAULT

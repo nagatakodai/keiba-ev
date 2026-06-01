@@ -59,9 +59,16 @@ LGBM_TEMPERATURE = 0.4
 #   - T_LLM: raw 指数 (0-100) を softmax(v / T_LLM) で 1着率分布に変換する温度。
 #            生値 (T=1) だと exp(100) で過尖鋭化し1頭に集中するため大きめの温度で平坦化する。
 #            T=25 なら 100 vs 50 の差が win 比 ~7倍 (model の spread と同程度)。
-# LLM_BLEND_DEFAULT=0.3: Claude 指数は未検証 heuristic なので保守的に開始 (market β=0.78 後の
-# モデル取り分 0.22 のうち w=0.3 だけ指数側)。レース蓄積後に実現的中率と照合して sweep する。
-LLM_BLEND_DEFAULT = 0.3
+# 実験戦略 (ユーザ指示 2026-06-01): **人気/オッズ (市場) を選抜に使わず、速度図表(model) と
+# Claude 指数のみで賭ける**。N=7,000 バックテストで「公開データの win 確率は市場を OOS で
+# 上回れない (β-MLE=1.0)」が確定したため、市場追随でなく『速度+Claude が市場とズレる所で
+# value を狙う』contrarian 実験に切替え、今後のライブで検証する。
+#   - MARKET_BLEND_LIVE=0.0: 市場ブレンドを無効化 (estimate_probs の market 分岐を skip)。
+#   - LLM_BLEND_DEFAULT=0.5: speed(model) と Claude を 50/50 合成 (per-horse は support で
+#     スケール = Claude が根拠を持つ馬だけ最大0.5 まで動かす)。
+# BLEND_DEFAULT(=0.78) は backtest/holdout の参照用に残す (live は MARKET_BLEND_LIVE を使う)。
+LLM_BLEND_DEFAULT = 0.5
+MARKET_BLEND_LIVE = 0.0
 T_LLM = 25.0
 
 
