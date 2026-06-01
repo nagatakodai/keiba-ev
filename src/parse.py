@@ -798,7 +798,10 @@ def parse_result(html: str) -> dict | None:
     if not table:
         return None
     finish_order: list[int] = []
-    for row in table.select("tr.HorseList") or table.select("tr"):
+    # NAR (門別等) は着順データ行が class 無しの <tr>、取消馬だけ <tr class="HorseList Torikeshi">
+    # になる場合がある。`tr.HorseList` を優先すると取消馬1行だけ拾って finish_order が
+    # 空になり結果が落ちる (753 race 未ラベル化の原因) → 全 tr を走査して order セルで判定。
+    for row in table.find_all("tr"):
         cells = row.find_all("td")
         if len(cells) < 3:
             continue

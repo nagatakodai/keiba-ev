@@ -1,8 +1,8 @@
 {
-  "trained_at": "2026-05-31T23:28:06",
+  "trained_at": "2026-06-01T12:35:14",
   "n_train_races": 5776,
   "n_valid_races": 1443,
-  "n_train_rows": 59575,
+  "n_train_rows": 65114,
   "feature_cols": [
     "speed_idx_weighted",
     "speed_idx_best",
@@ -49,61 +49,61 @@
     "bagging_freq": 5,
     "verbose": -1
   },
-  "best_iteration": 107,
+  "best_iteration": 69,
   "best_scores": {
     "train": {
-      "ndcg@1": 0.500206401188871,
-      "ndcg@3": 0.5708858566673556,
-      "ndcg@5": 0.652393394632193
+      "ndcg@1": 0.47258498654172076,
+      "ndcg@3": 0.552933768034086,
+      "ndcg@5": 0.6375665822911664
     },
     "valid": {
-      "ndcg@1": 0.38184873949579823,
-      "ndcg@3": 0.4865887884623004,
-      "ndcg@5": 0.5812496206459408
+      "ndcg@1": 0.3835425383542538,
+      "ndcg@3": 0.4924210711828521,
+      "ndcg@5": 0.5909199248954436
     }
   },
-  "softmax_temperature": 0.55,
-  "softmax_temperature_valid_log_loss": 1.9572296355820464,
+  "softmax_temperature": 0.5,
+  "softmax_temperature_valid_log_loss": 1.955972160428079,
   "top_features_by_gain": [
     {
       "name": "recent_form_score",
-      "gain": 30715.44638633728
-    },
-    {
-      "name": "last3f_idx_recent",
-      "gain": 9382.40205526352
+      "gain": 31717.8140707016
     },
     {
       "name": "shrunk_show_rate",
-      "gain": 9014.370411872864
+      "gain": 8899.053894996643
+    },
+    {
+      "name": "last3f_idx_recent",
+      "gain": 7512.690114021301
     },
     {
       "name": "popularity_outperformance",
-      "gain": 7563.990756988525
+      "gain": 7296.80858039856
     },
     {
       "name": "body_weight",
-      "gain": 5247.236704826355
-    },
-    {
-      "name": "style_score",
-      "gain": 3994.697147846222
+      "gain": 5010.710688591003
     },
     {
       "name": "same_venue_count",
-      "gain": 3609.5519156455994
+      "gain": 3620.7737226486206
+    },
+    {
+      "name": "style_score",
+      "gain": 3382.3968048095703
     },
     {
       "name": "speed_idx_last",
-      "gain": 2558.0479288101196
+      "gain": 2272.3179893493652
     },
     {
       "name": "shrunk_win_rate",
-      "gain": 2106.3471097946167
+      "gain": 1731.0279064178467
     },
     {
-      "name": "speed_idx_weighted",
-      "gain": 2046.3804998397827
+      "name": "days_since_last_run",
+      "gain": 1358.9275903701782
     }
   ]
 }
