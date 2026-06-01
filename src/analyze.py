@@ -598,8 +598,8 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
         "race_id": race_id,
         "scored_at": dt.datetime.now().isoformat(timespec="seconds"),
         "model": model,
-        # scale="prob": scores は推定勝率 %。scale="strength": 旧 0-100 強さ指数 (温度パス)。
-        "scale": parsed.get("scale", "prob"),
+        # scale="strength": scores は 0-100 強さ指数 (温度パス)。"prob": 推定勝率 % (後方互換)。
+        "scale": parsed.get("scale", "strength"),
         "scores": {str(k): v for k, v in (parsed.get("scores") or {}).items()},
         "support": {str(k): v for k, v in (parsed.get("support") or {}).items()},
         "notes": parsed.get("notes") or {},
@@ -613,23 +613,23 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
 def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
     """`<race_id>.llm.json` を読み (scores, support, scale, scored_at) を返す。
 
-    scores=dict[int,float] (scale="prob" なら推定勝率 %、"strength" なら旧 0-100 指数)、
+    scores=dict[int,float] (scale="strength" なら 0-100 指数、"prob" なら推定勝率 %)、
     support=dict[int,int] (補強根拠件数)。無い / 壊れている / 古すぎる (max_age_sec 超過) なら
-    (None, None, "prob", scored_at) を返し、bet ステージはモデルのみにフォールバックする。
+    (None, None, "strength", scored_at) を返し、bet ステージはモデルのみにフォールバックする。
     """
     p = _llm_scores_path(race_id)
     if not p.exists():
-        return None, None, "prob", None
+        return None, None, "strength", None
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None, None, "prob", None
+        return None, None, "strength", None
     scored_at = d.get("scored_at")
     if scored_at:
         try:
             age = (dt.datetime.now() - dt.datetime.fromisoformat(scored_at)).total_seconds()
             if age > max_age_sec:
-                return None, None, "prob", scored_at
+                return None, None, "strength", scored_at
         except ValueError:
             pass
     scores = {}
@@ -644,7 +644,7 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
             support[int(k)] = max(0, int(float(v)))
         except (ValueError, TypeError):
             continue
-    scale = d.get("scale") or "prob"
+    scale = d.get("scale") or "strength"
     return (scores or None), (support or None), scale, scored_at
 
 
@@ -660,7 +660,7 @@ def _run_score_stage(
     if not llm_mod.is_available():
         console.print("[yellow]claude CLI 不可 — score ステージ skip[/yellow]")
         return None
-    console.rule(f"[bold]Claude 考察: 各馬の推定勝率 (score ステージ, 全馬 web 検索補強)[/bold]")
+    console.rule(f"[bold]Claude 考察: 各馬の強さ指数 (score ステージ, 全馬 web 検索補強)[/bold]")
     chunks: list[str] = []
     saw_result = False
     tool_count = 0
@@ -734,7 +734,7 @@ def _build_index_compare(
     rd, llm_win_index: dict[int, float] | None,
     llm_support: dict[int, int] | None = None,
 ) -> list[dict]:
-    """Claude 勝率 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。両指数は独立。
+    """Claude 指数 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。両指数は独立。
     Claude 値降順 (無ければ市場指数降順)。どちらか一方しか無い馬も含める。support は補強根拠件数。"""
     market = _market_win_index(rd)
     claude = llm_win_index or {}
@@ -780,7 +780,7 @@ def _save_prediction_snapshot(
     llm_blend: float | None = None,
     llm_scored_at: str | None = None,
     llm_support: dict[int, int] | None = None,
-    llm_scale: str = "prob",
+    llm_scale: str = "strength",
 ) -> None:
     # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
@@ -843,7 +843,7 @@ def _save_prediction_snapshot(
         "recommended_bundle": recommended_bundle,
         # 2段パイプライン: Claude 考察由来の各馬指数を model fundamental に合成した痕跡。
         # llm_win_index=null は score 未完了/未実施 (= モデルのみ) のフォールバックを意味する。
-        # llm_win_index: scale="prob" なら推定勝率 %、"strength" なら旧 0-100 指数。
+        # llm_win_index: scale="strength" なら 0-100 指数、"prob" なら推定勝率 %。
         "llm_win_index": ({str(k): v for k, v in llm_win_index.items()}
                           if llm_win_index else None),
         "llm_support": ({str(k): v for k, v in llm_support.items()}
@@ -855,13 +855,8 @@ def _save_prediction_snapshot(
         # 市場指数 (= 100 / 単勝オッズ、1.0倍で100、Claude 独立)。
         "market_win_index": ({str(k): v for k, v in _market_win_index(rd).items()}
                              or None),
-        # Claude 勝率 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場、support=補強件数)。
-        # 表示は勝率 % なので prob スケールの時だけ Claude 列を出す (旧 strength は市場指数のみ)。
-        "index_compare": _build_index_compare(
-            rd,
-            llm_win_index if llm_scale == "prob" else None,
-            llm_support if llm_scale == "prob" else None,
-        ),
+        # Claude 指数 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場、support=補強件数)。
+        "index_compare": _build_index_compare(rd, llm_win_index, llm_support),
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

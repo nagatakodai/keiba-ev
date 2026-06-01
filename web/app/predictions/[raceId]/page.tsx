@@ -829,11 +829,11 @@ function IndexCompareCard({
     <Card
       title={
         <span className="flex items-center gap-2">
-          <span>Claude 勝率 × 市場指数</span>
+          <span>Claude 指数 × 市場指数</span>
           <span className="text-xs text-(--color-muted) font-normal">
             {hasClaude
-              ? "独立した 2 指標の併記 · Claude 推定勝率 (%、市場起点+検索補強) と 市場指数 (=100/単勝オッズ) · 差 = Claude − 市場 · 根=補強根拠件数"
-              : "Claude 勝率なし (score 未実施) · 市場指数のみ (=100/単勝オッズ、1.0倍で100)"}
+              ? "独立した 2 指標の併記 · Claude 強さ指数 (0-100、市場独立+検索補強) と 市場指数 (=100/単勝オッズ) · 差 = Claude − 市場 · 根=補強根拠件数"
+              : "Claude 指数なし (score 未実施) · 市場指数のみ (=100/単勝オッズ、1.0倍で100)"}
           </span>
         </span>
       }
@@ -844,7 +844,7 @@ function IndexCompareCard({
             <tr className="border-b border-(--color-line)">
               <th className="py-2 pr-3 text-right">馬</th>
               <th className="py-2 pr-3">馬名</th>
-              <th className="py-2 pr-3 text-right" title="Claude 推定勝率 % (市場暗黙率を起点に検索補強で上下)">Claude 勝率</th>
+              <th className="py-2 pr-3 text-right" title="Claude 強さ指数 0-100 (市場独立の相対評価、検索補強で上下)">Claude 指数</th>
               <th className="py-2 pr-3 text-right" title="市場指数 = 100 / 単勝オッズ (暗黙1着率 %、1.0倍で100)">市場指数</th>
               <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
               <th className="py-2 pr-2 text-right" title="補強根拠件数。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)">根</th>
@@ -868,7 +868,7 @@ function IndexCompareCard({
                     )}
                   </td>
                   <td className="py-1.5 pr-3 text-right">
-                    {r.claude_index != null ? `${r.claude_index.toFixed(1)}%` : "—"}
+                    {r.claude_index != null ? r.claude_index.toFixed(1) : "—"}
                   </td>
                   <td className="py-1.5 pr-3 text-right">
                     {r.market_index != null ? r.market_index.toFixed(1) : "—"}
@@ -896,10 +896,10 @@ function IndexCompareCard({
         </table>
       </div>
       <p className="mt-3 text-xs text-(--color-muted)">
-        Claude 勝率と市場指数は独立。Claude 勝率 = 市場暗黙率を起点に、全馬を web 検索で補強して上下
-        させた推定勝率 %。市場指数 = 100 / 単勝オッズ。根 (補強根拠件数) が多い馬ほど確率モデルが
-        Claude 勝率を厚く採用 (0 = 市場どおり)。最終的な統合は確率モデルの市場ブレンドで別途行う。
-        {scoredAt ? ` · Claude 勝率: ${fmtServerDateTime(scoredAt)}` : ""}
+        Claude 指数と市場指数は独立。Claude 指数 = 各馬の力を 0-100 で相対評価 (市場には揃えず、全馬を
+        web 検索で補強して上下)。市場指数 = 100 / 単勝オッズ。根 (補強根拠件数) が多い馬ほど確率モデルが
+        Claude 指数を厚く採用 (0 = 動かさない)。最終的な統合は確率モデルの市場ブレンドで別途行う。
+        {scoredAt ? ` · Claude 指数: ${fmtServerDateTime(scoredAt)}` : ""}
       </p>
     </Card>
   );

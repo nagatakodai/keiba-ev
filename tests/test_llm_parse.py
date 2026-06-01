@@ -55,26 +55,26 @@ def test_parse_bundle_review_picks_absent_is_none():
     assert r["picks"] is None and r["cuts"] == ["wide:3-7"]
 
 
-def test_parse_horse_scores_prob_format():
-    """新形式: win_prob (%) + support → scale='prob'。"""
-    txt = '```json\n{"win_prob": {"5": 55.0, "8": 12.0}, "support": {"5": 3, "8": 0}, ' \
+def test_parse_horse_scores_strength_format():
+    """正規形: scores (0-100 指数) + support → scale='strength'。"""
+    txt = '```json\n{"scores": {"5": 90, "8": 58}, "support": {"5": 3, "8": 0}, ' \
           '"notes": {"5": "距離適性◎"}, "summary": "x", "confidence": "mid"}\n```'
-    p = llm.parse_horse_scores(txt)
-    assert p["scale"] == "prob"
-    assert p["scores"] == {5: 55.0, 8: 12.0}
-    assert p["support"] == {5: 3, 8: 0}
-
-
-def test_parse_horse_scores_legacy_strength():
-    """旧形式: scores (0-100) のみ → scale='strength'、support 空。"""
-    txt = '```json\n{"scores": {"5": 90, "8": 58}, "summary": "", "confidence": ""}\n```'
     p = llm.parse_horse_scores(txt)
     assert p["scale"] == "strength"
     assert p["scores"] == {5: 90.0, 8: 58.0}
+    assert p["support"] == {5: 3, 8: 0}
+
+
+def test_parse_horse_scores_prob_fallback():
+    """後方互換: win_prob (%) のみ → scale='prob'。"""
+    txt = '```json\n{"win_prob": {"5": 55.0, "8": 12.0}, "summary": "", "confidence": ""}\n```'
+    p = llm.parse_horse_scores(txt)
+    assert p["scale"] == "prob"
+    assert p["scores"] == {5: 55.0, 8: 12.0}
     assert p["support"] == {}
 
 
 def test_parse_horse_scores_broken_returns_empty():
     p = llm.parse_horse_scores("no json here")
     assert p["scores"] == {}
-    assert p["scale"] == "prob"
+    assert p["scale"] == "strength"

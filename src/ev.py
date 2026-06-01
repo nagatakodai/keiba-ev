@@ -81,7 +81,7 @@ def estimate_probs(
     llm_win_index: dict[int, float] | None = None,
     llm_blend: float = LLM_BLEND_DEFAULT,
     llm_support: dict[int, int] | None = None,
-    llm_scale: str = "prob",
+    llm_scale: str = "strength",
 ) -> Probabilities:
     """Layer 1 特徴量 (features.py) + 市場ブレンド + Discounted Harville で Probabilities を作る。
 
@@ -254,7 +254,7 @@ def _fundamental_win_probs(horses, feats) -> dict[int, float]:
 
 
 # 補強根拠件数 (support) → llm_blend に掛ける per-horse 係数。根拠の無い馬は 0 (= モデル/市場に
-# 委ねる)、根拠が増えるほど Claude の勝率を厚く採用する。3 件以上で満額。
+# 委ねる)、根拠が増えるほど Claude の指数を厚く採用する。3 件以上で満額。
 _SUPPORT_WEIGHT = {0: 0.0, 1: 0.5, 2: 0.8}
 
 
@@ -271,19 +271,20 @@ def _combine_llm_index(
     floor: float,
     *,
     support: dict[int, int] | None = None,
-    scale: str = "prob",
+    scale: str = "strength",
 ) -> dict[int, float]:
-    """Claude の per-horse 勝率/指数を model fundamental と loglinear 合成する。
+    """Claude の per-horse 指数/勝率を model fundamental と loglinear 合成する。
 
-    scale="prob" (新): llm_index は推定勝率 (%, Σ≈100)。正規化して L_i にそのまま使う
-        (温度不要 — 出力が既に確率)。
-    scale="strength" (旧): llm_index は 0-100 強さ指数。softmax(v/T_LLM) で確率化 (後方互換)。
+    scale="strength" (正規): llm_index は 0-100 強さ指数 (市場独立の相対評価)。
+        softmax(v/T_LLM) で確率化する。
+    scale="prob" (後方互換): llm_index は推定勝率 (%, Σ≈100)。正規化して L_i にそのまま使う
+        (温度なし)。
 
     合成は per-horse 重み付き loglinear:
         g_i = softmax((1-w_i)·log f_i + w_i·log L_i)
         w_i = clamp(llm_blend · support_mult(support_i))   (support 無し → w_i=llm_blend)
 
-    補強根拠 (support) が多い馬ほど w_i が大きく Claude の勝率を厚く採る。根拠 0 の馬は
+    補強根拠 (support) が多い馬ほど w_i が大きく Claude の指数を厚く採る。根拠 0 の馬は
     w_i=0 で fundamental のまま (= 検索で動かした馬だけ反映)。空なら fundamental を返す。
     """
     import math
