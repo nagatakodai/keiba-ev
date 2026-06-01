@@ -172,6 +172,9 @@ def evaluate_stream(
     cmd = [
         "claude", "-p", prompt,
         "--model", model,
+        # effort=max: claude CLI の推論深度を最大化 (`claude --help` で実在確認:
+        # --effort <low|medium|high|xhigh|max>)。-p (print) モードでも有効。
+        "--effort", "max",
         "--output-format", "stream-json",
         "--verbose",
         "--no-session-persistence",
@@ -440,6 +443,9 @@ def select_bundle_stream(
     cmd = [
         "claude", "-p", prompt,
         "--model", model,
+        # effort=max: claude CLI の推論深度を最大化 (`claude --help` で実在確認:
+        # --effort <low|medium|high|xhigh|max>)。-p (print) モードでも有効。
+        "--effort", "max",
         "--output-format", "stream-json",
         "--verbose",
         "--no-session-persistence",
@@ -596,6 +602,9 @@ def score_horses_stream(
     cmd = [
         "claude", "-p", prompt,
         "--model", model,
+        # effort=max: claude CLI の推論深度を最大化 (`claude --help` で実在確認:
+        # --effort <low|medium|high|xhigh|max>)。-p (print) モードでも有効。
+        "--effort", "max",
         "--output-format", "stream-json",
         "--verbose",
         "--no-session-persistence",
@@ -821,6 +830,9 @@ def evaluate_refresh_stream(
     cmd = [
         "claude", "-p", prompt,
         "--model", model,
+        # effort=max: claude CLI の推論深度を最大化 (`claude --help` で実在確認:
+        # --effort <low|medium|high|xhigh|max>)。-p (print) モードでも有効。
+        "--effort", "max",
         "--output-format", "stream-json",
         "--verbose",
         "--no-session-persistence",

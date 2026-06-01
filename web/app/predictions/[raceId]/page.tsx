@@ -13,6 +13,31 @@ import {
   type RecommendedBundle,
 } from "@/lib/api";
 
+// race_id は backend で `${cup_id}-${schedule_index}-${race_number}` 形式
+// (src/analyze.py)。venue_name / race_number が空の snapshot (keibago/jra/oddspark
+// 由来や旧 snapshot) でもタイトルが必ず出るよう、複数フィールドからフォールバックする。
+function raceTitle(d: {
+  race_id?: string | null;
+  venue_name?: string | null;
+  race_number?: number | null;
+}): string {
+  const venue = (d.venue_name ?? "").trim();
+  // race_number が正の整数ならそれを採用。0/欠落なら race_id 末尾セグメントを使う。
+  let raceNo: number | null =
+    typeof d.race_number === "number" && d.race_number > 0
+      ? d.race_number
+      : null;
+  if (raceNo == null && d.race_id) {
+    const tail = d.race_id.split("-").pop();
+    const parsed = tail != null ? Number.parseInt(tail, 10) : NaN;
+    if (Number.isFinite(parsed) && parsed > 0) raceNo = parsed;
+  }
+  const rPart = raceNo != null ? `${raceNo}R` : "";
+  const title = [venue, rPart].filter(Boolean).join(" ");
+  // venue も R 番号も取れない最悪ケースは race_id をそのまま見せる (必ず非空)。
+  return title || (d.race_id ?? "予測詳細");
+}
+
 export async function generateMetadata({
   params,
 }: {
@@ -21,7 +46,7 @@ export async function generateMetadata({
   const { raceId } = await params;
   try {
     const d = await api.getPrediction(raceId);
-    return { title: `${d.venue_name} ${d.race_number}R` };
+    return { title: raceTitle(d) };
   } catch {
     return { title: "予測詳細" };
   }
@@ -75,9 +100,12 @@ export default async function PredictionDetailPage({
     <Page>
       <PageHeader
         title={
+          // タイトル本文を独立 span で包む (bare text node のままだと badge 群と
+          // baseline がズレる)。venue_name/race_number 欠落 snapshot でも raceTitle が
+          // 必ず非空を返すのでタイトルが消えない。badge 群は items-center で揃える。
           <span className="flex items-center gap-3">
-            {d.venue_name} {d.race_number}R
-            <Badge tone="muted">{d.race_class}</Badge>
+            <span>{raceTitle(d)}</span>
+            {d.race_class && <Badge tone="muted">{d.race_class}</Badge>}
             {d.model_info?.engine === "lgbm" ? (
               <span title={`LightGBM ${d.model_info.n_features ?? "?"} features, trained ${d.model_info.trained_at ?? "?"}`}>
                 <Badge tone="info">LGBM</Badge>

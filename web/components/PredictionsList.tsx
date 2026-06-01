@@ -236,7 +236,11 @@ export function PredictionsList({
                       )}
                     </div>
                   </Link>
-                  <div className="flex gap-1 shrink-0 items-start">
+                  {/* 状態バッジ + 詳細リンクは固定高さ (h-6) の帯に **items-center** で
+                      まとめる。content 行は items-start なので各行のこの帯の上端は行上端で
+                      揃い、帯内中央寄せにより全行でバッジ/詳細が一直線に並ぶ (左カラムの
+                      1 行目高さ=締切/保存 が行ごとに違っても右側はズレない)。 */}
+                  <div className="flex items-center gap-2 shrink-0 h-6">
                     {/* **1 ラベル原則** (2026-05-29 ユーザ指示):
                         優先順 hit (的中/見送り/不的中) > 補強済 > timing。
                         timing.label="結果待ち" は 評価待ち 文脈で冗長なので非表示。 */}
@@ -253,13 +257,13 @@ export function PredictionsList({
                     ) : timing.label !== "結果待ち" ? (
                       <Badge tone={timing.tone}>{timing.label}</Badge>
                     ) : null}
+                    <Link
+                      href={`/predictions/${p.race_id}`}
+                      className="text-xs text-(--color-accent) hover:underline whitespace-nowrap"
+                    >
+                      詳細 →
+                    </Link>
                   </div>
-                  <Link
-                    href={`/predictions/${p.race_id}`}
-                    className="text-xs text-(--color-accent) hover:underline shrink-0"
-                  >
-                    詳細 →
-                  </Link>
                   </div>
                 </li>
                 );
