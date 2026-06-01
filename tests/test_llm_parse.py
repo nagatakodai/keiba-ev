@@ -78,3 +78,32 @@ def test_parse_horse_scores_broken_returns_empty():
     p = llm.parse_horse_scores("no json here")
     assert p["scores"] == {}
     assert p["scale"] == "strength"
+    assert p["alerts"] == {}   # alerts キーは常に存在 (空でも壊れない)
+
+
+def test_parse_horse_scores_with_alerts():
+    """直前/軟情報フラグ (alerts) を {int:[str]} に正規化。取消馬は scores 0。"""
+    txt = ('```json\n{"scores": {"7": 82, "3": 0}, "support": {"7": 2, "3": 1}, '
+           '"alerts": {"7": ["前走不利", "厩舎勝負気配"], "3": ["取消", "馬体重-12kg"]}, '
+           '"summary": "x", "confidence": "high"}\n```')
+    p = llm.parse_horse_scores(txt)
+    assert p["scores"] == {7: 82.0, 3: 0.0}
+    assert p["alerts"] == {7: ["前走不利", "厩舎勝負気配"], 3: ["取消", "馬体重-12kg"]}
+
+
+def test_parse_horse_scores_alerts_absent_is_empty():
+    """alerts フィールド不在 (旧出力) でも空 dict で後方互換。"""
+    txt = '```json\n{"scores": {"5": 90}, "support": {"5": 1}}\n```'
+    p = llm.parse_horse_scores(txt)
+    assert p["scores"] == {5: 90.0}
+    assert p["alerts"] == {}
+
+
+def test_normalize_alerts_robustness():
+    """単一文字列→リスト化、空/None 除外、空配列の馬は落とす、壊れた入力は {}。"""
+    assert llm._normalize_alerts({"3": "取消"}) == {3: ["取消"]}          # str → [str]
+    assert llm._normalize_alerts({"7": ["前走不利", "", None]}) == {7: ["前走不利"]}  # 空除外
+    assert llm._normalize_alerts({"2": []}) == {}                        # 空配列は落とす
+    assert llm._normalize_alerts({"bad": ["x"]}) == {}                   # 非整数キーは無視
+    assert llm._normalize_alerts(None) == {}                            # 壊れた入力
+    assert llm._normalize_alerts("nope") == {}

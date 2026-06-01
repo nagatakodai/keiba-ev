@@ -143,7 +143,7 @@ def main(
         # fall through → 下の共通解析 + snapshot 保存へ
 
     # bet/score 共通: キャッシュ指数を読んで estimate_probs に合成する。
-    llm_index, llm_support, llm_scale, llm_scored_at = _load_llm_scores(race_id)
+    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = _load_llm_scores(race_id)
 
     lgbm_info = ev_mod.lgbm_status()
     if lgbm_info.get("available"):
@@ -190,7 +190,7 @@ def main(
             race_id, rd, rows, plan_rows, aptitudes, bet_tables, apt_top, market_signals,
             feats=feats, lgbm_info=lgbm_info, hit_points=hit_points, probs=probs,
             llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
-            llm_support=llm_support, llm_scale=llm_scale,
+            llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -607,6 +607,8 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
         "scale": parsed.get("scale", "strength"),
         "scores": {str(k): v for k, v in (parsed.get("scores") or {}).items()},
         "support": {str(k): v for k, v in (parsed.get("support") or {}).items()},
+        # alerts: 各馬の直前/軟情報フラグ配列 (例 {"3": ["取消", "馬体重-12kg"]})。記録/表示用。
+        "alerts": {str(k): list(v) for k, v in (parsed.get("alerts") or {}).items()},
         "notes": parsed.get("notes") or {},
         "summary": parsed.get("summary", ""),
         "confidence": parsed.get("confidence", ""),
@@ -616,25 +618,26 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
 
 
 def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
-    """`<race_id>.llm.json` を読み (scores, support, scale, scored_at) を返す。
+    """`<race_id>.llm.json` を読み (scores, support, scale, scored_at, alerts) を返す。
 
     scores=dict[int,float] (scale="strength" なら 0-100 指数、"prob" なら推定勝率 %)、
-    support=dict[int,int] (補強根拠件数)。無い / 壊れている / 古すぎる (max_age_sec 超過) なら
-    (None, None, "strength", scored_at) を返し、bet ステージはモデルのみにフォールバックする。
+    support=dict[int,int] (補強根拠件数)、alerts=dict[int,list[str]] (直前/軟情報フラグ、表示用)。
+    無い / 壊れている / 古すぎる (max_age_sec 超過) なら (None, None, "strength", scored_at, None)
+    を返し、bet ステージはモデルのみにフォールバックする。alerts は確率には使わず snapshot 表示用。
     """
     p = _llm_scores_path(race_id)
     if not p.exists():
-        return None, None, "strength", None
+        return None, None, "strength", None, None
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None, None, "strength", None
+        return None, None, "strength", None, None
     scored_at = d.get("scored_at")
     if scored_at:
         try:
             age = (dt.datetime.now() - dt.datetime.fromisoformat(scored_at)).total_seconds()
             if age > max_age_sec:
-                return None, None, "strength", scored_at
+                return None, None, "strength", scored_at, None
         except ValueError:
             pass
     scores = {}
@@ -650,7 +653,8 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
         except (ValueError, TypeError):
             continue
     scale = d.get("scale") or "strength"
-    return (scores or None), (support or None), scale, scored_at
+    alerts = llm_mod._normalize_alerts(d.get("alerts"))
+    return (scores or None), (support or None), scale, scored_at, (alerts or None)
 
 
 def _run_score_stage(
@@ -741,14 +745,18 @@ def _market_win_index(rd) -> dict[int, float]:
 def _build_index_compare(
     rd, llm_win_index: dict[int, float] | None,
     llm_support: dict[int, int] | None = None,
+    llm_alerts: dict[int, list[str]] | None = None,
 ) -> list[dict]:
     """Claude 指数 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。両指数は独立。
-    Claude 値降順 (無ければ市場指数降順)。どちらか一方しか無い馬も含める。support は補強根拠件数。"""
+    Claude 値降順 (無ければ市場指数降順)。どちらか一方しか無い馬も含める。support は補強根拠件数、
+    alerts は直前/軟情報フラグ配列 (無ければ空)。"""
     market = _market_win_index(rd)
     claude = llm_win_index or {}
     support = llm_support or {}
+    alerts = llm_alerts or {}
     names = {h.number: (h.name or "") for h in rd.race.horses if not h.absent}
-    nums = (set(claude) | set(market)) & set(names)
+    # alerts は Claude/市場いずれの指数も無い取消馬でも出したいので nums に含める。
+    nums = (set(claude) | set(market) | set(alerts)) & set(names)
     rows_out: list[dict] = []
     for n in nums:
         c = claude.get(n)
@@ -760,6 +768,7 @@ def _build_index_compare(
             "market_index": (mk if mk is not None else None),
             "diff": (round(float(c) - mk, 1) if (c is not None and mk is not None) else None),
             "support": (int(support[n]) if n in support else None),
+            "alerts": (list(alerts[n]) if n in alerts and alerts[n] else []),
         })
     rows_out.sort(
         key=lambda r: (
@@ -789,6 +798,7 @@ def _save_prediction_snapshot(
     llm_scored_at: str | None = None,
     llm_support: dict[int, int] | None = None,
     llm_scale: str = "strength",
+    llm_alerts: dict[int, list[str]] | None = None,
 ) -> None:
     # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
@@ -856,6 +866,9 @@ def _save_prediction_snapshot(
                           if llm_win_index else None),
         "llm_support": ({str(k): v for k, v in llm_support.items()}
                         if llm_support else None),
+        # 各馬の直前/軟情報フラグ (取消/馬体重増減/前走不利/厩舎勝負気配 等)。記録/表示用 (確率には未使用)。
+        "llm_alerts": ({str(k): list(v) for k, v in llm_alerts.items()}
+                       if llm_alerts else None),
         "llm_scale": llm_scale,
         "llm_blend": llm_blend,
         "llm_scored_at": llm_scored_at,
@@ -863,8 +876,9 @@ def _save_prediction_snapshot(
         # 市場指数 (= 100 / 単勝オッズ、1.0倍で100、Claude 独立)。
         "market_win_index": ({str(k): v for k, v in _market_win_index(rd).items()}
                              or None),
-        # Claude 指数 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場、support=補強件数)。
-        "index_compare": _build_index_compare(rd, llm_win_index, llm_support),
+        # Claude 指数 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場、support=補強件数、
+        # alerts=直前/軟情報フラグ)。
+        "index_compare": _build_index_compare(rd, llm_win_index, llm_support, llm_alerts),
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

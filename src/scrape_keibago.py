@@ -548,7 +548,7 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
-    llm_index, llm_support, llm_scale, llm_scored_at = az_mod._load_llm_scores(race_id)
+    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(race_id)
 
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
     s = sum(1.0 / o for o in win_odds.values()) or 1.0
@@ -586,7 +586,7 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
                 market_signals, feats=feats, lgbm_info=ev_mod.lgbm_status(),
                 hit_points=3, probs=probs,
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
-                llm_support=llm_support, llm_scale=llm_scale,
+                llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
             )
             _tag_snapshot_source(race_id, "keibago")
         except Exception as ex:  # noqa: BLE001

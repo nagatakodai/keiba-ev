@@ -193,7 +193,11 @@ export type PredictionDetail = {
     market_index: number | null;
     diff: number | null;
     support?: number | null;
+    // 直前/軟情報フラグ (取消/馬体重増減/前走不利/厩舎勝負気配 等)。無ければ空配列。
+    alerts?: string[] | null;
   }>;
+  // 各馬の直前/軟情報フラグ (score ステージ由来)。記録/表示用 (確率には未使用)。
+  llm_alerts?: Record<string, string[]> | null;
   // 市場乖離 (単勝 vs 複勝 implied prob 比率)。fetch されていなければ空配列。
   market_signals?: MarketSignal[];
   // 持ち時計 (同 venue × 同距離 × 同 surface での best own_time_sec)。速い順。

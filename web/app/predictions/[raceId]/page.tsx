@@ -841,6 +841,16 @@ function diffTone(diff: number | null): BadgeTone {
   return "muted";
 }
 
+// 直前/軟情報フラグの色分け: 否定 (取消/不利/減/イレ込み 等) = bad、
+// 好材料 (勝負気配/強化/有利/良/叩き 等) = good、それ以外 (展開/隊列の中立メモ) = warn。
+function alertTone(label: string): BadgeTone {
+  const negative = /取消|除外|回避|出遅|不利|詰|包|進路|渋|不安|不適|距離不|イレ込|チャカ|腰|裏|減|マイナス|-\d/;
+  const positive = /勝負気配|強化|抜群|良化|仕上|有利|高速|叩き|上昇|気配良|プラス|\+\d/;
+  if (negative.test(label)) return "bad";
+  if (positive.test(label)) return "good";
+  return "warn";
+}
+
 function IndexCompareCard({
   items,
   finish,
@@ -860,7 +870,7 @@ function IndexCompareCard({
           <span>Claude 指数 × 市場指数</span>
           <span className="text-xs text-(--color-muted) font-normal">
             {hasClaude
-              ? "独立した 2 指標の併記 · Claude 強さ指数 (0-100、市場独立+検索補強) と 市場指数 (オッズ由来 0-100) · 差 = Claude − 市場 · 根=補強根拠件数"
+              ? "独立した 2 指標の併記 · Claude 強さ指数 (0-100、市場独立+検索補強) と 市場指数 (オッズ由来 0-100) · 差 = Claude − 市場 · 根=補強根拠件数 · 直前/軟情報=取消/馬体重/前走不利/勝負気配 等のフラグ"
               : "Claude 指数なし (score 未実施) · 市場指数のみ (オッズ由来 0-100、1.0倍で100)"}
           </span>
         </span>
@@ -875,7 +885,8 @@ function IndexCompareCard({
               <th className="py-2 pr-3 text-right" title="Claude 強さ指数 0-100 (市場独立の相対評価、検索補強で上下)">Claude 指数</th>
               <th className="py-2 pr-3 text-right" title="市場指数 = 100·(1/オッズ)^(1/1.5) (1.0倍で100、温度T=1.5で0-100に分布)">市場指数</th>
               <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
-              <th className="py-2 pr-2 text-right" title="補強根拠件数。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)">根</th>
+              <th className="py-2 pr-3 text-right" title="補強根拠件数。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)">根</th>
+              <th className="py-2 pr-2" title="直前/軟情報フラグ (取消・馬体重増減・前走不利・厩舎勝負気配・展開 等)。市場がまだ織り込みきれない情報。表示/記録用 (確率には未反映)">直前/軟情報</th>
             </tr>
           </thead>
           <tbody>
@@ -910,11 +921,22 @@ function IndexCompareCard({
                       <span className="text-(--color-muted)">—</span>
                     )}
                   </td>
-                  <td className="py-1.5 pr-2 text-right">
+                  <td className="py-1.5 pr-3 text-right">
                     {r.support != null && r.support > 0 ? (
                       <Badge tone={r.support >= 3 ? "good" : "muted"}>{r.support}</Badge>
                     ) : (
                       <span className="text-(--color-muted)">{r.support === 0 ? "0" : "—"}</span>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-2">
+                    {r.alerts && r.alerts.length > 0 ? (
+                      <span className="flex flex-wrap gap-1">
+                        {r.alerts.map((a, i) => (
+                          <Badge key={i} tone={alertTone(a)}>{a}</Badge>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="text-(--color-muted)">—</span>
                     )}
                   </td>
                 </tr>
