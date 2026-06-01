@@ -178,7 +178,9 @@ TOLERANCE ?= 1.5
 SCORE_WINDOW ?= 5
 SCORE_TOLERANCE ?= 2
 LLM_BLEND ?=
-BET_LEAD_SEC ?= 60
+# 締切75秒前に発火: 発火後 daemon のカート投入+確定に ~20-40s かかるため、最新オッズを保ちつつ
+# ~締切40s前着で不成立を避ける緩衝。不成立が出るなら +15s、出なければ -15s で締切寄せに調整。
+BET_LEAD_SEC ?= 75
 INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
 BET_ODDSPARK ?=
@@ -237,6 +239,16 @@ watch-auto-ipat-bet:
 			sleep $(INTERVAL_SEC); \
 		done'
 
+# --- CLV: NAR 単勝オッズの時系列 capture を racing hours 中ループ (前向き蓄積) ---
+# data/cache/odds_trajectory/<rid>.jsonl にオッズ軌跡を貯める。`make capture-odds` で放置。
+CAPTURE_INTERVAL ?= 1200
+capture-odds:
+	@echo "CLV capture loop ($(CAPTURE_INTERVAL)s 毎 / Ctrl+C 終了)"
+	@while true; do \
+		$(PY) scripts/capture_odds_trajectory.py || true; \
+		sleep $(CAPTURE_INTERVAL); \
+	done
+
 # --- 推奨デフォルトで watch-auto-bet を起動するショートカット ---
 # `make bet` 一発で 2段パイプライン:
 #   SCORE 帯 5〜7分前 (Claude 考察→各馬指数) → BET 帯 1〜2.5分前 (最新オッズ+指数→束→投票),
@@ -253,7 +265,7 @@ bet:
 		$(if $(filter command line,$(origin LLM_BLEND)),LLM_BLEND=$(LLM_BLEND),) \
 		INTERVAL_SEC=$(if $(filter command line,$(origin INTERVAL_SEC)),$(INTERVAL_SEC),60) \
 		ACTIVE_HOURS=$(if $(filter command line,$(origin ACTIVE_HOURS)),$(ACTIVE_HOURS),09:00-23:45) \
-		MARKET_BLEND=$(if $(filter command line,$(origin MARKET_BLEND)),$(MARKET_BLEND),0.8) \
+		MARKET_BLEND=$(if $(filter command line,$(origin MARKET_BLEND)),$(MARKET_BLEND),0.78) \
 		MIN_PROB=$(if $(filter command line,$(origin MIN_PROB)),$(MIN_PROB),0.5) \
 		APTITUDE_TOP=$(if $(filter command line,$(origin APTITUDE_TOP)),$(APTITUDE_TOP),6) \
 		WITH_EXACTA=$(if $(filter command line,$(origin WITH_EXACTA)),$(WITH_EXACTA),1) \
