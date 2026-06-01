@@ -52,6 +52,10 @@ except ImportError:
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
+# 市場指数 (表示用) のべき乗温度。市場指数 = 100·(1/odds)^(1/T)。1.0倍は常に 100 (圧倒的)、
+# T>1 で強い人気馬を 100 寄りに上げつつ下位も 0-100 に分布させる。T=1 は素の 100/オッズ。
+MARKET_INDEX_T = 1.5
+
 
 @app.command()
 def main(
@@ -714,11 +718,13 @@ def _run_score_stage(
 def _market_win_index(rd) -> dict[int, float]:
     """単勝オッズ由来の市場指数 (0-100) を per-horse で返す。
 
-    Claude 指数とは **独立** な指標。**オッズによって変動し、単勝 1.0 倍 (= 市場暗黙1着率
-    100%) で 100** になる: `市場指数 = 100 / 単勝オッズ` (= 市場の暗黙1着率 %)。de-vig や
-    アンカーはせずオッズの素の暗黙率をそのまま 0-100 化する。両指数の最終的な統合は
-    estimate_probs の市場ブレンドで別途行う (この表示はあくまで独立な2指標の併記)。
+    Claude 指数とは **独立** な指標。オッズの素の暗黙率 p=1/オッズ を温度付きべき乗で 0-100
+    化する: `市場指数 = 100 · p^(1/MARKET_INDEX_T)`。**単勝 1.0 倍 (p=1.0) で必ず 100** (圧倒的)、
+    T>1 で強い人気馬を 100 寄りに持ち上げつつ下位も 0-100 に適度に分布させる (T=1 は素の
+    100/オッズ)。de-vig やアンカーはしない。最終的な統合は estimate_probs の市場ブレンドで
+    別途行う (この表示はあくまで独立な2指標の併記)。
     """
+    exp = 1.0 / MARKET_INDEX_T
     out: dict[int, float] = {}
     for h in rd.race.horses:
         if h.absent:
@@ -726,7 +732,8 @@ def _market_win_index(rd) -> dict[int, float]:
         wo = getattr(h, "win_odds", 0)
         if not wo or float(wo) <= 0:
             continue
-        out[h.number] = round(max(0.0, min(100.0, 100.0 / float(wo))), 1)
+        p = 1.0 / float(wo)
+        out[h.number] = round(max(0.0, min(100.0, 100.0 * (p ** exp))), 1)
     return out
 
 

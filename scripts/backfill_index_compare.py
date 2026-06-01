@@ -4,8 +4,8 @@
 計算するが、保存済 snapshot には rd が無い。代わりに snapshot 内の `market_signals`
 (win_odds を持つ) と `llm_win_index` (Claude 指数) だけから同じ指数を再構築する。
 
-市場指数の定義は analyze.py と同一: 単勝オッズ由来で、オッズによって変動し 1.0 倍で 100
-になる Claude 独立な指数 (市場指数 = 100 / 単勝オッズ = 市場暗黙1着率 %)。
+市場指数の定義は analyze.py の _market_win_index と同一: 単勝オッズ由来で 1.0 倍が 100 に
+なる Claude 独立な指数。市場指数 = 100·(1/オッズ)^(1/MARKET_INDEX_T) (T=1.5)。
 
 使い方: python scripts/backfill_index_compare.py [--dry-run]
 """
@@ -19,14 +19,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 PRED_DIR = ROOT / "data" / "predictions"
 
+# analyze.MARKET_INDEX_T と同期させること (重い src.analyze を import せず複製)。
+MARKET_INDEX_T = 1.5
+
 
 def _market_index_from_signals(market_signals: list[dict]) -> dict[int, float]:
+    exp = 1.0 / MARKET_INDEX_T
     out: dict[int, float] = {}
     for s in market_signals:
         wo = s.get("win_odds")
         if not wo or float(wo) <= 0:
             continue
-        out[int(s["number"])] = round(max(0.0, min(100.0, 100.0 / float(wo))), 1)
+        p = 1.0 / float(wo)
+        out[int(s["number"])] = round(max(0.0, min(100.0, 100.0 * (p ** exp))), 1)
     return out
 
 

@@ -90,3 +90,23 @@ def test_strength_scale_backward_compat():
 def test_empty_index_returns_fundamental():
     f = {1: 0.5, 2: 0.5}
     assert _combine_llm_index(f, {}, 0.5, 0.01, scale="prob") == f
+
+
+def test_market_win_index_temperature_shape():
+    """市場指数: 1.0倍→100、単調減少、T=1.5 のべき乗形 (analyze._market_win_index)。"""
+    from types import SimpleNamespace
+    from src.analyze import _market_win_index, MARKET_INDEX_T
+
+    def H(number, odds, absent=False):
+        return SimpleNamespace(number=number, win_odds=odds, absent=absent)
+
+    rd = SimpleNamespace(race=SimpleNamespace(horses=[
+        H(1, 1.0), H(2, 2.0), H(3, 5.0), H(4, 10.0), H(5, 0.0), H(6, 3.0, absent=True),
+    ]))
+    idx = _market_win_index(rd)
+    assert idx[1] == 100.0                       # 1.0倍は必ず 100 (圧倒的)
+    assert 5 not in idx and 6 not in idx          # オッズ0 / 取消は除外
+    assert idx[1] > idx[2] > idx[3] > idx[4]      # オッズ大ほど低い (単調)
+    # T=1.5 のべき乗: 2.0倍 = 100*0.5^(1/1.5) ≈ 63
+    assert abs(idx[2] - 63.0) < 0.5
+    assert MARKET_INDEX_T == 1.5
