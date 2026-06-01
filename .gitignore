@@ -22,3 +22,8 @@ web/tsconfig.tsbuildinfo
 web/next-env.d.ts
 web/.vercel/
 /package-lock.json
+
+# 実験/バックアップのスクラッチ (再生成可能)
+data/models/_experiment/
+data/models/_bak_pretrain/
+data/datasets/*.bak
