@@ -1,0 +1,66 @@
+{
+  "segment": "jra",
+  "feature_cols": [
+    "speed_idx_weighted",
+    "speed_idx_best",
+    "speed_idx_last",
+    "shrunk_win_rate",
+    "shrunk_show_rate",
+    "effective_starts",
+    "same_distance_count",
+    "same_surface_count",
+    "same_venue_count",
+    "same_going_count",
+    "same_going_show_rate",
+    "going_versatility",
+    "best_time_at_target",
+    "best_time_runs",
+    "weight_kg_delta",
+    "recent_form_score",
+    "popularity_outperformance",
+    "last3f_idx_recent",
+    "days_since_last_run",
+    "body_weight",
+    "body_weight_diff",
+    "big_weight_change",
+    "jockey_change",
+    "style_score",
+    "pace_fit",
+    "weight_kg"
+  ],
+  "params": {
+    "objective": "lambdarank",
+    "metric": [
+      "ndcg"
+    ],
+    "ndcg_eval_at": [
+      1,
+      3,
+      5
+    ],
+    "learning_rate": 0.03,
+    "num_leaves": 24,
+    "min_data_in_leaf": 10,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1
+  },
+  "best_iteration": 149,
+  "softmax_temperature": 1.0,
+  "market_blend_mle": 0.9999940391390134,
+  "lambda_2_mle": 0.9189319853239933,
+  "lambda_3_mle": 0.7621485165269751,
+  "n_train_races": 846,
+  "n_fit_races": 282,
+  "n_holdout_races": 282,
+  "holdout_eval": {
+    "n": 282,
+    "tansho_roi": 75.47872340425532,
+    "tansho_hit": 88,
+    "market_roi": 74.13120567375886,
+    "market_hit": 87,
+    "tri_h1k3_hit": 17,
+    "tri_h1k3_hitrate": 6.028368794326241
+  }
+}

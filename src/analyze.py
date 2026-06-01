@@ -130,18 +130,19 @@ def main(
     apt_top = _aptitude_top_horses(aptitudes, n=aptitude_top)
     market_signals = compute_market_signals(rd)
 
-    # 2段パイプライン score ステージ: Claude に各馬の強さ指数を出させてキャッシュし即終了。
-    # (estimate_probs / 束 / snapshot / enqueue はしない。bet ステージが指数を読む)
+    # 2段パイプライン score ステージ: Claude に各馬の強さ指数を出させてキャッシュ。
+    # その後 fall-through して指数つき snapshot を保存し履歴に出す (ユーザ指示: 指数をつけた
+    # 段階で履歴を作ってよい)。**投票 (enqueue) は auto_watch の bet phase のみ**が行うので、
+    # ここで snapshot を作っても実弾は飛ばない。bet ステージは締切直前に fresh odds で再計算・上書き。
     if phase == "score":
-        _print_race_header(rd)
         best_times_for_score = _serialize_best_times(rd, feats) if feats else []
         _run_score_stage(
             race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
             horse_best_times=best_times_for_score, model=llm_model,
         )
-        return
+        # fall through → 下の共通解析 + snapshot 保存へ
 
-    # bet ステージ: score ステージのキャッシュ指数を読んで estimate_probs に合成する。
+    # bet/score 共通: キャッシュ指数を読んで estimate_probs に合成する。
     llm_index, llm_support, llm_scale, llm_scored_at = _load_llm_scores(race_id)
 
     lgbm_info = ev_mod.lgbm_status()

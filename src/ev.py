@@ -74,8 +74,8 @@ def estimate_probs(
     market_blend: float = BLEND_DEFAULT,
     market_floor: float = 0.01,
     blend_method: str = "loglinear",   # "loglinear" (Benter 2-step) | "linear" (旧)
-    lambda_2: float = DEFAULT_LAMBDA_2,
-    lambda_3: float = DEFAULT_LAMBDA_3,
+    lambda_2: float | None = None,   # None = segment metadata の lambda_2_mle (無ければ DEFAULT)
+    lambda_3: float | None = None,
     use_show_bias: bool = True,
     market_win_override: dict[int, float] | None = None,
     llm_win_index: dict[int, float] | None = None,
@@ -114,8 +114,17 @@ def estimate_probs(
     if n == 0:
         return Probabilities(win={}, place2={}, place3={})
 
+    # JRA / NAR で別モデル + 別 (T, λ) を使う。segment metadata から λ を解決
+    # (lambda_2/3=None のとき。自前 MLE 校正値 lambda_*_mle、無ければ literature DEFAULT)。
+    segment = segment_of_rd(rd)
+    _seg_meta = _segment_booster_meta(segment)[1] or {}
+    if lambda_2 is None:
+        lambda_2 = float(_seg_meta.get("lambda_2_mle") or DEFAULT_LAMBDA_2)
+    if lambda_3 is None:
+        lambda_3 = float(_seg_meta.get("lambda_3_mle") or DEFAULT_LAMBDA_3)
+
     feats = build_features(rd)
-    fundamental_win = _fundamental_win_probs(horses, feats)
+    fundamental_win = _fundamental_win_probs(horses, feats, segment)
 
     # Claude 指数を model fundamental に合成 (市場ブレンドの前)。指数が無ければ no-op。
     if llm_win_index and llm_blend > 0:
@@ -241,13 +250,13 @@ def _z_score(values: dict[int, float]) -> dict[int, float]:
     return {k: (v - mean) / sd for k, v in values.items()}
 
 
-def _fundamental_win_probs(horses, feats) -> dict[int, float]:
+def _fundamental_win_probs(horses, feats, segment: str | None = None) -> dict[int, float]:
     """Layer 1 特徴量 → softmax で 1 着確率。
 
-    学習済 LightGBM lambdarank モデル (`data/models/lgbm_lambdarank.txt`) があれば
-    それを使う。無ければ z-score 線形和を softmax する Phase A 初期版にフォールバック。
+    segment ("jra"/"nar") があれば該当 LightGBM モデルを使う (無ければ global)。
+    モデルが無ければ z-score 線形和を softmax する Phase A 初期版にフォールバック。
     """
-    lgb_probs = _lgbm_predict(horses, feats)
+    lgb_probs = _lgbm_predict(horses, feats, segment)
     if lgb_probs is not None:
         return lgb_probs
     return _linear_softmax_fallback(horses, feats)
@@ -414,34 +423,65 @@ def lgbm_status() -> dict:
     return out
 
 
-def _lgbm_predict(horses, feats) -> dict[int, float] | None:
-    """LightGBM 学習済モデルがあれば feats 行列で score 予測 → softmax で 1 着確率。
+# セグメント別モデル (JRA / NAR)。scripts/train_segment_models.py が
+# data/models/lgbm_<seg>.txt + lgbm_<seg>_metadata.json を作る。metadata に
+# softmax_temperature / lambda_2_mle / lambda_3_mle / market_blend_mle (別 partition で MLE 凍結) を持つ。
+# 無い segment は global モデルにフォールバック。
+_SEG_CACHE: dict[str, tuple] = {}   # segment -> (booster, meta) | (None, None)
 
-    返り値 None: モデルなし or 予測失敗 (呼び出し側がフォールバック)。
-    """
-    global _LGBM_MODEL, _LGBM_META, _LGBM_LOAD_TRIED
-    if _LGBM_MODEL is None and not _LGBM_LOAD_TRIED:
-        _LGBM_LOAD_TRIED = True
+
+def segment_of_rd(rd) -> str:
+    """race の venue から JRA(中央, venue 01-10) / NAR(地方) を判定。"""
+    try:
+        vid = int(getattr(rd.race, "venue_id", 0) or 0)
+    except (TypeError, ValueError):
+        return "nar"
+    return "jra" if 1 <= vid <= 10 else "nar"
+
+
+def _segment_booster_meta(segment: str | None):
+    """segment 別 (booster, meta) を返す。無ければ global にフォールバック。"""
+    # global を必ずロード (フォールバック先)
+    lgbm_status()
+    if not segment:
+        return _LGBM_MODEL, _LGBM_META
+    if segment not in _SEG_CACHE:
         try:
             import json as _json
             from pathlib import Path as _Path
             import lightgbm as _lgb
             root = _Path(__file__).resolve().parents[1]
-            mp = root / "data" / "models" / "lgbm_lambdarank.txt"
-            meta = root / "data" / "models" / "lgbm_metadata.json"
-            if not mp.exists() or not meta.exists():
-                return None
-            _LGBM_MODEL = _lgb.Booster(model_file=str(mp))
-            _LGBM_META = _json.loads(meta.read_text(encoding="utf-8"))
+            mp = root / "data" / "models" / f"lgbm_{segment}.txt"
+            meta = root / "data" / "models" / f"lgbm_{segment}_metadata.json"
+            if mp.exists() and meta.exists():
+                _SEG_CACHE[segment] = (
+                    _lgb.Booster(model_file=str(mp)),
+                    _json.loads(meta.read_text(encoding="utf-8")),
+                )
+            else:
+                _SEG_CACHE[segment] = (None, None)
         except Exception:
-            return None
-    if _LGBM_MODEL is None or _LGBM_META is None:
+            _SEG_CACHE[segment] = (None, None)
+    b, m = _SEG_CACHE[segment]
+    if b is not None and m is not None:
+        return b, m
+    return _LGBM_MODEL, _LGBM_META
+
+
+def _lgbm_predict(horses, feats, segment: str | None = None) -> dict[int, float] | None:
+    """LightGBM 学習済モデルがあれば feats 行列で score 予測 → softmax で 1 着確率。
+
+    segment ("jra"/"nar") が与えられ該当モデルがあればそれを使う (無ければ global)。
+    返り値 None: モデルなし or 予測失敗 (呼び出し側がフォールバック)。
+    """
+    booster, meta = _segment_booster_meta(segment)
+    if booster is None or meta is None:
         return None
 
     try:
         import math
         from dataclasses import asdict as _asdict
-        feature_cols = _LGBM_META.get("feature_cols", [])
+        feature_cols = meta.get("feature_cols", [])
         if not feature_cols:
             return None
         rows = []
@@ -457,14 +497,11 @@ def _lgbm_predict(horses, feats) -> dict[int, float] | None:
             nums.append(h.number)
         if not rows:
             return None
-        scores = _LGBM_MODEL.predict(rows)
-        # 温度スケーリング付き softmax: probs = softmax(score / T)
-        # T は model-specific (W3 model T=0.4、W4 model T=1-2 等)、retraining 時に
-        # train.py が valid set で log loss 最小の T を fit して metadata に保存する。
-        # metadata に softmax_temperature があればそれを優先、無ければ
-        # LGBM_TEMPERATURE 定数 (= 0.4、Phase 21 旧 model 用) にフォールバック。
+        scores = booster.predict(rows)
+        # 温度スケーリング付き softmax: probs = softmax(score / T)。T は model-specific で
+        # 各 metadata の softmax_temperature を優先、無ければ LGBM_TEMPERATURE にフォールバック。
         T = float(
-            (_LGBM_META or {}).get("softmax_temperature")
+            (meta or {}).get("softmax_temperature")
             or LGBM_TEMPERATURE
         )
         T = max(T, 1e-3)
