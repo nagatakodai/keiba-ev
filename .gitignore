@@ -27,3 +27,6 @@ web/.vercel/
 data/models/_experiment/
 data/models/_bak_pretrain/
 data/datasets/*.bak
+
+# 本番未配線の実験校正器 (calibration_report.py の成果物、orphan)
+data/models/win_calibrator.pkl

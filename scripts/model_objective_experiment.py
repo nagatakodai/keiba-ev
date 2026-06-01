@@ -454,6 +454,17 @@ def main():
     mk_rank = next(i for i, (n, _) in enumerate(imp) if n == "market_implied") + 1
     print(f"  market_implied rank: {mk_rank}/{len(imp)}")
 
+    print("\n" + "=" * 70)
+    print("⚠ 結論の限界 (検証レビュー指摘):")
+    print("  - Exp2 の market-feature +ROI は **単一 chronological window の in-sample 値**。")
+    print("    CV/sliding-window 未検証。CLAUDE.md の Plan G/Sprint/confidence band と同じく")
+    print("    in-sample +EV が OOS で破綻する常習があるため、未確証。winner logloss は")
+    print("    market-only より僅かに悪く、校正面では純市場を超えていない。")
+    print("  - no-market 基線も popularity_outperformance (市場由来) を含み完全な market-free")
+    print("    ではない。温度 (with-market T≈0.65) も同 valid で post-hoc fit。")
+    print("  - 採用前に scripts/sliding_window_eval.py 流の独立2窓で再現を確認すること。")
+    print("  - そもそも単勝 ROI は全戦略 break-even(100%) 未満 = どれも -EV (利益ではない)。")
+    print("=" * 70)
     print("\nexperiment models saved to", OUT_DIR)
 
 

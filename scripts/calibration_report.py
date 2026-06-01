@@ -11,6 +11,16 @@ data/datasets/all.parquet の chronological split (last 20% = valid、残り = t
 
 を出す。良い方を data/models/win_calibrator.pkl に保存。
 
+⚠ **重要 (検証レビュー指摘)**:
+- win_calibrator.pkl は **本番 (ev.py) から未参照の実験成果物** (orphan)。estimate_probs に
+  校正を挟む配線はまだ無い。本番投入は base='blend_p' を本番の市場ブレンド経路
+  (trifecta-marginalized) で再現できると確認してから別途行う。
+- Platt/isotonic は **単調変換**なので各 race の argmax (= 単勝 top-1 選抜) を変えない →
+  単勝 ROI は不変。効くのは確率の絶対値 = 3連単 sharpness / Kelly 配分 / トリガミ判定のみ。
+  「校正で的中率が上がる」わけではない。
+- valid は本番 LGBM の early-stopping valid と同一窓のため報告 ECE/Brier はやや楽観側。
+  単一窓 in-sample なので arm 前に sliding-window で再現性確認が望ましい。
+
 本番コード (src/*.py) は触らない。読込・split・blend は src/ev.py /
 src/eval_holdout.py の実装に合わせている。
 

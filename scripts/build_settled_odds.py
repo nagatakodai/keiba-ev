@@ -6,6 +6,11 @@
 含めば payout、含まなければ 0」で収支が出る。EV/Kelly 選抜 (全組オッズが要る) には使えないが、
 確率ベース Plan (H1/H2/G・単勝) と「当たり判定 + 払戻」のバックテストはフルにできる。
 
+注意: parse_result が finish_order を返せない race (静的HTMLに着順行が無い等) は払戻が
+あっても全 drop される (実機 7,219→7,166)。同着 (dead-heat) race は払戻テーブルに複数組が
+載るが、消費側 (full_history_backtest) は all.parquet の finish_pos 1 組で当たり判定するため
+同着の片側を取りこぼしうる (頻度極小、ROI への影響は無視可能)。
+
 出力 `data/datasets/settled_odds.parquet`: 1 行 = (race_id, bet_type, key, odds)。
   - key は払戻の組番 ("5", "3-5", "3-5-7" 等、parse_result の final_odds キーから bet_type: を除いたもの)
   - odds = 払戻金 / 100 (= 確定オッズ)
@@ -36,7 +41,8 @@ def _one(rid: str) -> list[tuple]:
     try:
         with gzip.open(p, "rt", encoding="utf-8") as f:
             html = f.read()
-    except OSError:
+    except (OSError, EOFError, gzip.BadGzipFile, UnicodeDecodeError):
+        # 破損 gzip (BadGzipFile/EOFError) や文字化けで 1 race が全 drop しないよう広めに捕捉
         return []
     try:
         r = parse_result(html)

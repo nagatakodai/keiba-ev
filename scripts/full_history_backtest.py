@@ -1,25 +1,35 @@
 """全レース (~7,000) で確率ベース戦略をバックテストする。
 
 データ:
-  - data/datasets/all.parquet      : 特徴量 + target + win_odds (= 締切前市場)
+  - data/datasets/all.parquet          : 特徴量 + target + win_odds (= ほぼ確定単勝オッズ)
   - data/datasets/settled_odds.parquet : 結果HTML由来の確定払戻 (当たり組番のみ)
-  - data/models/lgbm_lambdarank.txt : 本番モデル
+  - data/models/lgbm_lambdarank.txt    : 本番モデル (--fresh-model で窓外学習の別モデルを使う)
 
-確定オッズは「当たった組番」だけだが、ROI は当たり目の払戻だけで決まるので、
-**確率で買い目を選ぶ戦略 (単勝 β-sweep / 3連単 Plan H1 / ワイド top など)** はフル評価できる。
-EV/Kelly 選抜 (全組オッズが要る) は対象外 (別途 N=291 の trifecta cache 評価に委ねる)。
+確定オッズは「当たった組番」だけだが、ROI は当たり目の払戻だけで決まるので、確率で買い目を
+選ぶ戦略 (単勝 β-sweep / 3連単 Plan H1 / ワイド top) はフル評価できる。EV/Kelly 選抜
+(全組オッズが要る) は対象外。
 
-評価窓:
-  - --valid-frac 0.2 (既定) で sorted race_id の後ろ20%
-  - --all で全レース (in-sample 寄り含むが N 最大、傾向把握用)
+**+EV の正しい定義 (重要)**: pari-mutuel は自分の賭け金も控除原資に入るので、利益が出る
+(= +EV) のは **長期 ROI > 100%** の戦略だけ。市場平均 (控除率ぶん ~80%) を上回ることは
+「損が市場より小さい」に過ぎず依然 -EV。よって本スクリプトは break-even=100% で判定し、
+市場 baseline は「同じ -EV の中でのエッジ診断 (相対比較)」としてのみ使う。点推定だけでは
+事後選択バイアスに弱いので **bootstrap 95%CI** を併記し、CI 下限が 100% を超えた戦略のみ
+を「+EV 候補」と呼ぶ。
 
-使い方: python scripts/full_history_backtest.py [--valid-frac 0.2] [--all]
+**検証窓の注意**: 既定 (--valid-frac 0.2) の後20%窓は、本番モデルの early-stopping と
+softmax 温度フィットに使われた窓そのもの (= mild in-sample / peeking)。真の out-of-sample が
+要るときは `--fresh-model`: 前70%で学習・[70,80)%で早期停止 (eval 窓を一切見ない) し
+後20%で評価する。
+
+使い方:
+  python scripts/full_history_backtest.py                 # 本番モデル (peeking 開示つき)
+  python scripts/full_history_backtest.py --fresh-model    # 真の out-of-sample
+  python scripts/full_history_backtest.py --all            # 全レース (in-sample 上界)
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from itertools import permutations
 from pathlib import Path
@@ -32,12 +42,17 @@ sys.path.insert(0, str(ROOT))
 
 import lightgbm as lgb  # noqa: E402
 
-from src.ev import DEFAULT_LAMBDA_2, DEFAULT_LAMBDA_3  # noqa: E402
+from src.ev import DEFAULT_LAMBDA_2, DEFAULT_LAMBDA_3, power_method_overround  # noqa: E402
 
 ALL = ROOT / "data" / "datasets" / "all.parquet"
 SETTLED = ROOT / "data" / "datasets" / "settled_odds.parquet"
 MODEL = ROOT / "data" / "models" / "lgbm_lambdarank.txt"
 META = ROOT / "data" / "models" / "lgbm_metadata.json"
+
+# bootstrap は決定的にしたい (Math.random 不可な環境制約とも整合) → 固定 seed。
+BOOT_SEED = 12345
+BOOT_N = 4000
+BREAK_EVEN = 100.0  # +EV の閾値は 100% (市場の ~80% ではない)
 
 
 def _race_int(rid: str) -> int:
@@ -54,67 +69,148 @@ def _softmax(x: np.ndarray, t: float) -> np.ndarray:
     return e / e.sum()
 
 
-def _blend(model_p: np.ndarray, market_p: np.ndarray, beta: float) -> np.ndarray:
-    """loglinear: softmax((1-β)·log model + β·log market) — ev.estimate_probs と同代数。"""
+def _blend(model_p: np.ndarray, market_devig: np.ndarray, beta: float) -> np.ndarray:
+    """loglinear: softmax((1-β)·log model + β·log π) — ev.estimate_probs と同代数。
+    market_devig は power_method de-vig 済の市場暗黙率 (本番と同一)。"""
     a = max(1.0 - beta, 0.0)
     b = max(beta, 0.0)
     lm = np.log(np.clip(model_p, 1e-9, None))
-    lk = np.log(np.clip(market_p, 1e-9, None))
+    lk = np.log(np.clip(market_devig, 1e-9, None))
     z = a * lm + b * lk
     z = z - z.max()
     e = np.exp(z)
     return e / e.sum()
 
 
+def _devig(odds: np.ndarray) -> np.ndarray:
+    """1/odds を power-method de-overround (本番 estimate_probs と同一)。"""
+    raw = 1.0 / odds
+    raw = raw / raw.sum()
+    d = power_method_overround({i: float(raw[i]) for i in range(len(raw))})
+    v = np.array([d[i] for i in range(len(raw))], dtype=float)
+    s = v.sum()
+    return v / s if s > 0 else raw
+
+
+def _bootstrap_roi_ci(profit: np.ndarray, stake: np.ndarray, n=BOOT_N, seed=BOOT_SEED):
+    """per-race の (profit, stake) を race 単位で resample して ROI(%) の 95%CI を返す。"""
+    rng = np.random.default_rng(seed)
+    m = len(profit)
+    if m == 0 or stake.sum() == 0:
+        return (0.0, 0.0)
+    idx = rng.integers(0, m, size=(n, m))
+    pe = profit[idx].sum(axis=1)
+    st = stake[idx].sum(axis=1)
+    rois = np.where(st > 0, pe / st * 100, 0.0)
+    return (float(np.percentile(rois, 2.5)), float(np.percentile(rois, 97.5)))
+
+
+def _paired_diff_ci(p_a, p_b, stake, n=BOOT_N, seed=BOOT_SEED):
+    """戦略A,B の per-race profit を同一 resample で差し引き、ROI差(pt) の 95%CI。"""
+    rng = np.random.default_rng(seed)
+    m = len(p_a)
+    if m == 0 or stake.sum() == 0:
+        return (0.0, 0.0, 0.0)
+    idx = rng.integers(0, m, size=(n, m))
+    sa = p_a[idx].sum(axis=1)
+    sb = p_b[idx].sum(axis=1)
+    st = stake[idx].sum(axis=1)
+    diff = np.where(st > 0, (sa - sb) / st * 100, 0.0)
+    return (float(np.percentile(diff, 2.5)), float(diff.mean()), float(np.percentile(diff, 97.5)))
+
+
+def _train_fresh(df: pd.DataFrame, rids_sorted: list[str], feat_cols, params):
+    """前70%で学習・[70,80)% で早期停止する『eval 窓を一切見ない』別モデルを訓練して返す。"""
+    n = len(rids_sorted)
+    tr = set(rids_sorted[: int(n * 0.70)])
+    va = set(rids_sorted[int(n * 0.70): int(n * 0.80)])
+    tdf = df[df["race_id"].isin(tr)].sort_values("race_id")
+    vdf = df[df["race_id"].isin(va)].sort_values("race_id")
+    gtr = tdf.groupby("race_id", sort=False).size().to_numpy()
+    gva = vdf.groupby("race_id", sort=False).size().to_numpy()
+    dtr = lgb.Dataset(tdf[feat_cols].values, label=tdf["target_rank"].values, group=gtr)
+    dva = lgb.Dataset(vdf[feat_cols].values, label=vdf["target_rank"].values, group=gva, reference=dtr)
+    booster = lgb.train(
+        params, dtr, num_boost_round=800, valid_sets=[dva],
+        callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)],
+    )
+    # 温度も窓外で fit (valid=[70,80)% の log loss 最小化)
+    best_T, best_ll = 0.5, float("inf")
+    for T in [0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0]:
+        ll = 0.0
+        nr = 0
+        for _r, g in vdf.groupby("race_id", sort=False):
+            sc = booster.predict(g[feat_cols].values, num_iteration=booster.best_iteration)
+            p = _softmax(np.asarray(sc), T)
+            y = g["target_top1"].to_numpy()
+            if y.sum() == 0:
+                continue
+            ll -= float(np.log(max(p[int(np.argmax(y))], 1e-12)))
+            nr += 1
+        ll = ll / max(nr, 1)
+        if ll < best_ll:
+            best_ll, best_T = ll, T
+    return booster, best_T
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--valid-frac", type=float, default=0.2)
-    ap.add_argument("--all", action="store_true", help="全レースで評価 (in-sample 寄り)")
-    ap.add_argument("--top-m", type=int, default=8, help="3連単候補を上位M頭の順列に限定")
+    ap.add_argument("--all", action="store_true", help="全レースで評価 (in-sample 上界)")
+    ap.add_argument("--fresh-model", action="store_true",
+                    help="eval 窓を一切見ない別モデルを訓練して真の out-of-sample 評価")
+    ap.add_argument("--top-m", type=int, default=8)
     args = ap.parse_args()
 
     df = pd.read_parquet(ALL)
     meta = json.loads(META.read_text())
     feat_cols = meta["feature_cols"]
-    T = float(meta.get("softmax_temperature", 0.5))
-    booster = lgb.Booster(model_file=str(MODEL))
+    rids = sorted(df["race_id"].unique().tolist(), key=_race_int)
+
+    if args.fresh_model:
+        params = dict(meta["params"])
+        booster, T = _train_fresh(df, rids, feat_cols, params)
+        model_desc = f"fresh model (train [0,70)%, early-stop [70,80)%, T={T:.2f} fit on [70,80)%)"
+        window_note = "真の out-of-sample (eval 窓 [80,100)% はモデルが一切見ていない)"
+    else:
+        booster = lgb.Booster(model_file=str(MODEL))
+        T = float(meta.get("softmax_temperature", 0.5))
+        model_desc = f"production model (T={T:.2f})"
+        window_note = ("⚠ mild in-sample: 既定後20%窓は本番モデルの early-stop+温度フィット窓"
+                       "そのもの (peeking)。真の OOS は --fresh-model")
 
     settled = pd.read_parquet(SETTLED)
-    # (race_id, bet_type) -> {key: odds}
     settled_idx: dict[tuple[str, str], dict[str, float]] = {}
     for rid, bt, key, odds in settled.itertuples(index=False):
         settled_idx.setdefault((rid, bt), {})[key] = odds
 
-    rids = sorted(df["race_id"].unique().tolist(), key=_race_int)
     if args.all:
         valid_rids = set(rids)
-        label = f"ALL races (in-sample 寄り) n={len(valid_rids)}"
+        label = f"ALL races (in-sample 上界) n={len(valid_rids)}"
+        window_note = "in-sample 上界 (モデルが学習に使った race を含む)。傾向把握のみ"
     else:
         n_valid = max(int(len(rids) * args.valid_frac), 1)
         valid_rids = set(rids[-n_valid:])
         label = f"chronological last {args.valid_frac:.0%} n={len(valid_rids)}"
 
-    # 予測対象は finish 確定 race のみ
     g_win = df.groupby("race_id")["target_top1"].max()
     labeled = set(g_win[g_win == 1].index)
     valid_rids = valid_rids & labeled
-
-    df = df[df["race_id"].isin(valid_rids)].copy()
-    df["score"] = booster.predict(df[feat_cols].values, num_iteration=booster.best_iteration)
+    vdf = df[df["race_id"].isin(valid_rids)].copy()
+    vdf["score"] = booster.predict(vdf[feat_cols].values, num_iteration=booster.best_iteration)
 
     betas = [round(b, 2) for b in np.arange(0.0, 1.01, 0.1)]
 
-    # ---- 1) 単勝 top-1 β-sweep ----
-    win_stat = {b: {"stake": 0, "payout": 0, "hits": 0, "n": 0} for b in betas}
-    # ---- 2) 3連単 Plan H1 (確率上位K点、EV不問) ----
+    # per-race profit/stake を貯めて bootstrap CI を出す
+    win_profit = {b: [] for b in betas}
+    win_stake = {b: [] for b in betas}
+    mkt_profit, mkt_stake = [], []
     tri_K = [1, 3, 6, 12]
-    tri_stat = {k: {"stake": 0, "payout": 0, "hits": 0, "n": 0} for k in tri_K}
-    # ---- 3) ワイド top-1 (確率最上位ペア) ----
-    wide_stat = {"stake": 0, "payout": 0, "hits": 0, "n": 0}
-    # market baseline (単勝 top-1 by market)
-    mkt_stat = {"stake": 0, "payout": 0, "hits": 0, "n": 0}
+    tri_profit = {k: [] for k in tri_K}
+    tri_stake = {k: [] for k in tri_K}
+    wide_profit, wide_stake = [], []
 
-    for rid, g in df.groupby("race_id"):
+    for rid, g in vdf.groupby("race_id"):
         g = g[g["win_odds"] > 0]
         if len(g) < 3:
             continue
@@ -122,47 +218,36 @@ def main() -> int:
         scores = g["score"].to_numpy()
         odds = g["win_odds"].to_numpy()
         finish = g.set_index("horse_number")["finish_pos"]
-        # 着順 1,2,3 の馬番
         order = finish[finish.isin([1, 2, 3])].sort_values()
         if len(order) < 3:
             continue
-        win_triple = tuple(int(x) for x in order.index[:3])  # (1着,2着,3着)
+        win_triple = tuple(int(x) for x in order.index[:3])
         winner = win_triple[0]
+        widx = int(np.where(nums == winner)[0][0])
 
         model_p = _softmax(scores, T)
-        market_p = (1.0 / odds) / np.sum(1.0 / odds)
+        market_devig = _devig(odds)
 
         tri_payout = settled_idx.get((rid, "trifecta"), {})
         wide_payout = settled_idx.get((rid, "wide"), {})
 
-        # 単勝 β-sweep
         for b in betas:
-            bp = _blend(model_p, market_p, b)
+            bp = _blend(model_p, market_devig, b)
             top = int(nums[int(np.argmax(bp))])
-            win_stat[b]["n"] += 1
-            win_stat[b]["stake"] += 100
-            if top == winner:
-                win_stat[b]["hits"] += 1
-                win_stat[b]["payout"] += int(100 * odds[int(np.where(nums == top)[0][0])])
-        # market baseline
-        topm = int(nums[int(np.argmax(market_p))])
-        mkt_stat["n"] += 1
-        mkt_stat["stake"] += 100
-        if topm == winner:
-            mkt_stat["hits"] += 1
-            mkt_stat["payout"] += int(100 * odds[int(np.where(nums == topm)[0][0])])
+            win_stake[b].append(100)
+            win_profit[b].append(int(100 * odds[int(np.where(nums == top)[0][0])]) if top == winner else 0)
+        # market baseline (β=1.0 相当だが素の市場で)
+        topm = int(nums[int(np.argmax(market_devig))])
+        mkt_stake.append(100)
+        mkt_profit.append(int(100 * odds[int(np.where(nums == topm)[0][0])]) if topm == winner else 0)
 
-        # 3連単 Plan H1: production の β=0.78 ブレンドで確率化 → 上位K点
-        bp = _blend(model_p, market_p, 0.78)
+        # 3連単 Plan H1: β=0.78 ブレンド → PL 連鎖、上位K点
+        bp = _blend(model_p, market_devig, 0.78)
         win_d = {int(nums[i]): float(bp[i]) for i in range(len(nums))}
-        # Discounted Harville で place2/place3 を作り PL 連鎖
         w2 = {k: v ** DEFAULT_LAMBDA_2 for k, v in win_d.items()}
         w3 = {k: v ** DEFAULT_LAMBDA_3 for k, v in win_d.items()}
-        # 上位M頭の順列だけ評価 (高確率順列を網羅)
         topM = [k for k, _ in sorted(win_d.items(), key=lambda kv: -kv[1])[:args.top_m]]
-        W = sum(win_d.values())
-        W2 = sum(w2.values())
-        W3 = sum(w3.values())
+        W, W2, W3 = sum(win_d.values()), sum(w2.values()), sum(w3.values())
         tri_probs = []
         for a, b2, c in permutations(topM, 3):
             pa = win_d[a] / W
@@ -172,61 +257,66 @@ def main() -> int:
         tri_probs.sort(key=lambda x: -x[1])
         for K in tri_K:
             picks = [t for t, _ in tri_probs[:K]]
-            tri_stat[K]["n"] += 1
-            tri_stat[K]["stake"] += 100 * K
+            tri_stake[K].append(100 * K)
+            pay = 0
             if win_triple in picks:
-                key = "-".join(str(x) for x in win_triple)
-                o = tri_payout.get(key)
+                o = tri_payout.get("-".join(str(x) for x in win_triple))
                 if o:
-                    tri_stat[K]["hits"] += 1
-                    tri_stat[K]["payout"] += int(100 * o)
+                    pay = int(100 * o)
+            tri_profit[K].append(pay)
 
-        # ワイド top-1: 確率最上位ペア (順不同)。当たり = top3 のうち2頭
+        # ワイド top-1
         place3_set = set(win_triple)
-        # ペア確率 ~ win_d[a]*win_d[b] 上位
         pair_rank = sorted(
-            ((tuple(sorted((nums[i], nums[j]))), win_d[int(nums[i])] * win_d[int(nums[j])])
+            ((tuple(sorted((int(nums[i]), int(nums[j])))), win_d[int(nums[i])] * win_d[int(nums[j])])
              for i in range(len(nums)) for j in range(i + 1, len(nums))),
             key=lambda x: -x[1],
         )
         if pair_rank:
             pick = pair_rank[0][0]
-            wide_stat["n"] += 1
-            wide_stat["stake"] += 100
+            wide_stake.append(100)
+            pay = 0
             if pick[0] in place3_set and pick[1] in place3_set:
-                key1 = f"{pick[0]}-{pick[1]}"
-                key2 = f"{pick[1]}-{pick[0]}"
-                o = wide_payout.get(key1) or wide_payout.get(key2)
+                o = wide_payout.get(f"{pick[0]}-{pick[1]}") or wide_payout.get(f"{pick[1]}-{pick[0]}")
                 if o:
-                    wide_stat["hits"] += 1
-                    wide_stat["payout"] += int(100 * o)
+                    pay = int(100 * o)
+            wide_profit.append(pay)
 
-    def roi(s):
-        return (s["payout"] / s["stake"] * 100) if s["stake"] else 0.0
+    def roi(p, s):
+        p, s = np.asarray(p), np.asarray(s)
+        return (p.sum() / s.sum() * 100) if s.sum() else 0.0
 
-    print(f"\n=== Full-history backtest — {label} ===\n")
-    print("[1] 単勝 top-1 β-sweep (blended model+market)")
-    print(f"{'β':>5} {'hit%':>7} {'ROI':>8} {'hits/n':>12}")
+    def line(name, p, s):
+        p, s = np.asarray(p), np.asarray(s)
+        r = roi(p, s)
+        lo, hi = _bootstrap_roi_ci(p, s)
+        flag = "  ← CI下限>100% = +EV候補" if lo > BREAK_EVEN else ""
+        n_hit = int((p > 0).sum())
+        return f"{name:>7} {r:>6.1f}%  95%CI[{lo:>5.1f},{hi:>5.1f}]  hit {n_hit}/{len(p)}{flag}"
+
+    print(f"\n=== Full-history backtest — {label} ===")
+    print(f"model: {model_desc}")
+    print(f"window: {window_note}")
+    print(f"break-even (+EV ライン) = ROI {BREAK_EVEN:.0f}%。市場 baseline は -EV 内のエッジ診断用。\n")
+
+    print("[1] 単勝 top-1 β-sweep (model+market loglinear de-vig blend)")
     for b in betas:
-        s = win_stat[b]
-        h = s["hits"] / s["n"] * 100 if s["n"] else 0
-        print(f"{b:>5.2f} {h:>6.1f}% {roi(s):>7.1f}% {s['hits']:>5}/{s['n']:<5}")
-    s = mkt_stat
-    print(f"{'mkt':>5} {s['hits']/s['n']*100:>6.1f}% {roi(s):>7.1f}% {s['hits']:>5}/{s['n']:<5}  (市場1番人気)")
+        print(line(f"β={b:.1f}", win_profit[b], win_stake[b]))
+    print(line("market", mkt_profit, mkt_stake) + "  (de-vig 市場1番人気)")
+    # best β vs market のペア差 CI
+    best_b = max(betas, key=lambda b: roi(win_profit[b], win_stake[b]))
+    lo, mean, hi = _paired_diff_ci(np.asarray(win_profit[best_b]), np.asarray(mkt_profit), np.asarray(mkt_stake))
+    sig = "有意 (CI が 0 を跨がない)" if (lo > 0 or hi < 0) else "有意でない (CI が 0 を跨ぐ)"
+    print(f"\n  best β={best_b:.1f} vs market のROI差: {mean:+.1f}pt  95%CI[{lo:+.1f},{hi:+.1f}] → {sig}")
 
     print("\n[2] 3連単 Plan H1 (β=0.78 確率上位K点、EV不問)")
-    print(f"{'K点':>5} {'hit%':>7} {'ROI':>8} {'hits/n':>12}")
     for K in tri_K:
-        s = tri_stat[K]
-        h = s["hits"] / s["n"] * 100 if s["n"] else 0
-        print(f"{K:>5} {h:>6.1f}% {roi(s):>7.1f}% {s['hits']:>5}/{s['n']:<5}")
+        print(line(f"K={K}", tri_profit[K], tri_stake[K]))
 
     print("\n[3] ワイド top-1 (確率最上位ペア)")
-    s = wide_stat
-    h = s["hits"] / s["n"] * 100 if s["n"] else 0
-    print(f"hit% {h:.1f}%  ROI {roi(s):.1f}%  hits {s['hits']}/{s['n']}")
-    print("\n注: 確定オッズ(当たり払戻)ベース。控除率 ~20-25% → ROI 77.5-80% が市場効率の目安。")
-    print("    ROI が安定して 80%+ かつ市場baselineを上回る戦略のみ実用候補。")
+    print(line("wide", wide_profit, wide_stake))
+
+    print("\n判定基準: ROI 95%CI 下限 > 100% の戦略のみ実弾候補。市場(80%)超えは『損が小さい』に過ぎず -EV。")
     return 0
 
 

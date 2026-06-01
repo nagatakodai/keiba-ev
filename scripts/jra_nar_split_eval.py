@@ -20,9 +20,9 @@
 """
 from __future__ import annotations
 
+import json
 import math
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,11 +34,16 @@ import pandas as pd  # noqa: E402
 
 from src.ev import (  # noqa: E402
     BLEND_DEFAULT,
-    LGBM_TEMPERATURE,
     power_method_overround,
 )
 
 DATASETS = ROOT / "data" / "datasets" / "all.parquet"
+# 本番 metadata の softmax 温度 (= production と一致。旧版は LGBM_TEMPERATURE=0.4 を使っていた)。
+try:
+    _SOFT_T = float(json.loads((ROOT / "data" / "models" / "lgbm_metadata.json").read_text())
+                    .get("softmax_temperature", 0.5))
+except Exception:
+    _SOFT_T = 0.5
 
 # train.py / sliding_window_eval.py と同一の non-feature 列。
 NON_FEATURE_COLS = {
@@ -139,11 +144,11 @@ def _market_prob(g: pd.DataFrame) -> dict[int, float]:
 
 
 def evaluate(valid: pd.DataFrame, booster, feature_cols,
-             *, T: float = LGBM_TEMPERATURE, beta: float = BLEND_DEFAULT) -> dict:
-    """valid を booster で評価。
+             *, T: float = _SOFT_T, beta: float = BLEND_DEFAULT) -> dict:
+    """valid を booster で評価 (T は production metadata=0.5)。
 
-    返す: n_races, ndcg1 (top-1 hit on raw model score), top1_hit% (blended),
-          tansho_roi (blended top-1 単勝), model_only_hit% (no market blend).
+    返す: n_races, top1_acc (raw model top-1 が実1着か = top-1 accuracy。NDCG ではない),
+          top1_hit% (blended), tansho_roi (blended top-1 単勝), model_only_hit%。
     """
     valid = valid.sort_values(["race_id", "horse_number"]).reset_index(drop=True)
     has = valid.groupby("race_id")["target_top1"].sum().pipe(lambda s: s[s > 0]).index
@@ -210,7 +215,7 @@ def evaluate(valid: pd.DataFrame, booster, feature_cols,
 def _fmt(r: dict) -> str:
     if r.get("n_races", 0) == 0:
         return "n=0 (評価不能)"
-    return (f"n={r['n_races']:>4}  ndcg@1={r['ndcg1']*100:5.1f}%  "
+    return (f"n={r['n_races']:>4}  top1acc={r["ndcg1"]*100:5.1f}%  "
             f"model_hit={r['model_hit']*100:5.1f}%  blend_hit={r['blend_hit']*100:5.1f}%  "
             f"tansho_ROI={r['tansho_roi']*100:6.1f}%  ll={r['log_loss']:.3f}")
 
