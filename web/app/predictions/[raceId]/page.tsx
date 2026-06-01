@@ -832,7 +832,7 @@ function IndexCompareCard({
           <span>Claude 指数 × 市場指数</span>
           <span className="text-xs text-(--color-muted) font-normal">
             {hasClaude
-              ? "Claude 考察 (0-100) と 単勝オッズ由来の市場指数を併記 · 差 = Claude − 市場 (正 = Claude が強気)"
+              ? "独立した 2 指数の併記 · Claude 考察 (0-100) と 市場指数 (単勝オッズ由来) · 差 = Claude − 市場 (正 = Claude が強気)"
               : "Claude 指数なし (score 未実施) · 市場指数のみ (1番人気=100 の相対勝率)"}
           </span>
         </span>
@@ -888,8 +888,9 @@ function IndexCompareCard({
         </table>
       </div>
       <p className="mt-3 text-xs text-(--color-muted)">
-        市場指数は単勝オッズの de-vig 勝率を Claude 指数と同じ対数勝率スケール (温度 T=25) に乗せ、
-        市場1番人気を Claude 最高指数に揃えたもの。差が大きい馬ほど Claude と市場の評価が乖離。
+        Claude 指数と市場指数は独立 (市場指数は単勝オッズの de-vig 勝率を 0-100 化、市場1番人気=100)。
+        対数勝率スケール (温度 T=25) で曲率は揃えるが Claude にはアンカーしない。最終的な統合は
+        確率モデルの市場ブレンドで別途行う。差が大きい馬ほど Claude と市場の評価が乖離。
         {scoredAt ? ` · Claude 指数: ${fmtServerDateTime(scoredAt)}` : ""}
       </p>
     </Card>

@@ -694,16 +694,14 @@ def _run_score_stage(
     return parsed
 
 
-def _market_win_index(rd, llm_win_index: dict[int, float] | None) -> dict[int, float]:
-    """単勝オッズの de-vig 暗黙勝率を Claude 指数と同じ対数勝率スケール (T_LLM) に乗せた
-    「市場指数」(0-100) を返す。Claude 指数と並べて表示し差分で乖離を見るための列。
+def _market_win_index(rd) -> dict[int, float]:
+    """単勝オッズの de-vig 暗黙勝率を 0-100 の「市場指数」にした dict を返す。
 
-    両指数を「指数 = T_LLM·log(勝率) + const」という同じ曲率に揃える。市場1番人気を
-    アンカー A に合わせるので、差 = Claude指数 − 市場指数 が「Claude が市場よりどれだけ
-    強気/弱気か」を Claude 指数のポイント単位でそのまま読める:
-      - A = max(Claude 指数) があればそれ (1番人気どうしを同じ高さに揃える) → 差は中位馬と
-        馬群形状の不一致を表す。
-      - Claude 指数が無ければ A=100 (市場単独、1番人気=100 の相対勝率指数)。
+    Claude 指数とは **独立** な指数。市場1番人気を 100 とする自前スケール (Claude の値には
+    一切依存せずアンカーしない) で、`市場指数 = 100 − T_LLM·log(1番人気勝率 / 当該馬勝率)`。
+    対数勝率スケール (温度 T_LLM) を使うのは Claude 指数と曲率を揃えて並べやすくするためで、
+    値そのものは Claude と独立。両指数の最終的な統合は estimate_probs の市場ブレンドで行う
+    (この表示はあくまで独立な2指標の併記)。
     """
     import math
     from .ev import T_LLM, power_method_overround
@@ -725,18 +723,17 @@ def _market_win_index(rd, llm_win_index: dict[int, float] | None) -> dict[int, f
     m_max = max(market.values())
     if m_max <= 0:
         return {}
-    anchor = max(llm_win_index.values()) if llm_win_index else 100.0
     out: dict[int, float] = {}
     for k, p in market.items():
-        idx = anchor - T_LLM * math.log(m_max / max(p, 1e-9))
+        idx = 100.0 - T_LLM * math.log(m_max / max(p, 1e-9))
         out[k] = round(max(0.0, min(100.0, idx)), 1)
     return out
 
 
 def _build_index_compare(rd, llm_win_index: dict[int, float] | None) -> list[dict]:
-    """Claude 指数 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。Claude 指数降順
-    (無ければ市場指数降順)。どちらか一方しか無い馬も含める。"""
-    market = _market_win_index(rd, llm_win_index)
+    """Claude 指数 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。両指数は独立。
+    Claude 指数降順 (無ければ市場指数降順)。どちらか一方しか無い馬も含める。"""
+    market = _market_win_index(rd)
     claude = llm_win_index or {}
     names = {h.number: (h.name or "") for h in rd.race.horses if not h.absent}
     nums = (set(claude) | set(market)) & set(names)
@@ -844,8 +841,8 @@ def _save_prediction_snapshot(
         "llm_blend": llm_blend,
         "llm_scored_at": llm_scored_at,
         "llm_fallback": llm_win_index is None,
-        # 市場指数 (単勝オッズ de-vig → Claude 指数と同じ対数勝率スケール 0-100)。
-        "market_win_index": ({str(k): v for k, v in _market_win_index(rd, llm_win_index).items()}
+        # 市場指数 (単勝オッズ de-vig → 0-100、Claude 独立・市場1番人気=100)。
+        "market_win_index": ({str(k): v for k, v in _market_win_index(rd).items()}
                              or None),
         # Claude 指数 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場)。
         "index_compare": _build_index_compare(rd, llm_win_index),
