@@ -539,7 +539,9 @@ function BundleLegsTable({
             <th className="py-2 pr-3 text-right">P×O</th>
             <th className="py-2 pr-3 text-right">Kelly</th>
             <th className="py-2 pr-3 text-right">配分</th>
-            <th className="py-2 pr-3 text-right">的中時 払戻</th>
+            <th className="py-2 pr-3 text-right" title="その脚が的中したときの払戻。確定後は最終オッズ基準 (最終 O × 配分)、未確定は予想オッズ基準">
+              的中時 払戻{hasFinal ? " (最終)" : ""}
+            </th>
             <th className="py-2 pr-3">帯</th>
           </tr>
         </thead>
@@ -581,7 +583,25 @@ function BundleLegsTable({
                 </td>
                 <td className="py-1.5 pr-3 text-right">{(l.kelly * 100).toFixed(1)}%</td>
                 <td className="py-1.5 pr-3 text-right font-bold">¥{l.stake.toLocaleString()}</td>
-                <td className="py-1.5 pr-3 text-right text-(--color-good)">¥{l.payout_if_hit.toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right text-(--color-good)">
+                  {(() => {
+                    // 確定後は最終オッズ基準 (fo × stake) に揃える。予想 O 基準 (payout_if_hit) は
+                    // 取り消し線で併記。最終 O 未取得なら従来どおり予想 O 基準を表示。
+                    const finalPay =
+                      fo != null && fo > 0 ? Math.round(fo * l.stake) : null;
+                    if (finalPay == null) return <>¥{l.payout_if_hit.toLocaleString()}</>;
+                    return (
+                      <span title={`予想 O 基準 ¥${l.payout_if_hit.toLocaleString()}`}>
+                        ¥{finalPay.toLocaleString()}
+                        {finalPay !== l.payout_if_hit && (
+                          <span className="ml-1 text-(--color-muted) text-xs line-through">
+                            ¥{l.payout_if_hit.toLocaleString()}
+                          </span>
+                        )}
+                      </span>
+                    );
+                  })()}
+                </td>
                 <td className="py-1.5 pr-3">
                   <Badge tone={tierTone(l.tier)}>{tierLabel(l.tier)}</Badge>
                 </td>
@@ -867,11 +887,11 @@ function IndexCompareCard({
     <Card
       title={
         <span className="flex items-center gap-2">
-          <span>Claude 指数 × 市場指数</span>
+          <span>Claude 指数 vs 市場指数 (参考)</span>
           <span className="text-xs text-(--color-muted) font-normal">
             {hasClaude
-              ? "独立した 2 指標の併記 · Claude 強さ指数 (0-100、市場独立+検索補強) と 市場指数 (オッズ由来 0-100) · 差 = Claude − 市場 · 根=補強根拠件数 · 直前/軟情報=取消/馬体重/前走不利/勝負気配 等のフラグ"
-              : "Claude 指数なし (score 未実施) · 市場指数のみ (オッズ由来 0-100、1.0倍で100)"}
+              ? "Claude 強さ指数と市場指数の乖離を見る参考表 · 確率 P は Claude 指数 ⊗ モデル指数(GBM⊗速度図表) で合成し市場指数は P に未合成 (市場無視) · 市場は P×O の O として効く · 差 = Claude − 市場 (正 = Claude 強気 = contrarian 狙い) · 根=補強根拠件数 · 直前/軟情報=取消/馬体重/前走不利/勝負気配 等のフラグ"
+              : "Claude 指数なし (score 未実施) · 市場指数のみ (オッズ由来 0-100、1.0倍で100、参考)"}
           </span>
         </span>
       }
@@ -883,7 +903,7 @@ function IndexCompareCard({
               <th className="py-2 pr-3 text-right">馬</th>
               <th className="py-2 pr-3">馬名</th>
               <th className="py-2 pr-3 text-right" title="Claude 強さ指数 0-100 (市場独立の相対評価、検索補強で上下)">Claude 指数</th>
-              <th className="py-2 pr-3 text-right" title="市場指数 = 100·(1/オッズ)^(1/1.5) (1.0倍で100、温度T=1.5で0-100に分布)">市場指数</th>
+              <th className="py-2 pr-3 text-right" title="市場指数 = 100·(1/オッズ)^(1/1.5) (1.0倍で100、温度T=1.5で0-100に分布)。参考: 確率 P には未合成 (市場無視)、P×O の O として効く">市場指数<span className="text-(--color-muted)"> (参考)</span></th>
               <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
               <th className="py-2 pr-3 text-right" title="補強根拠件数。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)">根</th>
               <th className="py-2 pr-2" title="直前/軟情報フラグ (取消・馬体重増減・前走不利・厩舎勝負気配・展開 等)。市場がまだ織り込みきれない情報。表示/記録用 (確率には未反映)">直前/軟情報</th>
@@ -946,10 +966,12 @@ function IndexCompareCard({
         </table>
       </div>
       <p className="mt-3 text-xs text-(--color-muted)">
-        Claude 指数と市場指数は独立。Claude 指数 = 各馬の力を 0-100 で相対評価 (市場には揃えず、全馬を
-        web 検索で補強して上下)。市場指数 = 100·(1/オッズ)^(1/1.5) — 単勝1.0倍で100 (圧倒的)、温度
-        T=1.5 で 0-100 に分布。根 (補強根拠件数) が多い馬ほど確率モデルが Claude 指数を厚く採用
-        (0 = 動かさない)。最終的な統合は確率モデルの市場ブレンドで別途行う。
+        この表は Claude 指数と市場指数の乖離を見る参考。live の確率 P は Claude 指数 ⊗ モデル指数
+        (GBM ⊗ 速度図表) で合成し、市場指数 (= 100·(1/オッズ)^(1/1.5)、1.0倍で100) は P に混ぜていない
+        (市場無視 market_blend=0)。市場は P×O の O (実オッズ) としてのみ効く。Claude 指数 = 各馬の力を
+        0-100 で相対評価 (市場には揃えず、全馬を web 検索で補強して上下)。差 = Claude − 市場 (正 =
+        Claude が市場より強気 = contrarian の狙い目)。根 (補強根拠件数) が多い馬ほど確率モデルが
+        Claude 指数を厚く採用 (0 = 動かさない)。
         {scoredAt ? ` · Claude 指数: ${fmtServerDateTime(scoredAt)}` : ""}
       </p>
     </Card>
