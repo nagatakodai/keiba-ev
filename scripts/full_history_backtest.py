@@ -21,10 +21,19 @@ softmax 温度フィットに使われた窓そのもの (= mild in-sample / pee
 要るときは `--fresh-model`: 前70%で学習・[70,80)%で早期停止 (eval 窓を一切見ない) し
 後20%で評価する。
 
+**speed_v2 並列合成の比較 (--speed-v2-blend)**: live (ev.estimate_probs) は LightGBM
+fundamental と v2 速度図表 (実データ par+pace+trip) を幾何 (loglinear) 平均する。本スクリプトは
+同じ式で「LGBM 単独 (base, sv2=0)」と「LGBM⊗speed_v2 並列 (sv2=W)」の単勝 top-1 ROI を
+**同一 race で paired bootstrap** 比較し、差が有意か (CI が 0 を跨ぐか) を出す。注意: par table
+(data/cache/par_times.json) は全 race 集計なので eval 窓の時計も含む = speed_v2 にはごく軽い
+par leakage がある (個馬の結果ではなく condition 水準なので市場も同じ par を見る前提)。
+それでも edge が出なければ「leakage 込みでも勝てない」= test_speed_v2 の β-MLE≈1.0 と整合。
+
 使い方:
   python scripts/full_history_backtest.py                 # 本番モデル (peeking 開示つき)
   python scripts/full_history_backtest.py --fresh-model    # 真の out-of-sample
   python scripts/full_history_backtest.py --all            # 全レース (in-sample 上界)
+  python scripts/full_history_backtest.py --fresh-model --speed-v2-blend 0.5  # 並列合成の効果
 """
 from __future__ import annotations
 
@@ -42,9 +51,13 @@ sys.path.insert(0, str(ROOT))
 
 import lightgbm as lgb  # noqa: E402
 
-from src.ev import DEFAULT_LAMBDA_2, DEFAULT_LAMBDA_3, power_method_overround  # noqa: E402
+from src.ev import (  # noqa: E402
+    DEFAULT_LAMBDA_2, DEFAULT_LAMBDA_3, SPEED_V2_BLEND_LIVE, SPEED_V2_TEMP,
+    power_method_overround,
+)
 
 ALL = ROOT / "data" / "datasets" / "all.parquet"
+V2 = ROOT / "data" / "datasets" / "v2_features.parquet"
 SETTLED = ROOT / "data" / "datasets" / "settled_odds.parquet"
 MODEL = ROOT / "data" / "models" / "lgbm_lambdarank.txt"
 META = ROOT / "data" / "models" / "lgbm_metadata.json"
@@ -77,6 +90,34 @@ def _blend(model_p: np.ndarray, market_devig: np.ndarray, beta: float) -> np.nda
     lm = np.log(np.clip(model_p, 1e-9, None))
     lk = np.log(np.clip(market_devig, 1e-9, None))
     z = a * lm + b * lk
+    z = z - z.max()
+    e = np.exp(z)
+    return e / e.sum()
+
+
+def _speed_v2_probs(best: np.ndarray, n_runs: np.ndarray, t: float):
+    """speed_chart.speed_v2_win_probs と同一: 有効馬の speed_v2_best を field 内 z-score →
+    softmax(z/T)。no-data 馬は z=0 (中立)。coverage 不足 (有効馬<3 or field半数未満) は None。"""
+    best = np.asarray(best, dtype=float)
+    n_runs = np.asarray(n_runs)
+    mask = n_runs > 0
+    k = int(mask.sum())
+    if k < 3 or k < 0.5 * len(best):
+        return None
+    xs = best[mask]
+    mean = xs.mean()
+    sd = xs.std(ddof=1) if k > 1 else 0.0
+    z = np.zeros(len(best), dtype=float)
+    if sd > 1e-6:
+        z[mask] = (best[mask] - mean) / sd
+    return _softmax(z, t)
+
+
+def _loglinear(f: np.ndarray, g: np.ndarray, w: float) -> np.ndarray:
+    """ev._loglinear_blend と同代数: c ∝ f^(1-w)·g^w。"""
+    a = max(1.0 - w, 0.0)
+    b = max(w, 0.0)
+    z = a * np.log(np.clip(f, 1e-9, None)) + b * np.log(np.clip(g, 1e-9, None))
     z = z - z.max()
     e = np.exp(z)
     return e / e.sum()
@@ -160,7 +201,11 @@ def main() -> int:
     ap.add_argument("--fresh-model", action="store_true",
                     help="eval 窓を一切見ない別モデルを訓練して真の out-of-sample 評価")
     ap.add_argument("--top-m", type=int, default=8)
+    ap.add_argument("--speed-v2-blend", type=float, default=SPEED_V2_BLEND_LIVE,
+                    help="v2速度図表を LightGBM fundamental と並列合成する重み (0=base のみ)。"
+                         "base(sv2=0) と paired 比較する")
     args = ap.parse_args()
+    sv2_w = max(min(args.speed_v2_blend, 1.0), 0.0)
 
     df = pd.read_parquet(ALL)
     meta = json.loads(META.read_text())
@@ -198,12 +243,23 @@ def main() -> int:
     valid_rids = valid_rids & labeled
     vdf = df[df["race_id"].isin(valid_rids)].copy()
     vdf["score"] = booster.predict(vdf[feat_cols].values, num_iteration=booster.best_iteration)
+    # v2 速度図表 (speed_v2_best / v2_n_runs) を merge。無ければ 0 (= sv2 no-op)。
+    if sv2_w > 0 and V2.exists():
+        v2df = pd.read_parquet(V2)[["race_id", "horse_number", "speed_v2_best", "v2_n_runs"]]
+        vdf = vdf.merge(v2df, on=["race_id", "horse_number"], how="left")
+    if "speed_v2_best" not in vdf.columns:
+        vdf["speed_v2_best"] = 0.0
+        vdf["v2_n_runs"] = 0
+    vdf["speed_v2_best"] = vdf["speed_v2_best"].fillna(0.0)
+    vdf["v2_n_runs"] = vdf["v2_n_runs"].fillna(0)
 
     betas = [round(b, 2) for b in np.arange(0.0, 1.01, 0.1)]
 
-    # per-race profit/stake を貯めて bootstrap CI を出す
+    # per-race profit/stake を貯めて bootstrap CI を出す。
+    # base = LGBM fundamental のみ / sv2 = LGBM⊗speed_v2 並列 fundamental。
     win_profit = {b: [] for b in betas}
     win_stake = {b: [] for b in betas}
+    win_profit_sv2 = {b: [] for b in betas}
     mkt_profit, mkt_stake = [], []
     tri_K = [1, 3, 6, 12]
     tri_profit = {k: [] for k in tri_K}
@@ -228,21 +284,34 @@ def main() -> int:
         model_p = _softmax(scores, T)
         market_devig = _devig(odds)
 
+        # speed_v2 並列合成: fundamental = LGBM ⊗ speed_v2 (live ev.estimate_probs と同式)。
+        # 図表が薄ければ sv2_p=None → fund_p=model_p (no-op, live と同じ縮退)。
+        fund_p = model_p
+        if sv2_w > 0:
+            sv2_p = _speed_v2_probs(g["speed_v2_best"].to_numpy(),
+                                    g["v2_n_runs"].to_numpy(), SPEED_V2_TEMP)
+            if sv2_p is not None:
+                fund_p = _loglinear(model_p, sv2_p, sv2_w)
+
         tri_payout = settled_idx.get((rid, "trifecta"), {})
         wide_payout = settled_idx.get((rid, "wide"), {})
 
-        for b in betas:
-            bp = _blend(model_p, market_devig, b)
+        def _win_pay(fund, b):
+            bp = _blend(fund, market_devig, b)
             top = int(nums[int(np.argmax(bp))])
+            return int(100 * odds[int(np.where(nums == top)[0][0])]) if top == winner else 0
+
+        for b in betas:
             win_stake[b].append(100)
-            win_profit[b].append(int(100 * odds[int(np.where(nums == top)[0][0])]) if top == winner else 0)
+            win_profit[b].append(_win_pay(model_p, b))      # base (sv2=0)
+            win_profit_sv2[b].append(_win_pay(fund_p, b))    # sv2 並列
         # market baseline (β=1.0 相当だが素の市場で)
         topm = int(nums[int(np.argmax(market_devig))])
         mkt_stake.append(100)
         mkt_profit.append(int(100 * odds[int(np.where(nums == topm)[0][0])]) if topm == winner else 0)
 
-        # 3連単 Plan H1: β=0.78 ブレンド → PL 連鎖、上位K点
-        bp = _blend(model_p, market_devig, 0.78)
+        # 3連単 Plan H1: β=0.78 ブレンド → PL 連鎖、上位K点 (fund_p = sv2 並列 fundamental)
+        bp = _blend(fund_p, market_devig, 0.78)
         win_d = {int(nums[i]): float(bp[i]) for i in range(len(nums))}
         w2 = {k: v ** DEFAULT_LAMBDA_2 for k, v in win_d.items()}
         w3 = {k: v ** DEFAULT_LAMBDA_3 for k, v in win_d.items()}
@@ -299,21 +368,39 @@ def main() -> int:
     print(f"window: {window_note}")
     print(f"break-even (+EV ライン) = ROI {BREAK_EVEN:.0f}%。市場 baseline は -EV 内のエッジ診断用。\n")
 
-    print("[1] 単勝 top-1 β-sweep (model+market loglinear de-vig blend)")
+    print("[1a] 単勝 top-1 β-sweep — base (LGBM fundamental のみ, speed_v2_blend=0)")
     for b in betas:
         print(line(f"β={b:.1f}", win_profit[b], win_stake[b]))
     print(line("market", mkt_profit, mkt_stake) + "  (de-vig 市場1番人気)")
-    # best β vs market のペア差 CI
     best_b = max(betas, key=lambda b: roi(win_profit[b], win_stake[b]))
     lo, mean, hi = _paired_diff_ci(np.asarray(win_profit[best_b]), np.asarray(mkt_profit), np.asarray(mkt_stake))
     sig = "有意 (CI が 0 を跨がない)" if (lo > 0 or hi < 0) else "有意でない (CI が 0 を跨ぐ)"
-    print(f"\n  best β={best_b:.1f} vs market のROI差: {mean:+.1f}pt  95%CI[{lo:+.1f},{hi:+.1f}] → {sig}")
+    print(f"  best β={best_b:.1f} vs market のROI差: {mean:+.1f}pt  95%CI[{lo:+.1f},{hi:+.1f}] → {sig}")
 
-    print("\n[2] 3連単 Plan H1 (β=0.78 確率上位K点、EV不問)")
+    if sv2_w > 0:
+        print(f"\n[1b] 単勝 top-1 β-sweep — sv2 (LGBM ⊗ speed_v2 並列, speed_v2_blend={sv2_w:.2f})")
+        for b in betas:
+            print(line(f"β={b:.1f}", win_profit_sv2[b], win_stake[b]))
+        # base vs sv2 の paired diff CI (同一 race・同 stake、sv2 − base)。
+        # β=0.0 は live (市場無視) の設定そのもの。best_b は base の最良 β で揃える。
+        print("\n  speed_v2 効果 (sv2 − base のROI差, 同一race paired):")
+        for b in sorted({0.0, round(best_b, 2), 0.78}):
+            if b not in win_profit:
+                continue
+            dlo, dmean, dhi = _paired_diff_ci(
+                np.asarray(win_profit_sv2[b]), np.asarray(win_profit[b]), np.asarray(win_stake[b]))
+            dsig = "有意" if (dlo > 0 or dhi < 0) else "有意でない (CI が 0 を跨ぐ)"
+            tag = " ←live(市場無視)" if b == 0.0 else ""
+            print(f"    β={b:.2f}{tag}: base {roi(win_profit[b], win_stake[b]):.1f}% → "
+                  f"sv2 {roi(win_profit_sv2[b], win_stake[b]):.1f}%  "
+                  f"Δ{dmean:+.1f}pt 95%CI[{dlo:+.1f},{dhi:+.1f}] → {dsig}")
+
+    _fund_note = f"sv2 並列 fundamental (speed_v2_blend={sv2_w:.2f})" if sv2_w > 0 else "LGBM fundamental"
+    print(f"\n[2] 3連単 Plan H1 (β=0.78 確率上位K点、EV不問) — {_fund_note}")
     for K in tri_K:
         print(line(f"K={K}", tri_profit[K], tri_stake[K]))
 
-    print("\n[3] ワイド top-1 (確率最上位ペア)")
+    print(f"\n[3] ワイド top-1 (確率最上位ペア) — {_fund_note}")
     print(line("wide", wide_profit, wide_stake))
 
     print("\n判定基準: ROI 95%CI 下限 > 100% の戦略のみ実弾候補。市場(80%)超えは『損が小さい』に過ぎず -EV。")
