@@ -164,6 +164,39 @@ export type RecommendedBundle = {
   };
 };
 
+// Plan T「全力的中モード」束 (3連単のみ・市場無視・Claude 指数フォーメーション・トリガミ防止あり)。
+// legs は RecommendedBundle と同形 (BundleLegsTable 流用可、bet_type は全て "trifecta")。
+export type TrifectaHitmaxBundle = {
+  objective: string;              // "trifecta_hitmax"
+  bankroll: number;
+  legs: BundleLeg[];
+  total_stake: number;
+  total_fraction: number;
+  bundle_hit_prob: number;
+  covered_prob: number;           // = bundle_hit_prob。理論的中率 (model 基準・過信禁物)
+  expected_return: number;        // gross multiplier (-EV 想定の参考値)
+  n_points: number;               // 実点数 (フォーメーション展開数 − トリガミ除去)
+  n_formation: number;            // フォーメーション展開の総 triple 数 (除去前)
+  n_candidates: number;           // odds が取れて買えた triple 数
+  // Claude 指数フォーメーション構造
+  rank_source?: string | null;    // "claude" | "model" (Claude 指数 or model fallback)
+  formation?: string | null;      // "1×4×7" (1着×2着×3着 の頭数)
+  head_horses?: number[];         // 1着候補 (絞る)
+  mid_horses?: number[];          // 2着候補 (中くらい)
+  tail_horses?: number[];         // 3着候補 (広げる)
+  head_n?: number;                // 1着列頭数 (1 or 2、指数の開きで可変)
+  // トリガミ防止 (build_bundle と共通)
+  min_payout_ratio?: number;      // 最小 払戻/投資 (≥ torigami_margin なら当たれば必ず投資総額以上)
+  dropped_torigami?: number;      // トリガミで除去した脚数
+  torigami_margin?: number;
+  odds_summary?: {
+    min_payout: number;
+    median_payout: number;
+    max_payout: number;
+    weighted_avg_odds: number;    // Σ p_i·O_i / Σ p_i (配当の伸び)
+  } | null;
+};
+
 export type PredictionDetail = {
   race_id: string;
   saved_at: string;
@@ -221,6 +254,14 @@ export type PredictionDetail = {
   //   recommended_bundle      : 回収優先 (実弾で買う、joint Kelly EV 最適)
   //   recommended_bundle_hit  : 的中優先 (おまけ計測、prob 降順 pool で Kelly)
   recommended_bundle?: RecommendedBundle | null;
+  // Plan T「全力的中モード」: 3連単のみ・市場無視・EV/トリガミ無しの model 的中確率 top-K 束。
+  // recommended_bundle (EV駆動) と完全分離。covered_prob = 理論的中率 (model 基準・過信禁物)。
+  recommended_bundle_t?: TrifectaHitmaxBundle | null;
+  plan_t_keys?: number[][];
+  plan_t_params?: {
+    cover?: number; min_points?: number; max_points?: number;
+    fixed_k?: number | null; stake_mode?: string; min_odds?: number | null; bankroll?: number;
+  } | null;
   // 的中優先 EV table (per bet type, prob 降順, px_o>=1.0 で足切り)。
   evidence?: { evidence_by_key?: Record<string, { count: number; reasons?: string[] }>; cuts?: string[]; final_plan?: unknown };
   evidence_rows?: PredictionRow[];

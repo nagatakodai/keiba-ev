@@ -85,6 +85,11 @@ def main(
     phase: str = typer.Option("bet", "--phase", help="score = Claude 考察で各馬指数を出しキャッシュ / bet = 指数+市場でP→束→snapshot (既定)"),
     llm_blend: float = typer.Option(ev_mod.LLM_BLEND_DEFAULT, "--llm-blend", help="Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ)"),
     speed_v2_blend: float = typer.Option(ev_mod.SPEED_V2_BLEND_LIVE, "--speed-v2-blend", help="v2速度図表(実データpar+pace+trip)を LightGBM fundamental と並列合成する重み (0=図表使わず, 0.5=幾何平均)。既定=SPEED_V2_BLEND_LIVE"),
+    plan_t_head_max: int = typer.Option(2, "--t-head-max", help="Plan T(全力的中): 1着列の最大頭数 (絞る)。指数top2が接戦なら2頭"),
+    plan_t_head_gap: float = typer.Option(0.12, "--t-head-gap", help="Plan T: 指数top2の相対差がこれ以下なら1着を2頭に (開き判定)"),
+    plan_t_mid: int = typer.Option(4, "--t-mid", help="Plan T: 2着列の頭数 (中くらい)"),
+    plan_t_tail: int = typer.Option(7, "--t-tail", help="Plan T: 3着列の頭数 (広げる)"),
+    plan_t_no_torigami: bool = typer.Option(False, "--t-no-torigami", help="Plan T のトリガミ防止を無効化 (既定: 防止する)"),
 ):
     """URL (netkeiba) を渡して P×O ランキングと Plan A/B/C を出力。"""
     if not (url or html_file):
@@ -174,6 +179,19 @@ def main(
     )
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
 
+    # Plan T 専用の **market-free** probs (市場無視を保証)。market_blend>0 (例: make bet の 0.78)
+    # でも Plan T は市場をランキングに使わないため、market_blend=0 の model-only probs を別途用意する。
+    # market_blend==0 のときは同一なので再計算しない (no-op コスト回避)。
+    if market_blend == 0:
+        probs_t = probs
+    else:
+        probs_t = ev_mod.estimate_probs(
+            rd, market_blend=0.0, market_floor=market_floor,
+            speed_v2_blend=speed_v2_blend,
+            llm_win_index=llm_index, llm_blend=llm_blend,
+            llm_support=llm_support, llm_scale=llm_scale,
+        )
+
     _print_race_header(rd)
     _print_horse_table(rd)
     _print_aptitudes(rd, aptitudes)
@@ -194,7 +212,10 @@ def main(
             feats=feats, lgbm_info=lgbm_info, hit_points=hit_points, probs=probs,
             llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
             llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
-            speed_v2_blend=speed_v2_blend,
+            speed_v2_blend=speed_v2_blend, probs_t=probs_t,
+            plan_t_head_max=plan_t_head_max, plan_t_head_gap=plan_t_head_gap,
+            plan_t_mid=plan_t_mid, plan_t_tail=plan_t_tail,
+            plan_t_no_torigami=plan_t_no_torigami,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -805,6 +826,12 @@ def _save_prediction_snapshot(
     llm_scale: str = "strength",
     llm_alerts: dict[int, list[str]] | None = None,
     speed_v2_blend: float | None = None,
+    probs_t=None,                       # Plan T 用 market-free probs (無ければ probs を使う)
+    plan_t_head_max: int = 2,
+    plan_t_head_gap: float = 0.12,
+    plan_t_mid: int = 4,
+    plan_t_tail: int = 7,
+    plan_t_no_torigami: bool = False,
 ) -> None:
     # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
@@ -816,6 +843,30 @@ def _save_prediction_snapshot(
             recommended_bundle = pf_mod.build_bundle(cands, probs, prioritize="yield")
         except Exception as ex:  # noqa: BLE001
             console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
+    # Plan T (全力的中モード): Claude 指数ドリブンの3連単フォーメーション・市場無視・トリガミ防止あり。
+    # recommended_bundle (EV駆動) とは別物として併走計測する (実弾購入は別フラグ判断)。
+    # 市場無視を保証するため probs_t (market_blend=0 の model-only) を使い、ランキングは Claude 指数。
+    recommended_bundle_t = None
+    probs_for_t = probs_t if probs_t is not None else probs
+    if probs_for_t is not None:
+        try:
+            recommended_bundle_t = pf_mod.build_trifecta_hitmax(
+                probs_for_t, rd.trifecta, rank_index=llm_win_index,
+                head_max=plan_t_head_max, head_gap=plan_t_head_gap,
+                mid_count=plan_t_mid, tail_count=plan_t_tail,
+                avoid_torigami=(not plan_t_no_torigami),
+            )
+        except Exception as ex:  # noqa: BLE001
+            console.print(f"[yellow]Plan T (recommended_bundle_t) 計算失敗: {ex}[/yellow]")
+    if recommended_bundle_t and recommended_bundle_t.get("legs"):
+        rt = recommended_bundle_t
+        osum = rt.get("odds_summary") or {}
+        console.print(
+            f"[magenta]Plan T 全力的中 ({rt.get('rank_source')}指数 {rt.get('formation')}): "
+            f"3連単 {rt['n_points']}点 / 理論的中率 {rt['covered_prob'] * 100:.1f}% (model基準・過信禁物) / "
+            f"¥{rt['total_stake']:,} / 当たれば払戻 ¥{osum.get('min_payout', 0):,}〜¥{osum.get('max_payout', 0):,}"
+            f"{' / トリガミ防止' if not plan_t_no_torigami else ''}[/magenta]"
+        )
     # 回収優先 bet_tables に 3連単 (rows = P×O 降順 top 30) を含める
     bet_tables_serial = _serialize_bet_tables(bet_tables) if bet_tables else {}
     if rows:
@@ -865,6 +916,18 @@ def _save_prediction_snapshot(
         "aptitude_top_horses": list(aptitude_top_horses or []),
         # 「Claude 総合オススメ」= 全 bet type 横断の joint Kelly 最適まとめ買い束 (回収優先, 実弾)。
         "recommended_bundle": recommended_bundle,
+        # Plan T「全力的中モード」= 3連単のみ・市場無視・EV/トリガミ無しの model 的中確率 top-K 束。
+        # recommended_bundle (EV駆動) と完全分離。covered_prob=理論的中率(model基準・過信禁物)。
+        "recommended_bundle_t": recommended_bundle_t,
+        "plan_t_keys": ([l["key"] for l in recommended_bundle_t["legs"]]
+                        if recommended_bundle_t else []),
+        "plan_t_params": {
+            "head_max": plan_t_head_max, "head_gap": plan_t_head_gap,
+            "mid": plan_t_mid, "tail": plan_t_tail,
+            "avoid_torigami": (not plan_t_no_torigami), "bankroll": 10_000,
+            # 市場無視を保証: Plan T は market_blend=0 の model-only probs を使用 (review 指摘対応)。
+            "market_blend": 0.0, "rank_by": "claude_index",
+        },
         # 2段パイプライン: Claude 考察由来の各馬指数を model fundamental に合成した痕跡。
         # llm_win_index=null は score 未完了/未実施 (= モデルのみ) のフォールバックを意味する。
         # llm_win_index: scale="strength" なら 0-100 指数、"prob" なら推定勝率 %。
@@ -1479,6 +1542,9 @@ def _refresh_and_reevaluate(
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor,
                                    speed_v2_blend=speed_v2_blend)
     probs2 = ev_mod.load_probs(None, probs2)
+    # Plan T は市場無視を保証するため market-free probs を別途用意 (market_blend>0 時のみ再計算)。
+    probs2_t = probs2 if market_blend == 0 else ev_mod.estimate_probs(
+        rd2, market_blend=0.0, market_floor=market_floor, speed_v2_blend=speed_v2_blend)
     rows2 = ev_mod.build_table(rd2, probs2)
     bet_tables2 = ev_mod.build_all_bet_tables(rd2, probs2)
 
@@ -1494,6 +1560,7 @@ def _refresh_and_reevaluate(
         _save_prediction_snapshot(
             race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
             feats=feats2, lgbm_info=lgbm_info2, hit_points=hit_points, probs=probs2,
+            speed_v2_blend=speed_v2_blend, probs_t=probs2_t,
         )
 
     _print_top(rows2, n=show)

@@ -32,7 +32,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .ev import PXO_FLOOR
+from .ev import PXO_FLOOR, _tier, trifecta_prob
 from .models import Probabilities
 
 # 1 − Σf の予備をわずかに残し、全外し outcome で log(0) = −∞ になるのを防ぐ。
@@ -340,6 +340,157 @@ def build_bundle(
     base["total_fraction"] = float(frac_round.sum()) if len(frac_round) else 0.0
     base["dropped_torigami"] = n_dropped_torigami
     base["torigami_margin"] = float(torigami_margin)
+    return base
+
+
+def build_trifecta_hitmax(
+    probs: Probabilities,
+    trifecta: Sequence,                  # rd.trifecta (BetOdds 列; odds 源)
+    *,
+    rank_index: dict[int, float] | None = None,   # Claude 指数 (無ければ model win prob で代替)
+    bankroll: int = 10_000,
+    head_max: int = 2,                   # 1着列 最大頭数 (絞る)
+    head_gap: float = 0.12,              # 指数 top2 の相対差がこれ以下なら 1着を 2 頭に (開き判定)
+    mid_count: int = 4,                  # 2着列 頭数 (中くらい)
+    tail_count: int = 7,                 # 3着列 頭数 (広げる)
+    avoid_torigami: bool = True,         # トリガミ防止 (ユーザ指示で既定 ON)
+    torigami_margin: float = TORIGAMI_MARGIN,
+    min_stake: int = 100,
+    stake_unit: int = 100,
+) -> dict:
+    """Plan T「全力的中モード」: Claude 指数ドリブンの 3連単フォーメーション。
+
+    要件 (ユーザ指示 2026-06-02):
+    - **Claude 指数の上位を本命**にしてフォーメーションを組む (rank_index が Claude 指数。無ければ
+      model win prob で代替)。**市場 (オッズ) はランキングに一切使わない**。
+    - **指数の開きを見て 1着を 1〜2 頭に**変える (top2 の相対差が head_gap 以下なら 2 頭=絞りつつ
+      接戦は厚く)。点数はフォーメーションの幅で自動的に変わる。
+    - **1着は絞る (1〜2) / 2着は中くらい (mid_count) / 3着は広げる (tail_count)**。head⊆mid⊆tail
+      (同一ランキングの top-n) で ordered triple を全展開。
+    - **トリガミ防止する** (avoid_torigami=True): build_bundle の的中優先 (prioritize="hit") 配分 +
+      トリガミ除去ループを再利用し、どの脚が当たっても払戻 ≥ 投資総額×margin を保証 (= 当たれば
+      投資総額以上を回収)。-EV は許容 (当たらなければマイナス) だが当たり時のトリガミは防ぐ。
+    - 3連単のみ。確率は **market_blend=0 の model-only probs** (Claude指数 ⊗ GBM ⊗ speed_v2) を
+      渡すこと (呼び出し側が保証)。返り値は build_bundle と同 schema (objective="trifecta_hitmax")。
+
+    odds が取れない triple は買えないので除外。covered_prob は最終 (トリガミ除去後) の脚の
+    model 的中確率の和 (= 互いに排他なので束の理論的中率)。
+    """
+    base = {
+        "objective": "trifecta_hitmax",
+        "bankroll": bankroll,
+        "legs": [],
+        "total_stake": 0,
+        "total_fraction": 0.0,
+        "bundle_hit_prob": 0.0,
+        "covered_prob": 0.0,
+        "expected_return": 0.0,
+        "n_points": 0,
+        "n_candidates": 0,
+        "n_formation": 0,
+        "rank_source": None,
+        "head_horses": [],
+        "mid_horses": [],
+        "tail_horses": [],
+        "head_n": 0,
+        "formation": None,
+        "odds_summary": None,
+    }
+
+    # odds 源: absent / odds<=0 を除外して key→odds lookup (build_table と同じガード)。
+    odds_by_key: dict[tuple, float] = {}
+    for t in (trifecta or []):
+        if getattr(t, "absent", False) or getattr(t, "odds", 0) <= 0:
+            continue
+        odds_by_key[tuple(t.key)] = float(t.odds)
+
+    win = probs.win or {}
+    horses = [h for h, pw in win.items() if pw > 0]
+    if not horses or not odds_by_key:
+        return base
+
+    # ランキング: Claude 指数優先 (rank_index)、無ければ model win prob (市場は使わない)。
+    if rank_index:
+        rank = sorted(horses, key=lambda h: (rank_index.get(h, float("-inf")), win.get(h, 0.0)),
+                      reverse=True)
+        idx = {h: float(rank_index.get(h, 0.0)) for h in rank}
+        base["rank_source"] = "claude"
+    else:
+        rank = sorted(horses, key=lambda h: win.get(h, 0.0), reverse=True)
+        idx = {h: float(win.get(h, 0.0)) for h in rank}
+        base["rank_source"] = "model"
+    n = len(rank)
+
+    # 1着列の頭数: 既定 1。指数 top2 が接戦 (idx[1] ≥ idx[0]·(1−head_gap)) なら 2 頭に (絞りつつ厚く)。
+    head_n = 1
+    if n >= 2 and head_max >= 2:
+        top, second = idx[rank[0]], idx[rank[1]]
+        if top > 0 and second >= top * (1.0 - head_gap):
+            head_n = 2
+    head_n = max(1, min(head_n, head_max, n))
+    mid_n = min(max(mid_count, head_n), n)         # 2着 中くらい (≥ head)
+    tail_n = min(max(tail_count, mid_n), n)        # 3着 広い (≥ mid)
+    head, mid, tail = rank[:head_n], rank[:mid_n], rank[:tail_n]
+    base.update(head_horses=list(head), mid_horses=list(mid), tail_horses=list(tail),
+                head_n=head_n, formation=f"{head_n}×{mid_n}×{tail_n}")
+
+    # フォーメーション展開: a∈head, b∈mid, c∈tail (相異なる)。買える (odds 有る) triple のみ候補化。
+    cands: list[dict] = []
+    seen: set[tuple] = set()
+    for a in head:
+        for b in mid:
+            if b == a:
+                continue
+            for c in tail:
+                if c == a or c == b:
+                    continue
+                key = (a, b, c)
+                if key in seen:
+                    continue
+                seen.add(key)
+                odds = odds_by_key.get(key)
+                if odds is None:
+                    continue
+                pr = trifecta_prob(key, probs)
+                cands.append({"bet_type": "trifecta", "key": list(key), "odds": odds,
+                              "prob": pr, "px_o": pr * odds, "tier": _tier(pr * odds)})
+    base["n_formation"] = len(seen)
+    base["n_candidates"] = len(cands)
+    if not cands:
+        return base
+
+    # 配分 + トリガミ防止は build_bundle の的中優先経路を再利用 (テスト済の除去ループ)。
+    # prioritize="hit": EV floor なし・想定P比例配分。avoid_torigami: 払戻 < 投資総額×margin の
+    # 脚を収束まで除去 → どの的中でも払戻 ≥ 投資総額×margin。上限を外して formation 全体を渡す。
+    bundle = build_bundle(
+        cands, probs, bankroll=bankroll, prioritize="hit",
+        avoid_torigami=avoid_torigami, torigami_margin=torigami_margin,
+        hit_max_legs=len(cands), max_legs=len(cands),
+        min_stake=min_stake, stake_unit=stake_unit,
+    )
+    # build_bundle の汎用フィールドを base にマージしつつ Plan T 固有を上書き。
+    base.update({k: bundle[k] for k in bundle if k in base or k in (
+        "min_payout_ratio", "dropped_torigami", "torigami_margin",
+        "expected_log_growth", "total_fraction", "n_outcomes")})
+    base["objective"] = "trifecta_hitmax"
+    base["legs"] = bundle.get("legs", [])
+    base["total_stake"] = bundle.get("total_stake", 0)
+    base["expected_return"] = bundle.get("expected_return", 0.0)
+    # covered_prob = 最終 (トリガミ除去後) 脚の model 的中確率の和 (排他 ⇒ 束の理論的中率)。
+    covered = float(sum(trifecta_prob(tuple(l["key"]), probs) for l in base["legs"]))
+    base["covered_prob"] = covered
+    base["bundle_hit_prob"] = covered
+    base["n_points"] = len(base["legs"])
+
+    if base["legs"]:
+        payouts = sorted(l["payout_if_hit"] for l in base["legs"])
+        wsum = sum(l["prob"] for l in base["legs"]) or 1.0
+        base["odds_summary"] = {
+            "min_payout": payouts[0],
+            "median_payout": payouts[len(payouts) // 2],
+            "max_payout": payouts[-1],
+            "weighted_avg_odds": float(sum(l["prob"] * l["odds"] for l in base["legs"]) / wsum),
+        }
     return base
 
 

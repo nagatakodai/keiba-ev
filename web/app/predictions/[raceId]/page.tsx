@@ -156,6 +156,8 @@ export default async function PredictionDetailPage({
 
       <TopRecommendationCard d={d} finish={finish} />
 
+      <PlanTCard d={d} finish={finish} />
+
       {d.result && (() => {
         // 表示判定は回収優先 bundle のみ (的中優先は廃止)。
         const bundleLegs = d.recommended_bundle?.legs;
@@ -511,6 +513,67 @@ function TopRecommendationCard({
           </p>
         </>
       )}
+    </Card>
+  );
+}
+
+// Plan T「全力的中モード」: 3連単のみ・市場無視・Claude 指数フォーメーション・トリガミ防止あり。
+// recommended_bundle (EV駆動) とは別物。legs は同形なので BundleLegsTable を流用する。
+function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
+  const b = d.recommended_bundle_t;
+  if (!b || !b.legs || b.legs.length === 0) return null;
+  const settled = !!finish && finish.length >= 3;
+  const hit = !!(finish && b.legs.some((l) => betHits(l.bet_type, l.key, finish)));
+  const osum = b.odds_summary;
+  const torigamiOn = (b.dropped_torigami ?? 0) >= 0 && b.min_payout_ratio != null;
+  const rankLabel = b.rank_source === "claude" ? "Claude 指数" : "モデル指数 (Claude 未実施)";
+  return (
+    <Card
+      tone={settled && hit ? "active" : "default"}
+      title={
+        <span className="flex items-center gap-2 flex-wrap">
+          <span>Plan T — 全力的中モード (3連単)</span>
+          <Badge tone="warn">市場無視</Badge>
+          {b.formation && <Badge tone="info">{b.formation} フォーメーション</Badge>}
+          {settled && <Badge tone={hit ? "good" : "bad"}>{hit ? "的中" : "不的中"}</Badge>}
+        </span>
+      }
+    >
+      <p className="text-xs text-(--color-muted) mb-3">
+        市場(オッズ)をランキングに一切使わず、<b>{rankLabel}</b>の上位を本命に3連単フォーメーションを組む。
+        1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
+        (当たれば投資総額以上を回収)。理論的中率は model 基準なので過信禁物 (楽観バイアス込み)・当たらなければ
+        −EV。実弾は EV 束 (recommended_bundle) とは別判断。
+      </p>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <Stat label="点数" value={`${b.n_points} 点`} />
+        <Stat label="理論的中率 (model)" value={fmtPct(b.covered_prob, 1)} />
+        <Stat label="投資総額" value={`¥${b.total_stake.toLocaleString()}`} />
+        {osum && (
+          <Stat label="当たれば払戻 (最小〜最大)"
+            value={`¥${osum.min_payout.toLocaleString()}〜¥${osum.max_payout.toLocaleString()}`} />
+        )}
+        {b.min_payout_ratio != null && (
+          <Stat label="最小 払戻/投資"
+            value={<span className={b.min_payout_ratio >= (b.torigami_margin ?? 1.1) ? "text-(--color-good)" : "text-(--color-warn)"}>×{b.min_payout_ratio.toFixed(2)}</span>} />
+        )}
+        {osum && <Stat label="加重平均オッズ" value={`×${osum.weighted_avg_odds.toFixed(0)}`} />}
+      </div>
+      {(b.head_horses?.length || b.mid_horses?.length || b.tail_horses?.length) && (
+        <div className="mt-3 text-xs text-(--color-muted) space-y-0.5">
+          <div>1着 (絞): <span className="mono text-(--color-fg)">{(b.head_horses ?? []).join(", ")}</span></div>
+          <div>2着 (中): <span className="mono text-(--color-fg)">{(b.mid_horses ?? []).join(", ")}</span></div>
+          <div>3着 (広): <span className="mono text-(--color-fg)">{(b.tail_horses ?? []).join(", ")}</span></div>
+        </div>
+      )}
+      <div className="mt-4">
+        <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} />
+      </div>
+      <p className="mt-3 text-xs text-(--color-muted)">
+        ランキング = {rankLabel} (市場オッズ不使用) · {b.formation} フォーメーション
+        {torigamiOn ? ` · トリガミ防止: ${(b.dropped_torigami ?? 0) > 0 ? `${b.dropped_torigami}点除去` : "全脚クリア"}` : ""}
+        。当たれば投資総額以上を回収 (トリガミ防止) だが、当たらなければ損 = 長期は −EV になり得る。
+      </p>
     </Card>
   );
 }
