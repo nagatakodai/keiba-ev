@@ -701,7 +701,8 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
         ]
 
     mwp = market_win_probs_from_tanfuku(bets.tanfuku)
-    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp)
+    probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp,
+                                  speed_v2_blend=ev_mod.SPEED_V2_BLEND_LIVE)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     # 3連単 EV table (rd.trifecta 由来)

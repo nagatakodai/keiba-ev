@@ -71,6 +71,17 @@ LLM_BLEND_DEFAULT = 0.5
 MARKET_BLEND_LIVE = 0.0
 T_LLM = 25.0
 
+# v2 速度図表 (実データ par+pace+trip, src/speed_chart.py) を LightGBM fundamental と
+# **並列**に合成する設定 (live 実験, ユーザ指示 2026-06-02)。LightGBM の代替ではなく、
+# fundamental 段で speed_v2_best の field 内分布と幾何 (loglinear) 平均を取る。
+#   - SPEED_V2_BLEND_LIVE: 合成重み w (0=LGBM のみ, 1=図表のみ, 0.5=幾何平均=並列)。
+#   - SPEED_V2_TEMP: speed_v2_best の field 内 z-score を softmax(z/T) で確率化する温度。
+# 注意: test_speed_v2.py で v2 図表は β-MLE≈1.0 (= 市場超え不可・市場に織り込み済) と出ており、
+# OOS の +EV 根拠はまだ無い (要レース蓄積後 sweep)。これは live 検証用の配線。backtest 経路は
+# estimate_probs(speed_v2_blend=0.0 既定) のままなので holdout 参照値 (β=0.78 等) は不変。
+SPEED_V2_BLEND_LIVE = 0.5
+SPEED_V2_TEMP = 1.0
+
 
 # ---------- 確率推定 ----------
 
@@ -80,6 +91,7 @@ def estimate_probs(
     *,
     market_blend: float = BLEND_DEFAULT,
     market_floor: float = 0.01,
+    speed_v2_blend: float = 0.0,   # >0 で v2 速度図表を LightGBM fundamental と並列合成 (live)
     blend_method: str = "loglinear",   # "loglinear" (Benter 2-step) | "linear" (旧)
     lambda_2: float | None = None,   # None = segment metadata の lambda_2_mle (無ければ DEFAULT)
     lambda_3: float | None = None,
@@ -131,7 +143,7 @@ def estimate_probs(
         lambda_3 = float(_seg_meta.get("lambda_3_mle") or DEFAULT_LAMBDA_3)
 
     feats = build_features(rd)
-    fundamental_win = _fundamental_win_probs(horses, feats, segment)
+    fundamental_win = _fundamental_win_probs(horses, feats, segment, speed_v2_blend=speed_v2_blend)
 
     # Claude 指数を model fundamental に合成 (市場ブレンドの前)。指数が無ければ no-op。
     if llm_win_index and llm_blend > 0:
@@ -257,16 +269,49 @@ def _z_score(values: dict[int, float]) -> dict[int, float]:
     return {k: (v - mean) / sd for k, v in values.items()}
 
 
-def _fundamental_win_probs(horses, feats, segment: str | None = None) -> dict[int, float]:
+def _loglinear_blend(f: dict[int, float], g: dict[int, float], w: float) -> dict[int, float]:
+    """2 つの確率分布を幾何 (loglinear) 合成: c_i ∝ f_i^(1-w) · g_i^w。Σ=1 に正規化。
+
+    g に無い馬は w_eff=0 (f のまま) で扱い、不当な抑制を避ける。
+    """
+    import math
+
+    w = max(min(w, 1.0), 0.0)
+    logs: dict[int, float] = {}
+    for k in set(f) | set(g):
+        a = max(f.get(k, 0.0), 1e-9)
+        if k in g:
+            b = max(g[k], 1e-9)
+            logs[k] = (1.0 - w) * math.log(a) + w * math.log(b)
+        else:
+            logs[k] = math.log(a)
+    m = max(logs.values())
+    exps = {k: math.exp(v - m) for k, v in logs.items()}
+    s = sum(exps.values()) or 1.0
+    return {k: v / s for k, v in exps.items()}
+
+
+def _fundamental_win_probs(horses, feats, segment: str | None = None,
+                           *, speed_v2_blend: float = 0.0) -> dict[int, float]:
     """Layer 1 特徴量 → softmax で 1 着確率。
 
     segment ("jra"/"nar") があれば該当 LightGBM モデルを使う (無ければ global)。
     モデルが無ければ z-score 線形和を softmax する Phase A 初期版にフォールバック。
+
+    speed_v2_blend>0 のとき、馬柱から算出した v2 速度図表 (speed_chart.speed_v2_win_probs)
+    を上記 fundamental と並列に幾何合成する (live 実験)。図表データが薄ければ no-op。
     """
     lgb_probs = _lgbm_predict(horses, feats, segment)
-    if lgb_probs is not None:
-        return lgb_probs
-    return _linear_softmax_fallback(horses, feats)
+    base = lgb_probs if lgb_probs is not None else _linear_softmax_fallback(horses, feats)
+    if speed_v2_blend and speed_v2_blend > 0:
+        try:
+            from .speed_chart import speed_v2_win_probs
+            sv2 = speed_v2_win_probs(horses, temperature=SPEED_V2_TEMP)
+        except Exception:
+            sv2 = None
+        if sv2:
+            base = _loglinear_blend(base, sv2, speed_v2_blend)
+    return base
 
 
 # 補強根拠件数 (support) → llm_blend に掛ける per-horse 係数。根拠の無い馬は 0 (= モデル/市場に

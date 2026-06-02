@@ -27,6 +27,7 @@ from rich.table import Table
 from . import ev as ev_mod
 from . import llm as llm_mod
 from . import portfolio as pf_mod
+from . import speed_chart as _speed_chart_mod
 from .aptitude import AptitudeIndex, compute_aptitudes
 from .ev import PXO_FLOOR
 from .features import build_features
@@ -83,6 +84,7 @@ def main(
     with_trio: bool = typer.Option(False, "--with-trio", help="3 連複 (b6) も fetch (jiku iteration で重い)"),
     phase: str = typer.Option("bet", "--phase", help="score = Claude 考察で各馬指数を出しキャッシュ / bet = 指数+市場でP→束→snapshot (既定)"),
     llm_blend: float = typer.Option(ev_mod.LLM_BLEND_DEFAULT, "--llm-blend", help="Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ)"),
+    speed_v2_blend: float = typer.Option(ev_mod.SPEED_V2_BLEND_LIVE, "--speed-v2-blend", help="v2速度図表(実データpar+pace+trip)を LightGBM fundamental と並列合成する重み (0=図表使わず, 0.5=幾何平均)。既定=SPEED_V2_BLEND_LIVE"),
 ):
     """URL (netkeiba) を渡して P×O ランキングと Plan A/B/C を出力。"""
     if not (url or html_file):
@@ -166,6 +168,7 @@ def main(
     # に残置、CLI の --market-blend で 1 回限り試せる。
     probs = ev_mod.estimate_probs(
         rd, market_blend=market_blend, market_floor=market_floor,
+        speed_v2_blend=speed_v2_blend,
         llm_win_index=llm_index, llm_blend=llm_blend,
         llm_support=llm_support, llm_scale=llm_scale,
     )
@@ -191,6 +194,7 @@ def main(
             feats=feats, lgbm_info=lgbm_info, hit_points=hit_points, probs=probs,
             llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
             llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
+            speed_v2_blend=speed_v2_blend,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -246,6 +250,7 @@ def main(
                 min_prob=min_prob,
                 market_blend=market_blend,
                 market_floor=market_floor,
+                speed_v2_blend=speed_v2_blend,
                 hit_points=hit_points,
                 hit_budget_ratio=hit_budget_ratio,
                 aptitude_top=aptitude_top,
@@ -799,6 +804,7 @@ def _save_prediction_snapshot(
     llm_support: dict[int, int] | None = None,
     llm_scale: str = "strength",
     llm_alerts: dict[int, list[str]] | None = None,
+    speed_v2_blend: float | None = None,
 ) -> None:
     # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
@@ -873,6 +879,13 @@ def _save_prediction_snapshot(
         "llm_blend": llm_blend,
         "llm_scored_at": llm_scored_at,
         "llm_fallback": llm_win_index is None,
+        # v2 速度図表 (実データ par+pace+trip) を LightGBM fundamental と並列合成した重みと、
+        # 各馬の図表値 (best/wavg/pace/trip/n_runs)。speed_v2_blend=0/None なら未使用。
+        "speed_v2_blend": speed_v2_blend,
+        "speed_v2_chart": (
+            {str(k): v for k, v in _speed_chart_mod.horse_charts(rd.race.horses).items()}
+            if speed_v2_blend else None
+        ),
         # 市場指数 (= 100 / 単勝オッズ、1.0倍で100、Claude 独立)。
         "market_win_index": ({str(k): v for k, v in _market_win_index(rd).items()}
                              or None),
@@ -1409,6 +1422,7 @@ def _refresh_and_reevaluate(
     min_prob: Optional[float] = None,
     market_blend: float = ev_mod.MARKET_BLEND_LIVE,
     market_floor: float = 0.01,
+    speed_v2_blend: float = ev_mod.SPEED_V2_BLEND_LIVE,
     hit_points: int = 3,
     hit_budget_ratio: float = 0.2,
     aptitude_top: int = 6,
@@ -1462,7 +1476,8 @@ def _refresh_and_reevaluate(
     apt_top2 = _aptitude_top_horses(aptitudes2, n=aptitude_top)
     market_signals2 = compute_market_signals(rd2)
     lgbm_info2 = ev_mod.lgbm_status()
-    probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor)
+    probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor,
+                                   speed_v2_blend=speed_v2_blend)
     probs2 = ev_mod.load_probs(None, probs2)
     rows2 = ev_mod.build_table(rd2, probs2)
     bet_tables2 = ev_mod.build_all_bet_tables(rd2, probs2)
