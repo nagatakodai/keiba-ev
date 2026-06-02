@@ -416,6 +416,7 @@ class WatchAutoManager:
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
+        bet_plan_t: bool = False,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -432,6 +433,7 @@ class WatchAutoManager:
                 bet_payment_method=bet_payment_method,
                 bet_auto_login=bet_auto_login,
                 bet_ipat=bet_ipat,
+                bet_plan_t=bet_plan_t,
             )
 
     async def _start_locked(
@@ -459,7 +461,13 @@ class WatchAutoManager:
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
+        bet_plan_t: bool = False,
     ) -> Job:
+        # 投票束 source を全 betting subprocess に env で伝播 (Job.start が os.environ.copy する
+        # ので loop/scheduler/daemon が一致して継承)。plan_t=Plan T 全力的中 / recommended=EV束。
+        # 早期 return (稼働中ループに daemon を足す) 経路でも効くよう最初に設定する。daemon は更に
+        # .req 記録の bundle_source を権威として尊重するので取り違えは二重に防がれる。
+        os.environ["KEIBA_BET_BUNDLE"] = "plan_t" if bet_plan_t else "recommended"
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
         # ただし**投票ブラウザ daemon が死んでいれば貼り直す**: resume (startup の should_run)
@@ -517,6 +525,8 @@ class WatchAutoManager:
             inner.append("--bet-oddspark")
         if bet_ipat:
             inner.append("--bet-ipat")
+        if bet_plan_t:
+            inner.append("--bet-plan-t")   # env と二重 (env が主、フラグは保険)
         cmd = [
             PY, "-m", "api._watch_loop",
             "--interval", str(interval_sec),
@@ -546,6 +556,7 @@ class WatchAutoManager:
             "bet_payment_method": bet_payment_method,
             "bet_auto_login": bet_auto_login,
             "bet_ipat": bet_ipat,
+            "bet_plan_t": bet_plan_t,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -764,6 +775,7 @@ class WatchAutoManager:
                     if cfg.get("bet_payment_method") else "opcoin",
                 bet_auto_login=bool(cfg.get("bet_auto_login")),
                 bet_ipat=bool(cfg.get("bet_ipat")),
+                bet_plan_t=bool(cfg.get("bet_plan_t")),
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

@@ -620,13 +620,22 @@ class BettingSession:
 
 
 def _apply_stake_multiplier(legs: list[CartLeg], multiplier: float) -> list[CartLeg]:
-    """leg.stake を multiplier 倍して 100 円単位に丸める (最低 ¥100)。"""
+    """leg.stake を multiplier 倍。**整数倍のみ** (非整数は最近接整数に snap + 警告)。
+
+    整数倍は ¥100 倍数のまま stake 比率が不変でトリガミ保証 (各脚 payout ≥ 投資総額×margin) を
+    保つ。非整数は per-leg ¥100 丸めで比率が歪み保証を崩し得る (CartLeg に odds 無く再検証不能)。
+    """
     if multiplier == 1.0:
+        return legs
+    m_int = max(1, int(round(multiplier)))
+    if abs(multiplier - m_int) > 1e-9:
+        print(f"[ipat_bet] ⚠ stake-multiplier={multiplier} は非整数。トリガミ保証維持のため "
+              f"×{m_int} に丸めます (整数倍のみ stake 比率不変)。")
+    if m_int == 1:
         return legs
     out = []
     for l in legs:
-        amt = max(100, int(round(l.stake * multiplier / 100.0)) * 100)
-        out.append(CartLeg(bet_type=l.bet_type, key=l.key, stake=amt))
+        out.append(CartLeg(bet_type=l.bet_type, key=l.key, stake=max(100, l.stake * m_int)))
     return out
 
 

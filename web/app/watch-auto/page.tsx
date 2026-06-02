@@ -65,6 +65,8 @@ export default function WatchAutoPage() {
   const [betOddspark, setBetOddspark] = useState(false);
   // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) が起動 (土日 JRA 用)。
   const [betIpat, setBetIpat] = useState(false);
+  // 投票束を Plan T (全力的中フォーメーション・市場無視) にする (既定 false = EV束)。
+  const [betPlanT, setBetPlanT] = useState(false);
   // 自動ログイン: ON で env 認証 (ODDSPARK_ID/PASSWORD/PIN) で自動ログイン。OFF は人が手でログイン。
   const [betAutoLogin, setBetAutoLogin] = useState(false);
   // **自動購入 (実弾)** モード: ON で #gotobuy → 確認画面 → 確定 まで自動 (人の介入なし)。
@@ -100,6 +102,7 @@ export default function WatchAutoPage() {
     if (c.no_llm != null) setNoLlm(!!c.no_llm);
     if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
     if (c.bet_ipat != null) setBetIpat(!!c.bet_ipat);
+    if (c.bet_plan_t != null) setBetPlanT(!!c.bet_plan_t);
     if (c.bet_auto_login != null) setBetAutoLogin(!!c.bet_auto_login);
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
@@ -155,6 +158,7 @@ export default function WatchAutoPage() {
         no_llm: noLlm,
         bet_oddspark: betOddspark,
         bet_ipat: betIpat,
+        bet_plan_t: betPlanT,
         bet_auto_login: betAutoLogin,
         bet_auto_purchase: betAutoPurchase,
         // 0 を許容 (cap=0 で無効化を意図的に表現できる)。NaN/負値だけ既定に戻す。
@@ -424,6 +428,23 @@ export default function WatchAutoPage() {
                 />
                 <span>JRA 即PAT 自動投票 (カート投入・要ログイン / 土日 JRA 開催日)</span>
               </label>
+              {(betOddspark || betIpat) && (
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={betPlanT}
+                    onChange={(e) => setBetPlanT(e.target.checked)}
+                    disabled={running}
+                    className="accent-(--color-warn)"
+                  />
+                  <span>
+                    投票束を <b>Plan T (全力的中・市場無視)</b> にする
+                    <span className="text-xs text-(--color-muted)">
+                      {" "}(既定OFF=EV束。切替はループ再起動が必要・−EV想定)
+                    </span>
+                  </span>
+                </label>
+              )}
             </div>
             {betOddspark && (
               <>

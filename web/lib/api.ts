@@ -328,6 +328,8 @@ export type WatchAutoStatus = {
     bet_payment_method?: "opcoin" | "buylimit";
     // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) を起動。
     bet_ipat?: boolean;
+    // 投票束を Plan T (全力的中フォーメーション・市場無視) にする (既定 false = EV束)。
+    bet_plan_t?: boolean;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -524,6 +526,7 @@ export const api = {
     bet_stake_multiplier?: number;
     bet_payment_method?: "opcoin" | "buylimit";
     bet_ipat?: boolean;
+    bet_plan_t?: boolean;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

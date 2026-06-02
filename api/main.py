@@ -304,6 +304,10 @@ class WatchAutoStartRequest(BaseModel):
     # **headful なので `make api` は DISPLAY のある端末で起動**。認証は env
     # (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。bet_oddspark と独立に ON 可。
     bet_ipat: bool = False
+    # 投票する束を Plan T (全力的中フォーメーション・市場無視) にする (既定 False = EV束 recommended_bundle)。
+    # ON で全 betting subprocess に env KEIBA_BET_BUNDLE=plan_t を継承させる (enqueue/scheduler/daemon 一致)。
+    # 切替はループ再起動が必要 (起動時の env が .req に記録され daemon が尊重するため)。
+    bet_plan_t: bool = False
 
 
 @app.post("/api/watch-auto/start")
@@ -331,6 +335,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_stake_multiplier=req.bet_stake_multiplier,
         bet_payment_method=req.bet_payment_method,
         bet_ipat=req.bet_ipat,
+        bet_plan_t=req.bet_plan_t,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "ipat_bet_running": WATCH.ipat_bet_running,

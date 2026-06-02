@@ -504,16 +504,24 @@ def record_daily_stake(amount: int) -> int:
 
 
 def _apply_stake_multiplier(legs: list["CartLeg"], multiplier: float) -> list["CartLeg"]:
-    """各 leg.stake を multiplier 倍 (100円単位に丸め)、新しい CartLeg リストを返す。
+    """各 leg.stake を multiplier 倍、新しい CartLeg リストを返す。multiplier=1.0 は no-op。
 
-    multiplier=1.0 は no-op (引数をそのまま返す)。min 100円 を保証 (1円賭けは不可)。
+    **整数倍のみ**に snap する: stake は ¥100 倍数なので整数倍は ¥100 倍数のまま stake 比率が
+    不変で、build_bundle のトリガミ保証 (各脚 payout ≥ 投資総額×margin) が保たれる。非整数倍は
+    per-leg の ¥100 丸めで比率が歪み保証を崩し得る (CartLeg は odds を持たず再検証不能) ため、
+    最近接整数 (≥1) に丸めて警告する。
     """
     if multiplier == 1.0:
         return legs
+    m_int = max(1, int(round(multiplier)))
+    if abs(multiplier - m_int) > 1e-9:
+        print(f"[oddspark_bet] ⚠ stake-multiplier={multiplier} は非整数。トリガミ保証維持のため "
+              f"×{m_int} に丸めます (整数倍のみ stake 比率不変)。")
+    if m_int == 1:
+        return legs
     out: list[CartLeg] = []
     for l in legs:
-        new_stake = max(100, int(round(l.stake * multiplier / 100.0)) * 100)
-        out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=new_stake))
+        out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=max(100, l.stake * m_int)))
     return out
 
 
