@@ -202,8 +202,23 @@ def _creds() -> dict:
             "pin": _env_any("ODDS_PARK_PIN", "ODDSPARK_PIN")}
 
 
-def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
-    """snapshot の recommended_bundle.legs → CartLeg。(legs, race_label) を返す。"""
+# 投票に使う束の source。env KEIBA_BET_BUNDLE (recommended=EV束 / plan_t=全力的中フォーメーション)
+# で切替。enqueue (auto_watch) と daemon (本モジュール) は別プロセスだが env を共有すれば一致する。
+# --plan-t フラグは _main で os.environ にセットしてから処理に入る。
+_BUNDLE_FIELD = {"recommended": "recommended_bundle", "plan_t": "recommended_bundle_t"}
+
+
+def _bundle_source() -> str:
+    return "plan_t" if os.environ.get("KEIBA_BET_BUNDLE", "").strip().lower() == "plan_t" else "recommended"
+
+
+def _legs_from_snapshot(netkeiba_rid: str, source_override: str | None = None) -> tuple[list[CartLeg], str]:
+    """snapshot の束 legs → CartLeg。(legs, race_label) を返す。
+
+    source: source_override (queue の .req に記録された enqueue 時の意図) を最優先し、無ければ
+    env KEIBA_BET_BUNDLE。これで enqueue したプロセスの束選択を daemon が権威として尊重し、
+    別プロセス/別端末で env が食い違っても「enqueue した束」を必ず投票する (取り違え防止)。
+    """
     from .parse import _split_race_id
     venue, si, rn, cup = _split_race_id(netkeiba_rid)
     rid = f"{cup}-{si}-{rn}"
@@ -211,11 +226,13 @@ def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
     if not path.exists():
         raise OddsparkBetError(f"snapshot が無い: {path} (先に analyze で生成)")
     snap = json.loads(path.read_text(encoding="utf-8"))
-    bundle = snap.get("recommended_bundle") or {}
+    src = source_override if source_override in _BUNDLE_FIELD else _bundle_source()
+    field = _BUNDLE_FIELD[src]
+    bundle = snap.get(field) or {}
     legs = [CartLeg(bet_type=l["bet_type"], key=list(l["key"]), stake=int(l.get("stake", 0)))
             for l in (bundle.get("legs") or []) if int(l.get("stake", 0)) > 0]
     if not legs:
-        raise OddsparkBetError("recommended_bundle に脚が無い (見送り or 未生成)")
+        raise OddsparkBetError(f"{field} に脚が無い (見送り or 未生成)")
     return legs, f"{venue} {rn}R"
 
 
@@ -1137,9 +1154,14 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
     """
     for req in sorted(QUEUE_DIR.glob("*.req")):
         rid = req.stem
+        # .req に記録された enqueue 時の束 source を権威として読む (env 食い違い対策)。
+        try:
+            source = (json.loads(req.read_text(encoding="utf-8")) or {}).get("bundle_source")
+        except Exception:  # noqa: BLE001
+            source = None
         terminal = True   # 処理確定 (.done に落とす) か。一過性失敗のみ False で .req 残置
         try:
-            legs, label = _legs_from_snapshot(rid)
+            legs, label = _legs_from_snapshot(rid, source_override=source)
             status, _ok = sess.add_race(rid, legs, label=label)
             if status == "dup":
                 print(f"[oddspark_bet] {rid} は投入済 (skip)")
@@ -1174,6 +1196,12 @@ def _to_netkeiba_rid(arg: str) -> str:
 
 def _main() -> None:
     argv = sys.argv[1:]
+    # --plan-t: 投票に使う束を Plan T (全力的中フォーメーション) に切替 (既定は recommended=EV束)。
+    # env で daemon と enqueue を一致させる (両者別プロセス)。
+    if "--plan-t" in argv:
+        os.environ["KEIBA_BET_BUNDLE"] = "plan_t"
+    print(f"[oddspark_bet] 投票束 source = {_bundle_source()} "
+          f"({'Plan T 全力的中フォーメーション' if _bundle_source() == 'plan_t' else 'EV束 recommended_bundle'})")
     # 常駐セッション (watch-auto --bet-oddspark と連携): 起動時に人がログイン → queue 監視。
     if "--session" in argv:
         poll = 5
@@ -1236,10 +1264,12 @@ def _main() -> None:
     if not args:
         print("usage:\n"
               "  one-shot: python -m src.oddspark_bet <netkeiba_nar_race_id|race_id> "
-              "[--headless] [--manual-login]\n"
+              "[--headless] [--manual-login] [--plan-t]\n"
               "  常駐    : python -m src.oddspark_bet --session [--auto-login] [--poll=5] [--clear] "
-              "[--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000]\n"
-              "    per-race 上限: --max-stake=N で明示指定。未指定なら基準¥10,000×倍率に連動")
+              "[--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000] [--plan-t]\n"
+              "    per-race 上限: --max-stake=N で明示指定。未指定なら基準¥10,000×倍率に連動\n"
+              "    --plan-t: EV束でなく Plan T (全力的中フォーメーション・市場無視) を投票 "
+              "(env KEIBA_BET_BUNDLE=plan_t でも可)")
         raise SystemExit(2)
     try:
         rid = _to_netkeiba_rid(args[0])

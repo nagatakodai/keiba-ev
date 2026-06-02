@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -36,6 +37,19 @@ IPAT_BET_QUEUE_DIR = ROOT / "data/cache/ipat_bet_queue"  # = ipat_bet.QUEUE_DIR 
 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
+
+# enqueue する束の source。env KEIBA_BET_BUNDLE で daemon (oddspark_bet/ipat_bet) と一致させる。
+# recommended=EV束 / plan_t=Plan T 全力的中フォーメーション。--bet-plan-t で env をセット。
+_BUNDLE_FIELD = {"recommended": "recommended_bundle", "plan_t": "recommended_bundle_t"}
+
+
+def _bet_bundle_source() -> str:
+    """投票束 source token ("recommended" | "plan_t")。env KEIBA_BET_BUNDLE で決まる。"""
+    return "plan_t" if os.environ.get("KEIBA_BET_BUNDLE", "").strip().lower() == "plan_t" else "recommended"
+
+
+def _bet_bundle_field() -> str:
+    return _BUNDLE_FIELD[_bet_bundle_source()]
 
 
 # 2段パイプライン: score / bet で dedup 名前空間を分ける。同一 race を score で済ませても
@@ -151,7 +165,7 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
-    legs = [l for l in ((d.get("recommended_bundle") or {}).get("legs") or [])
+    legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]
     if not legs:
         return False   # 見送り (束が空) は投入しない
@@ -163,6 +177,7 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
     tmp.write_text(json.dumps({
         "netkeiba_rid": netkeiba_rid, "race_id": race_id, "legs": len(legs),
         "total_stake": sum(int(l.get("stake", 0)) for l in legs),
+        "bundle_source": _bet_bundle_source(),
         "enqueued_at": int(time.time()),
     }, ensure_ascii=False), encoding="utf-8")
     tmp.rename(req)   # atomic
@@ -188,7 +203,7 @@ def _enqueue_ipat_bet(race_id: str, netkeiba_rid: str) -> bool:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
-    legs = [l for l in ((d.get("recommended_bundle") or {}).get("legs") or [])
+    legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]
     if not legs:
         return False   # 見送り (束が空) は投入しない
@@ -200,6 +215,7 @@ def _enqueue_ipat_bet(race_id: str, netkeiba_rid: str) -> bool:
     tmp.write_text(json.dumps({
         "netkeiba_rid": netkeiba_rid, "race_id": race_id, "legs": len(legs),
         "total_stake": sum(int(l.get("stake", 0)) for l in legs),
+        "bundle_source": _bet_bundle_source(),
         "enqueued_at": int(time.time()),
     }, ensure_ascii=False), encoding="utf-8")
     tmp.rename(req)   # atomic
@@ -504,6 +520,12 @@ def main(
         help="束(legs)が出た発走前 JRA レースを 即PAT betting queue に投入する。別途 "
              "`python -m src.ipat_bet --session` を起動しログインしておくこと (購入確定は人)。",
     ),
+    bet_plan_t: bool = typer.Option(
+        False, "--bet-plan-t",
+        help="enqueue する束を Plan T (全力的中フォーメーション) にする (既定=EV束 recommended_bundle)。"
+             "daemon 側も --plan-t で起動すること。ループ運用は env KEIBA_BET_BUNDLE=plan_t を推奨 "
+             "(loop の各 tick subprocess と daemon の両方が継承する)。",
+    ),
     no_llm: bool = typer.Option(
         False, "--no-llm",
         help="claude -p による各馬指数 (考察) を行わず確率モデルのみで snapshot を保存する。"
@@ -518,6 +540,11 @@ def main(
 ) -> None:
     """1 巡だけ実行。2段: score 帯で考察→指数キャッシュ+**締切前 bet を予約** → 予約時刻 (締切
     bet_lead_sec 秒前) が来た bet を**自動発火** (最新オッズ→束→enqueue)。"""
+    # --bet-plan-t: enqueue する束を Plan T に切替 (env 経由で daemon と一致させる)。
+    if bet_plan_t:
+        os.environ["KEIBA_BET_BUNDLE"] = "plan_t"
+    if (bet_oddspark or bet_ipat):
+        console.print(f"[dim]bet enqueue 束 source = {_bet_bundle_field()}[/dim]")
     now_dt = datetime.now()
     now_ts = int(now_dt.timestamp())
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")

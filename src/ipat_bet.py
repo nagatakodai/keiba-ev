@@ -246,8 +246,20 @@ def _race_no(netkeiba_rid: str) -> int:
     return int(netkeiba_rid[10:12])
 
 
-def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
-    """snapshot の recommended_bundle.legs → CartLeg。(legs, race_label) を返す。
+# 投票に使う束の source。env KEIBA_BET_BUNDLE (recommended=EV束 / plan_t=全力的中フォーメーション)。
+# oddspark_bet と同形 (enqueue/daemon を env で一致させる)。--plan-t は _main で env にセット。
+_BUNDLE_FIELD = {"recommended": "recommended_bundle", "plan_t": "recommended_bundle_t"}
+
+
+def _bundle_source() -> str:
+    return "plan_t" if os.environ.get("KEIBA_BET_BUNDLE", "").strip().lower() == "plan_t" else "recommended"
+
+
+def _legs_from_snapshot(netkeiba_rid: str, source_override: str | None = None) -> tuple[list[CartLeg], str]:
+    """snapshot の束 legs → CartLeg。(legs, race_label) を返す。
+
+    source: source_override (queue の .req に記録された enqueue 時の意図) を最優先し、無ければ
+    env KEIBA_BET_BUNDLE。enqueue した束を daemon が権威として尊重 (env 食い違いで取り違えない)。
 
     snapshot ファイル名は内部 race_id `<cup>-<si>-<rn>` (odds 源非依存で共通)。netkeiba 12桁 rid →
     内部 race_id 変換は `parse._split_race_id` を使う (oddspark_bet._legs_from_snapshot と同形)。
@@ -259,11 +271,13 @@ def _legs_from_snapshot(netkeiba_rid: str) -> tuple[list[CartLeg], str]:
     if not path.exists():
         raise IpatBetError(f"snapshot が無い: {path} (先に analyze で生成)")
     snap = json.loads(path.read_text(encoding="utf-8"))
-    bundle = snap.get("recommended_bundle") or {}
+    src = source_override if source_override in _BUNDLE_FIELD else _bundle_source()
+    field = _BUNDLE_FIELD[src]
+    bundle = snap.get(field) or {}
     legs = [CartLeg(bet_type=l["bet_type"], key=list(l["key"]), stake=int(l.get("stake", 0)))
             for l in (bundle.get("legs") or []) if int(l.get("stake", 0)) > 0]
     if not legs:
-        raise IpatBetError("recommended_bundle に脚が無い (見送り or 未生成)")
+        raise IpatBetError(f"{field} に脚が無い (見送り or 未生成)")
     return legs, f"{venue} {rn}R"
 
 
@@ -840,9 +854,13 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
     """queue を1巡: 各 <rid>.req の snapshot 束を投入し、処理確定なら .done に rename。"""
     for req in sorted(QUEUE_DIR.glob("*.req")):
         rid = req.stem
+        try:
+            source = (json.loads(req.read_text(encoding="utf-8")) or {}).get("bundle_source")
+        except Exception:  # noqa: BLE001
+            source = None
         terminal = True
         try:
-            legs, label = _legs_from_snapshot(rid)
+            legs, label = _legs_from_snapshot(rid, source_override=source)
             status, _ok = sess.add_race(rid, legs, label=label)
             if status == "dup":
                 print(f"[ipat_bet] {rid} は投入済 (skip)")
@@ -875,6 +893,11 @@ def _to_netkeiba_rid(arg: str) -> str:
 
 def _main() -> None:
     argv = sys.argv[1:]
+    # --plan-t: 投票に使う束を Plan T (全力的中フォーメーション) に切替 (既定は EV束)。env で一致。
+    if "--plan-t" in argv:
+        os.environ["KEIBA_BET_BUNDLE"] = "plan_t"
+    print(f"[ipat_bet] 投票束 source = {_bundle_source()} "
+          f"({'Plan T 全力的中フォーメーション' if _bundle_source() == 'plan_t' else 'EV束 recommended_bundle'})")
     if "--session" in argv:
         poll = 5
         daily_cap = DAILY_CAP_DEFAULT
@@ -918,10 +941,12 @@ def _main() -> None:
     args = [a for a in argv if not a.startswith("-")]
     if not args:
         print("usage:\n"
-              "  one-shot: python -m src.ipat_bet <netkeiba_jra_race_id|race_id> [--manual-login]\n"
+              "  one-shot: python -m src.ipat_bet <netkeiba_jra_race_id|race_id> [--manual-login] [--plan-t]\n"
               "  常駐    : python -m src.ipat_bet --session [--auto-login] [--auto-purchase] "
-              "[--poll=5] [--clear] [--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000]\n"
-              "    per-race 上限: --max-stake=N で明示指定。未指定なら基準¥10,000×倍率に連動")
+              "[--poll=5] [--clear] [--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000] [--plan-t]\n"
+              "    per-race 上限: --max-stake=N で明示指定。未指定なら基準¥10,000×倍率に連動\n"
+              "    --plan-t: EV束でなく Plan T (全力的中フォーメーション・市場無視) を投票 "
+              "(env KEIBA_BET_BUNDLE=plan_t でも可)")
         raise SystemExit(2)
     try:
         rid = _to_netkeiba_rid(args[0])

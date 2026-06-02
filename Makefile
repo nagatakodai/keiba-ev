@@ -185,6 +185,9 @@ INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
 BET_ODDSPARK ?=
 BET_IPAT ?=
+# 投票に使う束: recommended (EV束, 既定) | plan_t (Plan T 全力的中フォーメーション・市場無視)。
+# env KEIBA_BET_BUNDLE で daemon/scheduler/loop 全プロセスを一致させる。例: make bet BET_BUNDLE=plan_t
+BET_BUNDLE ?= recommended
 BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,)
 BAND_ARGS := --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE) --bet-lead-sec $(BET_LEAD_SEC) $(if $(LLM_BLEND),--llm-blend $(LLM_BLEND),)
 # 投票発火の専用デーモン (watch-auto の poll とは独立に締切 BET_LEAD_SEC 秒前ちょうどに撃つ)。
@@ -208,8 +211,8 @@ watch-auto:
 SESSION_ARGS ?=
 watch-auto-bet:
 	@echo "watch-auto-bet: 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
-	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。**"
-	@bash -c 'trap "kill 0" EXIT INT TERM; \
+	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。** 投票束=$(BET_BUNDLE)"
+	@bash -c 'export KEIBA_BET_BUNDLE=$(BET_BUNDLE); trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.oddspark_bet --session $(SESSION_ARGS) & \
 		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-oddspark & \
 		while true; do \
@@ -227,8 +230,8 @@ watch-auto-bet:
 # 認証は env (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。SESSION_ARGS で daemon に追加引数。
 watch-auto-ipat-bet:
 	@echo "watch-auto-ipat-bet: 即PAT 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
-	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。**"
-	@bash -c 'trap "kill 0" EXIT INT TERM; \
+	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。** 投票束=$(BET_BUNDLE)"
+	@bash -c 'export KEIBA_BET_BUNDLE=$(BET_BUNDLE); trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.ipat_bet --session $(SESSION_ARGS) & \
 		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-ipat & \
 		while true; do \

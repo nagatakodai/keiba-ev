@@ -89,7 +89,7 @@ def test_queue_success_and_terminal_error_mark_done(tmp_path, monkeypatch):
     qdir = tmp_path / "q"
     monkeypatch.setattr(ob, "QUEUE_DIR", qdir)
     monkeypatch.setattr(ob, "_legs_from_snapshot",
-                        lambda rid: ([ob.CartLeg("win", [1], 100)], "X"))
+                        lambda rid, source_override=None: ([ob.CartLeg("win", [1], 100)], "X"))
     for rid in ("202650052701", "202650052702", "202650052703"):
         _put_req(qdir, rid)
     sess = _FakeSession({
@@ -108,7 +108,7 @@ def test_queue_transient_error_retries_then_gives_up(tmp_path, monkeypatch):
     qdir = tmp_path / "q"
     monkeypatch.setattr(ob, "QUEUE_DIR", qdir)
     monkeypatch.setattr(ob, "_legs_from_snapshot",
-                        lambda rid: ([ob.CartLeg("win", [1], 100)], "X"))
+                        lambda rid, source_override=None: ([ob.CartLeg("win", [1], 100)], "X"))
     rid = "202650052705"
     _put_req(qdir, rid)
     sess = _FakeSession({rid: RuntimeError})   # 一過性 glitch を模す
