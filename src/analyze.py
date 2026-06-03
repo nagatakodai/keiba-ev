@@ -688,23 +688,19 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
 
 
 # score ステージ timeout の見積り基準。effort=max の web 検索は 1 ラウンド ~30-50s かかり
-# sequential なので、小頭数でも一定の floor を確保しないと kill されて指数キャッシュが作れない
-# (実機: 7頭立てで floor 300s に張り付き 11 回検索の途中で timeout)。
-# **研究に最大 15 分使ってよい** (ユーザ指示 2026-06-03)。floor=cap=900 なので runway が足りる限り
-# 全レースこの 15 分枠を使える (小頭数でも短縮しない)。per-horse は将来 cap を上げたとき再活性化。
-SCORE_TIMEOUT_FLOOR = 900          # 研究に 15 分使ってよい (runway が足りれば全レースこの枠)
-SCORE_TIMEOUT_PER_HORSE = 50       # 頭数 × これ で必要量を見積り (現状 floor=cap=900 に支配される)
-SCORE_TIMEOUT_CAP = 900            # 上限 15 分
-SCORE_DEADLINE_BUFFER = 180        # 締切のこの秒数前までに指数キャッシュを書き終える (bet 段が読めるよう)
+# sequential なので、小頭数でも十分な時間を確保しないと kill されて指数キャッシュが作れない
+# (実機: 7頭立てで旧 floor 300s に張り付き 11 回検索の途中で timeout)。
+# **timeout は常に 15 分 (900s) 固定** (ユーザ指示 2026-06-03)。以前は runway (締切までの残り) で
+# 頭打ちしていたが廃止。15 分を使い切りたければ score 帯を締切の ~18 分以上前に始めること
+# (--score-window / --score-tolerance)。env KEIBA_SCORE_TIMEOUT があれば絶対上書き。
+SCORE_TIMEOUT_SEC = 900            # 常に 15 分
 
 
 def _score_timeout(rd, n_run: int) -> int:
-    """score ステージの timeout を「締切までの runway」と「頭数の必要量」から決める。
+    """score ステージの timeout。**常に 15 分 (SCORE_TIMEOUT_SEC) 固定**。
 
-    - env `KEIBA_SCORE_TIMEOUT` (秒) があれば**絶対上書き** (運用での手動チューニング用)。
-    - 無ければ need = clamp(n_run × PER_HORSE, FLOOR..CAP) を、利用可能 runway
-      (締切 − now − BUFFER) で頭打ちにする。runway を超えると bet 段 (締切直前発火) が指数を
-      読む前に kill されず済む一方、無駄に締切を跨がない。締切情報が無ければ need をそのまま。
+    env `KEIBA_SCORE_TIMEOUT` (秒) があれば絶対上書き (運用での手動チューニング用)。
+    runway での頭打ちはしない (rd / n_run は呼び出し互換のため受けるが未使用)。
     """
     env = (os.environ.get("KEIBA_SCORE_TIMEOUT") or "").strip()
     if env:
@@ -714,14 +710,7 @@ def _score_timeout(rd, n_run: int) -> int:
                 return v
         except ValueError:
             pass
-    need = max(SCORE_TIMEOUT_FLOOR, min(n_run * SCORE_TIMEOUT_PER_HORSE, SCORE_TIMEOUT_CAP))
-    deadline = rd.race.close_at or ((rd.race.start_at - 120) if rd.race.start_at else 0)
-    if deadline:
-        runway = int(deadline - time.time() - SCORE_DEADLINE_BUFFER)
-        if runway >= 120:
-            return min(need, runway)         # runway を超えない (bet 段に間に合わせる)
-        return max(90, runway)               # 締切間際 → 取れるだけ取って諦める (最低 90s)
-    return need
+    return SCORE_TIMEOUT_SEC
 
 
 def _run_score_stage(
