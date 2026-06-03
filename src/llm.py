@@ -769,6 +769,172 @@ def parse_horse_scores(text: str) -> dict:
     }
 
 
+# 締切1分前の高速 3連単選定では web 検索もファイル読みも一切させない (純粋推論で ~10-30s)。
+_TRIFECTA_SELECT_DISALLOWED = (
+    DISALLOWED_TOOLS + ",Read,WebFetch,"
+    "mcp__brave-search__brave_web_search,mcp__brave-search__brave_local_search,"
+    "mcp__tavily__tavily_search,mcp__tavily__tavily-search,"
+    "mcp__tavily__tavily_extract,mcp__tavily__tavily-extract"
+)
+
+
+def build_trifecta_select_prompt(
+    rd: RaceData, *, llm_index: dict[int, float] | None,
+    aptitudes: dict[int, Any] | None = None,
+    win_odds: dict[int, float] | None = None,
+    max_points: int = 48,
+) -> str:
+    """締切直前の 3連単「全力的中」買い目選定 prompt (検索なし・指数上位から自由構築)。
+
+    各馬の **Claude 指数 (score 段で web 研究済)** + 適性総合 + 単勝オッズを提示し、指数上位を
+    本命に 1着→2着→3着 のフォーメーションを **自由に構築**させる。市場は参考程度。出力は買い目
+    (ordered triple) の配列のみ。トリガミ防止・配分は後段 (build_trifecta_from_keys) が行う。
+    """
+    r = rd.race
+    idx = llm_index or {}
+    apt = aptitudes or {}
+    wodds = dict(win_odds or {})
+    horses = [h for h in r.horses if not getattr(h, "absent", False)]
+    for h in horses:
+        wodds.setdefault(h.number, getattr(h, "win_odds", 0.0) or 0.0)
+    ranked = sorted(horses, key=lambda h: (idx.get(h.number, -1.0),
+                                           -(wodds.get(h.number) or 9e9)), reverse=True)
+    venue = getattr(r, "venue_name", "") or ""
+    dist = getattr(r, "distance", None)
+    surf = getattr(r, "surface", "") or ""
+    rno = getattr(r, "race_number", "") or ""
+    lines = [
+        f"# {venue} {rno}R 3連単「全力的中」買い目選定 ({dist}m {surf})",
+        "あなたは競馬の3連単買い目を組むエキスパート。**各馬の強さ指数 (score 段で web 研究済)** と "
+        "適性・単勝オッズを見て、**指数上位を本命に 1着→2着→3着 のフォーメーション (買い目) を自由に構築**する。",
+        "**検索はしない** (締切直前・指数は研究済)。市場(オッズ)は人気の参考程度で、指数を最優先する。",
+        "",
+        "## 各馬 (Claude 指数降順)",
+        "| 馬番 | 馬名 | 指数(0-100) | 適性総合 | 単勝オッズ |",
+        "|---|---|---|---|---|",
+    ]
+    for h in ranked:
+        n = h.number
+        a = apt.get(n)
+        atot = f"{a.total:.0f}" if a is not None and hasattr(a, "total") else "-"
+        o = wodds.get(n) or 0.0
+        lines.append(f"| {n} | {getattr(h, 'name', '')} | "
+                     f"{idx.get(n, 0):.0f} | {atot} | {o:.1f} |")
+    lines += [
+        "",
+        "## 組み方 (全力的中モード)",
+        f"- **1着** は指数最上位を 1〜2 頭に**絞る** (指数が拮抗するなら2頭)。",
+        "- **2着** は中くらい (指数上位 3〜5 頭程度)。**3着** は広めに取る (上位 5〜8 頭程度・"
+        "3着づけは妙味も拾う)。head ⊆ mid ⊆ tail に拘らず、指数で妥当な馬を各列に置いてよい。",
+        f"- **総点数の上限は {max_points} 点**。これを超えない範囲で「当たりやすさ」を最大化する。"
+        "薄すぎる(指数下位どうしの)目は入れない。",
+        "- 取消・極端な人気薄で指数も低い馬は外す。指数 0 の馬は買い目に入れない。",
+        "",
+        "## 出力 (買い目のみ・JSON)",
+        "考察は短く。最後に必ず以下を ```json ... ``` で出力する。keys は [1着,2着,3着] の配列:",
+        "```json",
+        '{"keys": [[7,2,11],[7,11,2],[2,7,11]],'
+        ' "formation": "1×4×6", "summary": "指数1位7番を1着固定、…",'
+        ' "confidence": "high|mid|low"}',
+        "```",
+    ]
+    return "\n".join(lines)
+
+
+def select_trifecta_stream(
+    rd: RaceData, *,
+    llm_index: dict[int, float] | None,
+    aptitudes: dict[int, Any] | None = None,
+    win_odds: dict[int, float] | None = None,
+    max_points: int = 48,
+    model: str = "opus",
+    timeout: int = 75,
+) -> Iterator[tuple[str, Any]]:
+    """締切直前の高速 3連単選定 stream-json。**web 検索なし** (純粋推論で ~10-30s)。
+
+    出力は parse_trifecta_selection で {keys, formation, summary, confidence} に正規化する。
+    """
+    if not is_available():
+        yield ("error", "claude CLI が見つかりません")
+        return
+    horses = [h for h in rd.race.horses if not getattr(h, "absent", False)]
+    if not horses:
+        yield ("result", "")
+        return
+    prompt = build_trifecta_select_prompt(
+        rd, llm_index=llm_index, aptitudes=aptitudes,
+        win_odds=win_odds, max_points=max_points,
+    )
+    cmd = [
+        "claude", "-p", prompt,
+        "--model", model,
+        "--effort", "high",        # 検索なしの純粋推論なので max でなく high で十分高速
+        "--output-format", "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--permission-mode", "bypassPermissions",
+        "--allowedTools", "",                       # ツール一切なし = 検索しない・高速
+        "--disallowedTools", _TRIFECTA_SELECT_DISALLOWED,
+    ]
+    proc = subprocess.Popen(
+        cmd, cwd=str(ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=_claude_env(),
+    )
+    assert proc.stdout is not None
+    timer, timed_out = _start_kill_timer(proc, timeout)
+    try:
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = ev.get("type")
+            if etype == "assistant":
+                for block in ev.get("message", {}).get("content", []) or []:
+                    if block.get("type") == "text" and block.get("text"):
+                        yield ("text", block["text"])
+            elif etype == "result":
+                yield ("result", ev.get("result", "") or "")
+            elif etype == "error":
+                yield ("error", ev.get("message", "unknown error"))
+    except Exception as e:  # noqa: BLE001
+        yield ("error", f"stream parse error: {e}")
+    finally:
+        for ev in _finalize_claude_proc(proc, timer, timed_out):
+            yield ev
+
+
+def parse_trifecta_selection(text: str) -> dict:
+    """3連単選定出力の JSON を {keys:[[a,b,c]...], formation, summary, confidence} に正規化。
+
+    壊れた/空出力は keys 空で返す (raise しない)。keys は相異3整数の triple のみ採用。
+    """
+    out = {"keys": [], "formation": "", "summary": "", "confidence": ""}
+    raw = parse_evidence(text)   # ```json``` 抽出を流用
+    if not isinstance(raw, dict):
+        return out
+    keys: list[list[int]] = []
+    for k in (raw.get("keys") or []):
+        if not isinstance(k, (list, tuple)) or len(k) != 3:
+            continue
+        try:
+            a, b, c = int(k[0]), int(k[1]), int(k[2])
+        except (TypeError, ValueError):
+            continue
+        if len({a, b, c}) != 3:
+            continue
+        keys.append([a, b, c])
+    out["keys"] = keys
+    out["formation"] = str(raw.get("formation", ""))
+    out["summary"] = str(raw.get("summary", ""))
+    out["confidence"] = str(raw.get("confidence", ""))
+    return out
+
+
 def parse_bundle_review(text: str) -> dict:
     """選定出力の JSON ブロックを {picks,cuts,notes,summary,confidence} に正規化。
 

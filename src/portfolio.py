@@ -494,6 +494,116 @@ def build_trifecta_hitmax(
     return base
 
 
+def build_trifecta_from_keys(
+    probs: Probabilities,
+    trifecta: Sequence,
+    keys: Sequence[Sequence[int]],
+    *,
+    bankroll: int = 10_000,
+    avoid_torigami: bool = True,
+    torigami_margin: float = TORIGAMI_MARGIN,
+    min_stake: int = 100,
+    stake_unit: int = 100,
+    max_points: int = 60,
+) -> dict:
+    """Claude が選んだ 3連単 買い目 (keys) からトリガミ防止つき束を組む (Plan T の Claude 選定版)。
+
+    build_trifecta_hitmax の **機械フォーメーション展開を Claude 選定 keys に差し替えた**版。配分・
+    トリガミ除去は同じ build_bundle(prioritize="hit") 経路を再利用するので、束の schema・トリガミ
+    保証は build_trifecta_hitmax と同一。買えない (オッズ無し) triple・重複・非相異馬は除外し、
+    最大 max_points 点で打ち切る。返り値 objective="trifecta_claude_select" / rank_source="claude" /
+    selection_source="claude" (それ以外のフィールドは build_trifecta_hitmax と同形)。
+    """
+    base = {
+        "objective": "trifecta_claude_select",
+        "bankroll": bankroll, "legs": [], "total_stake": 0, "total_fraction": 0.0,
+        "bundle_hit_prob": 0.0, "covered_prob": 0.0, "expected_return": 0.0,
+        "n_points": 0, "n_candidates": 0, "n_formation": 0,
+        "rank_source": "claude", "selection_source": "claude",
+        "head_horses": [], "mid_horses": [], "tail_horses": [],
+        "head_n": 0, "formation": None, "odds_summary": None,
+    }
+    odds_by_key: dict[tuple, float] = {}
+    for t in (trifecta or []):
+        if getattr(t, "absent", False) or getattr(t, "odds", 0) <= 0:
+            continue
+        odds_by_key[tuple(t.key)] = float(t.odds)
+    win = probs.win or {}
+    if not odds_by_key or not keys:
+        return base
+
+    cands: list[dict] = []
+    seen: set[tuple] = set()
+    heads: list[int] = []
+    mids: list[int] = []
+    tails: list[int] = []
+    for k in keys:
+        if not k or len(k) != 3:
+            continue
+        try:
+            a, b, c = int(k[0]), int(k[1]), int(k[2])
+        except (TypeError, ValueError):
+            continue
+        if len({a, b, c}) != 3:                # 相異3頭でない
+            continue
+        if a not in win or b not in win or c not in win:   # 出走馬でない
+            continue
+        key = (a, b, c)
+        if key in seen:
+            continue
+        odds = odds_by_key.get(key)
+        if odds is None:                       # 買えない (オッズ無し) → 除外
+            continue
+        seen.add(key)
+        if a not in heads:
+            heads.append(a)
+        if b not in mids:
+            mids.append(b)
+        if c not in tails:
+            tails.append(c)
+        pr = trifecta_prob(key, probs)
+        cands.append({"bet_type": "trifecta", "key": [a, b, c], "odds": odds,
+                      "prob": pr, "px_o": pr * odds, "tier": _tier(pr * odds)})
+        if len(cands) >= max_points:
+            break
+    base.update(n_formation=len(seen), n_candidates=len(cands),
+                head_horses=list(heads), mid_horses=list(mids), tail_horses=list(tails),
+                head_n=len(heads),
+                formation=f"{len(heads)}×{len(mids)}×{len(tails)} (Claude選定)")
+    if not cands:
+        return base
+
+    bundle = build_bundle(
+        cands, probs, bankroll=bankroll, prioritize="hit",
+        avoid_torigami=avoid_torigami, torigami_margin=torigami_margin,
+        hit_max_legs=len(cands), max_legs=len(cands),
+        min_stake=min_stake, stake_unit=stake_unit,
+    )
+    base.update({k: bundle[k] for k in bundle if k in base or k in (
+        "min_payout_ratio", "dropped_torigami", "torigami_margin",
+        "expected_log_growth", "total_fraction", "n_outcomes")})
+    base["objective"] = "trifecta_claude_select"
+    base["rank_source"] = "claude"
+    base["selection_source"] = "claude"
+    base["legs"] = bundle.get("legs", [])
+    base["total_stake"] = bundle.get("total_stake", 0)
+    base["expected_return"] = bundle.get("expected_return", 0.0)
+    covered = float(sum(trifecta_prob(tuple(l["key"]), probs) for l in base["legs"]))
+    base["covered_prob"] = covered
+    base["bundle_hit_prob"] = covered
+    base["n_points"] = len(base["legs"])
+    if base["legs"]:
+        payouts = sorted(l["payout_if_hit"] for l in base["legs"])
+        wsum = sum(l["prob"] for l in base["legs"]) or 1.0
+        base["odds_summary"] = {
+            "min_payout": payouts[0],
+            "median_payout": payouts[len(payouts) // 2],
+            "max_payout": payouts[-1],
+            "weighted_avg_odds": float(sum(l["prob"] * l["odds"] for l in base["legs"]) / wsum),
+        }
+    return base
+
+
 def candidates_from_ev_rows(rows, bet_tables) -> list[dict]:
     """analyze.py の EvRow (3連単) + BetEvRow テーブル (他 bet type) を候補に変換。"""
     cands: list[dict] = []

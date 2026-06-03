@@ -217,6 +217,9 @@ def main(
             plan_t_head_max=plan_t_head_max, plan_t_head_gap=plan_t_head_gap,
             plan_t_mid=plan_t_mid, plan_t_tail=plan_t_tail,
             plan_t_no_torigami=plan_t_no_torigami,
+            # bet 段のみ Plan T 買い目選定を Claude に任せる (score 段はキャッシュ作りなので機械)。
+            claude_trifecta_select=(phase == "bet" and not no_llm),
+            llm_select_model=llm_model,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -786,6 +789,83 @@ def _run_score_stage(
     return parsed
 
 
+# 締切直前 3連単選定の timeout 既定 (秒)。env KEIBA_TRIFECTA_SELECT_TIMEOUT で上書き。
+# 検索なしの純粋推論なので短くてよい。runway (締切までの残り) でさらに頭打ちする。
+TRIFECTA_SELECT_TIMEOUT_DEFAULT = 75
+
+
+def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
+                            model: str = "opus", avoid_torigami: bool = True,
+                            max_points: int = 48) -> dict | None:
+    """締切直前に Claude を起動し 3連単買い目を選定 → トリガミ防止つき束を返す (失敗時 None)。
+
+    指示: 指数出力後、3連単の買い目選定まで Claude に任せる / 残り≈1分で起動・**検索なし高速**。
+    keys が空 / 未完了 / 締切間際で時間が無い場合は None を返し、呼び出し側が機械フォーメーション
+    (build_trifecta_hitmax) にフォールバックする。
+    """
+    if not llm_mod.is_available() or not llm_win_index:
+        return None
+    # 締切までの runway で timeout を頭打ち (締切を跨いで走らない)。
+    deadline = rd.race.close_at or ((rd.race.start_at - 120) if rd.race.start_at else 0)
+    base_t = TRIFECTA_SELECT_TIMEOUT_DEFAULT
+    env_t = (os.environ.get("KEIBA_TRIFECTA_SELECT_TIMEOUT") or "").strip()
+    if env_t:
+        try:
+            base_t = max(10, int(float(env_t)))
+        except ValueError:
+            pass
+    if deadline:
+        runway = int(deadline - time.time() - 10)
+        if runway <= 15:
+            console.print("[yellow]Plan T Claude 選定 skip: 締切間際で時間が無い → 機械フォーメーション[/yellow]")
+            return None
+        timeout = max(15, min(base_t, runway))
+    else:
+        timeout = base_t
+    win_odds = {h.number: (getattr(h, "win_odds", 0.0) or 0.0)
+                for h in rd.race.horses if not h.absent}
+    console.rule("[bold]Claude 3連単 買い目選定 (締切直前・検索なし高速)[/bold]")
+    chunks: list[str] = []
+    saw_result = False
+    try:
+        for etype, payload in llm_mod.select_trifecta_stream(
+            rd, llm_index=llm_win_index, aptitudes=aptitudes, win_odds=win_odds,
+            max_points=max_points, model=model, timeout=timeout,
+        ):
+            if etype == "text":
+                chunks.append(payload)
+                console.print(payload, end="")
+            elif etype == "result":
+                saw_result = True
+                if payload:
+                    chunks.append(payload)
+            elif etype == "error":
+                console.print(f"[red]Plan T 選定エラー: {payload}[/red]")
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[yellow]Plan T Claude 選定失敗: {ex}[/yellow]")
+        return None
+    if not saw_result:
+        console.print("[yellow]Plan T Claude 選定 未完了 → 機械フォーメーションにフォールバック[/yellow]")
+        return None
+    sel = llm_mod.parse_trifecta_selection("".join(chunks))
+    keys = sel.get("keys") or []
+    if not keys:
+        console.print("[yellow]Plan T Claude 選定: keys 空 → 機械フォーメーション[/yellow]")
+        return None
+    bundle = pf_mod.build_trifecta_from_keys(
+        probs_for_t, rd.trifecta, keys,
+        avoid_torigami=avoid_torigami, max_points=max_points)
+    if bundle and bundle.get("legs"):
+        bundle["llm_select"] = {"summary": sel.get("summary", ""),
+                                "confidence": sel.get("confidence", ""),
+                                "n_keys": len(keys)}
+        console.print(f"[magenta]Plan T Claude 選定: {len(keys)} 買い目 → 束 "
+                      f"{bundle['n_points']}点 / ¥{bundle['total_stake']:,}[/magenta]")
+        return bundle
+    console.print("[yellow]Plan T Claude 選定: 買える目が無く束が空 → 機械フォーメーション[/yellow]")
+    return None
+
+
 def _market_win_index(rd) -> dict[int, float]:
     """単勝オッズ由来の市場指数 (0-100) を per-horse で返す。
 
@@ -872,6 +952,8 @@ def _save_prediction_snapshot(
     plan_t_mid: int = 4,
     plan_t_tail: int = 7,
     plan_t_no_torigami: bool = False,
+    claude_trifecta_select: bool = False,   # bet 段: Plan T の買い目選定を Claude に任せる
+    llm_select_model: str = "opus",
 ) -> None:
     # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
@@ -889,15 +971,27 @@ def _save_prediction_snapshot(
     recommended_bundle_t = None
     probs_for_t = probs_t if probs_t is not None else probs
     if probs_for_t is not None:
-        try:
-            recommended_bundle_t = pf_mod.build_trifecta_hitmax(
-                probs_for_t, rd.trifecta, rank_index=llm_win_index,
-                head_max=plan_t_head_max, head_gap=plan_t_head_gap,
-                mid_count=plan_t_mid, tail_count=plan_t_tail,
-                avoid_torigami=(not plan_t_no_torigami),
-            )
-        except Exception as ex:  # noqa: BLE001
-            console.print(f"[yellow]Plan T (recommended_bundle_t) 計算失敗: {ex}[/yellow]")
+        # bet 段 (締切直前) は **Claude に 3連単買い目を選定させる** (指数上位から自由構築・検索なし)。
+        # 失敗 / timeout / keys 空 / 締切間際 → 従来の機械フォーメーション (build_trifecta_hitmax)。
+        if (claude_trifecta_select and llm_win_index
+                and not os.environ.get("KEIBA_NO_CLAUDE_TRIFECTA_SELECT")):
+            try:
+                recommended_bundle_t = _claude_select_trifecta(
+                    rd, probs_for_t, llm_win_index, aptitudes,
+                    model=llm_select_model, avoid_torigami=(not plan_t_no_torigami))
+            except Exception as ex:  # noqa: BLE001
+                console.print(f"[yellow]Plan T Claude 選定で例外: {ex} → 機械フォーメーション[/yellow]")
+                recommended_bundle_t = None
+        if not (recommended_bundle_t and recommended_bundle_t.get("legs")):
+            try:
+                recommended_bundle_t = pf_mod.build_trifecta_hitmax(
+                    probs_for_t, rd.trifecta, rank_index=llm_win_index,
+                    head_max=plan_t_head_max, head_gap=plan_t_head_gap,
+                    mid_count=plan_t_mid, tail_count=plan_t_tail,
+                    avoid_torigami=(not plan_t_no_torigami),
+                )
+            except Exception as ex:  # noqa: BLE001
+                console.print(f"[yellow]Plan T (recommended_bundle_t) 計算失敗: {ex}[/yellow]")
     if recommended_bundle_t and recommended_bundle_t.get("legs"):
         rt = recommended_bundle_t
         osum = rt.get("odds_summary") or {}

@@ -588,6 +588,9 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
                 hit_points=3, probs=probs,
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
+                # この保存は bet 段のみ到達 (score 段は上で early return) なので Plan T 買い目選定を
+                # Claude に任せる。指数キャッシュが無ければ内部で機械フォーメーションへフォールバック。
+                claude_trifecta_select=True,
             )
             _tag_snapshot_source(race_id, "keibago")
         except Exception as ex:  # noqa: BLE001

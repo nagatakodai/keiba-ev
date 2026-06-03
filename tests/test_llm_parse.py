@@ -107,3 +107,21 @@ def test_normalize_alerts_robustness():
     assert llm._normalize_alerts({"bad": ["x"]}) == {}                   # 非整数キーは無視
     assert llm._normalize_alerts(None) == {}                            # 壊れた入力
     assert llm._normalize_alerts("nope") == {}
+
+
+def test_parse_trifecta_selection_valid():
+    """3連単選定 JSON: 相異3整数の triple のみ採用、非distinct/len不正/壊れた入力を除外。"""
+    text = (
+        'considerations...\n```json\n'
+        '{"keys": [[7,2,11],[7,11,2],[2,2,2],[1,3],[5,6,7]], '
+        '"formation": "1x4x6", "summary": "s", "confidence": "high"}\n```'
+    )
+    out = llm.parse_trifecta_selection(text)
+    assert out["keys"] == [[7, 2, 11], [7, 11, 2], [5, 6, 7]]   # 非distinct[2,2,2]/len2[1,3] 除外
+    assert out["formation"] == "1x4x6"
+    assert out["confidence"] == "high"
+
+
+def test_parse_trifecta_selection_garbage():
+    assert llm.parse_trifecta_selection("no json here")["keys"] == []
+    assert llm.parse_trifecta_selection("```json\n{}\n```")["keys"] == []

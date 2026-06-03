@@ -530,6 +530,8 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
   // Claude 指数なし (model 縮退) の Plan T は自動投票されない (auto_watch/daemon が enqueue を skip)。
   const claudeMissing = b.rank_source !== "claude";
   const rankLabel = b.rank_source === "claude" ? "Claude 指数" : "モデル指数 (Claude 未実施)";
+  // 締切直前に Claude が買い目自体を選定したか (build_trifecta_from_keys)。
+  const claudeSelected = b.selection_source === "claude";
   return (
     <Card
       tone={settled && hit ? "active" : "default"}
@@ -537,6 +539,7 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
         <span className="flex items-center gap-2 flex-wrap">
           <span>Plan T — 全力的中モード (3連単)</span>
           <Badge tone="warn">市場無視</Badge>
+          {claudeSelected && <Badge tone="magenta">Claude 買い目選定</Badge>}
           {b.formation && <Badge tone="info">{b.formation} フォーメーション</Badge>}
           {claudeMissing && <Badge tone="bad">Claude指数なし→自動投票対象外</Badge>}
           {settled && <Badge tone={hit ? "good" : "bad"}>{hit ? "的中" : "不的中"}</Badge>}
@@ -552,6 +555,13 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
           <>
             {" "}<b className="text-(--color-bad)">この束は Claude 指数が無く model ランキングへ縮退しているため、Plan T 自動投票では
             送信されません</b> (Claude 指数フォーメーションが本質のため)。
+          </>
+        )}
+        {claudeSelected && (
+          <>
+            {" "}<b className="text-(--color-magenta)">締切直前に Claude が買い目を選定</b>
+            (指数上位から自由構築・検索なし高速)。配分・トリガミ防止はモデル側。
+            {b.llm_select?.summary && <> 選定根拠: {b.llm_select.summary}</>}
           </>
         )}
       </p>

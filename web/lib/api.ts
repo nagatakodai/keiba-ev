@@ -180,6 +180,10 @@ export type TrifectaHitmaxBundle = {
   n_candidates: number;           // odds が取れて買えた triple 数
   // Claude 指数フォーメーション構造
   rank_source?: string | null;    // "claude" | "model" (Claude 指数 or model fallback)
+  // "claude" = 締切直前に Claude が3連単買い目を選定 (build_trifecta_from_keys)。
+  // 無し/その他 = 機械フォーメーション (build_trifecta_hitmax)。
+  selection_source?: string | null;
+  llm_select?: { summary?: string; confidence?: string; n_keys?: number } | null;
   formation?: string | null;      // "1×4×7" (1着×2着×3着 の頭数)
   head_horses?: number[];         // 1着候補 (絞る)
   mid_horses?: number[];          // 2着候補 (中くらい)

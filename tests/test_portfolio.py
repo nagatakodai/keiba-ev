@@ -169,3 +169,47 @@ def test_budget_and_hit_prob_bounds():
     assert b["total_stake"] <= 10_000
     assert 0.0 <= b["bundle_hit_prob"] <= 1.0
     assert b["total_fraction"] <= 1.0 + 1e-9
+
+
+def _tri_odds(keys_odds):
+    """[(key, odds), ...] → trifecta BetOdds 風オブジェクト列 (SimpleNamespace)。"""
+    from types import SimpleNamespace
+    return [SimpleNamespace(key=list(k), odds=float(o), absent=False) for k, o in keys_odds]
+
+
+def test_build_trifecta_from_keys_filters_and_allocates():
+    """Claude 選定 keys から束: 重複/非distinct/出走外/オッズ無しを除外、トリガミ防止 stake 配分。"""
+    win = {1: 0.40, 2: 0.25, 3: 0.15, 4: 0.12, 5: 0.08}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    tri = _tri_odds([((1, 2, 3), 60), ((1, 3, 2), 90), ((2, 1, 3), 120), ((1, 2, 4), 75)])
+    keys = [[1, 2, 3], [1, 3, 2], [2, 1, 3], [1, 2, 4],
+            [1, 2, 3], [1, 1, 2], [9, 9, 9], [1, 2, 5]]  # dup / 非distinct / 出走外 / オッズ無し
+    b = pf.build_trifecta_from_keys(probs, tri, keys)
+    assert b["objective"] == "trifecta_claude_select"
+    assert b["rank_source"] == "claude" and b["selection_source"] == "claude"
+    assert b["n_candidates"] == 4                     # 有効 4 keys のみ ([1,2,5]はオッズ無し)
+    got = {tuple(l["key"]) for l in b["legs"]}
+    assert got <= {(1, 2, 3), (1, 3, 2), (2, 1, 3), (1, 2, 4)}
+    # トリガミ防止: 全脚 payout ≥ 投資総額 (min_payout_ratio ≥ margin)
+    assert b["min_payout_ratio"] >= b.get("torigami_margin", 1.10) - 1e-9
+    assert 0 < b["total_stake"] <= 10_000
+
+
+def test_build_trifecta_from_keys_empty_when_no_buyable():
+    win = {1: 0.5, 2: 0.3, 3: 0.2}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    tri = _tri_odds([((1, 2, 3), 50)])
+    # 選定 keys が全て買えない (オッズ無し) → 束空
+    b = pf.build_trifecta_from_keys(probs, tri, [[3, 2, 1], [2, 3, 1]])
+    assert b["legs"] == [] and b["n_points"] == 0
+
+
+def test_build_trifecta_from_keys_max_points_cap():
+    win = {i: 1.0 / 8 for i in range(1, 9)}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    import itertools
+    perms = list(itertools.permutations(range(1, 9), 3))
+    tri = _tri_odds([(p, 100 + i) for i, p in enumerate(perms)])
+    keys = [list(p) for p in perms]                    # 336 通り
+    b = pf.build_trifecta_from_keys(probs, tri, keys, max_points=20)
+    assert b["n_candidates"] <= 20                     # max_points で打ち切り
