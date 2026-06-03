@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import gzip
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -683,6 +684,41 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
     return (scores or None), (support or None), scale, scored_at, (alerts or None)
 
 
+# score ステージ timeout の見積り基準。effort=max の web 検索は 1 ラウンド ~30-50s かかり
+# sequential なので、小頭数でも一定の floor を確保しないと kill されて指数キャッシュが作れない
+# (実機: 7頭立てで floor 300s に張り付き 11 回検索の途中で timeout)。
+SCORE_TIMEOUT_FLOOR = 600          # 最低 10 分は確保 (旧 300s は effort=max 研究に短すぎた)
+SCORE_TIMEOUT_PER_HORSE = 50       # 頭数 × これ で必要量を見積り
+SCORE_TIMEOUT_CAP = 900            # 上限 15 分 (暴走防止)
+SCORE_DEADLINE_BUFFER = 180        # 締切のこの秒数前までに指数キャッシュを書き終える (bet 段が読めるよう)
+
+
+def _score_timeout(rd, n_run: int) -> int:
+    """score ステージの timeout を「締切までの runway」と「頭数の必要量」から決める。
+
+    - env `KEIBA_SCORE_TIMEOUT` (秒) があれば**絶対上書き** (運用での手動チューニング用)。
+    - 無ければ need = clamp(n_run × PER_HORSE, FLOOR..CAP) を、利用可能 runway
+      (締切 − now − BUFFER) で頭打ちにする。runway を超えると bet 段 (締切直前発火) が指数を
+      読む前に kill されず済む一方、無駄に締切を跨がない。締切情報が無ければ need をそのまま。
+    """
+    env = (os.environ.get("KEIBA_SCORE_TIMEOUT") or "").strip()
+    if env:
+        try:
+            v = int(float(env))
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    need = max(SCORE_TIMEOUT_FLOOR, min(n_run * SCORE_TIMEOUT_PER_HORSE, SCORE_TIMEOUT_CAP))
+    deadline = rd.race.close_at or ((rd.race.start_at - 120) if rd.race.start_at else 0)
+    if deadline:
+        runway = int(deadline - time.time() - SCORE_DEADLINE_BUFFER)
+        if runway >= 120:
+            return min(need, runway)         # runway を超えない (bet 段に間に合わせる)
+        return max(90, runway)               # 締切間際 → 取れるだけ取って諦める (最低 90s)
+    return need
+
+
 def _run_score_stage(
     race_id: str, rd, *, aptitudes=None, market_signals=None,
     horse_best_times=None, model: str = "opus",
@@ -699,9 +735,11 @@ def _run_score_stage(
     chunks: list[str] = []
     saw_result = False
     tool_count = 0
-    # 検索予算 = 頭数×2 に増やしたので timeout も頭数連動 (1 クエリ ~20s 見込み、上限 900s)。
+    # timeout は「締切までの runway」と「頭数の必要量」から決める (env KEIBA_SCORE_TIMEOUT で上書き可)。
     n_run = len([h for h in rd.race.horses if not h.absent])
-    score_timeout = max(300, min(n_run * 2 * 20, 900))
+    score_timeout = _score_timeout(rd, n_run)
+    console.print(f"[dim]score timeout = {score_timeout}s ({n_run}頭, "
+                  f"締切={_fmt_ts(rd.race.close_at) if rd.race.close_at else '不明'})[/dim]")
     try:
         for etype, payload in llm_mod.score_horses_stream(
             rd, model=model, aptitudes=aptitudes,

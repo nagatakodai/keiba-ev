@@ -571,6 +571,10 @@ def build_horse_score_prompt(
         f"(合計 ~{len(horses) * 2} クエリ) まで** Brave/Tavily で補強してよい。各馬について最低 "
         "1 回は ①直前情報 (取消/馬体重) または ②軟情報 (近走の不利/勝負気配) を確認し、人気・評価が"
         "割れる馬は 2 回まで深掘りする。各クエリ前に「何が決まるか」を 1 行説明。",
+        "**時間厳守**: これは締切直前の処理。深追いして timeout すると指数が**丸ごと失われる** "
+        "(部分結果も残らない) ので、予算を超えそうなら手元の根拠で各馬の指数を確定し、**必ず最後まで "
+        "JSON を出力する**こと。完璧な調査より「全馬の指数を時間内に出し切る」を優先。1 つの "
+        "WebFetch/検索が重いと感じたら打ち切って次へ進む。",
         "**クエリ例 (①②を狙う)**: \"<馬名>\" 取消 OR 除外 OR 馬体重 / \"<場名>\" <YYYYMMDD> 馬場 含水率 / "
         "\"<馬名>\" 前走 不利 OR 出遅れ OR 詰まる / \"<馬名>\" 厩舎 OR 調教 OR 仕上がり / "
         "\"<開催名>\" {race_no}R 展開 OR ペース / \"<騎手名>\" <場名> 成績".replace("{race_no}", str(r.race_number)),
@@ -619,7 +623,7 @@ def score_horses_stream(
     rd: RaceData,
     *,
     model: str = "opus",
-    timeout: int = 300,
+    timeout: int = 600,
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
