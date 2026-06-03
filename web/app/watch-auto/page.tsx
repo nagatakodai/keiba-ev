@@ -450,7 +450,8 @@ export default function WatchAutoPage() {
                     <span>
                       投票束を <b>Plan T (全力的中・市場無視)</b> にする
                       <span className="text-xs text-(--color-muted)">
-                        {" "}(既定OFF=EV束。切替はループ再起動が必要・−EV想定)
+                        {" "}(既定OFF=EV束。切替はループ再起動が必要・−EV想定。
+                        <b>Claude 指数が無いレースは自動 skip</b>)
                       </span>
                     </span>
                   </label>

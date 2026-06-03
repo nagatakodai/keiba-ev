@@ -274,6 +274,10 @@ def _legs_from_snapshot(netkeiba_rid: str, source_override: str | None = None) -
     src = source_override if source_override in _BUNDLE_FIELD else _bundle_source()
     field = _BUNDLE_FIELD[src]
     bundle = snap.get(field) or {}
+    # Plan T は Claude 指数フォーメーションが本質。指数が無く model ランキングへ縮退した束
+    # (rank_source != "claude") は投票しない (ユーザ指示 2026-06-03)。enqueue 側でも弾くが daemon でも二重に防ぐ。
+    if src == "plan_t" and bundle.get("rank_source") != "claude":
+        raise IpatBetError("Plan T は Claude 指数なし (rank_source≠claude) — 投票しない")
     legs = [CartLeg(bet_type=l["bet_type"], key=list(l["key"]), stake=int(l.get("stake", 0)))
             for l in (bundle.get("legs") or []) if int(l.get("stake", 0)) > 0]
     if not legs:

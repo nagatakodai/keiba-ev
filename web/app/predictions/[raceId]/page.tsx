@@ -527,6 +527,8 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
   const hit = !!(finish && b.legs.some((l) => betHits(l.bet_type, l.key, finish)));
   const osum = b.odds_summary;
   const torigamiOn = (b.dropped_torigami ?? 0) >= 0 && b.min_payout_ratio != null;
+  // Claude 指数なし (model 縮退) の Plan T は自動投票されない (auto_watch/daemon が enqueue を skip)。
+  const claudeMissing = b.rank_source !== "claude";
   const rankLabel = b.rank_source === "claude" ? "Claude 指数" : "モデル指数 (Claude 未実施)";
   return (
     <Card
@@ -536,6 +538,7 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
           <span>Plan T — 全力的中モード (3連単)</span>
           <Badge tone="warn">市場無視</Badge>
           {b.formation && <Badge tone="info">{b.formation} フォーメーション</Badge>}
+          {claudeMissing && <Badge tone="bad">Claude指数なし→自動投票対象外</Badge>}
           {settled && <Badge tone={hit ? "good" : "bad"}>{hit ? "的中" : "不的中"}</Badge>}
         </span>
       }
@@ -545,6 +548,12 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
         1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
         (当たれば投資総額以上を回収)。理論的中率は model 基準なので過信禁物 (楽観バイアス込み)・当たらなければ
         −EV。実弾は EV 束 (recommended_bundle) とは別判断。
+        {claudeMissing && (
+          <>
+            {" "}<b className="text-(--color-bad)">この束は Claude 指数が無く model ランキングへ縮退しているため、Plan T 自動投票では
+            送信されません</b> (Claude 指数フォーメーションが本質のため)。
+          </>
+        )}
       </p>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <Stat label="点数" value={`${b.n_points} 点`} />

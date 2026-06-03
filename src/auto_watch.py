@@ -52,6 +52,20 @@ def _bet_bundle_field() -> str:
     return _BUNDLE_FIELD[_bet_bundle_source()]
 
 
+def _plan_t_missing_claude_index(d: dict) -> bool:
+    """Plan T 投票時に Claude 指数が無い (= model fallback) かを返す (True なら投票しない)。
+
+    Plan T「全力的中モード」は Claude 各馬指数フォーメーションが本質なので、指数キャッシュが
+    無く model ランキングへ縮退した束 (rank_source != "claude") は投票しない (ユーザ指示 2026-06-03)。
+    EV束 (recommended) は指数キャッシュ無し→モデルのみで bet が設計上の従来挙動なので、この
+    ゲートは plan_t のときだけ効かせる。
+    """
+    if _bet_bundle_source() != "plan_t":
+        return False
+    bundle = d.get(_bet_bundle_field()) or {}
+    return bundle.get("rank_source") != "claude"
+
+
 # 2段パイプライン: score / bet で dedup 名前空間を分ける。同一 race を score で済ませても
 # bet 帯で skip されないようにする (= 共有すると bet が全 skip され賭けが走らない致命バグ)。
 # bet は既存ファイルを使い後方互換、score は別ファイル。
@@ -165,6 +179,9 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
+    if _plan_t_missing_claude_index(d):
+        console.print(f"[yellow]Plan T enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
+        return False
     legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]
     if not legs:
@@ -202,6 +219,9 @@ def _enqueue_ipat_bet(race_id: str, netkeiba_rid: str) -> bool:
     try:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
+        return False
+    if _plan_t_missing_claude_index(d):
+        console.print(f"[yellow]Plan T enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
         return False
     legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]

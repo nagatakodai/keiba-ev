@@ -97,3 +97,52 @@ def test_enqueue_skips_jra(tmp_path, monkeypatch):
     _write_snapshot(tmp_path, "2026940527-527-9",
                     [{"bet_type": "win", "key": [1], "stake": 500}])
     assert aw._enqueue_oddspark_bet("2026940527-527-9", "202694052709") is False
+
+
+def _write_snapshot_plan_t(root, race_id, legs, rank_source):
+    """EV束 + Plan T 束 (rank_source 付き) を持つ snapshot を書く。"""
+    pred = root / "data" / "predictions"
+    pred.mkdir(parents=True, exist_ok=True)
+    (pred / f"{race_id}.json").write_text(json.dumps({
+        "race_id": race_id,
+        "recommended_bundle": {"legs": legs},
+        "recommended_bundle_t": {"legs": legs, "rank_source": rank_source},
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_enqueue_plan_t_skips_when_no_claude_index(tmp_path, monkeypatch):
+    """Plan T 投票時、Claude 指数なし (rank_source=model) なら投票しない (enqueue しない)。"""
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "plan_t")
+    _write_snapshot_plan_t(tmp_path, "2026500527-527-9",
+                           [{"bet_type": "trifecta", "key": [1, 2, 3], "stake": 100}],
+                           rank_source="model")   # Claude 指数なし → model 縮退
+    assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is False
+    assert not (tmp_path / "queue" / "202650052709.req").exists()
+
+
+def test_enqueue_plan_t_votes_with_claude_index(tmp_path, monkeypatch):
+    """Plan T 投票時、Claude 指数あり (rank_source=claude) なら通常どおり enqueue。"""
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "plan_t")
+    _write_snapshot_plan_t(tmp_path, "2026500527-527-9",
+                           [{"bet_type": "trifecta", "key": [1, 2, 3], "stake": 100}],
+                           rank_source="claude")
+    assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is True
+    req = tmp_path / "queue" / "202650052709.req"
+    assert req.exists()
+    assert json.loads(req.read_text())["bundle_source"] == "plan_t"
+
+
+def test_enqueue_ev_bundle_not_gated_by_claude_index(tmp_path, monkeypatch):
+    """EV束 (recommended, 既定) は Claude 指数の有無でゲートしない (model-only fallback は従来挙動)。"""
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    monkeypatch.delenv("KEIBA_BET_BUNDLE", raising=False)   # 既定 = recommended
+    # Plan T 束は model 縮退でも、投票するのは EV束なのでゲートは効かない。
+    _write_snapshot_plan_t(tmp_path, "2026500527-527-9",
+                           [{"bet_type": "win", "key": [7], "stake": 600}],
+                           rank_source="model")
+    assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is True
