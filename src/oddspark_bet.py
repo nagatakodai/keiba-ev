@@ -504,24 +504,21 @@ def record_daily_stake(amount: int) -> int:
 
 
 def _apply_stake_multiplier(legs: list["CartLeg"], multiplier: float) -> list["CartLeg"]:
-    """各 leg.stake を multiplier 倍、新しい CartLeg リストを返す。multiplier=1.0 は no-op。
+    """各 leg.stake を multiplier 倍し ¥100 単位で切り捨てた新しい CartLeg リストを返す。
 
-    **整数倍のみ**に snap する: stake は ¥100 倍数なので整数倍は ¥100 倍数のまま stake 比率が
-    不変で、build_bundle のトリガミ保証 (各脚 payout ≥ 投資総額×margin) が保たれる。非整数倍は
-    per-leg の ¥100 丸めで比率が歪み保証を崩し得る (CartLeg は odds を持たず再検証不能) ため、
-    最近接整数 (≥1) に丸めて警告する。
+    **小数倍に対応** (例 ×1.5)。stake×倍率 を ¥100 単位で **切り捨て (floor)** する。切り捨ては
+    実投票額を下げる方向 (賭け過ぎない) なので安全側。ただし整数倍と違い、脚間の stake 比率が
+    ¥100 単位 floor で僅かに動くため build_bundle のトリガミ保証 (各脚 payout ≥ 投資総額×margin)
+    は**厳密には保てない** (CartLeg は odds を持たず再検証不能)。margin=1.10 の緩衝内に収まる
+    小さなズレ。最低 ¥100。multiplier<=0 / ==1.0 は no-op。
     """
-    if multiplier == 1.0:
-        return legs
-    m_int = max(1, int(round(multiplier)))
-    if abs(multiplier - m_int) > 1e-9:
-        print(f"[oddspark_bet] ⚠ stake-multiplier={multiplier} は非整数。トリガミ保証維持のため "
-              f"×{m_int} に丸めます (整数倍のみ stake 比率不変)。")
-    if m_int == 1:
+    if multiplier <= 0 or multiplier == 1.0:
         return legs
     out: list[CartLeg] = []
     for l in legs:
-        out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=max(100, l.stake * m_int)))
+        # stake × 倍率 を ¥100 単位で切り捨て (floor)。最低 ¥100。
+        scaled = max(100, int(l.stake * multiplier // 100) * 100)
+        out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=scaled))
     return out
 
 
@@ -785,8 +782,8 @@ class BettingSession:
         # ④ success marker 検出時のみ daily 加算 (誤検知/失敗で二重購入しない)。
         self.auto_purchase = auto_purchase
         self.daily_cap = daily_cap
-        # **このセッション中のみ** 全 leg の stake を multiplier 倍する (100円単位丸め)。
-        # 例: 1.0=既定 / 2.0=倍掛け / 0.5=半額。per-race 上限/日次上限は維持されるので、
+        # **このセッション中のみ** 全 leg の stake を multiplier 倍する (小数倍可・100円単位切り捨て)。
+        # 例: 1.0=既定 / 1.5=1.5倍 / 2.0=倍掛け / 0.5=半額。per-race 上限/日次上限は維持されるので、
         # 倍率により合計が max_total_stake を超える race は通常通り reject される。
         self.stake_multiplier = float(stake_multiplier) if stake_multiplier else 1.0
         # 支払方法: opcoin (OPコイン残) または buylimit (投票資金残)。既定は OPコイン。
@@ -890,7 +887,7 @@ class BettingSession:
                  label: str = "") -> tuple[str, int]:
         """1 レースの束をカート投入。戻り値 (status, ok点数)。status: ok/dup。
 
-        `stake_multiplier != 1.0` のときは leg.stake を倍率倍して 100 円単位に丸める。
+        `stake_multiplier != 1.0` のときは leg.stake を倍率倍して 100 円単位に切り捨てる (小数倍可)。
         合計が `max_total_stake` を超えると race ごと reject (倍率込みで安全網が効く)。
         """
         if netkeiba_rid in self._added:
@@ -1117,7 +1114,7 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
     print(f"[oddspark_bet] 常駐セッション開始 ({mode}, 支払={pay_label})。")
     if stake_multiplier != 1.0:
         print(f"[oddspark_bet] ⚠ stake_multiplier={stake_multiplier}x 適用 — 全 leg の stake を "
-              f"{stake_multiplier} 倍 (100円単位丸め)。per-race ¥{max_total_stake:,} 超過の race は reject。")
+              f"{stake_multiplier} 倍 (小数倍可・100円単位切り捨て)。per-race ¥{max_total_stake:,} 超過の race は reject。")
     if auto_purchase:
         today = get_today_stake()
         print(f"[oddspark_bet] daily_cap: 本日累計 ¥{today:,} / 上限 ¥{daily_cap:,}")

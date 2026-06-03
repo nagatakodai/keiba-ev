@@ -73,7 +73,7 @@ export default function WatchAutoPage() {
   // bet_oddspark が ON でないと意味が無い。daily_cap (円) で日次上限ガード。
   const [betAutoPurchase, setBetAutoPurchase] = useState(false);
   const [betDailyCap, setBetDailyCap] = useState("50000");
-  // セッション中のみ全 leg の stake を倍率倍に (100円単位丸め)。1.0=既定 / 2.0=倍掛け 等。
+  // セッション中のみ全 leg の stake を倍率倍に (小数倍可・100円単位切り捨て)。1.0=既定 / 1.5 / 2.0 等。
   // これは EV束 (recommended_bundle) を投票するときの倍率。Plan T 投票時は betPlanTMultiplier が効く。
   const [betStakeMultiplier, setBetStakeMultiplier] = useState("1");
   // Plan T 投票時の掛金倍率 (EV束用とは独立)。betPlanT=ON のときだけ daemon に渡る。
@@ -464,7 +464,7 @@ export default function WatchAutoPage() {
                         className="w-28"
                       />
                       <span className="text-xs text-(--color-muted) pb-1.5">
-                        Plan T の各脚 stake を ×N (整数倍に丸め・トリガミ保証維持)。下の EV束用「掛金倍率」とは独立。
+                        Plan T の各脚 stake を ×N (小数可・100円単位切り捨て)。下の EV束用「掛金倍率」とは独立。
                       </span>
                     </div>
                   )}

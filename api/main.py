@@ -292,7 +292,7 @@ class WatchAutoStartRequest(BaseModel):
     bet_auto_purchase: bool = False
     # 日次上限 (円)。0 で無効化、ge=0 で負値拒否、le で安全上限 (誤入力暴走防止)。
     bet_daily_cap: int = Field(default=50000, ge=0, le=10_000_000)
-    # **このセッション中のみ** 全 leg の stake を N 倍 (100円単位丸め)。per-race 上限 +
+    # **このセッション中のみ** 全 leg の stake を N 倍 (小数倍可・100円単位切り捨て)。per-race 上限 +
     # daily_cap は維持される。gt=0 で 0 倍を拒否 (誤入力で予期しない floor 動作を避ける)、
     # le=100 で実用上限 (100 倍超は事故の方が高確率)。
     bet_stake_multiplier: float = Field(default=1.0, gt=0.0, le=100.0)

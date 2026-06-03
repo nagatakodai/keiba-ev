@@ -30,6 +30,22 @@ def test_fill_cart_rejects_over_limit():
         ob.fill_cart("202650052705", legs, max_total_stake=10_000)
 
 
+def test_apply_stake_multiplier_fractional_floor():
+    """小数倍に対応・各脚 stake×倍率 を ¥100 単位で切り捨て (floor)・最低 ¥100。"""
+    legs = [ob.CartLeg("trifecta", [1, 2, 3], 100),
+            ob.CartLeg("trifecta", [1, 2, 4], 300),
+            ob.CartLeg("trifecta", [1, 2, 5], 1000)]
+    # ×1.5: 150→100, 450→400, 1500→1500 (¥100 単位で切り捨て)
+    assert [l.stake for l in ob._apply_stake_multiplier(legs, 1.5)] == [100, 400, 1500]
+    # 整数倍も同じ floor 経路で素直に倍化
+    assert [l.stake for l in ob._apply_stake_multiplier(legs, 2.0)] == [200, 600, 2000]
+    # ×0.5: 50→(最低)100, 150→100, 500→500
+    assert [l.stake for l in ob._apply_stake_multiplier(legs, 0.5)] == [100, 100, 500]
+    # ×1.0 / 非正 は no-op (同一リストを返す)
+    assert ob._apply_stake_multiplier(legs, 1.0) is legs
+    assert ob._apply_stake_multiplier(legs, 0) is legs
+
+
 def test_shikibetsu_covers_all_bet_types():
     for bt in ("win", "place", "quinella", "wide", "exacta", "trio", "trifecta"):
         assert bt in ob._SHIKIBETSU
@@ -381,14 +397,6 @@ def test_apply_stake_multiplier_min_100():
     """微小な multiplier でも最低 100 円 (1 円賭けは不可)。"""
     out = ob._apply_stake_multiplier([ob.CartLeg("win", [1], 100)], 0.1)
     assert out[0].stake == 100   # 10 にはしない
-
-
-def test_apply_stake_multiplier_rounds_to_100():
-    """100 円単位に四捨五入丸め (150 → 200、149 → 100)。"""
-    # 100 * 1.5 = 150 → round(1.5)*100 = 200
-    assert ob._apply_stake_multiplier([ob.CartLeg("win", [1], 100)], 1.5)[0].stake == 200
-    # 100 * 1.49 = 149 → round(1.49)*100 = 100
-    assert ob._apply_stake_multiplier([ob.CartLeg("win", [1], 100)], 1.49)[0].stake == 100
 
 
 def test_add_race_respects_stake_multiplier(monkeypatch):
