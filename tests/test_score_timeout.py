@@ -24,16 +24,16 @@ def test_env_override_invalid_falls_back(monkeypatch):
     assert az._score_timeout(_rd(close_at=int(time.time()) + 3600), 7) == az.SCORE_TIMEOUT_FLOOR
 
 
-def test_small_field_gets_floor(monkeypatch):
-    """7 頭立てでも floor (600s) を確保する (旧実装は 300s に張り付き timeout 頻発)。"""
+def test_small_field_gets_full_15min(monkeypatch):
+    """研究に 15 分使ってよい: 7 頭立てでも runway が足りれば floor=cap=900s (旧 300s 張り付きを解消)。"""
     monkeypatch.delenv("KEIBA_SCORE_TIMEOUT", raising=False)
-    assert az._score_timeout(_rd(close_at=int(time.time()) + 3600), 7) == az.SCORE_TIMEOUT_FLOOR
+    assert az._score_timeout(_rd(close_at=int(time.time()) + 3600), 7) == az.SCORE_TIMEOUT_CAP
 
 
-def test_large_field_scales_per_horse(monkeypatch):
+def test_large_field_capped_at_15min(monkeypatch):
     monkeypatch.delenv("KEIBA_SCORE_TIMEOUT", raising=False)
-    # 16 頭 → need = min(16×50, cap900) = 800、runway 十分なら 800
-    assert az._score_timeout(_rd(close_at=int(time.time()) + 3600), 16) == 800
+    # 大頭数でも上限 15 分 (900s) で頭打ち
+    assert az._score_timeout(_rd(close_at=int(time.time()) + 3600), 18) == az.SCORE_TIMEOUT_CAP
 
 
 def test_capped_by_runway(monkeypatch):

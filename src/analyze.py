@@ -687,9 +687,11 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
 # score ステージ timeout の見積り基準。effort=max の web 検索は 1 ラウンド ~30-50s かかり
 # sequential なので、小頭数でも一定の floor を確保しないと kill されて指数キャッシュが作れない
 # (実機: 7頭立てで floor 300s に張り付き 11 回検索の途中で timeout)。
-SCORE_TIMEOUT_FLOOR = 600          # 最低 10 分は確保 (旧 300s は effort=max 研究に短すぎた)
-SCORE_TIMEOUT_PER_HORSE = 50       # 頭数 × これ で必要量を見積り
-SCORE_TIMEOUT_CAP = 900            # 上限 15 分 (暴走防止)
+# **研究に最大 15 分使ってよい** (ユーザ指示 2026-06-03)。floor=cap=900 なので runway が足りる限り
+# 全レースこの 15 分枠を使える (小頭数でも短縮しない)。per-horse は将来 cap を上げたとき再活性化。
+SCORE_TIMEOUT_FLOOR = 900          # 研究に 15 分使ってよい (runway が足りれば全レースこの枠)
+SCORE_TIMEOUT_PER_HORSE = 50       # 頭数 × これ で必要量を見積り (現状 floor=cap=900 に支配される)
+SCORE_TIMEOUT_CAP = 900            # 上限 15 分
 SCORE_DEADLINE_BUFFER = 180        # 締切のこの秒数前までに指数キャッシュを書き終える (bet 段が読めるよう)
 
 
