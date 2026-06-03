@@ -330,6 +330,8 @@ export type WatchAutoStatus = {
     bet_ipat?: boolean;
     // 投票束を Plan T (全力的中フォーメーション・市場無視) にする (既定 false = EV束)。
     bet_plan_t?: boolean;
+    // Plan T 投票時の掛金倍率 (×N)。bet_stake_multiplier (EV束用) とは独立。Plan T 選択中のみ有効。
+    bet_plan_t_multiplier?: number;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -527,6 +529,7 @@ export const api = {
     bet_payment_method?: "opcoin" | "buylimit";
     bet_ipat?: boolean;
     bet_plan_t?: boolean;
+    bet_plan_t_multiplier?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

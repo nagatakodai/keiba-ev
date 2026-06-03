@@ -417,6 +417,7 @@ class WatchAutoManager:
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
         bet_plan_t: bool = False,
+        bet_plan_t_multiplier: float = 1.0,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -434,6 +435,7 @@ class WatchAutoManager:
                 bet_auto_login=bet_auto_login,
                 bet_ipat=bet_ipat,
                 bet_plan_t=bet_plan_t,
+                bet_plan_t_multiplier=bet_plan_t_multiplier,
             )
 
     async def _start_locked(
@@ -462,12 +464,17 @@ class WatchAutoManager:
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
         bet_plan_t: bool = False,
+        bet_plan_t_multiplier: float = 1.0,
     ) -> Job:
         # 投票束 source を全 betting subprocess に env で伝播 (Job.start が os.environ.copy する
         # ので loop/scheduler/daemon が一致して継承)。plan_t=Plan T 全力的中 / recommended=EV束。
         # 早期 return (稼働中ループに daemon を足す) 経路でも効くよう最初に設定する。daemon は更に
         # .req 記録の bundle_source を権威として尊重するので取り違えは二重に防がれる。
         os.environ["KEIBA_BET_BUNDLE"] = "plan_t" if bet_plan_t else "recommended"
+        # daemon に渡す掛金倍率 = 投票する束に対応する倍率を選ぶ。Plan T を投票するなら Plan T 専用
+        # 倍率、EV束なら EV束倍率。1 セッションは片方の束しか投票しない (env/トグルで決まる) ので、
+        # active な束の倍率だけが効く。daemon 起動は全てこの eff_stake_multiplier を使う。
+        eff_stake_multiplier = bet_plan_t_multiplier if bet_plan_t else bet_stake_multiplier
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
         # ただし**投票ブラウザ daemon が死んでいれば貼り直す**: resume (startup の should_run)
@@ -478,12 +485,12 @@ class WatchAutoManager:
             if bet_oddspark and not self.bet_running:
                 await self._start_betting_daemon(
                     auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
-                    stake_multiplier=bet_stake_multiplier,
+                    stake_multiplier=eff_stake_multiplier,
                     payment_method=bet_payment_method, auto_login=bet_auto_login)
             if bet_ipat and not self.ipat_bet_running:
                 await self._start_ipat_daemon(
                     auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
-                    stake_multiplier=bet_stake_multiplier, auto_login=bet_auto_login)
+                    stake_multiplier=eff_stake_multiplier, auto_login=bet_auto_login)
             if (bet_oddspark or bet_ipat) and not self.scheduler_running:
                 await self._start_scheduler(
                     bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
@@ -557,6 +564,7 @@ class WatchAutoManager:
             "bet_auto_login": bet_auto_login,
             "bet_ipat": bet_ipat,
             "bet_plan_t": bet_plan_t,
+            "bet_plan_t_multiplier": bet_plan_t_multiplier,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -579,8 +587,8 @@ class WatchAutoManager:
                 auto_purchase=bool(cfg.get("bet_auto_purchase")),
                 daily_cap=int(cfg["bet_daily_cap"])
                     if cfg.get("bet_daily_cap") is not None else 50000,
-                stake_multiplier=float(cfg["bet_stake_multiplier"])
-                    if cfg.get("bet_stake_multiplier") is not None else 1.0,
+                # 投票束に対応する倍率 (Plan T 投票なら Plan T 倍率)。上で算出済の eff を使う。
+                stake_multiplier=eff_stake_multiplier,
                 payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
                 auto_login=bool(cfg.get("bet_auto_login")),
@@ -592,8 +600,8 @@ class WatchAutoManager:
                 auto_purchase=bool(cfg.get("bet_auto_purchase")),
                 daily_cap=int(cfg["bet_daily_cap"])
                     if cfg.get("bet_daily_cap") is not None else 50000,
-                stake_multiplier=float(cfg["bet_stake_multiplier"])
-                    if cfg.get("bet_stake_multiplier") is not None else 1.0,
+                # 投票束に対応する倍率 (Plan T 投票なら Plan T 倍率)。上で算出済の eff を使う。
+                stake_multiplier=eff_stake_multiplier,
                 auto_login=bool(cfg.get("bet_auto_login")),
             )
         # 投票発火デーモン (締切 bet_lead_sec 秒前に精密発火, watch poll とは独立)。
@@ -776,6 +784,8 @@ class WatchAutoManager:
                 bet_auto_login=bool(cfg.get("bet_auto_login")),
                 bet_ipat=bool(cfg.get("bet_ipat")),
                 bet_plan_t=bool(cfg.get("bet_plan_t")),
+                bet_plan_t_multiplier=float(cfg["bet_plan_t_multiplier"])
+                    if cfg.get("bet_plan_t_multiplier") is not None else 1.0,
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

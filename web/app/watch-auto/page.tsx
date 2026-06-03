@@ -74,7 +74,10 @@ export default function WatchAutoPage() {
   const [betAutoPurchase, setBetAutoPurchase] = useState(false);
   const [betDailyCap, setBetDailyCap] = useState("50000");
   // セッション中のみ全 leg の stake を倍率倍に (100円単位丸め)。1.0=既定 / 2.0=倍掛け 等。
+  // これは EV束 (recommended_bundle) を投票するときの倍率。Plan T 投票時は betPlanTMultiplier が効く。
   const [betStakeMultiplier, setBetStakeMultiplier] = useState("1");
+  // Plan T 投票時の掛金倍率 (EV束用とは独立)。betPlanT=ON のときだけ daemon に渡る。
+  const [betPlanTMultiplier, setBetPlanTMultiplier] = useState("1");
   // 支払方法: opcoin (OPコイン残, 既定) または buylimit (投票資金残)
   const [betPaymentMethod, setBetPaymentMethod] = useState<"opcoin" | "buylimit">("opcoin");
 
@@ -107,6 +110,7 @@ export default function WatchAutoPage() {
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
     if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
+    if (c.bet_plan_t_multiplier != null) setBetPlanTMultiplier(String(c.bet_plan_t_multiplier));
     if (c.bet_payment_method === "buylimit" || c.bet_payment_method === "opcoin")
       setBetPaymentMethod(c.bet_payment_method);
   }
@@ -170,6 +174,11 @@ export default function WatchAutoPage() {
         // `|| default` だと 0 が既定で上書きされ意図と異なる挙動になるため NaN 判定で分岐。
         bet_stake_multiplier: (() => {
           const v = parseFloat(betStakeMultiplier);
+          return Number.isFinite(v) && v > 0 ? v : 1.0;
+        })(),
+        // Plan T 投票時の倍率 (EV束用と独立)。backend Pydantic は gt=0 拒否なので NaN/負値は 1.0 に。
+        bet_plan_t_multiplier: (() => {
+          const v = parseFloat(betPlanTMultiplier);
           return Number.isFinite(v) && v > 0 ? v : 1.0;
         })(),
         bet_payment_method: betPaymentMethod,
@@ -429,21 +438,37 @@ export default function WatchAutoPage() {
                 <span>JRA 即PAT 自動投票 (カート投入・要ログイン / 土日 JRA 開催日)</span>
               </label>
               {(betOddspark || betIpat) && (
-                <label className="inline-flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={betPlanT}
-                    onChange={(e) => setBetPlanT(e.target.checked)}
-                    disabled={running}
-                    className="accent-(--color-warn)"
-                  />
-                  <span>
-                    投票束を <b>Plan T (全力的中・市場無視)</b> にする
-                    <span className="text-xs text-(--color-muted)">
-                      {" "}(既定OFF=EV束。切替はループ再起動が必要・−EV想定)
+                <div className="flex items-center gap-3 flex-wrap basis-full">
+                  <label className="inline-flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={betPlanT}
+                      onChange={(e) => setBetPlanT(e.target.checked)}
+                      disabled={running}
+                      className="accent-(--color-warn)"
+                    />
+                    <span>
+                      投票束を <b>Plan T (全力的中・市場無視)</b> にする
+                      <span className="text-xs text-(--color-muted)">
+                        {" "}(既定OFF=EV束。切替はループ再起動が必要・−EV想定)
+                      </span>
                     </span>
-                  </span>
-                </label>
+                  </label>
+                  {betPlanT && (
+                    <div className="flex items-end gap-2">
+                      <Input
+                        label="掛金倍率 — Plan T (×N)"
+                        value={betPlanTMultiplier}
+                        onChange={(e) => setBetPlanTMultiplier(e.target.value)}
+                        disabled={running}
+                        className="w-28"
+                      />
+                      <span className="text-xs text-(--color-muted) pb-1.5">
+                        Plan T の各脚 stake を ×N (整数倍に丸め・トリガミ保証維持)。下の EV束用「掛金倍率」とは独立。
+                      </span>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
             {betOddspark && (
@@ -490,13 +515,20 @@ export default function WatchAutoPage() {
                     disabled={running || !betAutoPurchase}
                     className="w-32"
                   />
-                  <Input
-                    label="掛金倍率 (×N)"
-                    value={betStakeMultiplier}
-                    onChange={(e) => setBetStakeMultiplier(e.target.value)}
-                    disabled={running}
-                    className="w-24"
-                  />
+                  <div className="flex items-end gap-2">
+                    <Input
+                      label={betPlanT ? "掛金倍率 — EV束 (×N, 無効)" : "掛金倍率 — EV束 (×N)"}
+                      value={betStakeMultiplier}
+                      onChange={(e) => setBetStakeMultiplier(e.target.value)}
+                      disabled={running || betPlanT}
+                      className="w-24"
+                    />
+                    {betPlanT && (
+                      <span className="text-xs text-(--color-warn) pb-1.5">
+                        Plan T 選択中は上の <b>Plan T 倍率</b>が使われます (EV束倍率は無効)。
+                      </span>
+                    )}
+                  </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
                       支払方法

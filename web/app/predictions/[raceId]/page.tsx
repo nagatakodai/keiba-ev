@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
+import { PlanTStakePreview } from "./PlanTStakePreview";
 import {
   api,
   type BetEvRow,
@@ -569,6 +570,7 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
       <div className="mt-4">
         <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} />
       </div>
+      <PlanTStakePreview bundle={b} />
       <p className="mt-3 text-xs text-(--color-muted)">
         ランキング = {rankLabel} (市場オッズ不使用) · {b.formation} フォーメーション
         {torigamiOn ? ` · トリガミ防止: ${(b.dropped_torigami ?? 0) > 0 ? `${b.dropped_torigami}点除去` : "全脚クリア"}` : ""}

@@ -308,6 +308,10 @@ class WatchAutoStartRequest(BaseModel):
     # ON で全 betting subprocess に env KEIBA_BET_BUNDLE=plan_t を継承させる (enqueue/scheduler/daemon 一致)。
     # 切替はループ再起動が必要 (起動時の env が .req に記録され daemon が尊重するため)。
     bet_plan_t: bool = False
+    # Plan T 投票時の掛金倍率 (×N)。bet_stake_multiplier (EV束用) とは独立。bet_plan_t=True の
+    # ときだけ有効で、daemon に渡る stake_multiplier がこの値になる (EV束選択時は bet_stake_multiplier)。
+    # 1 セッションは片方の束しか投票しないので、active な束の倍率だけが効く。gt=0/le=100 で誤入力ガード。
+    bet_plan_t_multiplier: float = Field(default=1.0, gt=0.0, le=100.0)
 
 
 @app.post("/api/watch-auto/start")
@@ -336,6 +340,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_payment_method=req.bet_payment_method,
         bet_ipat=req.bet_ipat,
         bet_plan_t=req.bet_plan_t,
+        bet_plan_t_multiplier=req.bet_plan_t_multiplier,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "ipat_bet_running": WATCH.ipat_bet_running,
