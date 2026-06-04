@@ -6,6 +6,7 @@ import {
   api,
   type BetEvRow,
   type BundleLeg,
+  type DroppedLeg,
   type HorseAptitude,
   type HorseBestTime,
   type MarketSignal,
@@ -568,7 +569,10 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <Stat label="点数" value={`${b.n_points} 点`} />
         <Stat label="理論的中率 (model)" value={fmtPct(b.covered_prob, 1)} />
-        <Stat label="投資総額" value={`¥${b.total_stake.toLocaleString()}`} />
+        {b.bankroll != null && (
+          <Stat label="購入予算 (1レース)" value={`¥${b.bankroll.toLocaleString()}`} />
+        )}
+        <Stat label="投資総額 (予算内)" value={`¥${b.total_stake.toLocaleString()}`} />
         {osum && (
           <Stat label="当たれば払戻 (最小〜最大)"
             value={`¥${osum.min_payout.toLocaleString()}〜¥${osum.max_payout.toLocaleString()}`} />
@@ -587,12 +591,21 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
         </div>
       )}
       <div className="mt-4">
-        <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} />
+        <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} droppedLegs={b.dropped_legs} />
       </div>
       <PlanTStakePreview bundle={b} />
       <p className="mt-3 text-xs text-(--color-muted)">
         ランキング = {rankLabel} (市場オッズ不使用) · {b.formation} フォーメーション
-        {torigamiOn ? ` · トリガミ防止: ${(b.dropped_torigami ?? 0) > 0 ? `${b.dropped_torigami}点除去` : "全脚クリア"}` : ""}
+        {b.bankroll != null ? ` · 購入予算 ¥${b.bankroll.toLocaleString()} 内に収める` : ""}
+        {(() => {
+          const nTori = (b.dropped_legs ?? []).filter((l) => l.reason !== "budget").length;
+          const nBudget = (b.dropped_legs ?? []).filter((l) => l.reason === "budget").length;
+          if (!torigamiOn && nBudget === 0) return "";
+          const parts: string[] = [];
+          if (torigamiOn) parts.push(nTori > 0 ? `トリガミ ${nTori}点除去` : "トリガミ全脚クリア");
+          if (nBudget > 0) parts.push(`予算外 ${nBudget}点`);
+          return ` · ${parts.join(" / ")} (表の取り消し線=買わない)`;
+        })()}
         。当たれば投資総額以上を回収 (トリガミ防止) だが、当たらなければ損 = 長期は −EV になり得る。
       </p>
     </Card>
@@ -603,13 +616,17 @@ function BundleLegsTable({
   legs,
   finish,
   finalOdds,
+  droppedLegs,
 }: {
   legs: BundleLeg[];
   finish?: number[];
   // result.final_odds: `"<bet_type>:<key-with-->"` → 最終確定オッズ。無ければ「—」。
   finalOdds?: Record<string, number>;
+  // 買わなかった脚 (= トリガミ防止 or 予算で除外)。取り消し線で末尾に併記。
+  droppedLegs?: DroppedLeg[];
 }) {
   const hasFinal = !!finalOdds && Object.keys(finalOdds).length > 0;
+  const dropped = droppedLegs ?? [];
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm tabnum table-zebra">
@@ -688,6 +705,38 @@ function BundleLegsTable({
                 </td>
                 <td className="py-1.5 pr-3">
                   <Badge tone={tierTone(l.tier)}>{tierLabel(l.tier)}</Badge>
+                </td>
+              </tr>
+            );
+          })}
+          {/* 買わなかった脚 (トリガミ防止 or 予算オーバー): 取り消し線+減光で末尾に併記。
+              取り消し線は table-row への propagation が不安定なので各セルへ明示的に付与する。 */}
+          {dropped.map((l) => {
+            const k = l.key.join("-");
+            const isBudget = l.reason === "budget";
+            const label = isBudget ? "予算外" : "トリガミ";
+            const title = isBudget
+              ? "予算 (購入予算) を割り当てきれず買わない脚"
+              : "トリガミ防止で除去された脚 — 当たっても投資総額を割るため買わない";
+            return (
+              <tr
+                key={`dropped:${l.bet_type}:${k}`}
+                className="border-b border-(--color-line)/60 opacity-60 text-(--color-muted)"
+                title={title}
+              >
+                <td className="py-1.5 pr-3">
+                  <Badge tone="muted">{betLabel(l.bet_type)}</Badge>
+                </td>
+                <td className="py-1.5 pr-3 font-medium mono line-through">{k}</td>
+                <td className="py-1.5 pr-3 text-right line-through">{l.odds.toFixed(1)}</td>
+                {hasFinal && <td className="py-1.5 pr-3 text-right">—</td>}
+                <td className="py-1.5 pr-3 text-right line-through">{fmtPct(l.prob, 2)}</td>
+                <td className="py-1.5 pr-3 text-right line-through">{l.px_o.toFixed(2)}</td>
+                <td className="py-1.5 pr-3 text-right">—</td>
+                <td className="py-1.5 pr-3 text-right line-through">¥0</td>
+                <td className="py-1.5 pr-3 text-right">—</td>
+                <td className="py-1.5 pr-3">
+                  <Badge tone={isBudget ? "muted" : "bad"}>{label}</Badge>
                 </td>
               </tr>
             );

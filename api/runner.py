@@ -418,6 +418,7 @@ class WatchAutoManager:
         bet_ipat: bool = False,
         bet_plan_t: bool = False,
         bet_plan_t_multiplier: float = 1.0,
+        plan_t_bankroll: int = 10_000,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -436,6 +437,7 @@ class WatchAutoManager:
                 bet_ipat=bet_ipat,
                 bet_plan_t=bet_plan_t,
                 bet_plan_t_multiplier=bet_plan_t_multiplier,
+                plan_t_bankroll=plan_t_bankroll,
             )
 
     async def _start_locked(
@@ -465,12 +467,17 @@ class WatchAutoManager:
         bet_ipat: bool = False,
         bet_plan_t: bool = False,
         bet_plan_t_multiplier: float = 1.0,
+        plan_t_bankroll: int = 10_000,
     ) -> Job:
         # 投票束 source を全 betting subprocess に env で伝播 (Job.start が os.environ.copy する
         # ので loop/scheduler/daemon が一致して継承)。plan_t=Plan T 全力的中 / recommended=EV束。
         # 早期 return (稼働中ループに daemon を足す) 経路でも効くよう最初に設定する。daemon は更に
         # .req 記録の bundle_source を権威として尊重するので取り違えは二重に防がれる。
         os.environ["KEIBA_BET_BUNDLE"] = "plan_t" if bet_plan_t else "recommended"
+        # Plan T の1レース購入予算も env で全 dispatch subprocess (analyze/keibago/jra/oddspark) に
+        # 伝播する (_save_prediction_snapshot が _plan_t_bankroll で尊重)。束を組む時点の予算なので、
+        # 投票倍率 (bet_plan_t_multiplier) とは別物。変更はループ再起動が必要 (spawn 時に env が固定)。
+        os.environ["KEIBA_PLAN_T_BANKROLL"] = str(int(plan_t_bankroll))
         # daemon に渡す掛金倍率 = 投票する束に対応する倍率を選ぶ。Plan T を投票するなら Plan T 専用
         # 倍率、EV束なら EV束倍率。1 セッションは片方の束しか投票しない (env/トグルで決まる) ので、
         # active な束の倍率だけが効く。daemon 起動は全てこの eff_stake_multiplier を使う。
@@ -565,6 +572,7 @@ class WatchAutoManager:
             "bet_ipat": bet_ipat,
             "bet_plan_t": bet_plan_t,
             "bet_plan_t_multiplier": bet_plan_t_multiplier,
+            "plan_t_bankroll": plan_t_bankroll,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -786,6 +794,8 @@ class WatchAutoManager:
                 bet_plan_t=bool(cfg.get("bet_plan_t")),
                 bet_plan_t_multiplier=float(cfg["bet_plan_t_multiplier"])
                     if cfg.get("bet_plan_t_multiplier") is not None else 1.0,
+                plan_t_bankroll=int(cfg["plan_t_bankroll"])
+                    if cfg.get("plan_t_bankroll") is not None else 10_000,
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

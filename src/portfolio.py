@@ -262,6 +262,10 @@ def build_bundle(
     f_active = np.zeros(0)
     stakes_active = np.zeros(0)
     n_dropped_torigami = 0
+    # 「買わなかった脚」(frontend で取り消し線表示)。各脚に reason を持たせる:
+    #   "torigami" = トリガミ防止で除去 / "budget" = 予算を割れず配分0 (stake<min_stake)。
+    # Plan T は予算 (bankroll) 内に収めるため、両方の理由で脚が落ち得る。
+    dropped_legs: list[dict] = []
     while active:
         H = H_full[active]
         if prioritize == "hit":
@@ -300,6 +304,21 @@ def build_bundle(
         # 最も payout カバレッジの低い脚を 1 本落として再最適化 (S が減り残りは楽になる)
         worst = min(offenders, key=lambda i: pool[active[i]]["odds"] * stakes[i])
         n_dropped_torigami += 1
+        # 除去脚を記録 (この iteration で割り当てられていた stake/払戻ごと) → frontend で取り消し線表示。
+        dc = pool[active[worst]]
+        dropped_legs.append({
+            "bet_type": dc["bet_type"],
+            "key": list(dc["key"]),
+            "odds": round(float(dc["odds"]), 1),
+            "prob": float(dc["prob"]),
+            "px_o": float(dc["px_o"]),
+            "tier": dc["tier"],
+            "kelly": 0.0,
+            "fraction": 0.0,
+            "stake": int(stakes[worst]),       # 除去時に割り当てられていた (が買わない) stake
+            "payout_if_hit": int(round(float(dc["odds"]) * stakes[worst])),
+            "reason": "torigami",
+        })
         active = [a for k, a in enumerate(active) if k != worst]
 
     H = H_full[active] if active else np.zeros((0, len(outcomes)))
@@ -307,9 +326,23 @@ def build_bundle(
 
     legs = []
     for li, pool_idx in enumerate(active):
-        if stakes_active[li] <= 0:
-            continue
         c = pool[pool_idx]
+        if stakes_active[li] <= 0:
+            # 候補だったが予算を割り切れず配分0 = 買わない脚。reason="budget" で記録し取り消し線表示。
+            dropped_legs.append({
+                "bet_type": c["bet_type"],
+                "key": list(c["key"]),
+                "odds": round(float(c["odds"]), 1),
+                "prob": float(c["prob"]),
+                "px_o": float(c["px_o"]),
+                "tier": c["tier"],
+                "kelly": 0.0,
+                "fraction": 0.0,
+                "stake": 0,
+                "payout_if_hit": 0,
+                "reason": "budget",
+            })
+            continue
         legs.append({
             "bet_type": c["bet_type"],
             "key": list(c["key"]),
@@ -339,6 +372,7 @@ def build_bundle(
     base["total_stake"] = int(total_stake)
     base["total_fraction"] = float(frac_round.sum()) if len(frac_round) else 0.0
     base["dropped_torigami"] = n_dropped_torigami
+    base["dropped_legs"] = dropped_legs       # 買わなかった脚 (reason=torigami|budget)。取り消し線表示用。
     base["torigami_margin"] = float(torigami_margin)
     return base
 
@@ -470,8 +504,8 @@ def build_trifecta_hitmax(
     )
     # build_bundle の汎用フィールドを base にマージしつつ Plan T 固有を上書き。
     base.update({k: bundle[k] for k in bundle if k in base or k in (
-        "min_payout_ratio", "dropped_torigami", "torigami_margin",
-        "expected_log_growth", "total_fraction", "n_outcomes")})
+        "min_payout_ratio", "dropped_torigami", "dropped_legs",
+        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes")})
     base["objective"] = "trifecta_hitmax"
     base["legs"] = bundle.get("legs", [])
     base["total_stake"] = bundle.get("total_stake", 0)
@@ -580,8 +614,8 @@ def build_trifecta_from_keys(
         min_stake=min_stake, stake_unit=stake_unit,
     )
     base.update({k: bundle[k] for k in bundle if k in base or k in (
-        "min_payout_ratio", "dropped_torigami", "torigami_margin",
-        "expected_log_growth", "total_fraction", "n_outcomes")})
+        "min_payout_ratio", "dropped_torigami", "dropped_legs",
+        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes")})
     base["objective"] = "trifecta_claude_select"
     base["rank_source"] = "claude"
     base["selection_source"] = "claude"

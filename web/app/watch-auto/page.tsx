@@ -78,6 +78,8 @@ export default function WatchAutoPage() {
   const [betStakeMultiplier, setBetStakeMultiplier] = useState("1");
   // Plan T 投票時の掛金倍率 (EV束用とは独立)。betPlanT=ON のときだけ daemon に渡る。
   const [betPlanTMultiplier, setBetPlanTMultiplier] = useState("1");
+  // Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
+  const [planTBankroll, setPlanTBankroll] = useState("10000");
   // 支払方法: opcoin (OPコイン残, 既定) または buylimit (投票資金残)
   const [betPaymentMethod, setBetPaymentMethod] = useState<"opcoin" | "buylimit">("opcoin");
 
@@ -111,6 +113,7 @@ export default function WatchAutoPage() {
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
     if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
     if (c.bet_plan_t_multiplier != null) setBetPlanTMultiplier(String(c.bet_plan_t_multiplier));
+    if (c.plan_t_bankroll != null) setPlanTBankroll(String(c.plan_t_bankroll));
     if (c.bet_payment_method === "buylimit" || c.bet_payment_method === "opcoin")
       setBetPaymentMethod(c.bet_payment_method);
   }
@@ -180,6 +183,11 @@ export default function WatchAutoPage() {
         bet_plan_t_multiplier: (() => {
           const v = parseFloat(betPlanTMultiplier);
           return Number.isFinite(v) && v > 0 ? v : 1.0;
+        })(),
+        // Plan T の1レース購入予算 (円)。backend は ge=100 拒否なので NaN/100未満は既定 10000 に。
+        plan_t_bankroll: (() => {
+          const v = parseInt(planTBankroll, 10);
+          return Number.isFinite(v) && v >= 100 ? v : 10000;
         })(),
         bet_payment_method: betPaymentMethod,
       });
@@ -376,6 +384,13 @@ export default function WatchAutoPage() {
                 placeholder="6 (default)"
                 value={aptitudeTop}
                 onChange={(e) => setAptitudeTop(e.target.value)}
+                disabled={running}
+              />
+              <Input
+                label="Plan T 1レース購入予算 (¥)"
+                placeholder="10000 (default)"
+                value={planTBankroll}
+                onChange={(e) => setPlanTBankroll(e.target.value)}
                 disabled={running}
               />
               <Input

@@ -781,24 +781,31 @@ _TRIFECTA_SELECT_DISALLOWED = (
 def build_trifecta_select_prompt(
     rd: RaceData, *, llm_index: dict[int, float] | None,
     aptitudes: dict[int, Any] | None = None,
-    win_odds: dict[int, float] | None = None,
+    bankroll: int = 10_000,
     max_points: int = 48,
 ) -> str:
-    """締切直前の 3連単「全力的中」買い目選定 prompt (検索なし・指数上位から自由構築)。
+    """締切直前の 3連単「全力的中」買い目選定 prompt (検索なし・Claude 指数上位から自由構築)。
 
-    各馬の **Claude 指数 (score 段で web 研究済)** + 適性総合 + 単勝オッズを提示し、指数上位を
-    本命に 1着→2着→3着 のフォーメーションを **自由に構築**させる。市場は参考程度。出力は買い目
-    (ordered triple) の配列のみ。トリガミ防止・配分は後段 (build_trifecta_from_keys) が行う。
+    各馬の **Claude 指数 (score 段で web 研究済)** + 適性総合のみを提示し、指数上位を本命に
+    1着→2着→3着 のフォーメーションを **自由に構築**させる。出力は買い目 (ordered triple) の
+    配列のみ。トリガミ防止・配分は後段 (build_trifecta_from_keys) が行う。
+
+    **市場は一切見せない**: Plan T は「市場無視」が本質なので、単勝オッズ・人気はプロンプトに
+    含めない (含めると Claude が市場に引きずられて指数選定が崩れる)。並べ替えも指数→適性→馬番で
+    市場フリーにする。購入は **1レース予算 (bankroll) 内に収める**よう点数を絞らせる。
     """
     r = rd.race
     idx = llm_index or {}
     apt = aptitudes or {}
-    wodds = dict(win_odds or {})
     horses = [h for h in r.horses if not getattr(h, "absent", False)]
-    for h in horses:
-        wodds.setdefault(h.number, getattr(h, "win_odds", 0.0) or 0.0)
+
+    def _apt_total(n: int) -> float:
+        a = apt.get(n)
+        return float(a.total) if a is not None and hasattr(a, "total") else -1.0
+
+    # 並べ替えは指数降順 → 適性降順 → 馬番昇順 (市場を一切使わない tiebreaker)。
     ranked = sorted(horses, key=lambda h: (idx.get(h.number, -1.0),
-                                           -(wodds.get(h.number) or 9e9)), reverse=True)
+                                           _apt_total(h.number), -h.number), reverse=True)
     venue = getattr(r, "venue_name", "") or ""
     dist = getattr(r, "distance", None)
     surf = getattr(r, "surface", "") or ""
@@ -806,29 +813,34 @@ def build_trifecta_select_prompt(
     lines = [
         f"# {venue} {rno}R 3連単「全力的中」買い目選定 ({dist}m {surf})",
         "あなたは競馬の3連単買い目を組むエキスパート。**各馬の強さ指数 (score 段で web 研究済)** と "
-        "適性・単勝オッズを見て、**指数上位を本命に 1着→2着→3着 のフォーメーション (買い目) を自由に構築**する。",
-        "**検索はしない** (締切直前・指数は研究済)。市場(オッズ)は人気の参考程度で、指数を最優先する。",
+        "適性総合を見て、**指数上位を本命に 1着→2着→3着 のフォーメーション (買い目) を自由に構築**する。",
+        "**検索はしない** (締切直前・指数は研究済)。",
+        "**重要: このモードは『市場無視』。単勝オッズ・人気・市場の評価は一切与えていないし、"
+        "推測もしないこと。あくまで下の Claude 指数 (と適性) だけで強さ順を判断して買い目を組む。**",
         "",
         "## 各馬 (Claude 指数降順)",
-        "| 馬番 | 馬名 | 指数(0-100) | 適性総合 | 単勝オッズ |",
-        "|---|---|---|---|---|",
+        "| 馬番 | 馬名 | 指数(0-100) | 適性総合 |",
+        "|---|---|---|---|",
     ]
     for h in ranked:
         n = h.number
         a = apt.get(n)
         atot = f"{a.total:.0f}" if a is not None and hasattr(a, "total") else "-"
-        o = wodds.get(n) or 0.0
         lines.append(f"| {n} | {getattr(h, 'name', '')} | "
-                     f"{idx.get(n, 0):.0f} | {atot} | {o:.1f} |")
+                     f"{idx.get(n, 0):.0f} | {atot} |")
     lines += [
         "",
         "## 組み方 (全力的中モード)",
         f"- **1着** は指数最上位を 1〜2 頭に**絞る** (指数が拮抗するなら2頭)。",
         "- **2着** は中くらい (指数上位 3〜5 頭程度)。**3着** は広めに取る (上位 5〜8 頭程度・"
         "3着づけは妙味も拾う)。head ⊆ mid ⊆ tail に拘らず、指数で妥当な馬を各列に置いてよい。",
-        f"- **総点数の上限は {max_points} 点**。これを超えない範囲で「当たりやすさ」を最大化する。"
+        f"- **このレースの購入予算は ¥{bankroll:,}**。買い目の合計購入額が**この予算内に収まる**よう"
+        f"点数を絞ること (1点あたり最低 ¥100・100円単位、トリガミ防止後に予算内)。予算 ÷ 100 が"
+        f"買える点数の概算上限 (≈{max(1, bankroll // 100)} 点) だが、薄い目を無理に足さず"
+        "「当たりやすさ」を最大化する点数に抑える。",
+        f"- **総点数の上限は {max_points} 点**。予算と上限の小さい方を超えない。"
         "薄すぎる(指数下位どうしの)目は入れない。",
-        "- 取消・極端な人気薄で指数も低い馬は外す。指数 0 の馬は買い目に入れない。",
+        "- 取消・極端に指数の低い馬は外す。指数 0 の馬は買い目に入れない。",
         "",
         "## 出力 (買い目のみ・JSON)",
         "考察は短く。最後に必ず以下を ```json ... ``` で出力する。keys は [1着,2着,3着] の配列:",
@@ -845,13 +857,15 @@ def select_trifecta_stream(
     rd: RaceData, *,
     llm_index: dict[int, float] | None,
     aptitudes: dict[int, Any] | None = None,
-    win_odds: dict[int, float] | None = None,
+    bankroll: int = 10_000,
     max_points: int = 48,
     model: str = "opus",
     timeout: int = 75,
 ) -> Iterator[tuple[str, Any]]:
     """締切直前の高速 3連単選定 stream-json。**web 検索なし** (純粋推論で ~10-30s)。
 
+    市場 (単勝オッズ・人気) はプロンプトに含めず Claude 指数のみで選定させる (Plan T=市場無視)。
+    bankroll は 1レース購入予算で、合計購入額をこの予算内に収めるよう点数を絞らせる。
     出力は parse_trifecta_selection で {keys, formation, summary, confidence} に正規化する。
     """
     if not is_available():
@@ -863,7 +877,7 @@ def select_trifecta_stream(
         return
     prompt = build_trifecta_select_prompt(
         rd, llm_index=llm_index, aptitudes=aptitudes,
-        win_odds=win_odds, max_points=max_points,
+        bankroll=bankroll, max_points=max_points,
     )
     cmd = [
         "claude", "-p", prompt,

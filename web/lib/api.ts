@@ -133,6 +133,10 @@ export type BundleLeg = {
   payout_if_hit: number; // この脚が的中したときの払戻 (odds × stake)。≥ total_stake ならトリガミ無し
 };
 
+// 「買わなかった脚」(取り消し線で表示)。BundleLeg と同形 + reason。
+//   reason="torigami" = トリガミ防止で除去 / "budget" = 予算を割れず配分0 (stake<min_stake)。
+export type DroppedLeg = BundleLeg & { reason?: "torigami" | "budget" | string };
+
 // 全 bet type 横断の joint (同時) Kelly 最適まとめ買い束。
 // レースの完全な top-3 結果分布上で束全体の E[log(資金)] を最大化した配分。
 export type RecommendedBundle = {
@@ -152,6 +156,8 @@ export type RecommendedBundle = {
   // 実オッズが ~(1−1/margin) 下振れしても収支マイナスにならない。dropped_torigami は除去脚数。
   min_payout_ratio?: number;
   dropped_torigami?: number;
+  // 買わなかった脚 (= トリガミ防止 or 予算で除外)。frontend で取り消し線表示。古い snapshot は欠落。
+  dropped_legs?: DroppedLeg[];
   torigami_margin?: number;     // 払戻/投資 の下限 (1.10 = 9% 下振れ緩衝)。古い snapshot は欠落
 
   // claude -p による web 調査検証 (取消/不安材料を裏取りして cut)。未検証なら欠落。
@@ -192,6 +198,8 @@ export type TrifectaHitmaxBundle = {
   // トリガミ防止 (build_bundle と共通)
   min_payout_ratio?: number;      // 最小 払戻/投資 (≥ torigami_margin なら当たれば必ず投資総額以上)
   dropped_torigami?: number;      // トリガミで除去した脚数
+  // 買わなかった脚 (= トリガミ防止 or 予算で除外)。frontend で取り消し線表示。古い snapshot は欠落。
+  dropped_legs?: DroppedLeg[];
   torigami_margin?: number;
   odds_summary?: {
     min_payout: number;
@@ -336,6 +344,8 @@ export type WatchAutoStatus = {
     bet_plan_t?: boolean;
     // Plan T 投票時の掛金倍率 (×N)。bet_stake_multiplier (EV束用) とは独立。Plan T 選択中のみ有効。
     bet_plan_t_multiplier?: number;
+    // Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
+    plan_t_bankroll?: number;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -534,6 +544,7 @@ export const api = {
     bet_ipat?: boolean;
     bet_plan_t?: boolean;
     bet_plan_t_multiplier?: number;
+    plan_t_bankroll?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

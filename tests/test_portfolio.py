@@ -109,6 +109,107 @@ def test_bundle_torigami_filter_does_not_add_legs():
     assert n_on <= n_off
 
 
+def test_bundle_records_dropped_legs_torigami():
+    """トリガミで除去した脚を dropped_legs に reason="torigami" で記録する (取り消し線用)。
+
+    記録された脚は (1) reason="torigami" の件数が dropped_torigami と一致 (2) 最終 legs に
+    含まれない (3) BundleLeg と同形 + reason を持つ (BundleLegsTable が描画できる) を満たす。
+    """
+    # 圧倒的本命を作り、低オッズ高 prob 脚をトリガミ除去させる。
+    win = {1: 0.5, 2: 0.2, 3: 0.15, 4: 0.1, 5: 0.05}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    cands = [
+        {"bet_type": "trifecta", "key": [1, 2, 3], "odds": 2.5, "prob": 0.20, "px_o": 0.50, "tier": "minus"},
+        {"bet_type": "trifecta", "key": [1, 3, 2], "odds": 4.0, "prob": 0.15, "px_o": 0.60, "tier": "minus"},
+        {"bet_type": "trifecta", "key": [1, 2, 4], "odds": 40.0, "prob": 0.08, "px_o": 3.2, "tier": "oana"},
+        {"bet_type": "trifecta", "key": [2, 1, 3], "odds": 60.0, "prob": 0.05, "px_o": 3.0, "tier": "oana"},
+        {"bet_type": "trifecta", "key": [1, 4, 5], "odds": 120.0, "prob": 0.02, "px_o": 2.4, "tier": "oana"},
+    ]
+    b = pf.build_bundle(cands, probs, prioritize="hit", avoid_torigami=True,
+                        hit_max_legs=len(cands), max_legs=len(cands))
+    dropped = b["dropped_legs"]
+    assert isinstance(dropped, list)
+    tori = [d for d in dropped if d["reason"] == "torigami"]
+    assert len(tori) == b["dropped_torigami"]
+    kept_keys = {tuple(l["key"]) for l in b["legs"]}
+    leg_fields = {"bet_type", "key", "odds", "prob", "px_o", "tier",
+                  "kelly", "fraction", "stake", "payout_if_hit", "reason"}
+    for dl in dropped:
+        assert tuple(dl["key"]) not in kept_keys           # 除去脚は買わない
+        assert leg_fields <= set(dl)                       # BundleLeg + reason 同形
+        assert dl["reason"] in ("torigami", "budget")
+    for dl in tori:
+        assert dl["payout_if_hit"] == round(dl["odds"] * dl["stake"])
+
+
+def test_bundle_records_dropped_legs_budget():
+    """予算 (bankroll) を割り切れず配分0 になった脚を reason="budget" で記録する。
+
+    小さい bankroll では多くの候補が stake<min_stake で買えない → それらが全て
+    dropped_legs に reason="budget" で残り、買わなかった買い目が取り消し線で見える。
+    """
+    win = {1: 0.30, 2: 0.20, 3: 0.15, 4: 0.12, 5: 0.10, 6: 0.08, 7: 0.05}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    keys = [(1, 2, 3), (1, 3, 2), (2, 1, 3), (1, 2, 4), (2, 3, 1),
+            (1, 4, 5), (3, 1, 2), (2, 4, 5), (4, 5, 6), (5, 6, 7)]
+    prob = [0.05, 0.04, 0.03, 0.025, 0.02, 0.015, 0.012, 0.01, 0.006, 0.003]
+    od = [20, 28, 35, 50, 70, 90, 120, 160, 250, 400]
+    cands = [{"bet_type": "trifecta", "key": list(k), "odds": float(o),
+              "prob": p, "px_o": p * o, "tier": "oana"}
+             for k, p, o in zip(keys, prob, od)]
+    b = pf.build_bundle(cands, probs, bankroll=600, prioritize="hit", avoid_torigami=True,
+                        hit_max_legs=len(cands), max_legs=len(cands),
+                        min_stake=100, stake_unit=100)
+    budget = [d for d in b["dropped_legs"] if d["reason"] == "budget"]
+    assert budget, "小予算では budget で買えない脚が出るはず"
+    # 予算内に収まる: 投資総額 ≤ bankroll、かつ買った脚 + 買わなかった脚 = 全候補。
+    assert b["total_stake"] <= 600
+    assert len(b["legs"]) + len(b["dropped_legs"]) == len(cands)
+    kept_keys = {tuple(l["key"]) for l in b["legs"]}
+    for d in budget:
+        assert d["stake"] == 0 and d["payout_if_hit"] == 0
+        assert tuple(d["key"]) not in kept_keys
+
+
+def test_trifecta_hitmax_propagates_dropped_legs():
+    """Plan T (build_trifecta_hitmax) が build_bundle の除去脚を束に伝搬する。"""
+    from src.models import BetOdds
+    win = {1: 0.5, 2: 0.2, 3: 0.15, 4: 0.1, 5: 0.05}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    trif = [
+        BetOdds(bet_type="trifecta", key=[1, 2, 3], odds=3.0),
+        BetOdds(bet_type="trifecta", key=[1, 3, 2], odds=5.0),
+        BetOdds(bet_type="trifecta", key=[1, 2, 4], odds=40.0),
+        BetOdds(bet_type="trifecta", key=[2, 1, 3], odds=60.0),
+        BetOdds(bet_type="trifecta", key=[1, 4, 5], odds=120.0),
+        BetOdds(bet_type="trifecta", key=[1, 3, 4], odds=70.0),
+        BetOdds(bet_type="trifecta", key=[2, 3, 1], odds=80.0),
+    ]
+    bt = pf.build_trifecta_hitmax(probs, trif, bankroll=10_000)
+    assert "dropped_legs" in bt
+    tori = [d for d in bt["dropped_legs"] if d["reason"] == "torigami"]
+    assert len(tori) == bt.get("dropped_torigami", 0)
+
+
+def test_trifecta_hitmax_respects_bankroll_budget():
+    """Plan T の合計購入額は指定 bankroll (購入予算) を超えない。"""
+    from src.models import BetOdds
+    win = {i: 1.0 / 8 for i in range(1, 9)}
+    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
+    # 全 ordered triple に薄いオッズを付与して広いフォーメーションを作る。
+    trif = []
+    for a in range(1, 9):
+        for b_ in range(1, 9):
+            for c in range(1, 9):
+                if len({a, b_, c}) == 3:
+                    trif.append(BetOdds(bet_type="trifecta", key=[a, b_, c], odds=200.0))
+    for budget in (3000, 5000, 10000):
+        bt = pf.build_trifecta_hitmax(probs, trif, bankroll=budget,
+                                      rank_index={i: 100 - i * 5 for i in range(1, 9)})
+        assert bt["total_stake"] <= budget, (budget, bt["total_stake"])
+        assert bt["bankroll"] == budget
+
+
 def test_outcomes_sum_to_one():
     for n in (4, 6, 8):
         outs, p = pf.enumerate_outcomes(_uniform_probs(n))

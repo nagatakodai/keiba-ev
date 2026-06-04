@@ -312,6 +312,10 @@ class WatchAutoStartRequest(BaseModel):
     # ときだけ有効で、daemon に渡る stake_multiplier がこの値になる (EV束選択時は bet_stake_multiplier)。
     # 1 セッションは片方の束しか投票しないので、active な束の倍率だけが効く。gt=0/le=100 で誤入力ガード。
     bet_plan_t_multiplier: float = Field(default=1.0, gt=0.0, le=100.0)
+    # Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
+    # 全 dispatch subprocess に env KEIBA_PLAN_T_BANKROLL で伝播 (analyze/keibago/jra/oddspark が尊重)。
+    # 投票時の倍率 (bet_plan_t_multiplier) とは別: これは束を組む時点の予算、倍率は購入時のスケール。
+    plan_t_bankroll: int = Field(default=10_000, ge=100, le=10_000_000)
 
 
 @app.post("/api/watch-auto/start")
@@ -341,6 +345,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_ipat=req.bet_ipat,
         bet_plan_t=req.bet_plan_t,
         bet_plan_t_multiplier=req.bet_plan_t_multiplier,
+        plan_t_bankroll=req.plan_t_bankroll,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "ipat_bet_running": WATCH.ipat_bet_running,
