@@ -67,23 +67,35 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
     (a.saved_at ?? "").localeCompare(b.saved_at ?? ""),
   );
 
-  // 累積収支 (回収優先のみ): 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
-  // 的中優先AI は計測用なのでグラフには出さない (2026-05-29 ユーザ指示)。
+  // 累積収支: 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
+  // 回収優先AI (実弾) と Plan T「3連単的中モード」(市場無視・的中優先) を併記する
+  // (2026-06-05 ユーザ指示: 3連単的中モードもダッシュボードにのせる)。
   let yieldStakeAcc = 0;
   let yieldPayoutAcc = 0;
+  let tStakeAcc = 0;
+  let tPayoutAcc = 0;
   const series = sorted.map((r) => {
     if (r.bundle_participated) {
       yieldStakeAcc += r.bundle_stake ?? 0;
       // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
       yieldPayoutAcc += r.bundle_payout_final ?? r.bundle_payout ?? 0;
     }
+    if (r.plan_t_participated) {
+      tStakeAcc += r.plan_t_stake ?? 0;
+      tPayoutAcc += r.plan_t_payout_final ?? r.plan_t_payout ?? 0;
+    }
     return {
       yieldNet: yieldPayoutAcc - yieldStakeAcc,
       yieldRoi: yieldStakeAcc > 0 ? yieldPayoutAcc / yieldStakeAcc : 0,
+      tNet: tPayoutAcc - tStakeAcc,
+      tRoi: tStakeAcc > 0 ? tPayoutAcc / tStakeAcc : 0,
     };
   });
   const yieldNetSeries = series.map((s) => s.yieldNet);
   const yieldRoiSeries = series.map((s) => s.yieldRoi);
+  const tNetSeries = series.map((s) => s.tNet);
+  const tRoiSeries = series.map((s) => s.tRoi);
+  const planTParticipated = races.some((r) => r.plan_t_participated);
 
   // 結果分布: 的中 / 不的中 / 見送り レース数
   const yieldHits = races.filter((r) => r.bundle_hit).length;
@@ -93,6 +105,12 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   const yieldSkips = races.filter(
     (r) => r.bundle_participated === false,
   ).length;
+  // Plan T「3連単的中モード」の結果分布
+  const tHits = races.filter((r) => r.plan_t_hit).length;
+  const tMisses = races.filter(
+    (r) => r.plan_t_participated && !r.plan_t_hit,
+  ).length;
+  const tSkips = races.filter((r) => r.plan_t_participated === false).length;
   const totalRaces = races.length;
 
   // bet type 別 hit 内訳 (回収優先)
@@ -118,6 +136,9 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             seriesA={yieldNetSeries}
             labelA="回収優先"
             colorA="#0ea5e9"
+            seriesB={planTParticipated ? tNetSeries : undefined}
+            labelB="3連単的中"
+            colorB="#d946ef"
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
         </Card>
@@ -126,6 +147,9 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             seriesA={yieldRoiSeries.map((v) => v * 100)}
             labelA="回収優先"
             colorA="#0ea5e9"
+            seriesB={planTParticipated ? tRoiSeries.map((v) => v * 100) : undefined}
+            labelB="3連単的中"
+            colorB="#d946ef"
             yFmt={(v) => `${v.toFixed(0)}%`}
             referenceY={100}
           />
@@ -138,6 +162,14 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
               misses={yieldMisses}
               skips={yieldSkips}
             />
+            {planTParticipated && (
+              <DistroBar
+                label="3連単的中モード"
+                hits={tHits}
+                misses={tMisses}
+                skips={tSkips}
+              />
+            )}
           </div>
         </Card>
         <Card title="bet 種別">
@@ -416,6 +448,7 @@ export default async function DashboardPage() {
   ]);
 
   const claudeBundle = cal?.claude_bundle;
+  const planTBundle = cal?.plan_t_bundle;
 
   const raceHitMap = new Map<string, RaceHit>();
   for (const r of cal?.races ?? []) raceHitMap.set(r.race_id, r);
@@ -581,7 +614,96 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 回収優先のみ */}
+      {/* 3連単的中モード (Plan T) セクション — 市場無視・全力的中フォーメーション。
+          実弾は回収優先が既定だが、watch-auto の bet_plan_t で実弾化も可能 (2026-06-05 追加)。
+          的中率系=フクシア / 回収率系=同系で AI 比較として並べる。 */}
+      <section className="space-y-2">
+        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
+          <span className="inline-block w-1 h-4 bg-fuchsia-500 translate-y-0.5" />
+          <span className="text-base">3連単的中モード</span>
+          <span className="text-xs font-normal text-(--color-muted)">
+            Plan T / 市場無視・3連単フォーメーション / 的中優先
+          </span>
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Stat
+            label="的中率"
+            value={
+              !planTBundle || planTBundle.participated_races === 0
+                ? "—"
+                : fmtPct(planTBundle.hit_rate, 1)
+            }
+            hint={
+              planTBundle && planTBundle.participated_races > 0
+                ? `${planTBundle.hits} 的中 / ${planTBundle.participated_races} 参加`
+                : "賭けたレースなし"
+            }
+            tone="default"
+            accentTone="magenta"
+          />
+          <Stat
+            label="回収率"
+            value={
+              !planTBundle || planTBundle.participated_races === 0
+                ? "—"
+                : fmtRoiPct(planTBundle.roi_final ?? planTBundle.roi)
+            }
+            hint={
+              planTBundle && planTBundle.participated_races > 0
+                ? `賭金 ${fmtYen(planTBundle.stake)} → 払戻(最終) ${fmtYen(planTBundle.payout_final ?? planTBundle.payout)}`
+                : "—"
+            }
+            tone={
+              !planTBundle || planTBundle.participated_races === 0
+                ? "default"
+                : (planTBundle.roi_final ?? planTBundle.roi) > 1
+                ? "default"
+                : "bad"
+            }
+            accentTone="magenta"
+          />
+          <Stat
+            label="収支"
+            value={
+              !planTBundle || planTBundle.participated_races === 0
+                ? "—"
+                : (() => {
+                    const pay = planTBundle.payout_final ?? planTBundle.payout;
+                    const pl = pay - planTBundle.stake;
+                    return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
+                  })()
+            }
+            hint={
+              planTBundle
+                ? `参加 ${planTBundle.participated_races} / 集計 ${planTBundle.races}`
+                : "—"
+            }
+            tone={
+              !planTBundle || planTBundle.participated_races === 0
+                ? "default"
+                : (planTBundle.payout_final ?? planTBundle.payout) - planTBundle.stake < 0
+                ? "bad"
+                : "default"
+            }
+            accentTone="magenta"
+          />
+          <Stat
+            label="見送りレース数"
+            value={planTBundle?.skipped_races ?? 0}
+            hint={
+              planTBundle && planTBundle.races > 0
+                ? `見送り率 ${Math.round((planTBundle.skipped_races / planTBundle.races) * 100)}%`
+                : "—"
+            }
+            accentTone="muted"
+          />
+        </div>
+        <div className="text-[10px] text-(--color-muted) text-right px-1">
+          ※ 計測指標。実弾は回収優先AI が既定 (watch-auto の Plan T 投票 ON で実弾化)
+        </div>
+      </section>
+
+      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 回収優先 + 3連単的中 */}
       {cal && cal.races.length > 0 && (
         <DashboardCharts races={cal.races} />
       )}

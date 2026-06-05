@@ -466,7 +466,14 @@ export type CalibrationRaceItem = {
   bundle_stake?: number;
   bundle_payout?: number;              // 予想オッズ基準
   bundle_payout_final?: number;        // 最終オッズ基準 (result.final_odds × stake)
-  // 的中優先 bundle (おまけ計測) の的中。古い snapshot で欠落あり。
+  // Plan T「3連単的中モード」bundle (市場無視・Claude 指数フォーメーション) の的中。
+  // 古い snapshot は recommended_bundle_t 欠落 → participated=false。
+  plan_t_hit?: boolean;
+  plan_t_hit_bet_types?: string[];
+  plan_t_participated?: boolean;
+  plan_t_stake?: number;
+  plan_t_payout?: number;              // 予想オッズ基準
+  plan_t_payout_final?: number;        // 最終オッズ基準
   // 最終オッズ取得済 race か (frontend で「予想/最終」両表示の discriminator)
   has_final_odds?: boolean;
   // snapshot 保存時刻 (ISO8601 JST naive)。チャートでの時系列ソート / 表示用。
@@ -485,7 +492,9 @@ export type CalibrationReport = {
   plans: CalibrationPlan[];
   // Claude 選定 回収優先 bundle (recommended_bundle) の集計
   claude_bundle?: ClaudeBundleAggregate;
-  // Claude 選定 的中優先 bundle (recommended_bundle_hit) の集計 (おまけ計測)
+  // Plan T「3連単的中モード」bundle (recommended_bundle_t) の集計。
+  // 市場無視・的中優先の計測指標。claude_bundle と同形。古い snapshot は 0 集計。
+  plan_t_bundle?: ClaudeBundleAggregate;
   races: CalibrationRaceItem[];
 };
 

@@ -91,7 +91,7 @@ export function Stat({
   tone?: "default" | "good" | "warn" | "bad" | "info";
   // optional 左 border の色のみ別系統で指定 (value 色は tone が制御)。
   // 例: tone=default (数値は標準色) + accentTone="info" (左 border は青)。
-  accentTone?: "default" | "good" | "warn" | "bad" | "info" | "muted";
+  accentTone?: "default" | "good" | "warn" | "bad" | "info" | "muted" | "magenta";
 }) {
   const color =
     tone === "good"
@@ -115,6 +115,8 @@ export function Stat({
       ? "border-l-(--color-info)"
       : accentSrc === "muted"
       ? "border-l-(--color-line)"
+      : accentSrc === "magenta"
+      ? "border-l-fuchsia-500"
       : "border-l-(--color-accent)";
   return (
     <div

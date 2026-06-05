@@ -288,6 +288,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             }
 
         b_yield = _bundle_stats(pred.get("recommended_bundle"))
+        # Plan T「3連単的中モード」(market 無視・Claude 指数フォーメーション)。
+        # 回収優先 bundle と完全分離して集計し、ダッシュボードで並べて見せる。
+        # 古い snapshot は recommended_bundle_t 欠落 → participated=False で分母外。
+        b_t = _bundle_stats(pred.get("recommended_bundle_t"))
 
         races.append(
             {
@@ -304,6 +308,13 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "bundle_stake": b_yield["stake"],
                 "bundle_payout": b_yield["payout"],
                 "bundle_payout_final": b_yield["payout_final"],
+                # Plan T「3連単的中モード」bundle (おまけ計測 / bet_plan_t で実弾化可)。
+                "plan_t_hit": b_t["hit"],
+                "plan_t_hit_bet_types": sorted({leg["bet_type"] for leg in b_t["hit_legs"]}),
+                "plan_t_participated": b_t["participated"],
+                "plan_t_stake": b_t["stake"],
+                "plan_t_payout": b_t["payout"],
+                "plan_t_payout_final": b_t["payout_final"],
                 # 最終オッズが取れたかの discriminator (frontend で「予想/最終 切替表示」用)
                 "has_final_odds": bool(final_odds),
                 # LLM 評価有無の discriminator
@@ -385,6 +396,11 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         races, "bundle_participated", "bundle_hit",
         "bundle_stake", "bundle_payout", "bundle_payout_final",
     )
+    # Plan T「3連単的中モード」の集計 (回収優先と同形)。市場無視・的中優先の計測指標。
+    plan_t_bundle = _bundle_agg(
+        races, "plan_t_participated", "plan_t_hit",
+        "plan_t_stake", "plan_t_payout", "plan_t_payout_final",
+    )
 
     return {
         "race_count": len(pairs),
@@ -396,6 +412,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "tiers": tiers_out,
         "plans": [],
         "claude_bundle": claude_bundle,
+        "plan_t_bundle": plan_t_bundle,
         "races": races,
     }
 
