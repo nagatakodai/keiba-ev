@@ -300,15 +300,15 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "finish": list(finish_tuple),
                 "winning_tier": winning_tier,
                 "payout": payout,
-                # 回収優先 bundle (実弾で買う)。bundle_payout = 予想オッズ基準 (snapshot)、
-                # bundle_payout_final = 最終オッズ基準 (実払戻に近い、後付け)。
+                # EV束 (recommended_bundle, モデルのみの参考値。2026-06-06 以降は投票しない)。
+                # bundle_payout = 予想オッズ基準 (snapshot)、bundle_payout_final = 最終オッズ基準。
                 "bundle_hit": b_yield["hit"],
                 "bundle_hit_bet_types": sorted({leg["bet_type"] for leg in b_yield["hit_legs"]}),
                 "bundle_participated": b_yield["participated"],
                 "bundle_stake": b_yield["stake"],
                 "bundle_payout": b_yield["payout"],
                 "bundle_payout_final": b_yield["payout_final"],
-                # Plan T「3連単的中モード」bundle (おまけ計測 / bet_plan_t で実弾化可)。
+                # Plan T「3連単的中モード」bundle (**実弾投票束**。2026-06-06 以降 Plan T 固定)。
                 "plan_t_hit": b_t["hit"],
                 "plan_t_hit_bet_types": sorted({leg["bet_type"] for leg in b_t["hit_legs"]}),
                 "plan_t_participated": b_t["participated"],

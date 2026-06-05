@@ -292,9 +292,9 @@ class WatchAutoStartRequest(BaseModel):
     bet_auto_purchase: bool = False
     # 日次上限 (円)。0 で無効化、ge=0 で負値拒否、le で安全上限 (誤入力暴走防止)。
     bet_daily_cap: int = Field(default=50000, ge=0, le=10_000_000)
-    # **このセッション中のみ** 全 leg の stake を N 倍 (小数倍可・100円単位切り捨て)。per-race 上限 +
-    # daily_cap は維持される。gt=0 で 0 倍を拒否 (誤入力で予期しない floor 動作を避ける)、
-    # le=100 で実用上限 (100 倍超は事故の方が高確率)。
+    # **このセッション中のみ** Plan T 束の全 leg stake を N 倍 (小数倍可・100円単位切り捨て)。
+    # per-race 上限 + daily_cap は維持される。gt=0 で 0 倍を拒否 (誤入力で予期しない floor 動作を
+    # 避ける)、le=100 で実用上限 (100 倍超は事故の方が高確率)。
     bet_stake_multiplier: float = Field(default=1.0, gt=0.0, le=100.0)
     # 支払方法: opcoin (OPコイン残, 既定) | buylimit (投票資金残, 会員入金)
     # Literal で API 境界で値検証 (任意文字列を入れて子プロセスのラベルに垂れ流すのを防ぐ)。
@@ -304,17 +304,12 @@ class WatchAutoStartRequest(BaseModel):
     # **headful なので `make api` は DISPLAY のある端末で起動**。認証は env
     # (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。bet_oddspark と独立に ON 可。
     bet_ipat: bool = False
-    # 投票する束を Plan T (全力的中フォーメーション・市場無視) にする (既定 False = EV束 recommended_bundle)。
-    # ON で全 betting subprocess に env KEIBA_BET_BUNDLE=plan_t を継承させる (enqueue/scheduler/daemon 一致)。
-    # 切替はループ再起動が必要 (起動時の env が .req に記録され daemon が尊重するため)。
-    bet_plan_t: bool = False
-    # Plan T 投票時の掛金倍率 (×N)。bet_stake_multiplier (EV束用) とは独立。bet_plan_t=True の
-    # ときだけ有効で、daemon に渡る stake_multiplier がこの値になる (EV束選択時は bet_stake_multiplier)。
-    # 1 セッションは片方の束しか投票しないので、active な束の倍率だけが効く。gt=0/le=100 で誤入力ガード。
-    bet_plan_t_multiplier: float = Field(default=1.0, gt=0.0, le=100.0)
+    # 投票束は Plan T (recommended_bundle_t, 3連単的中モード) **固定** (2026-06-06)。
+    # 旧 bet_plan_t トグル / bet_plan_t_multiplier (EV束との切替) は廃止。旧クライアントが
+    # 送ってきても Pydantic が無視する (extra ignore)。
     # Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
     # 全 dispatch subprocess に env KEIBA_PLAN_T_BANKROLL で伝播 (analyze/keibago/jra/oddspark が尊重)。
-    # 投票時の倍率 (bet_plan_t_multiplier) とは別: これは束を組む時点の予算、倍率は購入時のスケール。
+    # 投票時の倍率 (bet_stake_multiplier) とは別: これは束を組む時点の予算、倍率は購入時のスケール。
     plan_t_bankroll: int = Field(default=10_000, ge=100, le=10_000_000)
 
 
@@ -343,8 +338,6 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_stake_multiplier=req.bet_stake_multiplier,
         bet_payment_method=req.bet_payment_method,
         bet_ipat=req.bet_ipat,
-        bet_plan_t=req.bet_plan_t,
-        bet_plan_t_multiplier=req.bet_plan_t_multiplier,
         plan_t_bankroll=req.plan_t_bankroll,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,

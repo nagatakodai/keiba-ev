@@ -54,31 +54,17 @@ def test_bet_auto_login_default_off(no_spawn):
     assert "--auto-login" not in mgr.bet_job.cmd        # 既定は人が手でログイン
 
 
-def test_plan_t_uses_plan_t_multiplier(no_spawn):
-    """Plan T 投票時は bet_plan_t_multiplier が daemon に渡る (EV束倍率は無視)。"""
+def test_stake_multiplier_passed_to_daemon(no_spawn):
+    """掛金倍率 (Plan T 束) が daemon に --stake-multiplier で渡る。"""
     mgr = runner.WatchAutoManager()
-    asyncio.run(mgr.start(
-        bet_oddspark=True, bet_plan_t=True,
-        bet_stake_multiplier=3.0,      # EV束用 — Plan T 投票時は使われない
-        bet_plan_t_multiplier=2.0,     # Plan T 用 — これが効く
-    ))
-    assert os.environ.get("KEIBA_BET_BUNDLE") == "plan_t"
-    assert mgr.config["bet_plan_t"] is True
-    assert mgr.config["bet_plan_t_multiplier"] == 2.0
-    # daemon には Plan T 倍率 (2.0) が渡り、EV束倍率 (3.0) は渡らない。
+    asyncio.run(mgr.start(bet_oddspark=True, bet_stake_multiplier=2.0))
+    assert mgr.config["bet_stake_multiplier"] == 2.0
     assert "--stake-multiplier=2.0" in mgr.bet_job.cmd
-    assert "--stake-multiplier=3.0" not in mgr.bet_job.cmd
 
 
-def test_ev_bundle_uses_ev_multiplier_not_plan_t(no_spawn):
-    """EV束投票 (既定) は bet_stake_multiplier を使い、Plan T 倍率は無視する。"""
+def test_plan_t_bankroll_env_propagated(no_spawn):
+    """Plan T の1レース購入予算が env KEIBA_PLAN_T_BANKROLL で全 subprocess に伝播する。"""
     mgr = runner.WatchAutoManager()
-    asyncio.run(mgr.start(
-        bet_oddspark=True, bet_plan_t=False,
-        bet_stake_multiplier=3.0,      # EV束用 — これが効く
-        bet_plan_t_multiplier=2.0,     # Plan T 用 — EV束投票時は使われない
-    ))
-    assert os.environ.get("KEIBA_BET_BUNDLE") == "recommended"
-    # daemon には EV束倍率 (3.0) が渡り、Plan T 倍率 (2.0) は渡らない。
-    assert "--stake-multiplier=3.0" in mgr.bet_job.cmd
-    assert "--stake-multiplier=2.0" not in mgr.bet_job.cmd
+    asyncio.run(mgr.start(bet_oddspark=True, plan_t_bankroll=20_000))
+    assert os.environ.get("KEIBA_PLAN_T_BANKROLL") == "20000"
+    assert mgr.config["plan_t_bankroll"] == 20_000

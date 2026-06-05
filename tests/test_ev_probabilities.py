@@ -243,18 +243,8 @@ def test_estimate_probs_default_blend_matches_constant():
     assert sig.parameters["market_blend"].default == BLEND_DEFAULT
 
 
-def test_training_data_block_present_and_safe():
-    """`_training_data_block()` は metadata 有無に関わらず非空の string を返す。
-
-    Phase 24: claude -p に学習データ context を渡す path の smoke test。
-    """
-    from src.llm import _training_data_block
-    block = _training_data_block()
-    assert isinstance(block, str)
-    assert len(block) > 200
-    # 必ず holdout finding と Read 案内が含まれる
-    assert "+EV" in block or "EV" in block
-    assert "Read" in block or "data/" in block
+# test_training_data_block_present_and_safe は削除 (2026-06-06): `_training_data_block` は
+# 回収優先AI (build_prompt / build_refresh_prompt) 専用 helper で、回収優先AI 撤去と共に消えた。
 
 
 def test_llm_allows_read_tool():

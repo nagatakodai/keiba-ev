@@ -322,7 +322,7 @@ export type WatchAutoStatus = {
     aptitude_top?: number | null;
     with_exacta?: boolean;
     with_trio?: boolean;
-    // claude -p (回収優先の束選定 + 的中優先評価) を使わず確率モデルのみ。
+    // claude -p (各馬指数 score + Plan T 3連単選定) を使わず確率モデルのみ。
     no_llm?: boolean;
     // race detection を行う JST 時間帯 (HH:MM-HH:MM)。
     // backend (api/main.py:WatchAutoStartRequest) の default は "09:00-23:45"。
@@ -334,15 +334,15 @@ export type WatchAutoStatus = {
     // 自動購入 (実弾): ON で #gotobuy まで自動。daily_cap で日次上限ガード。
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;   // 円
-    // セッション中のみ全 leg の stake を N 倍 (100円単位丸め)。per-race 上限 / daily_cap は維持。
+    // セッション中のみ Plan T 束の全 leg stake を N 倍 (100円単位丸め)。per-race 上限 / daily_cap は維持。
     bet_stake_multiplier?: number;
     // 支払方法: "opcoin" (OPコイン残, 既定) | "buylimit" (投票資金残, 会員入金)
     bet_payment_method?: "opcoin" | "buylimit";
     // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) を起動。
     bet_ipat?: boolean;
-    // 投票束を Plan T (全力的中フォーメーション・市場無視) にする (既定 false = EV束)。
+    // legacy (2026-06-06 以前): 投票束 Plan T トグルと専用倍率。現在は Plan T 固定で送信しない。
+    // 旧 persist 済 config の prefill 互換のため型にだけ残す。
     bet_plan_t?: boolean;
-    // Plan T 投票時の掛金倍率 (×N)。bet_stake_multiplier (EV束用) とは独立。Plan T 選択中のみ有効。
     bet_plan_t_multiplier?: number;
     // Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
     plan_t_bankroll?: number;
@@ -551,8 +551,6 @@ export const api = {
     bet_stake_multiplier?: number;
     bet_payment_method?: "opcoin" | "buylimit";
     bet_ipat?: boolean;
-    bet_plan_t?: boolean;
-    bet_plan_t_multiplier?: number;
     plan_t_bankroll?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(

@@ -59,25 +59,21 @@ export default function WatchAutoPage() {
   const [activeHours, setActiveHours] = useState("09:00-23:45");
   const [withExacta, setWithExacta] = useState(false);
   const [withTrio, setWithTrio] = useState(false);
-  // claude -p (回収優先の束選定 + 的中優先評価) を使わず確率モデルのみで分析。
+  // claude -p (各馬指数 score + Plan T 3連単選定) を使わず確率モデルのみで分析。
   const [noLlm, setNoLlm] = useState(false);
   // オッズパーク自動投票 (カート投入)。ON で投票 daemon (headful ブラウザ) が起動し、人がログイン。
   const [betOddspark, setBetOddspark] = useState(false);
   // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) が起動 (土日 JRA 用)。
   const [betIpat, setBetIpat] = useState(false);
-  // 投票束を Plan T (全力的中フォーメーション・市場無視) にする (既定 false = EV束)。
-  const [betPlanT, setBetPlanT] = useState(false);
+  // 投票束は Plan T (recommended_bundle_t, 3連単的中モード) 固定 (2026-06-06)。旧トグルは廃止。
   // 自動ログイン: ON で env 認証 (ODDSPARK_ID/PASSWORD/PIN) で自動ログイン。OFF は人が手でログイン。
   const [betAutoLogin, setBetAutoLogin] = useState(false);
   // **自動購入 (実弾)** モード: ON で #gotobuy → 確認画面 → 確定 まで自動 (人の介入なし)。
   // bet_oddspark が ON でないと意味が無い。daily_cap (円) で日次上限ガード。
   const [betAutoPurchase, setBetAutoPurchase] = useState(false);
   const [betDailyCap, setBetDailyCap] = useState("50000");
-  // セッション中のみ全 leg の stake を倍率倍に (小数倍可・100円単位切り捨て)。1.0=既定 / 1.5 / 2.0 等。
-  // これは EV束 (recommended_bundle) を投票するときの倍率。Plan T 投票時は betPlanTMultiplier が効く。
+  // セッション中のみ Plan T 束の全 leg stake を倍率倍に (小数倍可・100円単位切り捨て)。1.0=既定。
   const [betStakeMultiplier, setBetStakeMultiplier] = useState("1");
-  // Plan T 投票時の掛金倍率 (EV束用とは独立)。betPlanT=ON のときだけ daemon に渡る。
-  const [betPlanTMultiplier, setBetPlanTMultiplier] = useState("1");
   // Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
   const [planTBankroll, setPlanTBankroll] = useState("10000");
   // 支払方法: opcoin (OPコイン残, 既定) または buylimit (投票資金残)
@@ -107,12 +103,14 @@ export default function WatchAutoPage() {
     if (c.no_llm != null) setNoLlm(!!c.no_llm);
     if (c.bet_oddspark != null) setBetOddspark(!!c.bet_oddspark);
     if (c.bet_ipat != null) setBetIpat(!!c.bet_ipat);
-    if (c.bet_plan_t != null) setBetPlanT(!!c.bet_plan_t);
     if (c.bet_auto_login != null) setBetAutoLogin(!!c.bet_auto_login);
     if (c.bet_auto_purchase != null) setBetAutoPurchase(!!c.bet_auto_purchase);
     if (c.bet_daily_cap != null) setBetDailyCap(String(c.bet_daily_cap));
-    if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
-    if (c.bet_plan_t_multiplier != null) setBetPlanTMultiplier(String(c.bet_plan_t_multiplier));
+    // 旧 config 互換: Plan T トグル時代は Plan T 専用倍率 (bet_plan_t_multiplier) が実効値
+    // だったので、そちらを優先して掛金倍率に流し込む (束は今や常に Plan T)。
+    if (c.bet_plan_t && c.bet_plan_t_multiplier != null)
+      setBetStakeMultiplier(String(c.bet_plan_t_multiplier));
+    else if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
     if (c.plan_t_bankroll != null) setPlanTBankroll(String(c.plan_t_bankroll));
     if (c.bet_payment_method === "buylimit" || c.bet_payment_method === "opcoin")
       setBetPaymentMethod(c.bet_payment_method);
@@ -165,7 +163,6 @@ export default function WatchAutoPage() {
         no_llm: noLlm,
         bet_oddspark: betOddspark,
         bet_ipat: betIpat,
-        bet_plan_t: betPlanT,
         bet_auto_login: betAutoLogin,
         bet_auto_purchase: betAutoPurchase,
         // 0 を許容 (cap=0 で無効化を意図的に表現できる)。NaN/負値だけ既定に戻す。
@@ -177,11 +174,6 @@ export default function WatchAutoPage() {
         // `|| default` だと 0 が既定で上書きされ意図と異なる挙動になるため NaN 判定で分岐。
         bet_stake_multiplier: (() => {
           const v = parseFloat(betStakeMultiplier);
-          return Number.isFinite(v) && v > 0 ? v : 1.0;
-        })(),
-        // Plan T 投票時の倍率 (EV束用と独立)。backend Pydantic は gt=0 拒否なので NaN/負値は 1.0 に。
-        bet_plan_t_multiplier: (() => {
-          const v = parseFloat(betPlanTMultiplier);
           return Number.isFinite(v) && v > 0 ? v : 1.0;
         })(),
         // Plan T の1レース購入予算 (円)。backend は ge=100 拒否なので NaN/100未満は既定 10000 に。
@@ -453,38 +445,10 @@ export default function WatchAutoPage() {
                 <span>JRA 即PAT 自動投票 (カート投入・要ログイン / 土日 JRA 開催日)</span>
               </label>
               {(betOddspark || betIpat) && (
-                <div className="flex items-center gap-3 flex-wrap basis-full">
-                  <label className="inline-flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={betPlanT}
-                      onChange={(e) => setBetPlanT(e.target.checked)}
-                      disabled={running}
-                      className="accent-(--color-warn)"
-                    />
-                    <span>
-                      投票束を <b>Plan T (全力的中・市場無視)</b> にする
-                      <span className="text-xs text-(--color-muted)">
-                        {" "}(既定OFF=EV束。切替はループ再起動が必要・−EV想定。
-                        <b>Claude 指数が無いレースは自動 skip</b>)
-                      </span>
-                    </span>
-                  </label>
-                  {betPlanT && (
-                    <div className="flex items-end gap-2">
-                      <Input
-                        label="掛金倍率 — Plan T (×N)"
-                        value={betPlanTMultiplier}
-                        onChange={(e) => setBetPlanTMultiplier(e.target.value)}
-                        disabled={running}
-                        className="w-28"
-                      />
-                      <span className="text-xs text-(--color-muted) pb-1.5">
-                        Plan T の各脚 stake を ×N (小数可・100円単位切り捨て)。下の EV束用「掛金倍率」とは独立。
-                      </span>
-                    </div>
-                  )}
-                </div>
+                <p className="basis-full text-xs text-(--color-muted)">
+                  投票束は <b>Plan T (3連単的中モード・市場無視)</b> 固定。
+                  <b>Claude 指数が無いレースは自動 skip</b> します (rank_source≠claude は投票しない)。
+                </p>
               )}
             </div>
             {betOddspark && (
@@ -531,20 +495,13 @@ export default function WatchAutoPage() {
                     disabled={running || !betAutoPurchase}
                     className="w-32"
                   />
-                  <div className="flex items-end gap-2">
-                    <Input
-                      label={betPlanT ? "掛金倍率 — EV束 (×N, 無効)" : "掛金倍率 — EV束 (×N)"}
-                      value={betStakeMultiplier}
-                      onChange={(e) => setBetStakeMultiplier(e.target.value)}
-                      disabled={running || betPlanT}
-                      className="w-24"
-                    />
-                    {betPlanT && (
-                      <span className="text-xs text-(--color-warn) pb-1.5">
-                        Plan T 選択中は上の <b>Plan T 倍率</b>が使われます (EV束倍率は無効)。
-                      </span>
-                    )}
-                  </div>
+                  <Input
+                    label="掛金倍率 — Plan T 束 (×N)"
+                    value={betStakeMultiplier}
+                    onChange={(e) => setBetStakeMultiplier(e.target.value)}
+                    disabled={running}
+                    className="w-24"
+                  />
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
                       支払方法

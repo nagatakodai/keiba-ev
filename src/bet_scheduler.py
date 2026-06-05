@@ -74,13 +74,8 @@ def run_scheduler(
 
 
 def _main() -> None:
-    import os
     argv = sys.argv[1:]
-    # --plan-t: 投票束を Plan T に切替 (env で enqueue/daemon と一致)。oddspark_bet/ipat_bet と対称化。
-    if "--plan-t" in argv:
-        os.environ["KEIBA_BET_BUNDLE"] = "plan_t"
-    print(f"[bet_scheduler] 投票束 source = {aw._bet_bundle_source()} "
-          f"(KEIBA_BET_BUNDLE={os.environ.get('KEIBA_BET_BUNDLE', 'recommended')})", flush=True)
+    print("[bet_scheduler] 投票束 = recommended_bundle_t (Plan T 3連単的中モード固定)", flush=True)
     bet_lead_sec = aw.BET_LEAD_SEC_DEFAULT
     rescan_sec = RESCAN_SEC_DEFAULT
     market_blend = None

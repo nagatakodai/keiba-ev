@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.request import Request, urlopen
 
-from .ev import MARKET_BLEND_LIVE
+from .ev import LLM_BLEND_DEFAULT, MARKET_BLEND_LIVE
 from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
 from .parse import VENUE_CODE, _split_race_id, is_nar_race_id
 
@@ -637,12 +637,15 @@ def build_oddspark_racedata(
 
 def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
                      with_llm: bool = True, market_blend: float = MARKET_BLEND_LIVE,
-                     aptitude_top: int = 6) -> dict:
+                     aptitude_top: int = 6, phase: str = "bet",
+                     llm_blend: float = LLM_BLEND_DEFAULT) -> dict:
     """NAR race を oddspark の単複/3連単オッズで解析する (netkeiba block 中のフォールバック)。
 
     出馬表 (馬柱/特徴量) は data/raw の netkeiba cache があれば使い (確率モデルが効く)、
     無ければ oddspark の馬リストだけで市場ブレンド主導の確率を出す。
     save_snapshot=True で data/predictions/<race_id>.json を保存 (dashboard / watch-auto 用)。
+    keibago/jra と同じ **2段パイプライン**: phase="score" で Claude 各馬指数をキャッシュして
+    即 return、phase="bet" (既定) で指数を合成した probs から Plan T 束まで生成する。
     返り値: {rd, probs, tables, bundle, ...}。
     """
     import gzip
@@ -700,9 +703,38 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
             for i, (k, o) in enumerate(bets.trifecta, 1)
         ]
 
+    from . import analyze as az_mod
+    from .aptitude import compute_aptitudes
+    from .features import build_features
+    race_id = f"{rd.race.cup_id}-{rd.race.schedule_index}-{rd.race.race_number}"
+    # cached でも oddspark HorseDetail 由来でも past_runs があれば特徴量が効く
+    has_past = any(h.past_runs for h in rd.race.horses)
+    feats = build_features(rd) if (used_cache or has_past) else None
+    aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
+    market_signals = None
+    try:
+        from .market_signal import compute_market_signals
+        market_signals = compute_market_signals(rd)
+    except Exception:  # noqa: BLE001
+        market_signals = None
+    best_times = az_mod._serialize_best_times(rd, feats) if feats else []
+
+    # 2段パイプライン score ステージ: Claude 指数をキャッシュし即 return (keibago/jra と同形)。
+    if phase == "score":
+        if with_llm:
+            az_mod._run_score_stage(
+                race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
+                horse_best_times=best_times, model="opus")
+        return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
+
+    # bet ステージ: キャッシュ指数を合成して estimate_probs。
+    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(race_id)
+
     mwp = market_win_probs_from_tanfuku(bets.tanfuku)
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp,
-                                  speed_v2_blend=ev_mod.SPEED_V2_BLEND_LIVE)
+                                  speed_v2_blend=ev_mod.SPEED_V2_BLEND_LIVE,
+                                  llm_win_index=llm_index, llm_blend=llm_blend,
+                                  llm_support=llm_support, llm_scale=llm_scale)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     # 3連単 EV table (rd.trifecta 由来)
@@ -722,60 +754,26 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
     tables["trifecta"] = tri_table
 
     if save_snapshot:
-        from . import analyze as az_mod
-        from .aptitude import compute_aptitudes
-        from .features import build_features
-        race_id = f"{rd.race.cup_id}-{rd.race.schedule_index}-{rd.race.race_number}"
-        # cached でも oddspark HorseDetail 由来でも past_runs があれば特徴量が効く
-        has_past = any(h.past_runs for h in rd.race.horses)
-        feats = build_features(rd) if (used_cache or has_past) else None
-        aptitudes = compute_aptitudes(rd, feats=feats) if feats else None
         apt_top = az_mod._aptitude_top_horses(aptitudes, n=aptitude_top) if aptitudes else None
         plan_rows = ev_mod.apply_caps(tri_table)
         snap_bet_tables = {k: v for k, v in tables.items()
                            if k in ("win", "place") and v}
-        market_signals = None
-        try:
-            from .market_signal import compute_market_signals
-            market_signals = compute_market_signals(rd)
-        except Exception:  # noqa: BLE001
-            market_signals = None
-        best_times = az_mod._serialize_best_times(rd, feats) if feats else []
         try:
             az_mod._save_prediction_snapshot(
                 race_id, rd, tri_table, plan_rows, aptitudes, snap_bet_tables, apt_top,
                 market_signals, feats=feats, lgbm_info=ev_mod.lgbm_status(),
                 hit_points=3, probs=probs,
+                llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
+                llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
+                # bet 段のみ到達 (score 段は上で early return)。Plan T 3連単買い目選定を Claude に
+                # 任せる (指数キャッシュ無しなら内部で機械フォーメーションにフォールバック)。
+                claude_trifecta_select=with_llm,
             )
             _tag_snapshot_source(race_id, "oddspark")
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_oddspark] snapshot 保存失敗: {ex}")
-
-        # netkeiba と同じ claude 調査: ① 3連単 plan の検索補強 (evidence) ②総合オススメ
-        # 束の web 検証。どちらも claude -p。netkeiba 経路 (analyze.py) と同じ関数を流用。
-        if with_llm:
-            from . import llm as llm_mod
-            try:
-                initial = az_mod._print_llm_evaluation(
-                    rd, plan_rows, model="opus", probs=probs, aptitudes=aptitudes,
-                    aptitude_top_horses=apt_top, market_signals=market_signals,
-                    horse_best_times=best_times,
-                )
-                evidence = llm_mod.parse_evidence(initial)
-                if evidence:
-                    az_mod._save_evidence_to_snapshot(race_id, plan_rows, evidence, apt_top, hit_points=3)
-            except Exception as ex:  # noqa: BLE001
-                print(f"[analyze_oddspark] LLM evidence 失敗: {ex}")
-            try:
-                az_mod._validate_and_update_bundle(
-                    race_id, rd, probs, tri_table, snap_bet_tables,
-                    aptitudes=aptitudes, market_signals=market_signals,
-                    horse_best_times=best_times, model="opus",
-                )
-                # 回収優先 完了 → 的中優先 を別 process で並行 spawn (実弾購入と並行)
-                az_mod._spawn_hit_bundle_claude(race_id)
-            except Exception as ex:  # noqa: BLE001
-                print(f"[analyze_oddspark] bundle 検証失敗: {ex}")
+        # 旧 claude 調査 (3連単 evidence 補強 + 回収優先束の web 検証) は撤去 (2026-06-06,
+        # Plan T 特化)。Claude は score ステージ指数 + Plan T 選定のみ。
 
     return {
         "rd": rd, "probs": probs, "loc": loc, "used_cache": used_cache,
@@ -810,6 +808,8 @@ def _cli() -> None:
     start_at = 0
     market_blend = MARKET_BLEND_LIVE
     aptitude_top = 6
+    phase = "bet"
+    llm_blend = LLM_BLEND_DEFAULT
     for a in sys.argv:
         if a.startswith("--start-at="):
             start_at = int(a.split("=", 1)[1] or 0)
@@ -818,23 +818,34 @@ def _cli() -> None:
                 market_blend = float(a.split("=", 1)[1])
             except ValueError:
                 pass
+        elif a.startswith("--llm-blend="):
+            try:
+                llm_blend = float(a.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif a.startswith("--phase="):
+            phase = a.split("=", 1)[1].strip() or "bet"
         elif a.startswith("--aptitude-top="):
             try:
                 aptitude_top = int(a.split("=", 1)[1])
             except ValueError:
                 pass
     if not args:
-        console.print("usage: python -m src.scrape_oddspark <netkeiba_nar_race_id> [--snapshot] [--start-at=UNIX] [--market-blend=X] [--aptitude-top=N]")
+        console.print("usage: python -m src.scrape_oddspark <netkeiba_nar_race_id> [--snapshot] [--start-at=UNIX] [--market-blend=X] [--aptitude-top=N] [--phase=score|bet] [--llm-blend=X] [--no-llm]")
         raise SystemExit(2)
     rid = args[0]
     try:
         res = analyze_oddspark(rid, save_snapshot=save, start_at=start_at,
                                with_llm="--no-llm" not in sys.argv,
-                               market_blend=market_blend, aptitude_top=aptitude_top)
+                               market_blend=market_blend, aptitude_top=aptitude_top,
+                               phase=phase, llm_blend=llm_blend)
     except OddsparkError as ex:
         console.print(f"[yellow]oddspark 解析不能 ({rid}): {ex}[/yellow]")
         raise SystemExit(1)
     loc = res["loc"]
+    if res.get("phase") == "score":
+        console.print(f"[bold]oddspark {loc.venue} {loc.race_nb}R score ステージ完了 (指数キャッシュ)[/bold]")
+        return
     console.rule(f"[bold]oddspark {loc.venue} {loc.race_nb}R[/bold] "
                  f"(raceDy={loc.race_dy} opTrackCd={loc.op_track_cd}) "
                  f"{'[cache 出馬表使用]' if res['used_cache'] else '[oddspark 馬リストのみ]'}")

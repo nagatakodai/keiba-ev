@@ -249,7 +249,6 @@ def main(
     _print_bet_tables(bet_tables, aptitude_top_horses=apt_top)
     _print_judgment_notes(rd, rows)
 
-    initial_eval = ""   # refresh の context 用に空のまま渡す
     # 2段パイプライン (指数ステップ一本化): bet ステージは Claude の picks/cuts 選定を呼ばない。
     # 買い目は score ステージの指数を合成した probs から build_bundle (joint Kelly + トリガミ防止)
     # が決める。Claude の考察は estimate_probs に既に入っている (llm_win_index)。
@@ -266,7 +265,6 @@ def main(
                 url=url,
                 rd_old=rd,
                 rows_old=rows,
-                initial_eval=initial_eval,
                 minutes_before=refresh_min,
                 model=llm_model,
                 no_llm=no_llm,
@@ -286,93 +284,6 @@ def main(
                 with_exacta=with_exacta,
                 with_trio=with_trio,
             )
-
-
-def _print_evidence_adjusted(
-    plan_rows,
-    evidence: dict,
-    hit_points: int = 3,
-    hit_budget_ratio: float = 0.2,
-    aptitude_top_horses: list[int] | None = None,
-) -> None:
-    evidence_by_key = evidence.get("evidence_by_key") or {}
-    cuts = evidence.get("cuts") or []
-    if not evidence_by_key and not cuts:
-        return
-    adjusted = ev_mod.apply_evidence(plan_rows, evidence_by_key, cuts)
-    console.rule("[bold magenta]検索補強適用後の Plan[/bold magenta]")
-    console.print(
-        f"[dim]補強根拠で {len(evidence_by_key)} 件評価、cuts {len(cuts)} 件除外 → "
-        f"{len(adjusted)}/{len(plan_rows)} 件残存[/dim]"
-    )
-    if cuts:
-        console.print(f"[red]cuts:[/red] {', '.join(cuts)}")
-    if adjusted:
-        tbl = Table(title="補強反映後の P×O 上位 10", show_lines=False)
-        tbl.add_column("#", justify="right", style="dim")
-        tbl.add_column("買い目", style="bold")
-        tbl.add_column("補強")
-        tbl.add_column("オッズ", justify="right")
-        tbl.add_column("補正P", justify="right")
-        tbl.add_column("補正P×O", justify="right")
-        tbl.add_column("帯")
-        for i, r in enumerate(adjusted[:10], 1):
-            key_str = f"{r.key[0]}-{r.key[1]}-{r.key[2]}"
-            info = evidence_by_key.get(key_str, {})
-            count = info.get("count", 0)
-            badge = f"{count}件" if count else "-"
-            tbl.add_row(
-                str(i),
-                key_str,
-                badge,
-                f"{r.odds:.1f}",
-                f"{r.prob * 100:.2f}%",
-                _color_pxo(r.px_o),
-                _tier_jp(r.tier),
-            )
-        console.print(tbl)
-    _print_plans(
-        adjusted,
-        hit_points=hit_points,
-        hit_budget_ratio=hit_budget_ratio,
-        aptitude_top_horses=aptitude_top_horses,
-    )
-
-
-def _save_evidence_to_snapshot(
-    race_id: str,
-    plan_rows,
-    evidence: dict,
-    aptitude_top_horses: list[int] | None = None,
-    hit_points: int = 3,
-) -> None:
-    snap_path = ROOT / "data" / "predictions" / f"{race_id}.json"
-    if not snap_path.exists():
-        return
-    try:
-        snap = json.loads(snap_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return
-    # 新スキーマ (2026-05-29 後半): Plan A/B 自体は廃止。evidence は LLM 補強後の 3連単 rows と
-    # cuts のみを保存する。bundle 再生成は `_validate_and_update_bundle` で別途処理。
-    _ = aptitude_top_horses
-    _ = hit_points
-    evidence_by_key = evidence.get("evidence_by_key") or {}
-    cuts = evidence.get("cuts") or []
-    adjusted = ev_mod.apply_evidence(plan_rows, evidence_by_key, cuts)
-    snap["evidence"] = evidence
-    snap["evidence_rows"] = [
-        {
-            "key": list(r.key),
-            "odds": r.odds,
-            "popularity": r.popularity,
-            "prob": r.prob,
-            "px_o": r.px_o,
-            "tier": r.tier,
-        }
-        for r in adjusted
-    ]
-    snap_path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _serialize_bet_tables(bet_tables: dict[str, list]) -> dict[str, list[dict]]:
@@ -481,150 +392,9 @@ def _serialize_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> list[dict]:
     return items
 
 
-def _validate_and_update_bundle(
-    race_id: str,
-    rd,
-    probs,
-    rows,
-    bet_tables,
-    *,
-    aptitudes=None,
-    market_signals=None,
-    horse_best_times=None,
-    model: str = "opus",
-    prioritize: str = "yield",
-) -> None:
-    """claude -p (web 検索付き) にモデル出力を全部見せて最終「買い目」を選定させ、
-    その picks で recommended_bundle (回収優先) または recommended_bundle_hit (的中優先) を
-    再構築して snapshot 更新。
-
-    `prioritize="yield"` (default): 回収優先 — joint Kelly EV 最適束、`recommended_bundle` を更新。
-    `prioritize="hit"`             : 的中優先 — prob 降順 pool で Kelly、`recommended_bundle_hit` を更新。
-
-    検証不能/見送り時は no-op (モデル束を維持)。
-    """
-    cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
-    bundle = pf_mod.build_bundle(cands, probs, prioritize=prioritize)
-    if not bundle.get("legs"):
-        return  # 見送り (+EV 束なし) — 選定対象なし
-    if not llm_mod.is_available():
-        return
-
-    mode_jp = "的中優先" if prioritize == "hit" else "回収優先"
-    console.rule(f"[bold]Claude 総合オススメ 選定 ({mode_jp}, claude -p, web 検索で per-leg 補強)[/bold]")
-    chunks: list[str] = []
-    saw_error = False
-    saw_result = False
-    tool_count = 0
-    try:
-        for etype, payload in llm_mod.select_bundle_stream(
-            rd, bundle, cands, model=model,
-            aptitudes=aptitudes, market_signals=market_signals,
-            horse_best_times=horse_best_times,
-            prioritize=prioritize,
-        ):
-            if etype == "text":
-                chunks.append(payload)
-                console.print(payload, end="")
-            elif etype == "tool_use":
-                # 検索 (Brave/Tavily/WebFetch) の query をリアルタイム表示。silent run 防止。
-                tool_count += 1
-                name = (payload or {}).get("name", "?")
-                inp = (payload or {}).get("input") or {}
-                q = inp.get("query") or inp.get("q") or inp.get("url") or ""
-                label = name.replace("mcp__", "").replace("__", "/")
-                if q:
-                    qshort = q if len(q) <= 70 else q[:67] + "..."
-                    console.print(f"[dim]  🔍 {label}: {qshort}[/dim]")
-                else:
-                    console.print(f"[dim]  ⚙ {label}[/dim]")
-            elif etype == "result":
-                saw_result = True
-                if payload:
-                    chunks.append(payload)
-            elif etype == "error":
-                saw_error = True
-                console.print(f"[red]bundle 選定エラー: {payload}[/red]")
-    except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]bundle 選定失敗: {ex}[/yellow]")
-        return
-
-    if tool_count:
-        console.print(f"[dim](補強のための検索/ツール呼び出し計 {tool_count} 回)[/dim]")
-    if saw_error or not saw_result:
-        console.print("[yellow]選定が完了しなかったため未選定のまま (モデル束を維持)[/yellow]")
-        return
-
-    review = llm_mod.parse_bundle_review("".join(chunks))
-    bundle, applied = _decide_selection_bundle(review, cands, probs, bundle, prioritize=prioritize)
-    if not applied:
-        # picks/cuts を適用できなかった (picks が候補 id に一致しない / 旧形式で picks も
-        # cuts も無い)。モデル束を維持し validated バッジは付けない (未検証扱い)。
-        console.print("[yellow]claude 選定を適用できず — モデル束を維持 (未検証)[/yellow]")
-        return
-    n = len(bundle.get("legs", []))
-    console.print(f"[cyan]claude 選定適用 → 束 {n} 脚" + (" (見送り)" if n == 0 else "") + "[/cyan]")
-    bundle["llm_review"] = {
-        "validated": True, "mode": "selection", "prioritize": prioritize, **review,
-    }
-    _update_snapshot_bundle(race_id, bundle, prioritize=prioritize)
-
-
-def _decide_selection_bundle(
-    review: dict, cands: list, probs, model_bundle: dict, *, prioritize: str = "yield"
-) -> tuple[dict, bool]:
-    """claude の選定 (review) から最終束を決める。戻り値 (bundle, applied)。
-
-    - picks 明示 (list):
-        - 空 `[]` = 明示的な見送り → 空束 (applied=True、claude が「賭けない」と判断)
-        - 有効 id あり → その脚で joint Kelly 再構築 (applied=True)
-        - 全て不正 id (selected 空) → モデル束維持 (applied=False、未検証扱い)
-    - picks 不在 (None) + cuts あり → 後方互換: cuts を除いた脚で再構築 (applied=True)
-    - picks も cuts も無し → モデル束維持 (applied=False)
-
-    `if picks:` だと `[]` (見送り) が falsy で素通りし、claude が賭けない判断をした
-    のにモデルの全束が validated 扱いで投入され得たため、`picks is not None` で分岐する。
-    """
-    from . import llm as llm_mod
-    from . import portfolio as pf_mod
-    picks = review.get("picks")
-    if picks is not None:
-        pick_set = set(picks)
-        selected = [c for c in cands
-                    if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) in pick_set]
-        if not picks:                       # 明示的な見送り (賭けない)
-            return pf_mod.build_bundle([], probs, prioritize=prioritize), True
-        if selected:                        # 有効な picks → その脚で再構築
-            return pf_mod.build_bundle(selected, probs, prioritize=prioritize), True
-        return model_bundle, False          # picks が全て候補 id に不一致 → 適用不可
-    if review.get("cuts"):                  # 後方互換: cuts のみ
-        cut_set = set(review["cuts"])
-        kept = [c for c in cands
-                if llm_mod.leg_id({"bet_type": c["bet_type"], "key": c["key"]}) not in cut_set]
-        return pf_mod.build_bundle(kept, probs, prioritize=prioritize), True
-    return model_bundle, False
-
-
-def _update_snapshot_bundle(race_id: str, bundle: dict, *, prioritize: str = "yield") -> None:
-    """既存 snapshot JSON の recommended_bundle / recommended_bundle_hit を差し替える。
-
-    prioritize="yield" → recommended_bundle (回収優先, 実弾で買う)
-    prioritize="hit"   → recommended_bundle_hit (的中優先, おまけ計測)
-    """
-    path = ROOT / "data" / "predictions" / f"{race_id}.json"
-    if not path.exists():
-        return
-    try:
-        snap = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    field = "recommended_bundle_hit" if prioritize == "hit" else "recommended_bundle"
-    snap[field] = bundle
-    path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
-    label = "recommended_bundle_hit" if prioritize == "hit" else "recommended_bundle"
-    console.print(f"[dim]{label} 更新 (LLM 検証反映)[/dim]")
-
-
+# 旧「回収優先AI」(claude -p による EV束 picks/cuts 選定 = _validate_and_update_bundle /
+# _decide_selection_bundle / _update_snapshot_bundle) は撤去 (ユーザ指示 2026-06-06)。
+# Claude の役割は score ステージ (各馬指数) + Plan T 3連単買い目選定 (_claude_select_trifecta) に特化。
 def _llm_scores_path(race_id: str) -> Path:
     return ROOT / "data" / "predictions" / f"{race_id}.llm.json"
 
@@ -1546,85 +1316,11 @@ def _print_judgment_notes(rd, rows) -> None:
         console.print(f"  - {n}")
 
 
-def _print_llm_evaluation(
-    rd,
-    rows,
-    *,
-    model: str,
-    ev_max: Optional[float] = None,
-    min_prob: Optional[float] = None,
-    probs=None,
-    aptitudes: dict | None = None,
-    aptitude_top_horses: list[int] | None = None,
-    market_signals: dict | None = None,
-    horse_best_times: list | None = None,
-) -> str:
-    if not llm_mod.is_available():
-        console.print("[yellow]claude CLI が見つかりません。--no-llm でスキップ可。[/yellow]")
-        return ""
-    console.rule(f"[bold magenta]Claude による評価 (model={model})[/bold magenta]")
-
-    final_text = ""
-    text_buf: list[str] = []
-    saw_init = False
-    tool_count = 0
-
-    for etype, payload in llm_mod.evaluate_stream(
-        rd, rows, model=model, ev_max=ev_max, min_prob=min_prob, probs=probs,
-        aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
-        market_signals=market_signals, horse_best_times=horse_best_times,
-    ):
-        if etype == "init":
-            saw_init = True
-            mcps = payload.get("mcp_servers") or []
-            ok = [m for m in mcps if m.get("status") in ("connected", "ready", "ok") or not m.get("status")]
-            ng = [m for m in mcps if m.get("status") not in ("connected", "ready", "ok") and m.get("status")]
-            if mcps:
-                ok_names = ", ".join(m.get("name", "?") for m in ok) or "(なし)"
-                console.print(f"[dim]✓ MCP 起動: {ok_names}[/dim]")
-                if ng:
-                    ng_lines = ", ".join(f"{m.get('name')}({m.get('status')})" for m in ng)
-                    console.print(f"[yellow]⚠ MCP 接続失敗: {ng_lines}[/yellow]")
-            else:
-                console.print("[yellow]⚠ MCP サーバが 1 つも認識されませんでした[/yellow]")
-        elif etype == "tool_use":
-            tool_count += 1
-            name = payload.get("name", "?")
-            inp = payload.get("input") or {}
-            q = inp.get("query") or inp.get("q") or inp.get("url") or ""
-            label = name.replace("mcp__", "").replace("__", "/")
-            if q:
-                qshort = q if len(q) <= 70 else q[:67] + "..."
-                console.print(f"[dim]  🔍 {label}: {qshort}[/dim]")
-            else:
-                console.print(f"[dim]  ⚙ {label}[/dim]")
-        elif etype == "text":
-            text_buf.append(payload)
-        elif etype == "result":
-            final_text = payload
-        elif etype == "error":
-            console.print(f"[red]✗ {payload}[/red]")
-
-    if not saw_init:
-        console.print("[yellow](stream-json イベントが届きませんでした)[/yellow]")
-
-    out = final_text or "\n".join(text_buf)
-    if out.strip():
-        console.print()
-        console.print(out.strip())
-    else:
-        console.print("[yellow]評価が空でした[/yellow]")
-    if tool_count:
-        console.print(f"[dim](検索/ツール呼び出し計 {tool_count} 回)[/dim]")
-    return out.strip()
-
-
 def _refresh_and_reevaluate(
     *,
     url: str,
     rd_old,
     rows_old,
-    initial_eval: str,
     minutes_before: int,
     model: str,
     no_llm: bool,
@@ -1727,16 +1423,9 @@ def _refresh_and_reevaluate(
     )
     _print_bet_tables(bet_tables2, aptitude_top_horses=apt_top2)
     _print_judgment_notes(rd2, rows2)
-
-    if not no_llm and not no_cache:
-        # refresh 時も「総合オススメ束への web 検索補強」だけを行う。
-        # 旧 _print_llm_refresh_evaluation の 3連単 evidence は廃止。
-        best_times2_for_llm = _serialize_best_times(rd2, feats2) if feats2 else []
-        _validate_and_update_bundle(
-            race_id, rd2, probs2, rows2, bet_tables2,
-            aptitudes=aptitudes2, market_signals=market_signals2,
-            horse_best_times=best_times2_for_llm, model=model,
-        )
+    # 旧: refresh 時の「総合オススメ束への web 検索補強」(回収優先AI) は撤去 (2026-06-06)。
+    # Claude は score ステージ指数 + Plan T 3連単選定に特化 (買い目は snapshot 保存時に決まる)。
+    _ = (no_llm, model)
 
 
 def _countdown(target: int) -> None:
@@ -1835,79 +1524,6 @@ def _print_diff(rows_old, rows_new) -> None:
 
     if not up and not down:
         console.print("[dim]P×O 有意変動なし (|Δ| < 0.3)[/dim]")
-
-
-def _print_llm_refresh_evaluation(
-    rd,
-    rows,
-    rows_old,
-    initial_eval: str,
-    *,
-    model: str,
-    ev_max: Optional[float] = None,
-    min_prob: Optional[float] = None,
-    probs=None,
-    race_id: str = "",
-    no_cache: bool = False,
-    hit_points: int = 3,
-    hit_budget_ratio: float = 0.2,
-    aptitudes: dict | None = None,
-    aptitude_top_horses: list[int] | None = None,
-) -> None:
-    if not llm_mod.is_available():
-        return
-    console.rule(f"[bold magenta]Claude 締切前再評価 (model={model})[/bold magenta]")
-
-    final_text = ""
-    text_buf: list[str] = []
-    tool_count = 0
-
-    for etype, payload in llm_mod.evaluate_refresh_stream(
-        rd, rows, rows_old, initial_eval, model=model, ev_max=ev_max, min_prob=min_prob, probs=probs,
-        aptitudes=aptitudes, aptitude_top_horses=aptitude_top_horses,
-    ):
-        if etype == "init":
-            mcps = payload.get("mcp_servers") or []
-            ok_names = ", ".join(m.get("name", "?") for m in mcps) or "(なし)"
-            console.print(f"[dim]✓ MCP 起動: {ok_names}[/dim]")
-        elif etype == "tool_use":
-            tool_count += 1
-            name = payload.get("name", "?")
-            inp = payload.get("input") or {}
-            q = inp.get("query") or inp.get("q") or inp.get("url") or ""
-            label = name.replace("mcp__", "").replace("__", "/")
-            if q:
-                qshort = q if len(q) <= 70 else q[:67] + "..."
-                console.print(f"[dim]  🔍 {label}: {qshort}[/dim]")
-            else:
-                console.print(f"[dim]  ⚙ {label}[/dim]")
-        elif etype == "text":
-            text_buf.append(payload)
-        elif etype == "result":
-            final_text = payload
-        elif etype == "error":
-            console.print(f"[red]✗ {payload}[/red]")
-
-    out = final_text or "\n".join(text_buf)
-    if out.strip():
-        console.print()
-        console.print(out.strip())
-    else:
-        console.print("[yellow]再評価が空でした[/yellow]")
-    if tool_count:
-        console.print(f"[dim](再評価の検索/ツール呼び出し計 {tool_count} 回)[/dim]")
-
-    evidence = llm_mod.parse_evidence(out)
-    if evidence:
-        _print_evidence_adjusted(
-            rows, evidence,
-            hit_points=hit_points, hit_budget_ratio=hit_budget_ratio,
-            aptitude_top_horses=aptitude_top_horses,
-        )
-        if race_id and not no_cache:
-            _save_evidence_to_snapshot(
-                race_id, rows, evidence, aptitude_top_horses, hit_points=hit_points,
-            )
 
 
 def _market_rate_str(odds: float) -> str:

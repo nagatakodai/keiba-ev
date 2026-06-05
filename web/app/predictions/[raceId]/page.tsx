@@ -551,7 +551,7 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
         市場(オッズ)をランキングに一切使わず、<b>{rankLabel}</b>の上位を本命に3連単フォーメーションを組む。
         1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
         (当たれば投資総額以上を回収)。理論的中率は model 基準なので過信禁物 (楽観バイアス込み)・当たらなければ
-        −EV。実弾は EV 束 (recommended_bundle) とは別判断。
+        −EV。<b>実弾投票はこの Plan T 束で行う (2026-06-06〜 固定。EV束はモデル参考値)</b>。
         {claudeMissing && (
           <>
             {" "}<b className="text-(--color-bad)">この束は Claude 指数が無く model ランキングへ縮退しているため、Plan T 自動投票では
@@ -767,21 +767,18 @@ function BundleCard({
   const half = Math.round(bundle.total_stake / 2 / 100) * 100;
   const nTypes = new Set(legs.map((l) => l.bet_type)).size;
   const bundleHit = finish ? legs.some((l) => betHits(l.bet_type, l.key, finish)) : false;
-  // 束はまずモデル (portfolio.build_bundle) のみで生成され、その後 claude -p の web 調査で
-  // 検証される。検証が済むまでは「Claude のオススメ」ではなく「モデル提案」として扱い、
-  // Claude branding を付けない (検証前に Claude が裏取りしたかのような誤認を防ぐ)。
-  // 的中優先は claude 選定対象外 (モデルのみ) なので検証バッジは出さない。
+  // EV束は 2026-06-06 以降モデルのみの参考値 (claude -p 検証=回収優先AI は撤去、投票しない)。
+  // validated バッジは旧 snapshot の記録としてのみ表示される。
   const validated = !isHit && bundle.llm_review?.validated === true;
   // トリガミ防止マージン (保存オッズからの下振れ緩衝)。古い snapshot は未保存 → 1 扱い。
   const margin = bundle.torigami_margin ?? 1;
   const driftPct = margin > 1 ? Math.round((1 - 1 / margin) * 100) : 0;
-  // タイトル/色は dashboard 規約に統一: 回収優先=highlight / 的中優先=緑(good)。
-  const titleColor = isHit ? "text-(--color-good)" : "text-(--color-highlight)";
-  // 回収優先 (yield) は検証状態に関わらず「回収優先AI」に統一 (的中優先AI と並列)。
-  // Claude 検証済かどうかは右側の magenta バッジで示す。
+  // タイトル/色は dashboard 規約に統一: EV束=highlight / 的中優先=緑(good)。
+  // EV束はモデルのみの参考値 (実弾投票束は Plan T = recommended_bundle_t)。
   const titleLabel = isHit
     ? "的中優先AI — まとめ買い"
-    : "回収優先AI — まとめ買い";
+    : "EV束 (モデル参考) — まとめ買い";
+  const titleColor = isHit ? "text-(--color-good)" : "text-(--color-highlight)";
   return (
     <Card
       // 的中優先は「買わない」おまけ計測なので alert ハイライトせず default で従属表示。
@@ -800,9 +797,9 @@ function BundleCard({
       right={
         <span className="flex items-center gap-2">
           {!isHit && (validated ? (
-            <Badge tone="magenta">claude -p 検証済{bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
+            <Badge tone="magenta">claude -p 検証済 (旧記録){bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
           ) : (
-            legs.length > 0 && <Badge tone="warn">Claude 検証前 (モデルのみ)</Badge>
+            legs.length > 0 && <Badge tone="muted">参考値・投票対象外 (投票は Plan T)</Badge>
           ))}
           {finish && (legs.length === 0
             ? <Badge tone="muted">束 見送り</Badge>

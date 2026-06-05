@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -38,30 +37,24 @@ IPAT_BET_QUEUE_DIR = ROOT / "data/cache/ipat_bet_queue"  # = ipat_bet.QUEUE_DIR 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
-# enqueue する束の source。env KEIBA_BET_BUNDLE で daemon (oddspark_bet/ipat_bet) と一致させる。
-# recommended=EV束 / plan_t=Plan T 全力的中フォーメーション。--bet-plan-t で env をセット。
-_BUNDLE_FIELD = {"recommended": "recommended_bundle", "plan_t": "recommended_bundle_t"}
-
-
+# 投票束は **Plan T (recommended_bundle_t, 3連単的中モード) 固定** (ユーザ指示 2026-06-06)。
+# 旧 EV束 (recommended_bundle) の投票/claude 選定 (回収優先AI) は廃止。recommended_bundle は
+# snapshot にモデルのみの参考値として残るが、enqueue/投票には一切使わない。
 def _bet_bundle_source() -> str:
-    """投票束 source token ("recommended" | "plan_t")。env KEIBA_BET_BUNDLE で決まる。"""
-    return "plan_t" if os.environ.get("KEIBA_BET_BUNDLE", "").strip().lower() == "plan_t" else "recommended"
+    """投票束 source token。常に "plan_t" (Plan T 特化)。"""
+    return "plan_t"
 
 
 def _bet_bundle_field() -> str:
-    return _BUNDLE_FIELD[_bet_bundle_source()]
+    return "recommended_bundle_t"
 
 
 def _plan_t_missing_claude_index(d: dict) -> bool:
-    """Plan T 投票時に Claude 指数が無い (= model fallback) かを返す (True なら投票しない)。
+    """Claude 指数が無い (= model fallback) かを返す (True なら投票しない)。
 
-    Plan T「全力的中モード」は Claude 各馬指数フォーメーションが本質なので、指数キャッシュが
+    Plan T「3連単的中モード」は Claude 各馬指数フォーメーションが本質なので、指数キャッシュが
     無く model ランキングへ縮退した束 (rank_source != "claude") は投票しない (ユーザ指示 2026-06-03)。
-    EV束 (recommended) は指数キャッシュ無し→モデルのみで bet が設計上の従来挙動なので、この
-    ゲートは plan_t のときだけ効かせる。
     """
-    if _bet_bundle_source() != "plan_t":
-        return False
     bundle = d.get(_bet_bundle_field()) or {}
     return bundle.get("rank_source") != "claude"
 
@@ -420,20 +413,18 @@ def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
                        phase: str = "bet", llm_blend: float | None = None) -> int:
     """NAR: oddspark オッズで解析し snapshot を保存 (keibago 不可時)。
 
-    oddspark の analyze は phase 非対応 (指数合成しない)。score 帯では何もしない (=skip, rc 0)。
-    bet 帯ではモデル+市場のみで snapshot を出す (= 従来挙動。指数はこの fallback では効かない)。
+    keibago/jra と同じ 2段パイプライン対応: phase=score で Claude 指数キャッシュ、
+    phase=bet で指数合成 + Plan T 束生成 (指数無しなら機械フォーメーションへ縮退)。
     """
-    if phase == "score":
-        return 0
     cmd = [sys.executable, "-m", "src.scrape_oddspark", netkeiba_rid,
-           "--snapshot", f"--start-at={start_at}"]
+           "--snapshot", f"--start-at={start_at}", *_phase_args(phase, llm_blend)]
     if market_blend is not None:
         cmd.append(f"--market-blend={market_blend}")
     if aptitude_top is not None:
         cmd.append(f"--aptitude-top={aptitude_top}")
     if no_llm:
         cmd.append("--no-llm")
-    console.print(f"[bold cyan]→ oddspark analyze:[/bold cyan] {netkeiba_rid}")
+    console.print(f"[bold cyan]→ oddspark analyze ({phase}):[/bold cyan] {netkeiba_rid}")
     proc = subprocess.run(cmd, cwd=ROOT)
     return proc.returncode
 
@@ -540,12 +531,6 @@ def main(
         help="束(legs)が出た発走前 JRA レースを 即PAT betting queue に投入する。別途 "
              "`python -m src.ipat_bet --session` を起動しログインしておくこと (購入確定は人)。",
     ),
-    bet_plan_t: bool = typer.Option(
-        False, "--bet-plan-t",
-        help="enqueue する束を Plan T (全力的中フォーメーション) にする (既定=EV束 recommended_bundle)。"
-             "daemon 側も --plan-t で起動すること。ループ運用は env KEIBA_BET_BUNDLE=plan_t を推奨 "
-             "(loop の各 tick subprocess と daemon の両方が継承する)。",
-    ),
     no_llm: bool = typer.Option(
         False, "--no-llm",
         help="claude -p による各馬指数 (考察) を行わず確率モデルのみで snapshot を保存する。"
@@ -560,11 +545,8 @@ def main(
 ) -> None:
     """1 巡だけ実行。2段: score 帯で考察→指数キャッシュ+**締切前 bet を予約** → 予約時刻 (締切
     bet_lead_sec 秒前) が来た bet を**自動発火** (最新オッズ→束→enqueue)。"""
-    # --bet-plan-t: enqueue する束を Plan T に切替 (env 経由で daemon と一致させる)。
-    if bet_plan_t:
-        os.environ["KEIBA_BET_BUNDLE"] = "plan_t"
     if (bet_oddspark or bet_ipat):
-        console.print(f"[dim]bet enqueue 束 source = {_bet_bundle_field()}[/dim]")
+        console.print(f"[dim]bet enqueue 束 = {_bet_bundle_field()} (Plan T 3連単的中モード固定)[/dim]")
     now_dt = datetime.now()
     now_ts = int(now_dt.timestamp())
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")

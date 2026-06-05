@@ -68,8 +68,8 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   );
 
   // 累積収支: 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
-  // 回収優先AI (実弾) と Plan T「3連単的中モード」(市場無視・的中優先) を併記する
-  // (2026-06-05 ユーザ指示: 3連単的中モードもダッシュボードにのせる)。
+  // Plan T「3連単的中モード」(実弾投票束, 2026-06-06〜固定) と EV束 (モデル参考) を併記する
+  // (2026-06-05 ユーザ指示: 3連単的中モードもダッシュボードにのせる → 2026-06-06 に実弾へ昇格)。
   let yieldStakeAcc = 0;
   let yieldPayoutAcc = 0;
   let tStakeAcc = 0;
@@ -134,10 +134,10 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
         <Card title="累積収支">
           <LineChart
             seriesA={yieldNetSeries}
-            labelA="回収優先"
+            labelA="EV束 (参考)"
             colorA="#0ea5e9"
             seriesB={planTParticipated ? tNetSeries : undefined}
-            labelB="3連単的中"
+            labelB="3連単的中 (実弾)"
             colorB="#d946ef"
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
@@ -145,10 +145,10 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
         <Card title="累積回収率 推移">
           <LineChart
             seriesA={yieldRoiSeries.map((v) => v * 100)}
-            labelA="回収優先"
+            labelA="EV束 (参考)"
             colorA="#0ea5e9"
             seriesB={planTParticipated ? tRoiSeries.map((v) => v * 100) : undefined}
-            labelB="3連単的中"
+            labelB="3連単的中 (実弾)"
             colorB="#d946ef"
             yFmt={(v) => `${v.toFixed(0)}%`}
             referenceY={100}
@@ -157,14 +157,14 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
         <Card title="結果分布">
           <div className="space-y-3">
             <DistroBar
-              label="回収優先AI"
+              label="EV束 (モデル参考)"
               hits={yieldHits}
               misses={yieldMisses}
               skips={yieldSkips}
             />
             {planTParticipated && (
               <DistroBar
-                label="3連単的中モード"
+                label="3連単的中モード (実弾)"
                 hits={tHits}
                 misses={tMisses}
                 skips={tSkips}
@@ -359,13 +359,12 @@ function PredictionRowItem({
   const closeAt = p.close_at ?? closeAtMap?.get(p.race_id) ?? null;
   const startAt = p.start_at ?? startAtMap?.get(p.race_id) ?? null;
   const timing = raceTimingStatus(closeAt, startAt, p.has_result, nowMs);
-  // Claude 総合オススメが「見送り」(束 legs 空) なら「不的中」ではなく「未参加」表示。
-  // **bundleSkipped は anyHit より優先**: 賭けていない race は plan_X_hit (理論値) が
-  // 立っていても「的中」ではない (見送り = 不参加)。
-  const bundleSkipped = !!(hit && hit.bundle_participated === false);
-  // 「的中」ラベルは **回収優先AI のみ**で判定 (2026-05-30 ユーザ指示)。
-  // 的中優先AI (おまけ計測・買わない) は当たっても race を的中扱いしない。
-  const anyHit = !bundleSkipped && !!(hit && hit.bundle_hit);
+  // 「的中」ラベルは **Plan T (3連単的中モード, 実弾投票束) のみ**で判定 (2026-06-06 特化)。
+  // Plan T 束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback して表示を保つ。
+  // **skipped は anyHit より優先**: 賭けていない race は理論値が立っていても「的中」ではない。
+  const usePlanT = !!(hit && hit.plan_t_participated);
+  const bundleSkipped = !!(hit && !usePlanT && hit.bundle_participated === false);
+  const anyHit = !bundleSkipped && !!(hit && (usePlanT ? hit.plan_t_hit : hit.bundle_hit));
   const rowBg = hit
     ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
     : raceTimingRowBg(timing.tone);
@@ -407,7 +406,8 @@ function PredictionRowItem({
               <span className="font-bold mono">{hit.finish.join("-")}</span>
             </span>
             <span className="text-(--color-muted)">·</span>
-            {hit.bundle_hit && <Badge tone="good">回収 Claude</Badge>}
+            {hit.plan_t_hit && <Badge tone="good">Plan T 的中</Badge>}
+            {hit.bundle_hit && <Badge tone="muted">EV束(参考) 的中</Badge>}
             {hit.payout > 0 && (
               <>
                 <span className="text-(--color-muted)">·</span>
