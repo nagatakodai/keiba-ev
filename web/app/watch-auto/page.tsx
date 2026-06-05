@@ -664,7 +664,7 @@ export default function WatchAutoPage() {
                   <th className="py-2 pr-3">締切</th>
                   <th className="py-2 pr-3">発走</th>
                   <th className="py-2 pr-3">状態</th>
-                  <th className="py-2 pr-3">回収優先 (Claude 束)</th>
+                  <th className="py-2 pr-3">Plan T 束 (実弾)</th>
                   <th className="py-2 pr-3">詳細</th>
                 </tr>
               </thead>
@@ -703,7 +703,7 @@ export default function WatchAutoPage() {
                       {pickStatus === "loading" ? (
                         <span className="text-(--color-muted)">…</span>
                       ) : (
-                        fmtPicks(p?.recommended_bundle?.legs?.map((l) => l.key) ?? [])
+                        fmtPicks(p?.recommended_bundle_t?.legs?.map((l) => l.key) ?? [])
                       )}
                     </td>
                     <td className="py-1.5 pr-3">

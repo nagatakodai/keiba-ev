@@ -123,14 +123,17 @@ export function PredictionsList({
                   nowMs,
                 );
                 const hit = showHits ? raceHitMap?.get(p.race_id) : undefined;
-                // Claude 総合オススメが「見送り」(束 legs 空) なら「不的中」ではなく「未参加」表示。
-                // **bundleSkipped は anyHit より優先**: 賭けていない race は plan_X_hit (理論値) が
+                // 「的中」ラベルは **Plan T (3連単的中モード, 実弾投票束) のみ**で判定 (2026-06-06 特化)。
+                // Plan T 束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
+                // **bundleSkipped は anyHit より優先**: 賭けていない race は理論値が
                 // 偶然立っていても「的中」ではない (見送り = 不参加)。
-                const bundleSkipped = !!(hit && hit.bundle_participated === false);
-                // 「的中」ラベルは **回収優先AI のみ**で判定 (2026-05-30 ユーザ指示)。
-                // 的中優先AI (おまけ計測・買わない) は当たっても race を的中扱いしない。
+                const usePlanT = !!(hit && hit.plan_t_participated);
+                const bundleSkipped = !!(
+                  hit && !usePlanT && hit.bundle_participated === false
+                );
                 const anyHit =
-                  !bundleSkipped && !!(hit && hit.bundle_hit);
+                  !bundleSkipped &&
+                  !!(hit && (usePlanT ? hit.plan_t_hit : hit.bundle_hit));
                 const rowBg = hit
                   ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
                   : raceTimingRowBg(timing.tone);
@@ -191,15 +194,18 @@ export function PredictionsList({
                             </span>
                           </span>
                           <span className="text-(--color-muted)">·</span>
+                          {hit.plan_t_hit && (
+                            <Badge tone="magenta">Plan T 的中</Badge>
+                          )}
                           {hit.bundle_hit && (
-                            <Badge tone="good">
-                              束的中{(hit.bundle_hit_bet_types?.length ?? 0) > 0
+                            <Badge tone={usePlanT ? "muted" : "good"}>
+                              EV束{usePlanT ? "(参考)" : ""}的中{(hit.bundle_hit_bet_types?.length ?? 0) > 0
                                 ? ` (${hit.bundle_hit_bet_types!.map((bt) => BET_LABELS[bt] ?? bt).join("/")})`
                                 : ""}
                             </Badge>
                           )}
                           {bundleSkipped && (
-                            // 見送り (Claude 総合オススメが空束) は「不的中」ではなく「見送り」表示
+                            // 見送り (束が空) は「不的中」ではなく「見送り」表示
                             <Badge tone="muted">束 見送り</Badge>
                           )}
                           {hit.payout > 0 && (

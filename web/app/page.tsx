@@ -59,8 +59,8 @@ function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
 }
 
-// 累積収支推移 (回収優先 + 的中優先) + 結果分布の簡易 SVG チャート群。recharts 等の
-// 重い依存を増やさず Tailwind + inline SVG で軽量描画する。
+// 累積収支推移 (3連単的中 Plan T = 実弾 + EV束 = 参考) + 結果分布の簡易 SVG チャート群。
+// recharts 等の重い依存を増やさず Tailwind + inline SVG で軽量描画する。
 function DashboardCharts({ races }: { races: RaceHit[] }) {
   // saved_at 昇順 (古い順) で並べて累積 stake / payout を計算
   const sorted = [...races].sort((a, b) =>
@@ -95,7 +95,6 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   const yieldRoiSeries = series.map((s) => s.yieldRoi);
   const tNetSeries = series.map((s) => s.tNet);
   const tRoiSeries = series.map((s) => s.tRoi);
-  const planTParticipated = races.some((r) => r.plan_t_participated);
 
   // 結果分布: 的中 / 不的中 / 見送り レース数
   const yieldHits = races.filter((r) => r.bundle_hit).length;
@@ -113,7 +112,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   const tSkips = races.filter((r) => r.plan_t_participated === false).length;
   const totalRaces = races.length;
 
-  // bet type 別 hit 内訳 (回収優先)
+  // bet type 別 hit 内訳 (EV束参考。Plan T は3連単のみなので種別チャートは EV束で見る)
   const betTypeHits: Record<string, number> = {};
   for (const r of races) {
     for (const bt of r.bundle_hit_bet_types ?? []) {
@@ -133,23 +132,23 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <Card title="累積収支">
           <LineChart
-            seriesA={yieldNetSeries}
-            labelA="EV束 (参考)"
-            colorA="#0ea5e9"
-            seriesB={planTParticipated ? tNetSeries : undefined}
-            labelB="3連単的中 (実弾)"
-            colorB="#d946ef"
+            seriesA={tNetSeries}
+            labelA="3連単的中 (実弾)"
+            colorA="#d946ef"
+            seriesB={yieldNetSeries}
+            labelB="EV束 (参考)"
+            colorB="#0ea5e9"
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
         </Card>
         <Card title="累積回収率 推移">
           <LineChart
-            seriesA={yieldRoiSeries.map((v) => v * 100)}
-            labelA="EV束 (参考)"
-            colorA="#0ea5e9"
-            seriesB={planTParticipated ? tRoiSeries.map((v) => v * 100) : undefined}
-            labelB="3連単的中 (実弾)"
-            colorB="#d946ef"
+            seriesA={tRoiSeries.map((v) => v * 100)}
+            labelA="3連単的中 (実弾)"
+            colorA="#d946ef"
+            seriesB={yieldRoiSeries.map((v) => v * 100)}
+            labelB="EV束 (参考)"
+            colorB="#0ea5e9"
             yFmt={(v) => `${v.toFixed(0)}%`}
             referenceY={100}
           />
@@ -157,22 +156,20 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
         <Card title="結果分布">
           <div className="space-y-3">
             <DistroBar
+              label="3連単的中モード (実弾)"
+              hits={tHits}
+              misses={tMisses}
+              skips={tSkips}
+            />
+            <DistroBar
               label="EV束 (モデル参考)"
               hits={yieldHits}
               misses={yieldMisses}
               skips={yieldSkips}
             />
-            {planTParticipated && (
-              <DistroBar
-                label="3連単的中モード (実弾)"
-                hits={tHits}
-                misses={tMisses}
-                skips={tSkips}
-              />
-            )}
           </div>
         </Card>
-        <Card title="bet 種別">
+        <Card title="bet 種別 (EV束参考)">
           <BetTypeBars betTypeHits={betTypeHits} totalRaces={totalRaces} />
         </Card>
       </div>
@@ -180,7 +177,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   );
 }
 
-// bet type 別 hit 件数の横棒。回収優先 / 的中優先 で共用。
+// bet type 別 hit 件数の横棒 (EV束参考用)。
 const BET_LABEL: Record<string, string> = {
   win: "単勝", place: "複勝", quinella: "馬連", wide: "ワイド",
   exacta: "馬単", trio: "3連複", trifecta: "3連単",
@@ -226,7 +223,7 @@ function LineChart({
   seriesA, seriesB, labelA, labelB, colorA, colorB, yFmt, referenceY,
 }: {
   seriesA: number[];
-  // seriesB は任意 (省略時は系列 A=回収優先 のみ描画)。
+  // seriesB は任意 (省略時は系列 A のみ描画)。A=Plan T 実弾 / B=EV束 参考 が既定の使い方。
   seriesB?: number[];
   labelA: string;
   labelB?: string;
@@ -475,35 +472,36 @@ export default async function DashboardPage() {
       {/* watch-auto stat はダッシュボードから削除 (2026-05-29 ユーザ指示)。
           状態は header の WatchPill で確認可能。 */}
 
-      {/* 一番上の段: 参加レース数 / 見送りレース数 / 的中レース数 / 収支 (全て回収優先AI 基準) */}
+      {/* 一番上の段: 参加レース数 / 見送りレース数 / 的中レース数 / 収支
+          (全て Plan T「3連単的中モード」= 実弾投票束 基準, 2026-06-06〜固定) */}
       <div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat
             label="参加レース数"
-            value={claudeBundle?.participated_races ?? 0}
+            value={planTBundle?.participated_races ?? 0}
             hint={
-              claudeBundle
-                ? `総合 ${claudeBundle.races} / 見送り ${claudeBundle.skipped_races}`
+              planTBundle
+                ? `総合 ${planTBundle.races} / 見送り ${planTBundle.skipped_races}`
                 : "—"
             }
             accentTone="muted"
           />
           <Stat
             label="見送りレース数"
-            value={claudeBundle?.skipped_races ?? 0}
+            value={planTBundle?.skipped_races ?? 0}
             hint={
-              claudeBundle && claudeBundle.races > 0
-                ? `見送り率 ${Math.round((claudeBundle.skipped_races / claudeBundle.races) * 100)}%`
+              planTBundle && planTBundle.races > 0
+                ? `見送り率 ${Math.round((planTBundle.skipped_races / planTBundle.races) * 100)}%`
                 : "—"
             }
             accentTone="muted"
           />
           <Stat
             label="的中レース数"
-            value={claudeBundle?.hits ?? 0}
+            value={planTBundle?.hits ?? 0}
             hint={
-              claudeBundle
-                ? `参加 ${claudeBundle.participated_races} / 集計 ${claudeBundle.races}`
+              planTBundle
+                ? `参加 ${planTBundle.participated_races} / 集計 ${planTBundle.races}`
                 : "—"
             }
             // 値は黒文字 (default)。左 border のみ緑で AI 種別を示す (2026-05-29 ユーザ指示)
@@ -515,37 +513,37 @@ export default async function DashboardPage() {
             // 収支は **最終オッズ基準** (実払戻に近い)。最終オッズが無い旧 result は
             // backend が予想オッズに fallback 済 (payout_final = payout) (2026-05-30 ユーザ指示)。
             value={
-              !claudeBundle
+              !planTBundle
                 ? "—"
                 : (() => {
-                    const pay = claudeBundle.payout_final ?? claudeBundle.payout;
-                    const pl = pay - claudeBundle.stake;
+                    const pay = planTBundle.payout_final ?? planTBundle.payout;
+                    const pl = pay - planTBundle.stake;
                     return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
                   })()
             }
             hint={
-              claudeBundle
-                ? `賭金 ${fmtYen(claudeBundle.stake)} → 払戻(最終) ${fmtYen(claudeBundle.payout_final ?? claudeBundle.payout)}`
+              planTBundle
+                ? `賭金 ${fmtYen(planTBundle.stake)} → 払戻(最終) ${fmtYen(planTBundle.payout_final ?? planTBundle.payout)}`
                 : "—"
             }
             tone={
               // 収支: マイナスなら赤、プラスは黒 (default) (2026-05-29 ユーザ指示)
-              !claudeBundle
+              !planTBundle
                 ? "default"
-                : (claudeBundle.payout_final ?? claudeBundle.payout) - claudeBundle.stake < 0
+                : (planTBundle.payout_final ?? planTBundle.payout) - planTBundle.stake < 0
                 ? "bad"
                 : "default"
             }
             accentTone={
-              !claudeBundle ||
-              (claudeBundle.payout_final ?? claudeBundle.payout) - claudeBundle.stake >= 0
-                ? "info"
+              !planTBundle ||
+              (planTBundle.payout_final ?? planTBundle.payout) - planTBundle.stake >= 0
+                ? "magenta"
                 : "bad"
             }
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
-          ※ 全て回収優先AI 基準 ／ 集計対象 {cal?.race_count ?? 0} レース ／
+          ※ 全て 3連単的中モード (Plan T, 実弾投票束) 基準 ／ 集計対象 {cal?.race_count ?? 0} レース ／
           {confidence && (
             <span className="ml-1">
               <Badge tone={confidence.tone}>{confidence.label}</Badge>
@@ -555,74 +553,14 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      {/* 回収優先AI セクション (実弾で買う) — 的中率系=緑 / 回収収支系=青 */}
-      <section className="space-y-2">
-        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
-          <span className="inline-block w-1 h-4 bg-(--color-info) translate-y-0.5" />
-          <span className="text-base">回収優先AI</span>
-          <span className="text-xs font-normal text-(--color-muted)">
-            joint Kelly EV 最適 / 実弾で買う対象
-          </span>
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {/* 左=的中率 (青線), 右=回収率 (緑線) (2026-05-29 ユーザ指示) */}
-        <Stat
-          label="的中率"
-          value={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "—"
-              : fmtPct(claudeBundle.hit_rate, 1)
-          }
-          hint={
-            claudeBundle && claudeBundle.participated_races > 0
-              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加 (見送り除く)`
-              : ""
-          }
-          // 的中率: 30% 未満 → 赤、それ以外 → 黒 (default) (2026-05-29 ユーザ指示)
-          tone={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "default"
-              : claudeBundle.hit_rate < 0.3
-              ? "bad"
-              : "default"
-          }
-          accentTone="good"
-        />
-        <Stat
-          label="回収率"
-          // 回収率も **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
-          value={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "—"
-              : fmtRoiPct(claudeBundle.roi_final ?? claudeBundle.roi)
-          }
-          hint={
-            claudeBundle && claudeBundle.participated_races > 0
-              ? `${claudeBundle.participated_races} 参加 / ${claudeBundle.skipped_races} 見送り · 賭金 ${fmtYen(claudeBundle.stake)} → 払戻(最終) ${fmtYen(claudeBundle.payout_final ?? claudeBundle.payout)}`
-              : "賭けたレースなし"
-          }
-          // 回収率: 100% 超 → 黒 (default)、それ以外 → 赤 (損失) (2026-05-29 ユーザ指示)
-          tone={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "default"
-              : (claudeBundle.roi_final ?? claudeBundle.roi) > 1
-              ? "default"
-              : "bad"
-          }
-          accentTone="info"
-        />
-        </div>
-      </section>
-
-      {/* 3連単的中モード (Plan T) セクション — 市場無視・全力的中フォーメーション。
-          実弾は回収優先が既定だが、watch-auto の bet_plan_t で実弾化も可能 (2026-06-05 追加)。
-          的中率系=フクシア / 回収率系=同系で AI 比較として並べる。 */}
+      {/* 3連単的中モード (Plan T) セクション — **実弾投票束 (2026-06-06〜固定)**。
+          市場無視・Claude 指数フォーメーション。的中率系=フクシア。 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
           <span className="inline-block w-1 h-4 bg-fuchsia-500 translate-y-0.5" />
           <span className="text-base">3連単的中モード</span>
           <span className="text-xs font-normal text-(--color-muted)">
-            Plan T / 市場無視・3連単フォーメーション / 的中優先
+            Plan T / 市場無視・Claude 指数フォーメーション / 実弾投票束 (固定)
           </span>
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -699,11 +637,73 @@ export default async function DashboardPage() {
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right px-1">
-          ※ 計測指標。実弾は回収優先AI が既定 (watch-auto の Plan T 投票 ON で実弾化)
+          ※ 実弾投票束 (2026-06-06〜 Plan T 固定)。Claude 指数なしのレースは自動見送り
         </div>
       </section>
 
-      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 回収優先 + 3連単的中 */}
+      {/* EV束 (モデル参考) セクション — joint Kelly EV 最適。投票しない比較計測 (2026-06-06〜)。 */}
+      <section className="space-y-2">
+        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
+          <span className="inline-block w-1 h-4 bg-(--color-info) translate-y-0.5" />
+          <span className="text-base">EV束 (モデル参考)</span>
+          <span className="text-xs font-normal text-(--color-muted)">
+            joint Kelly EV 最適 / 投票しない比較計測
+          </span>
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* 左=的中率 (緑 accent), 右=回収率 (青 accent) (2026-05-29 ユーザ指示) */}
+        <Stat
+          label="的中率"
+          value={
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "—"
+              : fmtPct(claudeBundle.hit_rate, 1)
+          }
+          hint={
+            claudeBundle && claudeBundle.participated_races > 0
+              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加 (見送り除く)`
+              : ""
+          }
+          // 的中率: 30% 未満 → 赤、それ以外 → 黒 (default) (2026-05-29 ユーザ指示)
+          tone={
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "default"
+              : claudeBundle.hit_rate < 0.3
+              ? "bad"
+              : "default"
+          }
+          accentTone="good"
+        />
+        <Stat
+          label="回収率"
+          // 回収率も **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
+          value={
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "—"
+              : fmtRoiPct(claudeBundle.roi_final ?? claudeBundle.roi)
+          }
+          hint={
+            claudeBundle && claudeBundle.participated_races > 0
+              ? `${claudeBundle.participated_races} 参加 / ${claudeBundle.skipped_races} 見送り · 賭金 ${fmtYen(claudeBundle.stake)} → 払戻(最終) ${fmtYen(claudeBundle.payout_final ?? claudeBundle.payout)}`
+              : "賭けたレースなし"
+          }
+          // 回収率: 100% 超 → 黒 (default)、それ以外 → 赤 (損失) (2026-05-29 ユーザ指示)
+          tone={
+            !claudeBundle || claudeBundle.participated_races === 0
+              ? "default"
+              : (claudeBundle.roi_final ?? claudeBundle.roi) > 1
+              ? "default"
+              : "bad"
+          }
+          accentTone="info"
+        />
+        </div>
+        <div className="text-[10px] text-(--color-muted) text-right px-1">
+          ※ モデルのみの参考値 (旧 回収優先AI)。実弾投票には使わない
+        </div>
+      </section>
+
+      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 3連単的中 (実弾) + EV束 (参考) */}
       {cal && cal.races.length > 0 && (
         <DashboardCharts races={cal.races} />
       )}

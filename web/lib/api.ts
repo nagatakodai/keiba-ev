@@ -51,7 +51,7 @@ export type PredictionSummary = {
   start_at: number | null;
   row_count: number;
   // 新スキーマ (2026-05-29 後半): Plan A/B も廃止。3連単 は他券種と並ぶ bet_tables[trifecta] に
-  // 入り、表示は 2 つの bundle (recommended_bundle 回収優先 + recommended_bundle_hit 的中優先) に集約。
+  // 入り、表示は 2 つの bundle (recommended_bundle_t Plan T 実弾 + recommended_bundle EV束参考) に集約。
   // 旧 plan_*_count は backend が 0 を返すように、frontend からも参照しない。
   // 適性指数 top 3 (total 降順)。snapshot に horse_aptitude が無いと空配列。
   top_aptitude?: Array<{ number: number; name: string; total: number }>;
@@ -262,9 +262,9 @@ export type PredictionDetail = {
   // 適性総合 top N 頭の馬番リスト (Plan G が依拠する集合)。
   aptitude_top_horses?: number[];
   // 新スキーマ (2026-05-29 後半): Plan A/B 自体は廃止。3連単 は bet_tables[trifecta] に入る。
-  // 2 つの bundle のみ表示する:
-  //   recommended_bundle      : 回収優先 (実弾で買う、joint Kelly EV 最適)
-  //   recommended_bundle_hit  : 的中優先 (おまけ計測、prob 降順 pool で Kelly)
+  // 2 つの bundle を表示する (2026-06-06〜 Plan T 特化):
+  //   recommended_bundle_t    : Plan T 3連単的中モード (**実弾投票束**, 固定)
+  //   recommended_bundle      : EV束 (モデルのみの参考値、joint Kelly EV 最適、投票しない)
   recommended_bundle?: RecommendedBundle | null;
   // Plan T「全力的中モード」: 3連単のみ・市場無視・EV/トリガミ無しの model 的中確率 top-K 束。
   // recommended_bundle (EV駆動) と完全分離。covered_prob = 理論的中率 (model 基準・過信禁物)。
@@ -459,14 +459,14 @@ export type CalibrationRaceItem = {
   finish: number[];
   winning_tier: string | null;
   payout: number;
-  // 回収優先 bundle (実弾で買う Claude 選定束) の的中。bet_type 横断 (3連単 + ワイド/馬連/etc)。
+  // EV束 (モデル参考, 2026-06-06〜投票しない) の的中。bet_type 横断 (3連単 + ワイド/馬連/etc)。
   bundle_hit?: boolean;
   bundle_hit_bet_types?: string[];
   bundle_participated?: boolean;
   bundle_stake?: number;
   bundle_payout?: number;              // 予想オッズ基準
   bundle_payout_final?: number;        // 最終オッズ基準 (result.final_odds × stake)
-  // Plan T「3連単的中モード」bundle (市場無視・Claude 指数フォーメーション) の的中。
+  // Plan T「3連単的中モード」bundle (**実弾投票束**, 市場無視・Claude 指数フォーメーション) の的中。
   // 古い snapshot は recommended_bundle_t 欠落 → participated=false。
   plan_t_hit?: boolean;
   plan_t_hit_bet_types?: string[];
@@ -490,10 +490,10 @@ export type CalibrationReport = {
   tiers: CalibrationTier[];
   // 新スキーマでは plans は常に空配列 (旧 Plan A/B/C/F/G/H1/H2 廃止)。frontend は無視で OK。
   plans: CalibrationPlan[];
-  // Claude 選定 回収優先 bundle (recommended_bundle) の集計
+  // EV束 (recommended_bundle, モデル参考・投票しない) の集計
   claude_bundle?: ClaudeBundleAggregate;
-  // Plan T「3連単的中モード」bundle (recommended_bundle_t) の集計。
-  // 市場無視・的中優先の計測指標。claude_bundle と同形。古い snapshot は 0 集計。
+  // Plan T「3連単的中モード」bundle (recommended_bundle_t, **実弾投票束**) の集計。
+  // claude_bundle と同形。古い snapshot は 0 集計。
   plan_t_bundle?: ClaudeBundleAggregate;
   races: CalibrationRaceItem[];
 };

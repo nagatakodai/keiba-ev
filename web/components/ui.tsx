@@ -496,7 +496,7 @@ export function raceTimingRowBg(tone: BadgeTone): string {
       rose: "bg-rose-50/60",
       info: "bg-sky-50/50",
       pending: "bg-orange-50/50",
-      // 見送り (Claude 総合オススメが空束) はグレー系で「不参加」を視覚的に明示
+      // 見送り (投票束が空) はグレー系で「不参加」を視覚的に明示
       // (2026-05-29 ユーザ指示)。
       muted: "bg-slate-100/70",
     } satisfies Record<BadgeTone, string>

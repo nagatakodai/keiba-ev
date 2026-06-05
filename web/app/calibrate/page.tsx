@@ -41,7 +41,8 @@ export default async function CalibratePage({
 
   const confidence = calibrationConfidence(cal.race_count);
   const lastUpdated = fmtRelativeFromNow(cal.last_updated_at);
-  const yb = cal.claude_bundle;       // 回収優先 (実弾で買う)
+  const tb = cal.plan_t_bundle;       // Plan T 3連単的中モード (実弾投票束, 2026-06-06〜固定)
+  const yb = cal.claude_bundle;       // EV束 (モデル参考・投票しない)
   // 回収率は **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
   const roiPct = (b?: { roi: number; roi_final?: number } | null) =>
     b ? `${Math.round((b.roi_final ?? b.roi) * 100)}%` : "—";
@@ -56,7 +57,7 @@ export default async function CalibratePage({
     <Page>
       <PageHeader
         title="確率較正"
-        subtitle="計算 EV と実 EV のオフセット (tier ratio) + 回収優先 / 的中優先 bundle の実績。サンプル 30+ で初めて判断材料になる。"
+        subtitle="計算 EV と実 EV のオフセット (tier ratio) + Plan T (実弾) / EV束 (参考) bundle の実績。サンプル 30+ で初めて判断材料になる。"
       />
 
       <div>
@@ -65,33 +66,39 @@ export default async function CalibratePage({
             label="総合レース数"
             value={cal.race_count}
             hint={
-              yb
-                ? `参加 ${yb.participated_races} / 見送り ${yb.skipped_races}`
+              tb
+                ? `参加 ${tb.participated_races} / 見送り ${tb.skipped_races}`
                 : "—"
             }
             accentTone="muted"
           />
           <Stat
             label="的中率"
-            value={!yb || yb.participated_races === 0 ? "—" : fmtPct(yb.hit_rate, 1)}
-            hint={yb && yb.participated_races > 0 ? `${yb.hits} 的中 / ${yb.participated_races} 参加` : "—"}
-            tone={hitTone(yb)}
-            accentTone="good"
+            value={!tb || tb.participated_races === 0 ? "—" : fmtPct(tb.hit_rate, 1)}
+            hint={tb && tb.participated_races > 0 ? `${tb.hits} 的中 / ${tb.participated_races} 参加` : "—"}
+            tone={hitTone(tb)}
+            accentTone="magenta"
           />
           <Stat
             label="回収率"
-            value={roiPct(yb)}
+            value={roiPct(tb)}
             hint={
-              yb && yb.participated_races > 0
-                ? `賭金 ${fmtYen(yb.stake)} → 払戻(最終) ${fmtYen(yb.payout_final ?? yb.payout)} · 見送り ${yb.skipped_races}`
+              tb && tb.participated_races > 0
+                ? `賭金 ${fmtYen(tb.stake)} → 払戻(最終) ${fmtYen(tb.payout_final ?? tb.payout)} · 見送り ${tb.skipped_races}`
                 : "賭けたレースなし"
             }
-            tone={roiTone(yb)}
-            accentTone="info"
+            tone={roiTone(tb)}
+            accentTone="magenta"
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
-          ※ 全て回収優先AI 基準 ／ 集計対象 {cal.race_count} レース ／
+          ※ 全て 3連単的中モード (Plan T, 実弾投票束) 基準
+          {yb && yb.participated_races > 0 && (
+            <span className="ml-1">
+              ／ EV束 (参考): 的中率 {fmtPct(yb.hit_rate, 1)} · 回収率 {roiPct(yb)}
+            </span>
+          )}
+          ／ 集計対象 {cal.race_count} レース ／
           <span className="ml-1">
             <Badge tone={confidence.tone}>{confidence.label}</Badge>
           </span>
@@ -144,16 +151,16 @@ export default async function CalibratePage({
           // 旧 table 形式は info 密度が低いため。
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5">
             {cal.races.map((r) => {
-              // 見送り (Claude 総合オススメが空束) は plan_X_hit が偶然立っていても
-              // 「賭けて当たった」ではないので的中扱いせず、row 自体をグレー bg に。
-              const bundleSkipped = r.bundle_participated === false;
-              // 「的中」ラベルは **回収優先AI のみ**で判定 (2026-05-30 ユーザ指示)。
-              // 的中優先AI は買わないおまけ計測なので当たっても race を的中扱いしない。
-              const anyHit = !bundleSkipped && !!r.bundle_hit;
+              // 「的中」ラベルは **Plan T (実弾投票束) のみ**で判定 (2026-06-06 特化)。
+              // Plan T 束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
+              // 見送り (束が空) は理論値が立っていても的中扱いせず、row 自体をグレー bg に。
+              const usePlanT = !!r.plan_t_participated;
+              const bundleSkipped = !usePlanT && r.bundle_participated === false;
+              const anyHit = !bundleSkipped && !!(usePlanT ? r.plan_t_hit : r.bundle_hit);
               const rowBg = bundleSkipped
                 ? "bg-(--color-panel-2)"          // 見送り = グレー系
                 : anyHit
-                  ? "bg-(--color-good)/5"        // 的中 (回収優先) = 緑薄
+                  ? "bg-(--color-good)/5"        // 的中 (Plan T) = 緑薄
                   : "";                           // 不的中 = 通常
               return (
                 <Link
@@ -174,14 +181,13 @@ export default async function CalibratePage({
                   <div className="flex gap-1 flex-wrap items-center shrink-0">
                     {bundleSkipped ? (
                       <Badge tone="muted">見送り</Badge>
+                    ) : anyHit ? (
+                      <Badge tone="magenta">{usePlanT ? "Plan T 的中" : "的中 (旧EV束)"}</Badge>
                     ) : (
-                      <>
-                        {r.bundle_hit ? (
-                          <Badge tone="info">回収優先</Badge>
-                        ) : (
-                          <Badge tone="muted">不的中</Badge>
-                        )}
-                      </>
+                      <Badge tone="muted">不的中</Badge>
+                    )}
+                    {usePlanT && r.bundle_hit && (
+                      <Badge tone="muted">EV束(参考)</Badge>
                     )}
                   </div>
                 </Link>

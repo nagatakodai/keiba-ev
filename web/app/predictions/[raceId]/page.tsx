@@ -156,18 +156,26 @@ export default async function PredictionDetailPage({
         }
       />
 
-      <TopRecommendationCard d={d} finish={finish} />
-
+      {/* Plan T (3連単的中モード) = 実弾投票束を最上段に (2026-06-06〜特化)。EV束は参考。 */}
       <PlanTCard d={d} finish={finish} />
 
+      <TopRecommendationCard d={d} finish={finish} />
+
       {d.result && (() => {
-        // 表示判定は回収優先 bundle のみ (的中優先は廃止)。
+        // 的中判定は **Plan T (実弾投票束) 基準** (2026-06-06 特化)。
+        // Plan T 束が無い旧 snapshot は旧実弾だった EV束に fallback。
+        const tLegs = d.recommended_bundle_t?.legs;
+        const tParticipated = Array.isArray(tLegs) && tLegs.length > 0;
+        const tHit = !!(finish && tParticipated &&
+          tLegs!.some((l) => betHits(l.bet_type, l.key, finish)));
         const bundleLegs = d.recommended_bundle?.legs;
         const bundleEmpty = Array.isArray(bundleLegs) && bundleLegs.length === 0;
         const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
           bundleLegs.some((l) => betHits(l.bet_type, l.key, finish)));
-        const anyHit = bundleHit;
-        const headlineBadge = bundleEmpty
+        const usePlanT = tParticipated;
+        const skipped = usePlanT ? false : bundleEmpty;
+        const anyHit = usePlanT ? tHit : bundleHit;
+        const headlineBadge = skipped
           ? <Badge tone="muted">見送り</Badge>
           : anyHit
             ? <Badge tone="good">的中</Badge>
@@ -194,11 +202,18 @@ export default async function PredictionDetailPage({
               <span className="text-xs text-(--color-muted) font-bold tracking-wider uppercase">
                 Bundle 別
               </span>
+              {tParticipated ? (
+                <Badge tone={tHit ? "magenta" : "muted"}>
+                  Plan T (実弾) {tHit ? "✓ 的中" : "× 不的中"}
+                </Badge>
+              ) : (
+                <Badge tone="muted">Plan T 見送り</Badge>
+              )}
               {bundleEmpty ? (
-                <Badge tone="muted">見送り (賭けず)</Badge>
+                <Badge tone="muted">EV束(参考) 見送り</Badge>
               ) : (
                 <Badge tone={bundleHit ? "good" : "muted"}>
-                  回収優先 {bundleHit ? "✓ 的中" : "× 不的中"}
+                  EV束(参考) {bundleHit ? "✓ 的中" : "× 不的中"}
                 </Badge>
               )}
             </div>
@@ -272,7 +287,7 @@ export default async function PredictionDetailPage({
       })()}
 
       {/* 新スキーマ (2026-05-29 後半): Plan A/B 廃止。3連単 は bet_tables[trifecta] に入り
-          他券種と並ぶ。bundle 表示は TopRecommendationCard (回収優先) + 同 (的中優先) で代替。 */}
+          他券種と並ぶ。bundle 表示は PlanTCard (実弾) + TopRecommendationCard (EV束参考) で代替。 */}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card title="P×O ランキング 上位 30">
@@ -300,7 +315,7 @@ function hitTier(d: PredictionDetail, finish?: number[]): string | null {
   return r ? tierLabel(r.tier) : null;
 }
 
-// ===== Claude 総合オススメ (全 bet type 横断 / Kelly 効率順) =====
+// ===== EV束 (モデル参考, 全 bet type 横断 / Kelly 効率順) =====
 // CLAUDE.md の方針に沿う「効率」= Kelly 資金成長率 f* = (P×O − 1) / (O − 1)。
 // 純 P×O 順だと高オッズの 3 連単 (楽観バイアスの罠) が上位を占めるが、Kelly は
 // 低オッズで堅い +EV (単勝/複勝/ワイド) を上位に、宝くじ型を下位に並べる。
@@ -462,9 +477,9 @@ function TopRecommendationCard({
       tone={best ? "alert" : "default"}
       title={
         <span className="flex items-center gap-2">
-          <span className="text-(--color-highlight) font-black">Claude 総合オススメ</span>
+          <span className="text-(--color-highlight) font-black">EV束 (モデル参考)</span>
           <span className="text-xs text-(--color-muted) font-normal">
-            全 bet type 横断 · Kelly 効率順 f*=(P×O−1)/(O−1) · P×O≥
+            旧 snapshot 近似表示 · 全 bet type 横断 · Kelly 効率順 f*=(P×O−1)/(O−1) · P×O≥
             {TOP_REC_PXO_FLOOR.toFixed(2)} で足切り · 独立サイジング(近似){usedEvidence ? " · LLM 補強反映" : ""}
           </span>
         </span>
@@ -757,7 +772,7 @@ function BundleCard({
 }: {
   bundle: RecommendedBundle;
   finish?: number[];
-  // "yield" = 回収優先 (実弾で買う対象・highlight) / "hit" = 的中優先 (おまけ計測・買わない・緑)
+  // "yield" = EV束 (モデル参考・投票しない・highlight) / "hit" = 旧 的中優先 (廃止済の旧 snapshot 用・緑)
   variant?: "yield" | "hit";
   // result.final_odds (leg_id → 最終確定オッズ)。legs テーブルで 予想/最終 を併記。
   finalOdds?: Record<string, number>;

@@ -346,7 +346,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         races_: list[dict], part_field: str, hit_field: str,
         stake_field: str, payout_field: str, payout_final_field: str,
     ) -> dict:
-        """bundle (回収優先 / 的中優先) の集計。見送り (participated=false) は除外。
+        """bundle (Plan T 実弾 / EV束参考) の集計。見送り (participated=false) は除外。
 
         payout (予想) と payout_final (最終オッズ) の両方で ROI を出す。
         """
@@ -391,12 +391,12 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             "roi_final_ci_high": roi_final_high,
         }
 
-    # 回収優先 (実弾で買う Claude 選定束)。的中優先は廃止。
+    # EV束 (recommended_bundle, モデルのみの参考値。2026-06-06 以降は投票しない)。
     claude_bundle = _bundle_agg(
         races, "bundle_participated", "bundle_hit",
         "bundle_stake", "bundle_payout", "bundle_payout_final",
     )
-    # Plan T「3連単的中モード」の集計 (回収優先と同形)。市場無視・的中優先の計測指標。
+    # Plan T「3連単的中モード」の集計 (**実弾投票束**, 2026-06-06〜固定)。EV束と同形。
     plan_t_bundle = _bundle_agg(
         races, "plan_t_participated", "plan_t_hit",
         "plan_t_stake", "plan_t_payout", "plan_t_payout_final",
