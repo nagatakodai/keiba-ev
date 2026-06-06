@@ -59,8 +59,9 @@ function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
 }
 
-// 累積収支推移 (3連単的中モード = 実弾 + EV束 = 参考) + 結果分布の簡易 SVG チャート群。
+// 累積収支推移 (3連単的中モード = 実弾投票束) + 結果分布の簡易 SVG チャート群。
 // recharts 等の重い依存を増やさず Tailwind + inline SVG で軽量描画する。
+// EV束 (モデル参考) の系列はダッシュボードから削除 (2026-06-06 ユーザ指示: EV束は不要)。
 function DashboardCharts({ races }: { races: RaceHit[] }) {
   // saved_at 昇順 (古い順) で並べて累積 stake / payout を計算
   const sorted = [...races].sort((a, b) =>
@@ -68,57 +69,29 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   );
 
   // 累積収支: 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
-  // 3連単的中モード (実弾投票束, 2026-06-06〜固定) と EV束 (モデル参考) を併記する
-  // (2026-06-05 ユーザ指示: 3連単的中モードもダッシュボードにのせる → 2026-06-06 に実弾へ昇格)。
-  let yieldStakeAcc = 0;
-  let yieldPayoutAcc = 0;
+  // 3連単的中モード (実弾投票束, 2026-06-06〜固定) のみ。
   let tStakeAcc = 0;
   let tPayoutAcc = 0;
   const series = sorted.map((r) => {
-    if (r.bundle_participated) {
-      yieldStakeAcc += r.bundle_stake ?? 0;
-      // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
-      yieldPayoutAcc += r.bundle_payout_final ?? r.bundle_payout ?? 0;
-    }
     if (r.trifecta_bundle_participated) {
       tStakeAcc += r.trifecta_bundle_stake ?? 0;
+      // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
       tPayoutAcc += r.trifecta_bundle_payout_final ?? r.trifecta_bundle_payout ?? 0;
     }
     return {
-      yieldNet: yieldPayoutAcc - yieldStakeAcc,
-      yieldRoi: yieldStakeAcc > 0 ? yieldPayoutAcc / yieldStakeAcc : 0,
       tNet: tPayoutAcc - tStakeAcc,
       tRoi: tStakeAcc > 0 ? tPayoutAcc / tStakeAcc : 0,
     };
   });
-  const yieldNetSeries = series.map((s) => s.yieldNet);
-  const yieldRoiSeries = series.map((s) => s.yieldRoi);
   const tNetSeries = series.map((s) => s.tNet);
   const tRoiSeries = series.map((s) => s.tRoi);
 
-  // 結果分布: 的中 / 不的中 / 見送り レース数
-  const yieldHits = races.filter((r) => r.bundle_hit).length;
-  const yieldMisses = races.filter(
-    (r) => r.bundle_participated && !r.bundle_hit,
-  ).length;
-  const yieldSkips = races.filter(
-    (r) => r.bundle_participated === false,
-  ).length;
-  // 3連単的中モードの結果分布
+  // 3連単的中モードの結果分布: 的中 / 不的中 / 見送り レース数
   const tHits = races.filter((r) => r.trifecta_bundle_hit).length;
   const tMisses = races.filter(
     (r) => r.trifecta_bundle_participated && !r.trifecta_bundle_hit,
   ).length;
   const tSkips = races.filter((r) => r.trifecta_bundle_participated === false).length;
-  const totalRaces = races.length;
-
-  // bet type 別 hit 内訳 (EV束参考。3連単束は当然3連単のみなので種別チャートは EV束で見る)
-  const betTypeHits: Record<string, number> = {};
-  for (const r of races) {
-    for (const bt of r.bundle_hit_bet_types ?? []) {
-      betTypeHits[bt] = (betTypeHits[bt] ?? 0) + 1;
-    }
-  }
 
   return (
     <section className="space-y-3">
@@ -126,7 +99,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
         <span className="inline-block w-1 h-4 bg-(--color-highlight) translate-y-0.5" />
         <span className="text-base">チャート</span>
         <span className="text-xs font-normal text-(--color-muted)">
-          累積収支 / 結果分布 / 的中 bet 種別
+          累積収支 / 結果分布
         </span>
       </h2>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -135,9 +108,6 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             seriesA={tNetSeries}
             labelA="3連単的中 (実弾)"
             colorA="#d946ef"
-            seriesB={yieldNetSeries}
-            labelB="EV束 (参考)"
-            colorB="#0ea5e9"
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
         </Card>
@@ -146,101 +116,40 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
             seriesA={tRoiSeries.map((v) => v * 100)}
             labelA="3連単的中 (実弾)"
             colorA="#d946ef"
-            seriesB={yieldRoiSeries.map((v) => v * 100)}
-            labelB="EV束 (参考)"
-            colorB="#0ea5e9"
             yFmt={(v) => `${v.toFixed(0)}%`}
             referenceY={100}
           />
         </Card>
         <Card title="結果分布">
-          <div className="space-y-3">
-            <DistroBar
-              label="3連単的中モード (実弾)"
-              hits={tHits}
-              misses={tMisses}
-              skips={tSkips}
-            />
-            <DistroBar
-              label="EV束 (モデル参考)"
-              hits={yieldHits}
-              misses={yieldMisses}
-              skips={yieldSkips}
-            />
-          </div>
-        </Card>
-        <Card title="bet 種別 (EV束参考)">
-          <BetTypeBars betTypeHits={betTypeHits} totalRaces={totalRaces} />
+          <DistroBar
+            label="3連単的中モード (実弾)"
+            hits={tHits}
+            misses={tMisses}
+            skips={tSkips}
+          />
         </Card>
       </div>
     </section>
   );
 }
 
-// bet type 別 hit 件数の横棒 (EV束参考用)。
-const BET_LABEL: Record<string, string> = {
-  win: "単勝", place: "複勝", quinella: "馬連", wide: "ワイド",
-  exacta: "馬単", trio: "3連複", trifecta: "3連単",
-};
-
-function BetTypeBars({
-  betTypeHits, totalRaces,
-}: {
-  betTypeHits: Record<string, number>;
-  totalRaces: number;
-}) {
-  if (Object.keys(betTypeHits).length === 0) {
-    return <p className="text-xs text-(--color-muted)">的中なし</p>;
-  }
-  return (
-    <div className="space-y-1.5">
-      {Object.entries(betTypeHits)
-        .sort((a, b) => b[1] - a[1])
-        .map(([bt, n]) => {
-          const pct = totalRaces > 0 ? (n / totalRaces) * 100 : 0;
-          return (
-            <div key={bt} className="flex items-center gap-2 text-xs">
-              <span className="w-12 shrink-0 text-(--color-muted)">
-                {BET_LABEL[bt] ?? bt}
-              </span>
-              <div className="flex-1 bg-(--color-panel-2) h-4 relative">
-                <div
-                  className="absolute inset-y-0 left-0 bg-(--color-good)/60"
-                  style={{ width: `${Math.min(100, pct * 4)}%` }}
-                />
-              </div>
-              <span className="font-bold tabnum w-12 text-right">
-                {n} 件
-              </span>
-            </div>
-          );
-        })}
-    </div>
-  );
-}
-
 function LineChart({
-  seriesA, seriesB, labelA, labelB, colorA, colorB, yFmt, referenceY,
+  seriesA, labelA, colorA, yFmt, referenceY,
 }: {
   seriesA: number[];
-  // seriesB は任意 (省略時は系列 A のみ描画)。A=3連単束 実弾 / B=EV束 参考 が既定の使い方。
-  seriesB?: number[];
   labelA: string;
-  labelB?: string;
   colorA: string;
-  colorB?: string;
   yFmt: (v: number) => string;
   referenceY?: number;
 }) {
-  const sB = seriesB ?? [];
   const w = 600;
   const h = 180;
   const pad = { l: 48, r: 12, t: 8, b: 18 };
-  const allValues = [...seriesA, ...sB, ...(referenceY !== undefined ? [referenceY] : [])];
+  const allValues = [...seriesA, ...(referenceY !== undefined ? [referenceY] : [])];
   const minY = Math.min(0, ...allValues);
   const maxY = Math.max(0, ...allValues);
   const rangeY = maxY - minY || 1;
-  const n = Math.max(seriesA.length, sB.length);
+  const n = seriesA.length;
   const innerW = w - pad.l - pad.r;
   const innerH = h - pad.t - pad.b;
   const xAt = (i: number) =>
@@ -269,19 +178,10 @@ function LineChart({
         {seriesA.length > 0 && (
           <path d={lineFor(seriesA)} fill="none" stroke={colorA} strokeWidth={2} />
         )}
-        {sB.length > 0 && colorB && (
-          <path d={lineFor(sB)} fill="none" stroke={colorB} strokeWidth={2} strokeDasharray="3 2" />
-        )}
         {/* legend */}
         <g transform={`translate(${pad.l + 4}, ${pad.t + 12})`}>
           <rect width={9} height={9} fill={colorA} />
           <text x={14} y={9} fontSize={10} fill="#374151">{labelA}</text>
-          {labelB && colorB && (
-            <>
-              <rect width={9} height={9} fill={colorB} x={70} />
-              <text x={84} y={9} fontSize={10} fill="#374151">{labelB}</text>
-            </>
-          )}
         </g>
       </svg>
     </div>
@@ -444,7 +344,6 @@ export default async function DashboardPage() {
       .catch(() => ({ items: [] as WatchAutoHistoryItem[] })),
   ]);
 
-  const claudeBundle = cal?.claude_bundle;
   const trifectaBundle = cal?.trifecta_bundle;
 
   const raceHitMap = new Map<string, RaceHit>();
@@ -641,69 +540,10 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* EV束 (モデル参考) セクション — joint Kelly EV 最適。投票しない比較計測 (2026-06-06〜)。 */}
-      <section className="space-y-2">
-        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
-          <span className="inline-block w-1 h-4 bg-(--color-info) translate-y-0.5" />
-          <span className="text-base">EV束 (モデル参考)</span>
-          <span className="text-xs font-normal text-(--color-muted)">
-            joint Kelly EV 最適 / 投票しない比較計測
-          </span>
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {/* 左=的中率 (緑 accent), 右=回収率 (青 accent) (2026-05-29 ユーザ指示) */}
-        <Stat
-          label="的中率"
-          value={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "—"
-              : fmtPct(claudeBundle.hit_rate, 1)
-          }
-          hint={
-            claudeBundle && claudeBundle.participated_races > 0
-              ? `${claudeBundle.hits} 的中 / ${claudeBundle.participated_races} 参加 (見送り除く)`
-              : ""
-          }
-          // 的中率: 30% 未満 → 赤、それ以外 → 黒 (default) (2026-05-29 ユーザ指示)
-          tone={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "default"
-              : claudeBundle.hit_rate < 0.3
-              ? "bad"
-              : "default"
-          }
-          accentTone="good"
-        />
-        <Stat
-          label="回収率"
-          // 回収率も **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
-          value={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "—"
-              : fmtRoiPct(claudeBundle.roi_final ?? claudeBundle.roi)
-          }
-          hint={
-            claudeBundle && claudeBundle.participated_races > 0
-              ? `${claudeBundle.participated_races} 参加 / ${claudeBundle.skipped_races} 見送り · 賭金 ${fmtYen(claudeBundle.stake)} → 払戻(最終) ${fmtYen(claudeBundle.payout_final ?? claudeBundle.payout)}`
-              : "賭けたレースなし"
-          }
-          // 回収率: 100% 超 → 黒 (default)、それ以外 → 赤 (損失) (2026-05-29 ユーザ指示)
-          tone={
-            !claudeBundle || claudeBundle.participated_races === 0
-              ? "default"
-              : (claudeBundle.roi_final ?? claudeBundle.roi) > 1
-              ? "default"
-              : "bad"
-          }
-          accentTone="info"
-        />
-        </div>
-        <div className="text-[10px] text-(--color-muted) text-right px-1">
-          ※ モデルのみの参考値 (旧 回収優先AI)。実弾投票には使わない
-        </div>
-      </section>
+      {/* EV束 (モデル参考) セクションはダッシュボードから削除 (2026-06-06 ユーザ指示)。
+          EV束の集計は /calibrate (確率較正) と履歴詳細ページで引き続き参照可能。 */}
 
-      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 3連単的中 (実弾) + EV束 (参考) */}
+      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 3連単的中 (実弾) のみ */}
       {cal && cal.races.length > 0 && (
         <DashboardCharts races={cal.races} />
       )}

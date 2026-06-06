@@ -210,6 +210,14 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             saved_at = pred.get("saved_at") or ""
             if saved_at < CALIBRATION_CUTOFF_ISO_JST:
                 continue
+            # **結果未取得レースは計測に入れない** (2026-06-06 ユーザ指示)。
+            # 結果ファイルが無いレースは上の result_path.exists() で join 段階から除外済。
+            # ここではさらに「結果ファイルはあるが finish_order が欠落/不完全 (3着まで
+            # 揃わない)」な placeholder/壊れ result も除外する — 空の finish のまま通すと
+            # 3連単的中モード等の計測で「参加・不的中」に誤計上されるため。
+            finish = result.get("finish_order") or []
+            if len(finish) < 3 or any(not isinstance(x, int) or x <= 0 for x in finish[:3]):
+                continue
             pairs.append((race_id, pred, result))
             r_ts = result.get("recorded_at")
             if isinstance(r_ts, str) and (last_updated_at is None or r_ts > last_updated_at):
