@@ -463,12 +463,12 @@ export default function WatchAutoPage() {
                 </p>
               )}
             </div>
-            {betOddspark && (
+            {(betOddspark || betIpat) && (
               <>
                 <p className="mt-2 text-xs text-(--color-muted)">
-                  ⚠ ON で開始すると <b>headful ブラウザが開きます</b>。発走前 NAR の束を
-                  カートに投入し続けます。ブラウザを表示するには <code>make api</code> を DISPLAY のある端末
-                  (WSLg 等) で起動しておくこと。
+                  ⚠ ON で開始すると <b>headful ブラウザが開きます</b>。発走前の束を
+                  カート/購入予定リストに投入し続けます。ブラウザを表示するには <code>make api</code> を
+                  DISPLAY のある端末 (WSLg 等) で起動しておくこと。
                 </p>
                 <div className="mt-3">
                   <label className="inline-flex items-center gap-2 cursor-pointer text-sm">
@@ -483,8 +483,21 @@ export default function WatchAutoPage() {
                   </label>
                   {betAutoLogin && (
                     <p className="mt-1 text-xs text-(--color-muted)">
-                      <code>make api</code> を起動する端末の env に <code>ODDSPARK_ID</code> /{" "}
-                      <code>ODDSPARK_PASSWORD</code> (+ 必要なら <code>ODDSPARK_PIN</code>) を設定しておくこと。
+                      <code>make api</code> を起動する端末の env に
+                      {betOddspark && (
+                        <>
+                          {" "}<code>ODDSPARK_ID</code> / <code>ODDSPARK_PASSWORD</code>
+                          {" "}(+ 必要なら <code>ODDSPARK_PIN</code>)
+                        </>
+                      )}
+                      {betOddspark && betIpat && "、"}
+                      {betIpat && (
+                        <>
+                          {" "}<code>IPAT_INETID</code> / <code>IPAT_SUBSCRIBER</code> /{" "}
+                          <code>IPAT_PARS</code> / <code>IPAT_PIN</code>
+                        </>
+                      )}
+                      {" "}を設定しておくこと。
                       未設定だと daemon が起動直後に失敗します (ライブログ参照)。認証情報はコミット禁止。
                     </p>
                   )}
@@ -527,39 +540,49 @@ export default function WatchAutoPage() {
                       1レース上限 = 基準¥10,000×N。空欄なら掛金倍率に連動。
                     </span>
                   </div>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
-                      支払方法
-                    </span>
-                    <div className="flex gap-3 text-sm">
-                      <label className="inline-flex items-center gap-1 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="bet_payment_method"
-                          checked={betPaymentMethod === "opcoin"}
-                          onChange={() => setBetPaymentMethod("opcoin")}
-                          disabled={running}
-                        />
-                        OPコイン
-                      </label>
-                      <label className="inline-flex items-center gap-1 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="bet_payment_method"
-                          checked={betPaymentMethod === "buylimit"}
-                          onChange={() => setBetPaymentMethod("buylimit")}
-                          disabled={running}
-                        />
-                        投票資金
-                      </label>
+                  {betOddspark && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
+                        支払方法 (オッズパーク)
+                      </span>
+                      <div className="flex gap-3 text-sm">
+                        <label className="inline-flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="bet_payment_method"
+                            checked={betPaymentMethod === "opcoin"}
+                            onChange={() => setBetPaymentMethod("opcoin")}
+                            disabled={running}
+                          />
+                          OPコイン
+                        </label>
+                        <label className="inline-flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="bet_payment_method"
+                            checked={betPaymentMethod === "buylimit"}
+                            onChange={() => setBetPaymentMethod("buylimit")}
+                            disabled={running}
+                          />
+                          投票資金
+                        </label>
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
                 {betAutoPurchase && (
                   <p className="mt-2 text-xs text-(--color-bad)">
-                    🚨 <b>実弾モード</b>: 確定ボタンを自動でクリックし、実際に賭けます。per-race ¥10,000 +
+                    🚨 <b>実弾モード</b>: 確定ボタンを自動でクリックし、実際に賭けます。per-race
+                    ¥{(() => {
+                      const cap = parseFloat(betMaxStakeMultiplier);
+                      const stk = parseFloat(betStakeMultiplier);
+                      const mult = Number.isFinite(cap) && cap > 0
+                        ? cap
+                        : Math.max(1, Number.isFinite(stk) && stk > 0 ? stk : 1);
+                      return (Math.round((10000 * mult) / 100) * 100).toLocaleString();
+                    })()} +
                     日次 ¥{(parseInt(betDailyCap, 10) || 50000).toLocaleString()} を上限としますが、
-                    オッズパーク利用規約および誤発注の責任は使用者にあります。
+                    各サービスの利用規約および誤発注の責任は使用者にあります。
                     確認画面の最終ボタン DOM が未検証の間は <code>AUTO_PURCHASE_VERIFIED=False</code> により
                     src 側で fail-safe (実弾は撃たれない)。実機で 1 回検証後に flag を True に。
                   </p>
