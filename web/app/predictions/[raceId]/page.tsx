@@ -159,7 +159,14 @@ export default async function PredictionDetailPage({
       {/* 3連単的中モード = 実弾投票束を最上段に (2026-06-06〜特化)。EV束は参考。 */}
       <TrifectaCard d={d} finish={finish} />
 
-      <TopRecommendationCard d={d} finish={finish} />
+      {d.index_compare && d.index_compare.length > 0 && (
+        <IndexCompareCard
+          items={d.index_compare}
+          finish={finish}
+          scoredAt={d.llm_scored_at}
+          hasClaude={!d.llm_fallback}
+        />
+      )}
 
       {d.result && (() => {
         // 的中判定は **3連単束 (実弾投票束) 基準** (2026-06-06 特化)。
@@ -221,14 +228,7 @@ export default async function PredictionDetailPage({
         );
       })()}
 
-      {d.index_compare && d.index_compare.length > 0 && (
-        <IndexCompareCard
-          items={d.index_compare}
-          finish={finish}
-          scoredAt={d.llm_scored_at}
-          hasClaude={!d.llm_fallback}
-        />
-      )}
+      <TopRecommendationCard d={d} finish={finish} />
 
       {d.horse_aptitude && d.horse_aptitude.length > 0 && (
         <AptitudeCard items={d.horse_aptitude} finish={finish} />
