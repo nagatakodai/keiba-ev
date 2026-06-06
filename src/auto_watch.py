@@ -267,19 +267,18 @@ def _recently_failed(race_id: str, now_ts: int, cooldown_sec: int = FAILED_RETRY
     return False
 
 
-def _list_due_races(window_min: float, tolerance_min: float, now_ts: int) -> list[dict]:
-    """その日 (JST) の開催一覧を **公式ソース** から取得し、締切 N±M 分のレースを抽出。
+def discover_today_races(today: str) -> list[dict]:
+    """当日 (JST, YYYYMMDD) の開催一覧を **公式ソース** から取得する。
 
+    返り値: [{race_id(netkeiba 12桁), url, start_at, venue, race_no, source}]。
     - NAR: **oddspark** の当日 race list (netkeiba_rid + 発走時刻、netkeiba 不要)。
-      analyze は `_dispatch_nar_fallback` で keiba.go.jp 公式 (全6券種) → oddspark 順。
-    - JRA: 発走時刻ソースが現状無いため live discovery skip (CLAUDE.md 既知の宿題)。
-      JRA を打つ場合は手動で `python -m src.scrape_jra <rid> --snapshot` または
-      `make run URL=...` を使う。
-
+      source="oddspark"。
+    - JRA: 競馬ブック (発走時刻) × JRA 公式 discover (netkeiba_rid) を (venue, race_no)
+      で join。source="keibabook"。
     netkeiba live (race_list / shutuba / odds) は IP 規制を避けるため **常に使わない**。
-    過去レースの解析や学習・holdout は data/raw/ の netkeiba キャッシュをそのまま使う。
+    `_list_due_races` (watch-auto の dispatch 帯抽出) と `src/odds_capture.py`
+    (締切前 N 分のオッズ polling) の共通 discovery。
     """
-    today = datetime.fromtimestamp(now_ts).strftime("%Y%m%d")
     races: list[dict] = []
     # NAR 公式 (oddspark の当日 race list) で discovery。netkeiba race_list は呼ばない。
     try:
@@ -335,6 +334,13 @@ def _list_due_races(window_min: float, tolerance_min: float, now_ts: int) -> lis
         console.print(
             "[yellow]race discovery 0 件 (NAR/JRA とも当日無し or 公式ソース不通)[/yellow]"
         )
+    return races
+
+
+def _list_due_races(window_min: float, tolerance_min: float, now_ts: int) -> list[dict]:
+    """当日開催 (discover_today_races) から締切 N±M 分のレースを抽出。"""
+    today = datetime.fromtimestamp(now_ts).strftime("%Y%m%d")
+    races = discover_today_races(today)
 
     # 検出帯は「**締切まで** window〜window+tolerance 分」の片側 (+のみ)。締切は発走の
     # CLOSE_LEAD_SEC 秒前で固定 (parse.close_at_for_start)。締切基準にすることで、レース

@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet watch-auto-ipat-bet bet
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet watch-auto-ipat-bet bet odds-capture
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -192,6 +192,15 @@ BAND_ARGS := --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE)
 # 投票発火の専用デーモン (watch-auto の poll とは独立に締切 BET_LEAD_SEC 秒前ちょうどに撃つ)。
 # market-blend/llm-blend は `=` 形 (bet_scheduler は = で parse)。--bet-oddspark/--bet-ipat は各 target で付与。
 SCHED_ARGS := --bet-lead-sec=$(BET_LEAD_SEC) $(if $(LLM_BLEND),--llm-blend=$(LLM_BLEND),) $(if $(MARKET_BLEND),--market-blend=$(MARKET_BLEND),) $(if $(APTITUDE_TOP),--aptitude-top=$(APTITUDE_TOP),)
+# --- オッズ変動キャプチャ daemon (Step 2) ---
+# 締切前 30 分のオッズを keiba.go.jp (NAR) / JRA 公式 (JRA) から 3 分おきに
+# data/cache/odds_timeline/<rid>.jsonl へ記録。netkeiba は使わない (IP 規制回避)。
+# watch-auto と独立プロセスなので投票 dispatch の latency に影響しない。
+ODDS_CAPTURE_ARGS ?=
+odds-capture:
+	@echo "odds-capture: 締切前オッズ polling (keiba.go.jp / JRA 公式, netkeiba 不使用) / Ctrl+C で終了"
+	$(PY) -m src.odds_capture $(ODDS_CAPTURE_ARGS)
+
 watch-auto:
 	@echo "watch-auto: SCORE $(SCORE_WINDOW)〜$(SCORE_TOLERANCE)分 / BET $(WINDOW)±$(TOLERANCE)分 / $(INTERVAL_SEC)秒おき / Ctrl+C で終了"
 	@while true; do \
