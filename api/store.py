@@ -194,6 +194,11 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
     # snapshot だけ** で計算しなおす。古い snapshot は dashboard / 履歴ページに表示しない。
     # 後で延ばしたければ CALIBRATION_CUTOFF_ISO_JST を更新するだけ。
     CALIBRATION_CUTOFF_ISO_JST = "2026-05-29T00:00:00"
+    # **3連単的中モード (実弾投票束) の計測開始日** (2026-06-06 ユーザ指示: 昨日=6/5 から)。
+    # それ以前の snapshot にも recommended_bundle_t が乗っていることがあるが、実弾運用前の
+    # 試行なので trifecta_bundle 集計 (ダッシュボードの的中率/回収率/収支/チャート) には
+    # 入れない。per-race の表示 (履歴ページの badge 等) は従来通り残す。
+    TRIFECTA_CUTOFF_ISO_JST = "2026-06-05T00:00:00"
     if PRED_DIR.exists():
         for pred_path in sorted(PRED_DIR.glob("*.json")):
             race_id = pred_path.stem
@@ -323,6 +328,9 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "trifecta_bundle_stake": b_t["stake"],
                 "trifecta_bundle_payout": b_t["payout"],
                 "trifecta_bundle_payout_final": b_t["payout_final"],
+                # 3連単的中モードの計測対象か (saved_at >= TRIFECTA_CUTOFF)。
+                # False の race は trifecta_bundle 集計とダッシュボードのチャートから除外。
+                "trifecta_measured": (pred.get("saved_at") or "") >= TRIFECTA_CUTOFF_ISO_JST,
                 # 最終オッズが取れたかの discriminator (frontend で「予想/最終 切替表示」用)
                 "has_final_odds": bool(final_odds),
                 # LLM 評価有無の discriminator
@@ -405,8 +413,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "bundle_stake", "bundle_payout", "bundle_payout_final",
     )
     # 3連単的中モードの集計 (**実弾投票束**, 2026-06-06〜固定)。EV束と同形。
+    # 計測対象は TRIFECTA_CUTOFF 以降のみ (それ以前は races/skipped の分母からも除外)。
     trifecta_bundle = _bundle_agg(
-        races, "trifecta_bundle_participated", "trifecta_bundle_hit",
+        [r for r in races if r.get("trifecta_measured")],
+        "trifecta_bundle_participated", "trifecta_bundle_hit",
         "trifecta_bundle_stake", "trifecta_bundle_payout", "trifecta_bundle_payout_final",
     )
 
@@ -421,6 +431,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "plans": [],
         "claude_bundle": claude_bundle,
         "trifecta_bundle": trifecta_bundle,
+        # 3連単的中モードの計測開始日 (frontend の注記表示用)
+        "trifecta_cutoff": TRIFECTA_CUTOFF_ISO_JST,
         "races": races,
     }
 

@@ -63,8 +63,11 @@ function fmtRoiPct(roi: number): string {
 // recharts 等の重い依存を増やさず Tailwind + inline SVG で軽量描画する。
 // EV束 (モデル参考) の系列はダッシュボードから削除 (2026-06-06 ユーザ指示: EV束は不要)。
 function DashboardCharts({ races }: { races: RaceHit[] }) {
+  // 3連単的中モードの計測対象 (trifecta_measured, 計測開始日以降) のみ。
+  // field 欠落 (旧 API) は従来通り含める。
+  const measured = races.filter((r) => r.trifecta_measured !== false);
   // saved_at 昇順 (古い順) で並べて累積 stake / payout を計算
-  const sorted = [...races].sort((a, b) =>
+  const sorted = [...measured].sort((a, b) =>
     (a.saved_at ?? "").localeCompare(b.saved_at ?? ""),
   );
 
@@ -86,12 +89,12 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   const tNetSeries = series.map((s) => s.tNet);
   const tRoiSeries = series.map((s) => s.tRoi);
 
-  // 3連単的中モードの結果分布: 的中 / 不的中 / 見送り レース数
-  const tHits = races.filter((r) => r.trifecta_bundle_hit).length;
-  const tMisses = races.filter(
+  // 3連単的中モードの結果分布: 的中 / 不的中 / 見送り レース数 (計測対象のみ)
+  const tHits = measured.filter((r) => r.trifecta_bundle_hit).length;
+  const tMisses = measured.filter(
     (r) => r.trifecta_bundle_participated && !r.trifecta_bundle_hit,
   ).length;
-  const tSkips = races.filter((r) => r.trifecta_bundle_participated === false).length;
+  const tSkips = measured.filter((r) => r.trifecta_bundle_participated === false).length;
 
   return (
     <section className="space-y-3">
@@ -357,8 +360,13 @@ export default async function DashboardPage() {
 
   const nowMs = Date.now();
   // 予測履歴セクションを削除したので related な集計は不要。
-  const confidence = cal ? calibrationConfidence(cal.race_count) : null;
+  // confidence / 集計対象 は 3連単的中モードの計測窓 (trifecta_cutoff 以降) 基準。
+  const confidence = trifectaBundle
+    ? calibrationConfidence(trifectaBundle.races)
+    : null;
   const lastUpdated = cal ? fmtRelativeFromNow(cal.last_updated_at, nowMs) : "—";
+  // "2026-06-05T00:00:00" → "2026-06-05" (注記表示用)
+  const trifectaCutoffDate = cal?.trifecta_cutoff?.slice(0, 10);
 
   return (
     <Page>
@@ -442,7 +450,8 @@ export default async function DashboardPage() {
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
-          ※ 全て 3連単的中モード (実弾投票束) 基準 ／ 集計対象 {cal?.race_count ?? 0} レース ／
+          ※ 全て 3連単的中モード (実弾投票束) 基準 ／ 集計対象 {trifectaBundle?.races ?? 0} レース
+          {trifectaCutoffDate ? ` (${trifectaCutoffDate}〜)` : ""} ／
           {confidence && (
             <span className="ml-1">
               <Badge tone={confidence.tone}>{confidence.label}</Badge>
@@ -536,7 +545,8 @@ export default async function DashboardPage() {
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right px-1">
-          ※ 実弾投票束 (2026-06-06〜 3連単的中モード固定)。Claude 指数なしのレースは自動見送り
+          ※ 実弾投票束 (3連単的中モード固定)。計測対象は{" "}
+          {trifectaCutoffDate ?? "計測開始日"}〜 のレースのみ。Claude 指数なしのレースは自動見送り
         </div>
       </section>
 

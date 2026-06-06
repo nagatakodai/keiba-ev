@@ -477,6 +477,8 @@ export type CalibrationRaceItem = {
   trifecta_bundle_stake?: number;
   trifecta_bundle_payout?: number;              // 予想オッズ基準
   trifecta_bundle_payout_final?: number;        // 最終オッズ基準
+  // 3連単的中モードの計測対象か (saved_at >= trifecta_cutoff)。false は集計/チャート除外。
+  trifecta_measured?: boolean;
   // 最終オッズ取得済 race か (frontend で「予想/最終」両表示の discriminator)
   has_final_odds?: boolean;
   // snapshot 保存時刻 (ISO8601 JST naive)。チャートでの時系列ソート / 表示用。
@@ -496,8 +498,10 @@ export type CalibrationReport = {
   // EV束 (recommended_bundle, モデル参考・投票しない) の集計
   claude_bundle?: ClaudeBundleAggregate;
   // 3連単的中モード bundle (recommended_bundle_t, **実弾投票束**) の集計。
-  // claude_bundle と同形。古い snapshot は 0 集計。
+  // claude_bundle と同形。trifecta_cutoff 以降の race のみが分母に入る。
   trifecta_bundle?: ClaudeBundleAggregate;
+  // 3連単的中モードの計測開始日 (ISO8601 JST naive)。注記表示用。
+  trifecta_cutoff?: string;
   races: CalibrationRaceItem[];
 };
 
