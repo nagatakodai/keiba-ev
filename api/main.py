@@ -296,6 +296,10 @@ class WatchAutoStartRequest(BaseModel):
     # per-race 上限 + daily_cap は維持される。gt=0 で 0 倍を拒否 (誤入力で予期しない floor 動作を
     # 避ける)、le=100 で実用上限 (100 倍超は事故の方が高確率)。
     bet_stake_multiplier: float = Field(default=1.0, gt=0.0, le=100.0)
+    # per-race 上限の専用倍率 (×N)。上限 = 基準¥10,000 × N。None (既定) なら従来どおり
+    # 掛金倍率に連動 (基準 × bet_stake_multiplier)。掛金倍率を上げずに上限だけ広げる /
+    # 逆に上限だけ絞る用途。daemon の --max-stake-multiplier に渡る。gt=0/le=100 で誤入力ガード。
+    bet_max_stake_multiplier: float | None = Field(default=None, gt=0.0, le=100.0)
     # 支払方法: opcoin (OPコイン残, 既定) | buylimit (投票資金残, 会員入金)
     # Literal で API 境界で値検証 (任意文字列を入れて子プロセスのラベルに垂れ流すのを防ぐ)。
     bet_payment_method: Literal["opcoin", "buylimit"] = "opcoin"
@@ -336,6 +340,7 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_auto_purchase=req.bet_auto_purchase,
         bet_daily_cap=req.bet_daily_cap,
         bet_stake_multiplier=req.bet_stake_multiplier,
+        bet_max_stake_multiplier=req.bet_max_stake_multiplier,
         bet_payment_method=req.bet_payment_method,
         bet_ipat=req.bet_ipat,
         trifecta_bankroll=req.trifecta_bankroll,

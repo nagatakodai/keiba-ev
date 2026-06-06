@@ -413,6 +413,7 @@ class WatchAutoManager:
         bet_auto_purchase: bool = False,
         bet_daily_cap: int = 50000,
         bet_stake_multiplier: float = 1.0,
+        bet_max_stake_multiplier: float | None = None,
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
@@ -430,6 +431,7 @@ class WatchAutoManager:
                 bet_auto_purchase=bet_auto_purchase,
                 bet_daily_cap=bet_daily_cap,
                 bet_stake_multiplier=bet_stake_multiplier,
+                bet_max_stake_multiplier=bet_max_stake_multiplier,
                 bet_payment_method=bet_payment_method,
                 bet_auto_login=bet_auto_login,
                 bet_ipat=bet_ipat,
@@ -458,6 +460,7 @@ class WatchAutoManager:
         bet_auto_purchase: bool = False,
         bet_daily_cap: int = 50000,
         bet_stake_multiplier: float = 1.0,
+        bet_max_stake_multiplier: float | None = None,
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
@@ -481,11 +484,14 @@ class WatchAutoManager:
                 await self._start_betting_daemon(
                     auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
                     stake_multiplier=eff_stake_multiplier,
+                    max_stake_multiplier=bet_max_stake_multiplier,
                     payment_method=bet_payment_method, auto_login=bet_auto_login)
             if bet_ipat and not self.ipat_bet_running:
                 await self._start_ipat_daemon(
                     auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
-                    stake_multiplier=eff_stake_multiplier, auto_login=bet_auto_login)
+                    stake_multiplier=eff_stake_multiplier,
+                    max_stake_multiplier=bet_max_stake_multiplier,
+                    auto_login=bet_auto_login)
             if (bet_oddspark or bet_ipat) and not self.scheduler_running:
                 await self._start_scheduler(
                     bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
@@ -553,6 +559,7 @@ class WatchAutoManager:
             "bet_auto_purchase": bet_auto_purchase,
             "bet_daily_cap": bet_daily_cap,
             "bet_stake_multiplier": bet_stake_multiplier,
+            "bet_max_stake_multiplier": bet_max_stake_multiplier,
             "bet_payment_method": bet_payment_method,
             "bet_auto_login": bet_auto_login,
             "bet_ipat": bet_ipat,
@@ -581,6 +588,7 @@ class WatchAutoManager:
                     if cfg.get("bet_daily_cap") is not None else 50000,
                 # 投票束に対応する倍率 (3連単束の各脚に掛かる倍率)。上で算出済の eff を使う。
                 stake_multiplier=eff_stake_multiplier,
+                max_stake_multiplier=cfg.get("bet_max_stake_multiplier"),
                 payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
                 auto_login=bool(cfg.get("bet_auto_login")),
@@ -594,6 +602,7 @@ class WatchAutoManager:
                     if cfg.get("bet_daily_cap") is not None else 50000,
                 # 投票束に対応する倍率 (3連単束の各脚に掛かる倍率)。上で算出済の eff を使う。
                 stake_multiplier=eff_stake_multiplier,
+                max_stake_multiplier=cfg.get("bet_max_stake_multiplier"),
                 auto_login=bool(cfg.get("bet_auto_login")),
             )
         # 投票発火デーモン (締切 bet_lead_sec 秒前に精密発火, watch poll とは独立)。
@@ -645,8 +654,11 @@ class WatchAutoManager:
     async def _start_ipat_daemon(self, *, auto_purchase: bool = False,
                                  daily_cap: int = 50000,
                                  stake_multiplier: float = 1.0,
+                                 max_stake_multiplier: float | None = None,
                                  auto_login: bool = False) -> None:
         """JRA 即PAT 投票 daemon (`ipat_bet --session`) を起動。oddspark daemon の JRA 版。
+
+        max_stake_multiplier: per-race 上限の専用倍率 (基準¥10,000×N)。None なら掛金倍率に連動。
 
         headful ブラウザを開き、ログイン → queue (ipat_bet_queue) を消費。
         - auto_login=False (既定): 人が headful ブラウザで手でログイン (poll 検出, 最も安全)。
@@ -665,6 +677,8 @@ class WatchAutoManager:
             cmd.append("--auto-purchase")
         if stake_multiplier != 1.0:
             cmd.append(f"--stake-multiplier={stake_multiplier}")
+        if max_stake_multiplier is not None and max_stake_multiplier > 0:
+            cmd.append(f"--max-stake-multiplier={max_stake_multiplier}")
         label_extra = ""
         if auto_login:
             label_extra += " [auto-login]"
@@ -672,6 +686,8 @@ class WatchAutoManager:
             label_extra += " [auto-purchase]"
         if stake_multiplier != 1.0:
             label_extra += f" [×{stake_multiplier}]"
+        if max_stake_multiplier is not None and max_stake_multiplier > 0:
+            label_extra += f" [上限×{max_stake_multiplier:g}]"
         self.ipat_bet_job = Job(
             job_id=f"ipat-session-{int(time.time())}",
             label="ipat-bet-session" + label_extra,
@@ -684,9 +700,12 @@ class WatchAutoManager:
     async def _start_betting_daemon(self, *, auto_purchase: bool = False,
                                     daily_cap: int = 50000,
                                     stake_multiplier: float = 1.0,
+                                    max_stake_multiplier: float | None = None,
                                     payment_method: str = "opcoin",
                                     auto_login: bool = False) -> None:
         """オッズパーク投票 daemon (`oddspark_bet --session`) を起動。
+
+        max_stake_multiplier: per-race 上限の専用倍率 (基準¥10,000×N)。None なら掛金倍率に連動。
 
         headful ブラウザを開き、ログイン → queue を消費。
         - auto_login=False (既定): 人が headful ブラウザで手でログイン (poll 検出, 最も安全)。
@@ -709,6 +728,8 @@ class WatchAutoManager:
             cmd.append("--auto-purchase")
         if stake_multiplier != 1.0:
             cmd.append(f"--stake-multiplier={stake_multiplier}")
+        if max_stake_multiplier is not None and max_stake_multiplier > 0:
+            cmd.append(f"--max-stake-multiplier={max_stake_multiplier}")
         label_extra = ""
         if auto_login:
             label_extra += " [auto-login]"
@@ -716,6 +737,8 @@ class WatchAutoManager:
             label_extra += " [auto-purchase]"
         if stake_multiplier != 1.0:
             label_extra += f" [×{stake_multiplier}]"
+        if max_stake_multiplier is not None and max_stake_multiplier > 0:
+            label_extra += f" [上限×{max_stake_multiplier:g}]"
         if payment_method != "opcoin":
             label_extra += f" [{payment_method}]"
         self.bet_job = Job(
@@ -775,6 +798,8 @@ class WatchAutoManager:
                     if (cfg.get("bet_plan_t") and cfg.get("bet_plan_t_multiplier") is not None)
                     else float(cfg["bet_stake_multiplier"])
                     if cfg.get("bet_stake_multiplier") is not None else 1.0,
+                bet_max_stake_multiplier=float(cfg["bet_max_stake_multiplier"])
+                    if cfg.get("bet_max_stake_multiplier") is not None else None,
                 bet_payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
                 bet_auto_login=bool(cfg.get("bet_auto_login")),

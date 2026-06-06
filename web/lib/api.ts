@@ -336,6 +336,8 @@ export type WatchAutoStatus = {
     bet_daily_cap?: number;   // 円
     // セッション中のみ 3連単束の全 leg stake を N 倍 (100円単位丸め)。per-race 上限 / daily_cap は維持。
     bet_stake_multiplier?: number;
+    // per-race 上限の専用倍率 (上限 = 基準¥10,000×N)。null/未設定なら掛金倍率に連動。
+    bet_max_stake_multiplier?: number | null;
     // 支払方法: "opcoin" (OPコイン残, 既定) | "buylimit" (投票資金残, 会員入金)
     bet_payment_method?: "opcoin" | "buylimit";
     // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) を起動。
@@ -550,6 +552,7 @@ export const api = {
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;
     bet_stake_multiplier?: number;
+    bet_max_stake_multiplier?: number | null;
     bet_payment_method?: "opcoin" | "buylimit";
     bet_ipat?: boolean;
     trifecta_bankroll?: number;

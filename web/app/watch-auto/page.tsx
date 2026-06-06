@@ -74,6 +74,8 @@ export default function WatchAutoPage() {
   const [betDailyCap, setBetDailyCap] = useState("50000");
   // セッション中のみ 3連単束の全 leg stake を倍率倍に (小数倍可・100円単位切り捨て)。1.0=既定。
   const [betStakeMultiplier, setBetStakeMultiplier] = useState("1");
+  // per-race 上限の専用倍率 (上限 = 基準¥10,000×N)。空 (既定) なら掛金倍率に連動。
+  const [betMaxStakeMultiplier, setBetMaxStakeMultiplier] = useState("");
   // 3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
   const [trifectaBankroll, setTrifectaBankroll] = useState("10000");
   // 支払方法: opcoin (OPコイン残, 既定) または buylimit (投票資金残)
@@ -111,6 +113,8 @@ export default function WatchAutoPage() {
     if (c.bet_plan_t && c.bet_plan_t_multiplier != null)
       setBetStakeMultiplier(String(c.bet_plan_t_multiplier));
     else if (c.bet_stake_multiplier != null) setBetStakeMultiplier(String(c.bet_stake_multiplier));
+    setBetMaxStakeMultiplier(
+      c.bet_max_stake_multiplier != null ? String(c.bet_max_stake_multiplier) : "");
     // 旧 config 互換: 旧キー plan_t_bankroll で persist された予算も読む。
     if (c.trifecta_bankroll != null) setTrifectaBankroll(String(c.trifecta_bankroll));
     else if (c.plan_t_bankroll != null) setTrifectaBankroll(String(c.plan_t_bankroll));
@@ -177,6 +181,12 @@ export default function WatchAutoPage() {
         bet_stake_multiplier: (() => {
           const v = parseFloat(betStakeMultiplier);
           return Number.isFinite(v) && v > 0 ? v : 1.0;
+        })(),
+        // per-race 上限倍率。空欄 = null = 掛金倍率に連動 (既定)。NaN/0以下も null に倒す。
+        bet_max_stake_multiplier: (() => {
+          if (betMaxStakeMultiplier.trim() === "") return null;
+          const v = parseFloat(betMaxStakeMultiplier);
+          return Number.isFinite(v) && v > 0 ? v : null;
         })(),
         // 3連単の1レース購入予算 (円)。backend は ge=100 拒否なので NaN/100未満は既定 10000 に。
         trifecta_bankroll: (() => {
@@ -504,6 +514,19 @@ export default function WatchAutoPage() {
                     disabled={running}
                     className="w-24"
                   />
+                  <div className="flex items-end gap-2">
+                    <Input
+                      label="per-race 上限倍率 (×N)"
+                      placeholder="掛金倍率に連動"
+                      value={betMaxStakeMultiplier}
+                      onChange={(e) => setBetMaxStakeMultiplier(e.target.value)}
+                      disabled={running}
+                      className="w-32"
+                    />
+                    <span className="text-xs text-(--color-muted) pb-1.5">
+                      1レース上限 = 基準¥10,000×N。空欄なら掛金倍率に連動。
+                    </span>
+                  </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
                       支払方法

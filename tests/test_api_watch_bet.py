@@ -68,3 +68,21 @@ def test_trifecta_bankroll_env_propagated(no_spawn):
     asyncio.run(mgr.start(bet_oddspark=True, trifecta_bankroll=20_000))
     assert os.environ.get("KEIBA_TRIFECTA_BANKROLL") == "20000"
     assert mgr.config["trifecta_bankroll"] == 20_000
+
+
+def test_max_stake_multiplier_passed_to_daemon(no_spawn):
+    """per-race 上限倍率が daemon に --max-stake-multiplier で渡る (掛金倍率と独立)。"""
+    mgr = runner.WatchAutoManager()
+    asyncio.run(mgr.start(bet_oddspark=True, bet_stake_multiplier=2.0,
+                          bet_max_stake_multiplier=5.0))
+    assert mgr.config["bet_max_stake_multiplier"] == 5.0
+    assert "--stake-multiplier=2.0" in mgr.bet_job.cmd
+    assert "--max-stake-multiplier=5.0" in mgr.bet_job.cmd
+
+
+def test_max_stake_multiplier_default_omitted(no_spawn):
+    """未指定 (None) なら --max-stake-multiplier は付かない (= 掛金倍率連動の従来挙動)。"""
+    mgr = runner.WatchAutoManager()
+    asyncio.run(mgr.start(bet_oddspark=True, bet_stake_multiplier=2.0))
+    assert mgr.config.get("bet_max_stake_multiplier") is None
+    assert not any(a.startswith("--max-stake-multiplier") for a in mgr.bet_job.cmd)

@@ -134,15 +134,22 @@ PER_RACE_BASE_DEFAULT = 10_000
 DAILY_STAKE_FILE = ROOT / "data" / "cache" / "oddspark_daily_stake.json"
 
 
-def _resolve_max_stake(explicit: int | None, multiplier: float) -> tuple[int, str]:
-    """per-race 上限を決める。明示指定があればそれ、無ければ基準値×倍率 (100円丸め)。
+def _resolve_max_stake(explicit: int | None, multiplier: float,
+                       cap_multiplier: float | None = None) -> tuple[int, str]:
+    """per-race 上限を決める。優先順: ①明示指定 (--max-stake=N 円) ②上限専用倍率
+    (--max-stake-multiplier=N、基準値×N) ③掛金倍率に連動 (基準値×掛金倍率, 従来既定)。
 
+    cap_multiplier は掛金倍率と独立に per-race 上限だけをスケールしたいとき用
+    (Web UI の「per-race 上限倍率」)。明示値なので max(1.0, ·) で底上げせずそのまま使う。
     戻り値 (max_total_stake, 由来の説明文)。
     """
     if explicit is not None:
         return explicit, f"明示指定 ¥{explicit:,}"
+    if cap_multiplier is not None and cap_multiplier > 0:
+        scaled = max(100, int(round(PER_RACE_BASE_DEFAULT * cap_multiplier / 100.0)) * 100)
+        return scaled, f"基準¥{PER_RACE_BASE_DEFAULT:,}×上限倍率{cap_multiplier:g} = ¥{scaled:,}"
     scaled = int(round(PER_RACE_BASE_DEFAULT * max(1.0, multiplier) / 100.0)) * 100
-    return scaled, (f"基準¥{PER_RACE_BASE_DEFAULT:,}×倍率{multiplier:g} = ¥{scaled:,}"
+    return scaled, (f"基準¥{PER_RACE_BASE_DEFAULT:,}×掛金倍率{multiplier:g} = ¥{scaled:,}"
                     if multiplier != 1.0 else f"既定 ¥{scaled:,}")
 # 当方 bet_type → オッズパーク式別の表示値/コード (要確認)。
 _SHIKIBETSU = {
@@ -1207,6 +1214,7 @@ def _main() -> None:
         daily_cap = DAILY_CAP_DEFAULT
         stake_multiplier = 1.0
         max_stake_explicit: int | None = None
+        max_stake_multiplier: float | None = None
         payment_method = PAYMENT_OPCOIN
         for a in argv:
             if a.startswith("--max-stake="):
@@ -1214,6 +1222,16 @@ def _main() -> None:
                     max_stake_explicit = max(0, int(a.split("=", 1)[1]))
                 except ValueError:
                     print(f"[oddspark_bet] --max-stake 値が不正 ({a}) → 倍率連動に fallback")
+            elif a.startswith("--max-stake-multiplier="):
+                try:
+                    v = float(a.split("=", 1)[1])
+                    if 0 < v <= 100:
+                        max_stake_multiplier = v
+                    else:
+                        print(f"[oddspark_bet] --max-stake-multiplier 値が範囲外 ({a}) → 掛金倍率連動 "
+                              "(有効範囲: 0 < N <= 100)")
+                except ValueError:
+                    print(f"[oddspark_bet] --max-stake-multiplier 値が不正 ({a}) → 掛金倍率連動")
             elif a.startswith("--poll="):
                 try:
                     poll = max(1, int(a.split("=", 1)[1]))
@@ -1245,7 +1263,8 @@ def _main() -> None:
                 else:
                     print(f"[oddspark_bet] --payment 値が不正 ({a}) → 既定 {payment_method} "
                           f"(opcoin | buylimit)")
-        max_total_stake, src = _resolve_max_stake(max_stake_explicit, stake_multiplier)
+        max_total_stake, src = _resolve_max_stake(
+            max_stake_explicit, stake_multiplier, max_stake_multiplier)
         print(f"[oddspark_bet] per-race 上限: {src}")
         run_session(
             headful="--headless" not in argv,
@@ -1265,8 +1284,10 @@ def _main() -> None:
               "  one-shot: python -m src.oddspark_bet <netkeiba_nar_race_id|race_id> "
               "[--headless] [--manual-login]\n"
               "  常駐    : python -m src.oddspark_bet --session [--auto-login] [--poll=5] [--clear] "
-              "[--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000]\n"
-              "    per-race 上限: --max-stake=N で明示指定。未指定なら基準¥10,000×倍率に連動\n"
+              "[--daily-cap=50000] [--stake-multiplier=2] [--max-stake=10000] "
+              "[--max-stake-multiplier=3]\n"
+              "    per-race 上限: --max-stake=N (円) > --max-stake-multiplier=N (基準¥10,000×N) "
+              "> 掛金倍率連動 (既定)\n"
               "    投票束は 3連単的中モード (recommended_bundle_t) 固定")
         raise SystemExit(2)
     try:
