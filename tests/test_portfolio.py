@@ -172,7 +172,7 @@ def test_bundle_records_dropped_legs_budget():
 
 
 def test_trifecta_hitmax_propagates_dropped_legs():
-    """Plan T (build_trifecta_hitmax) が build_bundle の除去脚を束に伝搬する。"""
+    """3連単束 (build_trifecta_hitmax) が build_bundle の除去脚を束に伝搬する。"""
     from src.models import BetOdds
     win = {1: 0.5, 2: 0.2, 3: 0.15, 4: 0.1, 5: 0.05}
     probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
@@ -192,7 +192,7 @@ def test_trifecta_hitmax_propagates_dropped_legs():
 
 
 def test_trifecta_hitmax_respects_bankroll_budget():
-    """Plan T の合計購入額は指定 bankroll (購入予算) を超えない。"""
+    """3連単束の合計購入額は指定 bankroll (購入予算) を超えない。"""
     from src.models import BetOdds
     win = {i: 1.0 / 8 for i in range(1, 9)}
     probs = Probabilities(win=win, place2=dict(win), place3=dict(win))

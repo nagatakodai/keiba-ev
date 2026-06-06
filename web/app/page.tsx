@@ -59,7 +59,7 @@ function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
 }
 
-// 累積収支推移 (3連単的中 Plan T = 実弾 + EV束 = 参考) + 結果分布の簡易 SVG チャート群。
+// 累積収支推移 (3連単的中モード = 実弾 + EV束 = 参考) + 結果分布の簡易 SVG チャート群。
 // recharts 等の重い依存を増やさず Tailwind + inline SVG で軽量描画する。
 function DashboardCharts({ races }: { races: RaceHit[] }) {
   // saved_at 昇順 (古い順) で並べて累積 stake / payout を計算
@@ -68,7 +68,7 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   );
 
   // 累積収支: 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
-  // Plan T「3連単的中モード」(実弾投票束, 2026-06-06〜固定) と EV束 (モデル参考) を併記する
+  // 3連単的中モード (実弾投票束, 2026-06-06〜固定) と EV束 (モデル参考) を併記する
   // (2026-06-05 ユーザ指示: 3連単的中モードもダッシュボードにのせる → 2026-06-06 に実弾へ昇格)。
   let yieldStakeAcc = 0;
   let yieldPayoutAcc = 0;
@@ -80,9 +80,9 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
       // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
       yieldPayoutAcc += r.bundle_payout_final ?? r.bundle_payout ?? 0;
     }
-    if (r.plan_t_participated) {
-      tStakeAcc += r.plan_t_stake ?? 0;
-      tPayoutAcc += r.plan_t_payout_final ?? r.plan_t_payout ?? 0;
+    if (r.trifecta_bundle_participated) {
+      tStakeAcc += r.trifecta_bundle_stake ?? 0;
+      tPayoutAcc += r.trifecta_bundle_payout_final ?? r.trifecta_bundle_payout ?? 0;
     }
     return {
       yieldNet: yieldPayoutAcc - yieldStakeAcc,
@@ -104,15 +104,15 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
   const yieldSkips = races.filter(
     (r) => r.bundle_participated === false,
   ).length;
-  // Plan T「3連単的中モード」の結果分布
-  const tHits = races.filter((r) => r.plan_t_hit).length;
+  // 3連単的中モードの結果分布
+  const tHits = races.filter((r) => r.trifecta_bundle_hit).length;
   const tMisses = races.filter(
-    (r) => r.plan_t_participated && !r.plan_t_hit,
+    (r) => r.trifecta_bundle_participated && !r.trifecta_bundle_hit,
   ).length;
-  const tSkips = races.filter((r) => r.plan_t_participated === false).length;
+  const tSkips = races.filter((r) => r.trifecta_bundle_participated === false).length;
   const totalRaces = races.length;
 
-  // bet type 別 hit 内訳 (EV束参考。Plan T は3連単のみなので種別チャートは EV束で見る)
+  // bet type 別 hit 内訳 (EV束参考。3連単束は当然3連単のみなので種別チャートは EV束で見る)
   const betTypeHits: Record<string, number> = {};
   for (const r of races) {
     for (const bt of r.bundle_hit_bet_types ?? []) {
@@ -223,7 +223,7 @@ function LineChart({
   seriesA, seriesB, labelA, labelB, colorA, colorB, yFmt, referenceY,
 }: {
   seriesA: number[];
-  // seriesB は任意 (省略時は系列 A のみ描画)。A=Plan T 実弾 / B=EV束 参考 が既定の使い方。
+  // seriesB は任意 (省略時は系列 A のみ描画)。A=3連単束 実弾 / B=EV束 参考 が既定の使い方。
   seriesB?: number[];
   labelA: string;
   labelB?: string;
@@ -356,12 +356,12 @@ function PredictionRowItem({
   const closeAt = p.close_at ?? closeAtMap?.get(p.race_id) ?? null;
   const startAt = p.start_at ?? startAtMap?.get(p.race_id) ?? null;
   const timing = raceTimingStatus(closeAt, startAt, p.has_result, nowMs);
-  // 「的中」ラベルは **Plan T (3連単的中モード, 実弾投票束) のみ**で判定 (2026-06-06 特化)。
-  // Plan T 束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback して表示を保つ。
+  // 「的中」ラベルは **3連単的中モード (実弾投票束) のみ**で判定 (2026-06-06 特化)。
+  // 3連単束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback して表示を保つ。
   // **skipped は anyHit より優先**: 賭けていない race は理論値が立っていても「的中」ではない。
-  const usePlanT = !!(hit && hit.plan_t_participated);
-  const bundleSkipped = !!(hit && !usePlanT && hit.bundle_participated === false);
-  const anyHit = !bundleSkipped && !!(hit && (usePlanT ? hit.plan_t_hit : hit.bundle_hit));
+  const useTrifecta = !!(hit && hit.trifecta_bundle_participated);
+  const bundleSkipped = !!(hit && !useTrifecta && hit.bundle_participated === false);
+  const anyHit = !bundleSkipped && !!(hit && (useTrifecta ? hit.trifecta_bundle_hit : hit.bundle_hit));
   const rowBg = hit
     ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
     : raceTimingRowBg(timing.tone);
@@ -403,7 +403,7 @@ function PredictionRowItem({
               <span className="font-bold mono">{hit.finish.join("-")}</span>
             </span>
             <span className="text-(--color-muted)">·</span>
-            {hit.plan_t_hit && <Badge tone="good">Plan T 的中</Badge>}
+            {hit.trifecta_bundle_hit && <Badge tone="good">3連単束 的中</Badge>}
             {hit.bundle_hit && <Badge tone="muted">EV束(参考) 的中</Badge>}
             {hit.payout > 0 && (
               <>
@@ -445,7 +445,7 @@ export default async function DashboardPage() {
   ]);
 
   const claudeBundle = cal?.claude_bundle;
-  const planTBundle = cal?.plan_t_bundle;
+  const trifectaBundle = cal?.trifecta_bundle;
 
   const raceHitMap = new Map<string, RaceHit>();
   for (const r of cal?.races ?? []) raceHitMap.set(r.race_id, r);
@@ -473,35 +473,35 @@ export default async function DashboardPage() {
           状態は header の WatchPill で確認可能。 */}
 
       {/* 一番上の段: 参加レース数 / 見送りレース数 / 的中レース数 / 収支
-          (全て Plan T「3連単的中モード」= 実弾投票束 基準, 2026-06-06〜固定) */}
+          (全て 3連単的中モード = 実弾投票束 基準, 2026-06-06〜固定) */}
       <div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat
             label="参加レース数"
-            value={planTBundle?.participated_races ?? 0}
+            value={trifectaBundle?.participated_races ?? 0}
             hint={
-              planTBundle
-                ? `総合 ${planTBundle.races} / 見送り ${planTBundle.skipped_races}`
+              trifectaBundle
+                ? `総合 ${trifectaBundle.races} / 見送り ${trifectaBundle.skipped_races}`
                 : "—"
             }
             accentTone="muted"
           />
           <Stat
             label="見送りレース数"
-            value={planTBundle?.skipped_races ?? 0}
+            value={trifectaBundle?.skipped_races ?? 0}
             hint={
-              planTBundle && planTBundle.races > 0
-                ? `見送り率 ${Math.round((planTBundle.skipped_races / planTBundle.races) * 100)}%`
+              trifectaBundle && trifectaBundle.races > 0
+                ? `見送り率 ${Math.round((trifectaBundle.skipped_races / trifectaBundle.races) * 100)}%`
                 : "—"
             }
             accentTone="muted"
           />
           <Stat
             label="的中レース数"
-            value={planTBundle?.hits ?? 0}
+            value={trifectaBundle?.hits ?? 0}
             hint={
-              planTBundle
-                ? `参加 ${planTBundle.participated_races} / 集計 ${planTBundle.races}`
+              trifectaBundle
+                ? `参加 ${trifectaBundle.participated_races} / 集計 ${trifectaBundle.races}`
                 : "—"
             }
             // 値は黒文字 (default)。左 border のみ緑で AI 種別を示す (2026-05-29 ユーザ指示)
@@ -513,37 +513,37 @@ export default async function DashboardPage() {
             // 収支は **最終オッズ基準** (実払戻に近い)。最終オッズが無い旧 result は
             // backend が予想オッズに fallback 済 (payout_final = payout) (2026-05-30 ユーザ指示)。
             value={
-              !planTBundle
+              !trifectaBundle
                 ? "—"
                 : (() => {
-                    const pay = planTBundle.payout_final ?? planTBundle.payout;
-                    const pl = pay - planTBundle.stake;
+                    const pay = trifectaBundle.payout_final ?? trifectaBundle.payout;
+                    const pl = pay - trifectaBundle.stake;
                     return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
                   })()
             }
             hint={
-              planTBundle
-                ? `賭金 ${fmtYen(planTBundle.stake)} → 払戻(最終) ${fmtYen(planTBundle.payout_final ?? planTBundle.payout)}`
+              trifectaBundle
+                ? `賭金 ${fmtYen(trifectaBundle.stake)} → 払戻(最終) ${fmtYen(trifectaBundle.payout_final ?? trifectaBundle.payout)}`
                 : "—"
             }
             tone={
               // 収支: マイナスなら赤、プラスは黒 (default) (2026-05-29 ユーザ指示)
-              !planTBundle
+              !trifectaBundle
                 ? "default"
-                : (planTBundle.payout_final ?? planTBundle.payout) - planTBundle.stake < 0
+                : (trifectaBundle.payout_final ?? trifectaBundle.payout) - trifectaBundle.stake < 0
                 ? "bad"
                 : "default"
             }
             accentTone={
-              !planTBundle ||
-              (planTBundle.payout_final ?? planTBundle.payout) - planTBundle.stake >= 0
+              !trifectaBundle ||
+              (trifectaBundle.payout_final ?? trifectaBundle.payout) - trifectaBundle.stake >= 0
                 ? "magenta"
                 : "bad"
             }
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
-          ※ 全て 3連単的中モード (Plan T, 実弾投票束) 基準 ／ 集計対象 {cal?.race_count ?? 0} レース ／
+          ※ 全て 3連単的中モード (実弾投票束) 基準 ／ 集計対象 {cal?.race_count ?? 0} レース ／
           {confidence && (
             <span className="ml-1">
               <Badge tone={confidence.tone}>{confidence.label}</Badge>
@@ -553,27 +553,27 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      {/* 3連単的中モード (Plan T) セクション — **実弾投票束 (2026-06-06〜固定)**。
+      {/* 3連単的中モード セクション — **実弾投票束 (2026-06-06〜固定)**。
           市場無視・Claude 指数フォーメーション。的中率系=フクシア。 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
           <span className="inline-block w-1 h-4 bg-fuchsia-500 translate-y-0.5" />
           <span className="text-base">3連単的中モード</span>
           <span className="text-xs font-normal text-(--color-muted)">
-            Plan T / 市場無視・Claude 指数フォーメーション / 実弾投票束 (固定)
+            市場無視・Claude 指数フォーメーション / 実弾投票束 (固定)
           </span>
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat
             label="的中率"
             value={
-              !planTBundle || planTBundle.participated_races === 0
+              !trifectaBundle || trifectaBundle.participated_races === 0
                 ? "—"
-                : fmtPct(planTBundle.hit_rate, 1)
+                : fmtPct(trifectaBundle.hit_rate, 1)
             }
             hint={
-              planTBundle && planTBundle.participated_races > 0
-                ? `${planTBundle.hits} 的中 / ${planTBundle.participated_races} 参加`
+              trifectaBundle && trifectaBundle.participated_races > 0
+                ? `${trifectaBundle.hits} 的中 / ${trifectaBundle.participated_races} 参加`
                 : "賭けたレースなし"
             }
             tone="default"
@@ -582,19 +582,19 @@ export default async function DashboardPage() {
           <Stat
             label="回収率"
             value={
-              !planTBundle || planTBundle.participated_races === 0
+              !trifectaBundle || trifectaBundle.participated_races === 0
                 ? "—"
-                : fmtRoiPct(planTBundle.roi_final ?? planTBundle.roi)
+                : fmtRoiPct(trifectaBundle.roi_final ?? trifectaBundle.roi)
             }
             hint={
-              planTBundle && planTBundle.participated_races > 0
-                ? `賭金 ${fmtYen(planTBundle.stake)} → 払戻(最終) ${fmtYen(planTBundle.payout_final ?? planTBundle.payout)}`
+              trifectaBundle && trifectaBundle.participated_races > 0
+                ? `賭金 ${fmtYen(trifectaBundle.stake)} → 払戻(最終) ${fmtYen(trifectaBundle.payout_final ?? trifectaBundle.payout)}`
                 : "—"
             }
             tone={
-              !planTBundle || planTBundle.participated_races === 0
+              !trifectaBundle || trifectaBundle.participated_races === 0
                 ? "default"
-                : (planTBundle.roi_final ?? planTBundle.roi) > 1
+                : (trifectaBundle.roi_final ?? trifectaBundle.roi) > 1
                 ? "default"
                 : "bad"
             }
@@ -603,23 +603,23 @@ export default async function DashboardPage() {
           <Stat
             label="収支"
             value={
-              !planTBundle || planTBundle.participated_races === 0
+              !trifectaBundle || trifectaBundle.participated_races === 0
                 ? "—"
                 : (() => {
-                    const pay = planTBundle.payout_final ?? planTBundle.payout;
-                    const pl = pay - planTBundle.stake;
+                    const pay = trifectaBundle.payout_final ?? trifectaBundle.payout;
+                    const pl = pay - trifectaBundle.stake;
                     return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
                   })()
             }
             hint={
-              planTBundle
-                ? `参加 ${planTBundle.participated_races} / 集計 ${planTBundle.races}`
+              trifectaBundle
+                ? `参加 ${trifectaBundle.participated_races} / 集計 ${trifectaBundle.races}`
                 : "—"
             }
             tone={
-              !planTBundle || planTBundle.participated_races === 0
+              !trifectaBundle || trifectaBundle.participated_races === 0
                 ? "default"
-                : (planTBundle.payout_final ?? planTBundle.payout) - planTBundle.stake < 0
+                : (trifectaBundle.payout_final ?? trifectaBundle.payout) - trifectaBundle.stake < 0
                 ? "bad"
                 : "default"
             }
@@ -627,17 +627,17 @@ export default async function DashboardPage() {
           />
           <Stat
             label="見送りレース数"
-            value={planTBundle?.skipped_races ?? 0}
+            value={trifectaBundle?.skipped_races ?? 0}
             hint={
-              planTBundle && planTBundle.races > 0
-                ? `見送り率 ${Math.round((planTBundle.skipped_races / planTBundle.races) * 100)}%`
+              trifectaBundle && trifectaBundle.races > 0
+                ? `見送り率 ${Math.round((trifectaBundle.skipped_races / trifectaBundle.races) * 100)}%`
                 : "—"
             }
             accentTone="muted"
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right px-1">
-          ※ 実弾投票束 (2026-06-06〜 Plan T 固定)。Claude 指数なしのレースは自動見送り
+          ※ 実弾投票束 (2026-06-06〜 3連単的中モード固定)。Claude 指数なしのレースは自動見送り
         </div>
       </section>
 

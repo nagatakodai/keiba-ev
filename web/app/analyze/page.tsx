@@ -61,7 +61,7 @@ export default function AnalyzePage() {
     <Page>
       <PageHeader
         title="レース予測分析"
-        subtitle="URL を渡して Plan T (3連単的中モード, 実弾投票束) と EV束 (モデル参考) を生成。refresh で発走 5 分前まで待機し最新オッズで再分析。"
+        subtitle="URL を渡して 3連単的中モード (実弾投票束) と EV束 (モデル参考) を生成。refresh で発走 5 分前まで待機し最新オッズで再分析。"
       />
 
       <Card title="リクエスト">

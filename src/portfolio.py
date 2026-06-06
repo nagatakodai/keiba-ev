@@ -264,7 +264,7 @@ def build_bundle(
     n_dropped_torigami = 0
     # 「買わなかった脚」(frontend で取り消し線表示)。各脚に reason を持たせる:
     #   "torigami" = トリガミ防止で除去 / "budget" = 予算を割れず配分0 (stake<min_stake)。
-    # Plan T は予算 (bankroll) 内に収めるため、両方の理由で脚が落ち得る。
+    # 3連単束は予算 (bankroll) 内に収めるため、両方の理由で脚が落ち得る。
     dropped_legs: list[dict] = []
     while active:
         H = H_full[active]
@@ -392,7 +392,7 @@ def build_trifecta_hitmax(
     min_stake: int = 100,
     stake_unit: int = 100,
 ) -> dict:
-    """Plan T「全力的中モード」: Claude 指数ドリブンの 3連単フォーメーション。
+    """3連単的中モード (全力フォーメーション): Claude 指数ドリブンの 3連単フォーメーション。
 
     要件 (ユーザ指示 2026-06-02):
     - **Claude 指数の上位を本命**にしてフォーメーションを組む (rank_index が Claude 指数。無ければ
@@ -502,7 +502,7 @@ def build_trifecta_hitmax(
         hit_max_legs=len(cands), max_legs=len(cands),
         min_stake=min_stake, stake_unit=stake_unit,
     )
-    # build_bundle の汎用フィールドを base にマージしつつ Plan T 固有を上書き。
+    # build_bundle の汎用フィールドを base にマージしつつ 3連単束固有を上書き。
     base.update({k: bundle[k] for k in bundle if k in base or k in (
         "min_payout_ratio", "dropped_torigami", "dropped_legs",
         "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes")})
@@ -540,7 +540,7 @@ def build_trifecta_from_keys(
     stake_unit: int = 100,
     max_points: int = 60,
 ) -> dict:
-    """Claude が選んだ 3連単 買い目 (keys) からトリガミ防止つき束を組む (Plan T の Claude 選定版)。
+    """Claude が選んだ 3連単 買い目 (keys) からトリガミ防止つき束を組む (3連単的中モードの Claude 選定版)。
 
     build_trifecta_hitmax の **機械フォーメーション展開を Claude 選定 keys に差し替えた**版。配分・
     トリガミ除去は同じ build_bundle(prioritize="hit") 経路を再利用するので、束の schema・トリガミ

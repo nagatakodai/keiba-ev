@@ -86,15 +86,15 @@ def main(
     phase: str = typer.Option("bet", "--phase", help="score = Claude 考察で各馬指数を出しキャッシュ / bet = 指数+市場でP→束→snapshot (既定)"),
     llm_blend: float = typer.Option(ev_mod.LLM_BLEND_DEFAULT, "--llm-blend", help="Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ)"),
     speed_v2_blend: float = typer.Option(ev_mod.SPEED_V2_BLEND_LIVE, "--speed-v2-blend", help="v2速度図表(実データpar+pace+trip)を LightGBM fundamental と並列合成する重み (0=図表使わず, 0.5=幾何平均)。既定=SPEED_V2_BLEND_LIVE"),
-    plan_t_head_max: int = typer.Option(2, "--t-head-max", help="Plan T(全力的中): 1着列の最大頭数 (絞る)。指数top2が接戦なら2頭"),
-    plan_t_head_gap: float = typer.Option(0.12, "--t-head-gap", help="Plan T: 指数top2の相対差がこれ以下なら1着を2頭に (開き判定)"),
-    plan_t_mid: int = typer.Option(4, "--t-mid", help="Plan T: 2着列の頭数 (中くらい)"),
-    plan_t_tail: int = typer.Option(7, "--t-tail", help="Plan T: 3着列の頭数 (広げる)"),
-    plan_t_no_torigami: bool = typer.Option(False, "--t-no-torigami", help="Plan T のトリガミ防止を無効化 (既定: 防止する)"),
-    plan_t_bankroll: int = typer.Option(
-        10_000, "--t-bankroll", envvar="KEIBA_PLAN_T_BANKROLL",
-        help="Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデルとも)。"
-             "env KEIBA_PLAN_T_BANKROLL でも指定可 (watch-auto/Web UI 経由)"),
+    trifecta_head_max: int = typer.Option(2, "--t-head-max", help="3連単的中モード: 1着列の最大頭数 (絞る)。指数top2が接戦なら2頭"),
+    trifecta_head_gap: float = typer.Option(0.12, "--t-head-gap", help="3連単的中モード: 指数top2の相対差がこれ以下なら1着を2頭に (開き判定)"),
+    trifecta_mid: int = typer.Option(4, "--t-mid", help="3連単的中モード: 2着列の頭数 (中くらい)"),
+    trifecta_tail: int = typer.Option(7, "--t-tail", help="3連単的中モード: 3着列の頭数 (広げる)"),
+    trifecta_no_torigami: bool = typer.Option(False, "--t-no-torigami", help="3連単束のトリガミ防止を無効化 (既定: 防止する)"),
+    trifecta_bankroll: int = typer.Option(
+        10_000, "--t-bankroll", envvar="KEIBA_TRIFECTA_BANKROLL",
+        help="3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデルとも)。"
+             "env KEIBA_TRIFECTA_BANKROLL でも指定可 (watch-auto/Web UI 経由)"),
 ):
     """URL (netkeiba) を渡して P×O ランキングと Plan A/B/C を出力。"""
     if not (url or html_file):
@@ -184,8 +184,8 @@ def main(
     )
     probs = ev_mod.load_probs(str(probs_file) if probs_file else None, probs)
 
-    # Plan T 専用の **market-free** probs (市場無視を保証)。market_blend>0 (例: make bet の 0.78)
-    # でも Plan T は市場をランキングに使わないため、market_blend=0 の model-only probs を別途用意する。
+    # 3連単束専用の **market-free** probs (市場無視を保証)。market_blend>0 (例: make bet の 0.78)
+    # でも3連単束は市場をランキングに使わないため、market_blend=0 の model-only probs を別途用意する。
     # market_blend==0 のときは同一なので再計算しない (no-op コスト回避)。
     if market_blend == 0:
         probs_t = probs
@@ -218,10 +218,10 @@ def main(
             llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
             llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
             speed_v2_blend=speed_v2_blend, probs_t=probs_t,
-            plan_t_head_max=plan_t_head_max, plan_t_head_gap=plan_t_head_gap,
-            plan_t_mid=plan_t_mid, plan_t_tail=plan_t_tail,
-            plan_t_no_torigami=plan_t_no_torigami, plan_t_bankroll=plan_t_bankroll,
-            # bet 段のみ Plan T 買い目選定を Claude に任せる (score 段はキャッシュ作りなので機械)。
+            trifecta_head_max=trifecta_head_max, trifecta_head_gap=trifecta_head_gap,
+            trifecta_mid=trifecta_mid, trifecta_tail=trifecta_tail,
+            trifecta_no_torigami=trifecta_no_torigami, trifecta_bankroll=trifecta_bankroll,
+            # bet 段のみ 3連単買い目選定を Claude に任せる (score 段はキャッシュ作りなので機械)。
             claude_trifecta_select=(phase == "bet" and not no_llm),
             llm_select_model=llm_model,
         )
@@ -394,7 +394,7 @@ def _serialize_aptitudes(rd, aptitudes: dict[int, AptitudeIndex]) -> list[dict]:
 
 # 旧「回収優先AI」(claude -p による EV束 picks/cuts 選定 = _validate_and_update_bundle /
 # _decide_selection_bundle / _update_snapshot_bundle) は撤去 (ユーザ指示 2026-06-06)。
-# Claude の役割は score ステージ (各馬指数) + Plan T 3連単買い目選定 (_claude_select_trifecta) に特化。
+# Claude の役割は score ステージ (各馬指数) + 3連単買い目選定 (_claude_select_trifecta) に特化。
 def _llm_scores_path(race_id: str) -> Path:
     return ROOT / "data" / "predictions" / f"{race_id}.llm.json"
 
@@ -556,20 +556,22 @@ def _run_score_stage(
 # 検索なしの純粋推論なので短くてよい。runway (締切までの残り) でさらに頭打ちする。
 TRIFECTA_SELECT_TIMEOUT_DEFAULT = 75
 
-# Plan T の1レース購入予算 (円) の既定。
-PLAN_T_BANKROLL_DEFAULT = 10_000
+# 3連単の1レース購入予算 (円) の既定。
+TRIFECTA_BANKROLL_DEFAULT = 10_000
 
 
-def _plan_t_bankroll(explicit: int | None = None) -> int:
-    """Plan T の1レース購入予算を解決する。
+def _trifecta_bankroll(explicit: int | None = None) -> int:
+    """3連単の1レース購入予算を解決する。
 
-    明示指定 (CLI --t-bankroll) があればそれを、無ければ env KEIBA_PLAN_T_BANKROLL、
+    明示指定 (CLI --t-bankroll) があればそれを、無ければ env KEIBA_TRIFECTA_BANKROLL、
     それも無ければ既定 ¥10,000。watch-auto/scraper/Web UI 経路は env で渡るので、明示が
     無くても env を尊重する (全 dispatch 経路で同一予算になる)。
     """
     if explicit is not None and explicit > 0:
         return int(explicit)
-    env = (os.environ.get("KEIBA_PLAN_T_BANKROLL") or "").strip()
+    # 旧 env 名 KEIBA_PLAN_T_BANKROLL も互換で読む (旧シェル/ループからの移行期対策)。
+    env = (os.environ.get("KEIBA_TRIFECTA_BANKROLL")
+           or os.environ.get("KEIBA_PLAN_T_BANKROLL") or "").strip()
     if env:
         try:
             v = int(float(env))
@@ -577,7 +579,7 @@ def _plan_t_bankroll(explicit: int | None = None) -> int:
                 return v
         except ValueError:
             pass
-    return PLAN_T_BANKROLL_DEFAULT
+    return TRIFECTA_BANKROLL_DEFAULT
 
 
 def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
@@ -603,7 +605,7 @@ def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
     if deadline:
         runway = int(deadline - time.time() - 10)
         if runway <= 15:
-            console.print("[yellow]Plan T Claude 選定 skip: 締切間際で時間が無い → 機械フォーメーション[/yellow]")
+            console.print("[yellow]3連単 Claude 買い目選定 skip: 締切間際で時間が無い → 機械フォーメーション[/yellow]")
             return None
         timeout = max(15, min(base_t, runway))
     else:
@@ -625,17 +627,17 @@ def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
                 if payload:
                     chunks.append(payload)
             elif etype == "error":
-                console.print(f"[red]Plan T 選定エラー: {payload}[/red]")
+                console.print(f"[red]3連単買い目選定エラー: {payload}[/red]")
     except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]Plan T Claude 選定失敗: {ex}[/yellow]")
+        console.print(f"[yellow]3連単 Claude 買い目選定失敗: {ex}[/yellow]")
         return None
     if not saw_result:
-        console.print("[yellow]Plan T Claude 選定 未完了 → 機械フォーメーションにフォールバック[/yellow]")
+        console.print("[yellow]3連単 Claude 買い目選定 未完了 → 機械フォーメーションにフォールバック[/yellow]")
         return None
     sel = llm_mod.parse_trifecta_selection("".join(chunks))
     keys = sel.get("keys") or []
     if not keys:
-        console.print("[yellow]Plan T Claude 選定: keys 空 → 機械フォーメーション[/yellow]")
+        console.print("[yellow]3連単 Claude 買い目選定: keys 空 → 機械フォーメーション[/yellow]")
         return None
     bundle = pf_mod.build_trifecta_from_keys(
         probs_for_t, rd.trifecta, keys,
@@ -644,10 +646,10 @@ def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
         bundle["llm_select"] = {"summary": sel.get("summary", ""),
                                 "confidence": sel.get("confidence", ""),
                                 "n_keys": len(keys)}
-        console.print(f"[magenta]Plan T Claude 選定: {len(keys)} 買い目 → 束 "
+        console.print(f"[magenta]3連単 Claude 買い目選定: {len(keys)} 買い目 → 束 "
                       f"{bundle['n_points']}点 / ¥{bundle['total_stake']:,}[/magenta]")
         return bundle
-    console.print("[yellow]Plan T Claude 選定: 買える目が無く束が空 → 機械フォーメーション[/yellow]")
+    console.print("[yellow]3連単 Claude 買い目選定: 買える目が無く束が空 → 機械フォーメーション[/yellow]")
     return None
 
 
@@ -731,14 +733,14 @@ def _save_prediction_snapshot(
     llm_scale: str = "strength",
     llm_alerts: dict[int, list[str]] | None = None,
     speed_v2_blend: float | None = None,
-    probs_t=None,                       # Plan T 用 market-free probs (無ければ probs を使う)
-    plan_t_head_max: int = 2,
-    plan_t_head_gap: float = 0.12,
-    plan_t_mid: int = 4,
-    plan_t_tail: int = 7,
-    plan_t_no_torigami: bool = False,
-    plan_t_bankroll: int | None = None,     # Plan T の1レース購入予算 (円)。None で env/既定 ¥10,000
-    claude_trifecta_select: bool = False,   # bet 段: Plan T の買い目選定を Claude に任せる
+    probs_t=None,                       # 3連単束用 market-free probs (無ければ probs を使う)
+    trifecta_head_max: int = 2,
+    trifecta_head_gap: float = 0.12,
+    trifecta_mid: int = 4,
+    trifecta_tail: int = 7,
+    trifecta_no_torigami: bool = False,
+    trifecta_bankroll: int | None = None,     # 3連単の1レース購入予算 (円)。None で env/既定 ¥10,000
+    claude_trifecta_select: bool = False,   # bet 段: 3連単買い目選定を Claude に任せる
     llm_select_model: str = "opus",
 ) -> None:
     # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
@@ -751,12 +753,12 @@ def _save_prediction_snapshot(
             recommended_bundle = pf_mod.build_bundle(cands, probs, prioritize="yield")
         except Exception as ex:  # noqa: BLE001
             console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
-    # Plan T (全力的中モード): Claude 指数ドリブンの3連単フォーメーション・市場無視・トリガミ防止あり。
+    # 3連単的中モード (全力フォーメーション): Claude 指数ドリブンの3連単フォーメーション・市場無視・トリガミ防止あり。
     # recommended_bundle (EV駆動) とは別物として併走計測する (実弾購入は別フラグ判断)。
     # 市場無視を保証するため probs_t (market_blend=0 の model-only) を使い、ランキングは Claude 指数。
     recommended_bundle_t = None
     probs_for_t = probs_t if probs_t is not None else probs
-    plan_t_bankroll = _plan_t_bankroll(plan_t_bankroll)   # 明示 → env → 既定 ¥10,000
+    trifecta_bankroll = _trifecta_bankroll(trifecta_bankroll)   # 明示 → env → 既定 ¥10,000
     if probs_for_t is not None:
         # bet 段 (締切直前) は **Claude に 3連単買い目を選定させる** (指数上位から自由構築・検索なし)。
         # 失敗 / timeout / keys 空 / 締切間際 → 従来の機械フォーメーション (build_trifecta_hitmax)。
@@ -765,29 +767,29 @@ def _save_prediction_snapshot(
             try:
                 recommended_bundle_t = _claude_select_trifecta(
                     rd, probs_for_t, llm_win_index, aptitudes,
-                    model=llm_select_model, avoid_torigami=(not plan_t_no_torigami),
-                    bankroll=plan_t_bankroll)
+                    model=llm_select_model, avoid_torigami=(not trifecta_no_torigami),
+                    bankroll=trifecta_bankroll)
             except Exception as ex:  # noqa: BLE001
-                console.print(f"[yellow]Plan T Claude 選定で例外: {ex} → 機械フォーメーション[/yellow]")
+                console.print(f"[yellow]3連単 Claude 買い目選定で例外: {ex} → 機械フォーメーション[/yellow]")
                 recommended_bundle_t = None
         if not (recommended_bundle_t and recommended_bundle_t.get("legs")):
             try:
                 recommended_bundle_t = pf_mod.build_trifecta_hitmax(
                     probs_for_t, rd.trifecta, rank_index=llm_win_index,
-                    head_max=plan_t_head_max, head_gap=plan_t_head_gap,
-                    mid_count=plan_t_mid, tail_count=plan_t_tail,
-                    avoid_torigami=(not plan_t_no_torigami), bankroll=plan_t_bankroll,
+                    head_max=trifecta_head_max, head_gap=trifecta_head_gap,
+                    mid_count=trifecta_mid, tail_count=trifecta_tail,
+                    avoid_torigami=(not trifecta_no_torigami), bankroll=trifecta_bankroll,
                 )
             except Exception as ex:  # noqa: BLE001
-                console.print(f"[yellow]Plan T (recommended_bundle_t) 計算失敗: {ex}[/yellow]")
+                console.print(f"[yellow]3連単束 (recommended_bundle_t) 計算失敗: {ex}[/yellow]")
     if recommended_bundle_t and recommended_bundle_t.get("legs"):
         rt = recommended_bundle_t
         osum = rt.get("odds_summary") or {}
         console.print(
-            f"[magenta]Plan T 全力的中 ({rt.get('rank_source')}指数 {rt.get('formation')}): "
+            f"[magenta]3連単的中モード ({rt.get('rank_source')}指数 {rt.get('formation')}): "
             f"3連単 {rt['n_points']}点 / 理論的中率 {rt['covered_prob'] * 100:.1f}% (model基準・過信禁物) / "
             f"¥{rt['total_stake']:,} / 当たれば払戻 ¥{osum.get('min_payout', 0):,}〜¥{osum.get('max_payout', 0):,}"
-            f"{' / トリガミ防止' if not plan_t_no_torigami else ''}[/magenta]"
+            f"{' / トリガミ防止' if not trifecta_no_torigami else ''}[/magenta]"
         )
     # 回収優先 bet_tables に 3連単 (rows = P×O 降順 top 30) を含める
     bet_tables_serial = _serialize_bet_tables(bet_tables) if bet_tables else {}
@@ -838,16 +840,16 @@ def _save_prediction_snapshot(
         "aptitude_top_horses": list(aptitude_top_horses or []),
         # 「Claude 総合オススメ」= 全 bet type 横断の joint Kelly 最適まとめ買い束 (回収優先, 実弾)。
         "recommended_bundle": recommended_bundle,
-        # Plan T「全力的中モード」= 3連単のみ・市場無視・EV/トリガミ無しの model 的中確率 top-K 束。
+        # 3連単的中モード (全力フォーメーション)= 3連単のみ・市場無視・EV/トリガミ無しの model 的中確率 top-K 束。
         # recommended_bundle (EV駆動) と完全分離。covered_prob=理論的中率(model基準・過信禁物)。
         "recommended_bundle_t": recommended_bundle_t,
-        "plan_t_keys": ([l["key"] for l in recommended_bundle_t["legs"]]
+        "trifecta_keys": ([l["key"] for l in recommended_bundle_t["legs"]]
                         if recommended_bundle_t else []),
-        "plan_t_params": {
-            "head_max": plan_t_head_max, "head_gap": plan_t_head_gap,
-            "mid": plan_t_mid, "tail": plan_t_tail,
-            "avoid_torigami": (not plan_t_no_torigami), "bankroll": plan_t_bankroll,
-            # 市場無視を保証: Plan T は market_blend=0 の model-only probs を使用 (review 指摘対応)。
+        "trifecta_params": {
+            "head_max": trifecta_head_max, "head_gap": trifecta_head_gap,
+            "mid": trifecta_mid, "tail": trifecta_tail,
+            "avoid_torigami": (not trifecta_no_torigami), "bankroll": trifecta_bankroll,
+            # 市場無視を保証: 3連単束は market_blend=0 の model-only probs を使用 (review 指摘対応)。
             "market_blend": 0.0, "rank_by": "claude_index",
         },
         # 2段パイプライン: Claude 考察由来の各馬指数を model fundamental に合成した痕跡。
@@ -1390,7 +1392,7 @@ def _refresh_and_reevaluate(
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor,
                                    speed_v2_blend=speed_v2_blend)
     probs2 = ev_mod.load_probs(None, probs2)
-    # Plan T は市場無視を保証するため market-free probs を別途用意 (market_blend>0 時のみ再計算)。
+    # 3連単束は市場無視を保証するため market-free probs を別途用意 (market_blend>0 時のみ再計算)。
     probs2_t = probs2 if market_blend == 0 else ev_mod.estimate_probs(
         rd2, market_blend=0.0, market_floor=market_floor, speed_v2_blend=speed_v2_blend)
     rows2 = ev_mod.build_table(rd2, probs2)
@@ -1424,7 +1426,7 @@ def _refresh_and_reevaluate(
     _print_bet_tables(bet_tables2, aptitude_top_horses=apt_top2)
     _print_judgment_notes(rd2, rows2)
     # 旧: refresh 時の「総合オススメ束への web 検索補強」(回収優先AI) は撤去 (2026-06-06)。
-    # Claude は score ステージ指数 + Plan T 3連単選定に特化 (買い目は snapshot 保存時に決まる)。
+    # Claude は score ステージ指数 + 3連単買い目選定に特化 (買い目は snapshot 保存時に決まる)。
     _ = (no_llm, model)
 
 

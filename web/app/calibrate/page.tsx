@@ -41,7 +41,7 @@ export default async function CalibratePage({
 
   const confidence = calibrationConfidence(cal.race_count);
   const lastUpdated = fmtRelativeFromNow(cal.last_updated_at);
-  const tb = cal.plan_t_bundle;       // Plan T 3連単的中モード (実弾投票束, 2026-06-06〜固定)
+  const tb = cal.trifecta_bundle;       // 3連単的中モード (実弾投票束, 2026-06-06〜固定)
   const yb = cal.claude_bundle;       // EV束 (モデル参考・投票しない)
   // 回収率は **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
   const roiPct = (b?: { roi: number; roi_final?: number } | null) =>
@@ -57,7 +57,7 @@ export default async function CalibratePage({
     <Page>
       <PageHeader
         title="確率較正"
-        subtitle="計算 EV と実 EV のオフセット (tier ratio) + Plan T (実弾) / EV束 (参考) bundle の実績。サンプル 30+ で初めて判断材料になる。"
+        subtitle="計算 EV と実 EV のオフセット (tier ratio) + 3連単束 (実弾) / EV束 (参考) bundle の実績。サンプル 30+ で初めて判断材料になる。"
       />
 
       <div>
@@ -92,7 +92,7 @@ export default async function CalibratePage({
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
-          ※ 全て 3連単的中モード (Plan T, 実弾投票束) 基準
+          ※ 全て 3連単的中モード (実弾投票束) 基準
           {yb && yb.participated_races > 0 && (
             <span className="ml-1">
               ／ EV束 (参考): 的中率 {fmtPct(yb.hit_rate, 1)} · 回収率 {roiPct(yb)}
@@ -151,16 +151,16 @@ export default async function CalibratePage({
           // 旧 table 形式は info 密度が低いため。
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5">
             {cal.races.map((r) => {
-              // 「的中」ラベルは **Plan T (実弾投票束) のみ**で判定 (2026-06-06 特化)。
-              // Plan T 束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
+              // 「的中」ラベルは **3連単束 (実弾投票束) のみ**で判定 (2026-06-06 特化)。
+              // 3連単束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
               // 見送り (束が空) は理論値が立っていても的中扱いせず、row 自体をグレー bg に。
-              const usePlanT = !!r.plan_t_participated;
-              const bundleSkipped = !usePlanT && r.bundle_participated === false;
-              const anyHit = !bundleSkipped && !!(usePlanT ? r.plan_t_hit : r.bundle_hit);
+              const useTrifecta = !!r.trifecta_bundle_participated;
+              const bundleSkipped = !useTrifecta && r.bundle_participated === false;
+              const anyHit = !bundleSkipped && !!(useTrifecta ? r.trifecta_bundle_hit : r.bundle_hit);
               const rowBg = bundleSkipped
                 ? "bg-(--color-panel-2)"          // 見送り = グレー系
                 : anyHit
-                  ? "bg-(--color-good)/5"        // 的中 (Plan T) = 緑薄
+                  ? "bg-(--color-good)/5"        // 的中 (3連単束) = 緑薄
                   : "";                           // 不的中 = 通常
               return (
                 <Link
@@ -182,11 +182,11 @@ export default async function CalibratePage({
                     {bundleSkipped ? (
                       <Badge tone="muted">見送り</Badge>
                     ) : anyHit ? (
-                      <Badge tone="magenta">{usePlanT ? "Plan T 的中" : "的中 (旧EV束)"}</Badge>
+                      <Badge tone="magenta">{useTrifecta ? "3連単束 的中" : "的中 (旧EV束)"}</Badge>
                     ) : (
                       <Badge tone="muted">不的中</Badge>
                     )}
-                    {usePlanT && r.bundle_hit && (
+                    {useTrifecta && r.bundle_hit && (
                       <Badge tone="muted">EV束(参考)</Badge>
                     )}
                   </div>

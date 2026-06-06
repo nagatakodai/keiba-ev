@@ -1,7 +1,7 @@
 "use client";
 
-// Plan T「全力的中モード」束の掛金倍率プレビュー (client island)。
-// 予想詳細ページの PlanTCard (server 描画) 内に差し込む。倍率 N (小数可) を選ぶと各脚 stake を
+// 3連単的中モード束の掛金倍率プレビュー (client island)。
+// 予想詳細ページの TrifectaCard (server 描画) 内に差し込む。倍率 N (小数可) を選ぶと各脚 stake を
 // ×N して ¥100 単位で切り捨て (floor) し、投資総額・的中時払戻・最小払戻比を再計算して表示する
 // 見積り計算機。実投票も同じ floor (src/oddspark_bet.py / ipat_bet.py の _apply_stake_multiplier)。
 import { useState } from "react";
@@ -16,7 +16,7 @@ function floorStake(stake: number, mult: number): number {
   return Math.max(100, Math.floor((stake * mult) / 100) * 100);
 }
 
-export function PlanTStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle }) {
+export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle }) {
   const [raw, setRaw] = useState("1");
   const parsed = parseFloat(raw);
   // 小数倍をそのまま使う (整数 snap しない)。NaN/非正は ×1。
@@ -117,7 +117,7 @@ export function PlanTStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle }) 
         </div>
       )}
       <p className="mt-2 text-xs text-(--color-muted)">
-        実投票も watch-auto の <b>掛金倍率 — Plan T (×N)</b> で同じ ¥100 単位切り捨てが各脚 stake に
+        実投票も watch-auto の <b>掛金倍率 — 3連単束 (×N)</b> で同じ ¥100 単位切り捨てが各脚 stake に
         適用されます (per-race 上限も倍率連動)。切り捨てで脚間比率が僅かに動くため、最小 払戻/投資 が
         margin (×{margin}) を下回ると <b className="text-(--color-warn)">トリガミ</b>になり得ます (色で警告)。
       </p>

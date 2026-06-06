@@ -1,4 +1,4 @@
-"""claude CLI を spawn する LLM パイプライン (競馬版, Plan T 特化)。
+"""claude CLI を spawn する LLM パイプライン (競馬版, 3連単的中モード特化)。
 
 役割は2つ: ①score ステージ = 各馬の強さ指数 (0-100) を web 検索補強つきで出す
 (`score_horses_stream`) ②bet ステージ = 締切直前の 3連単買い目選定 (`select_trifecta_stream`)。
@@ -447,7 +447,7 @@ def build_trifecta_select_prompt(
     1着→2着→3着 のフォーメーションを **自由に構築**させる。出力は買い目 (ordered triple) の
     配列のみ。トリガミ防止・配分は後段 (build_trifecta_from_keys) が行う。
 
-    **市場は一切見せない**: Plan T は「市場無視」が本質なので、単勝オッズ・人気はプロンプトに
+    **市場は一切見せない**: 3連単的中モードは「市場無視」が本質なので、単勝オッズ・人気はプロンプトに
     含めない (含めると Claude が市場に引きずられて指数選定が崩れる)。並べ替えも指数→適性→馬番で
     市場フリーにする。購入は **1レース予算 (bankroll) 内に収める**よう点数を絞らせる。
     """
@@ -521,7 +521,7 @@ def select_trifecta_stream(
 ) -> Iterator[tuple[str, Any]]:
     """締切直前の高速 3連単選定 stream-json。**web 検索なし** (純粋推論で ~10-30s)。
 
-    市場 (単勝オッズ・人気) はプロンプトに含めず Claude 指数のみで選定させる (Plan T=市場無視)。
+    市場 (単勝オッズ・人気) はプロンプトに含めず Claude 指数のみで選定させる (3連単的中モード=市場無視)。
     bankroll は 1レース購入予算で、合計購入額をこの予算内に収めるよう点数を絞らせる。
     出力は parse_trifecta_selection で {keys, formation, summary, confidence} に正規化する。
     """

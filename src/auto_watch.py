@@ -37,22 +37,22 @@ IPAT_BET_QUEUE_DIR = ROOT / "data/cache/ipat_bet_queue"  # = ipat_bet.QUEUE_DIR 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
-# 投票束は **Plan T (recommended_bundle_t, 3連単的中モード) 固定** (ユーザ指示 2026-06-06)。
+# 投票束は **3連単的中モード (recommended_bundle_t) 固定** (ユーザ指示 2026-06-06)。
 # 旧 EV束 (recommended_bundle) の投票/claude 選定 (回収優先AI) は廃止。recommended_bundle は
 # snapshot にモデルのみの参考値として残るが、enqueue/投票には一切使わない。
 def _bet_bundle_source() -> str:
-    """投票束 source token。常に "plan_t" (Plan T 特化)。"""
-    return "plan_t"
+    """投票束 source token。常に "trifecta" (3連単的中モード特化。旧称 "plan_t")。"""
+    return "trifecta"
 
 
 def _bet_bundle_field() -> str:
     return "recommended_bundle_t"
 
 
-def _plan_t_missing_claude_index(d: dict) -> bool:
+def _trifecta_missing_claude_index(d: dict) -> bool:
     """Claude 指数が無い (= model fallback) かを返す (True なら投票しない)。
 
-    Plan T「3連単的中モード」は Claude 各馬指数フォーメーションが本質なので、指数キャッシュが
+    3連単的中モードは Claude 各馬指数フォーメーションが本質なので、指数キャッシュが
     無く model ランキングへ縮退した束 (rank_source != "claude") は投票しない (ユーザ指示 2026-06-03)。
     """
     bundle = d.get(_bet_bundle_field()) or {}
@@ -172,8 +172,8 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
-    if _plan_t_missing_claude_index(d):
-        console.print(f"[yellow]Plan T enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
+    if _trifecta_missing_claude_index(d):
+        console.print(f"[yellow]3連単束 enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
         return False
     legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]
@@ -213,8 +213,8 @@ def _enqueue_ipat_bet(race_id: str, netkeiba_rid: str) -> bool:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
-    if _plan_t_missing_claude_index(d):
-        console.print(f"[yellow]Plan T enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
+    if _trifecta_missing_claude_index(d):
+        console.print(f"[yellow]3連単束 enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
         return False
     legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]
@@ -414,7 +414,7 @@ def _dispatch_oddspark(netkeiba_rid: str, start_at: int = 0,
     """NAR: oddspark オッズで解析し snapshot を保存 (keibago 不可時)。
 
     keibago/jra と同じ 2段パイプライン対応: phase=score で Claude 指数キャッシュ、
-    phase=bet で指数合成 + Plan T 束生成 (指数無しなら機械フォーメーションへ縮退)。
+    phase=bet で指数合成 + 3連単束生成 (指数無しなら機械フォーメーションへ縮退)。
     """
     cmd = [sys.executable, "-m", "src.scrape_oddspark", netkeiba_rid,
            "--snapshot", f"--start-at={start_at}", *_phase_args(phase, llm_blend)]
@@ -546,7 +546,7 @@ def main(
     """1 巡だけ実行。2段: score 帯で考察→指数キャッシュ+**締切前 bet を予約** → 予約時刻 (締切
     bet_lead_sec 秒前) が来た bet を**自動発火** (最新オッズ→束→enqueue)。"""
     if (bet_oddspark or bet_ipat):
-        console.print(f"[dim]bet enqueue 束 = {_bet_bundle_field()} (Plan T 3連単的中モード固定)[/dim]")
+        console.print(f"[dim]bet enqueue 束 = {_bet_bundle_field()} (3連単的中モード固定)[/dim]")
     now_dt = datetime.now()
     now_ts = int(now_dt.timestamp())
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")

@@ -55,16 +55,16 @@ def test_bet_auto_login_default_off(no_spawn):
 
 
 def test_stake_multiplier_passed_to_daemon(no_spawn):
-    """掛金倍率 (Plan T 束) が daemon に --stake-multiplier で渡る。"""
+    """掛金倍率 (3連単束) が daemon に --stake-multiplier で渡る。"""
     mgr = runner.WatchAutoManager()
     asyncio.run(mgr.start(bet_oddspark=True, bet_stake_multiplier=2.0))
     assert mgr.config["bet_stake_multiplier"] == 2.0
     assert "--stake-multiplier=2.0" in mgr.bet_job.cmd
 
 
-def test_plan_t_bankroll_env_propagated(no_spawn):
-    """Plan T の1レース購入予算が env KEIBA_PLAN_T_BANKROLL で全 subprocess に伝播する。"""
+def test_trifecta_bankroll_env_propagated(no_spawn):
+    """3連単の1レース購入予算が env KEIBA_TRIFECTA_BANKROLL で全 subprocess に伝播する。"""
     mgr = runner.WatchAutoManager()
-    asyncio.run(mgr.start(bet_oddspark=True, plan_t_bankroll=20_000))
-    assert os.environ.get("KEIBA_PLAN_T_BANKROLL") == "20000"
-    assert mgr.config["plan_t_bankroll"] == 20_000
+    asyncio.run(mgr.start(bet_oddspark=True, trifecta_bankroll=20_000))
+    assert os.environ.get("KEIBA_TRIFECTA_BANKROLL") == "20000"
+    assert mgr.config["trifecta_bankroll"] == 20_000

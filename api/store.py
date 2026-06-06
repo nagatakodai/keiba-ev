@@ -288,7 +288,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             }
 
         b_yield = _bundle_stats(pred.get("recommended_bundle"))
-        # Plan T「3連単的中モード」(market 無視・Claude 指数フォーメーション)。
+        # 3連単的中モード(market 無視・Claude 指数フォーメーション)。
         # 回収優先 bundle と完全分離して集計し、ダッシュボードで並べて見せる。
         # 古い snapshot は recommended_bundle_t 欠落 → participated=False で分母外。
         b_t = _bundle_stats(pred.get("recommended_bundle_t"))
@@ -308,13 +308,13 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "bundle_stake": b_yield["stake"],
                 "bundle_payout": b_yield["payout"],
                 "bundle_payout_final": b_yield["payout_final"],
-                # Plan T「3連単的中モード」bundle (**実弾投票束**。2026-06-06 以降 Plan T 固定)。
-                "plan_t_hit": b_t["hit"],
-                "plan_t_hit_bet_types": sorted({leg["bet_type"] for leg in b_t["hit_legs"]}),
-                "plan_t_participated": b_t["participated"],
-                "plan_t_stake": b_t["stake"],
-                "plan_t_payout": b_t["payout"],
-                "plan_t_payout_final": b_t["payout_final"],
+                # 3連単的中モード bundle (**実弾投票束**。2026-06-06 以降 3連単的中モード固定)。
+                "trifecta_bundle_hit": b_t["hit"],
+                "trifecta_bundle_hit_bet_types": sorted({leg["bet_type"] for leg in b_t["hit_legs"]}),
+                "trifecta_bundle_participated": b_t["participated"],
+                "trifecta_bundle_stake": b_t["stake"],
+                "trifecta_bundle_payout": b_t["payout"],
+                "trifecta_bundle_payout_final": b_t["payout_final"],
                 # 最終オッズが取れたかの discriminator (frontend で「予想/最終 切替表示」用)
                 "has_final_odds": bool(final_odds),
                 # LLM 評価有無の discriminator
@@ -346,7 +346,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         races_: list[dict], part_field: str, hit_field: str,
         stake_field: str, payout_field: str, payout_final_field: str,
     ) -> dict:
-        """bundle (Plan T 実弾 / EV束参考) の集計。見送り (participated=false) は除外。
+        """bundle (3連単束 実弾 / EV束参考) の集計。見送り (participated=false) は除外。
 
         payout (予想) と payout_final (最終オッズ) の両方で ROI を出す。
         """
@@ -396,10 +396,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         races, "bundle_participated", "bundle_hit",
         "bundle_stake", "bundle_payout", "bundle_payout_final",
     )
-    # Plan T「3連単的中モード」の集計 (**実弾投票束**, 2026-06-06〜固定)。EV束と同形。
-    plan_t_bundle = _bundle_agg(
-        races, "plan_t_participated", "plan_t_hit",
-        "plan_t_stake", "plan_t_payout", "plan_t_payout_final",
+    # 3連単的中モードの集計 (**実弾投票束**, 2026-06-06〜固定)。EV束と同形。
+    trifecta_bundle = _bundle_agg(
+        races, "trifecta_bundle_participated", "trifecta_bundle_hit",
+        "trifecta_bundle_stake", "trifecta_bundle_payout", "trifecta_bundle_payout_final",
     )
 
     return {
@@ -412,7 +412,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "tiers": tiers_out,
         "plans": [],
         "claude_bundle": claude_bundle,
-        "plan_t_bundle": plan_t_bundle,
+        "trifecta_bundle": trifecta_bundle,
         "races": races,
     }
 

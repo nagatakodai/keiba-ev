@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { PlanTStakePreview } from "./PlanTStakePreview";
+import { TrifectaStakePreview } from "./TrifectaStakePreview";
 import {
   api,
   type BetEvRow,
@@ -156,14 +156,14 @@ export default async function PredictionDetailPage({
         }
       />
 
-      {/* Plan T (3連単的中モード) = 実弾投票束を最上段に (2026-06-06〜特化)。EV束は参考。 */}
-      <PlanTCard d={d} finish={finish} />
+      {/* 3連単的中モード = 実弾投票束を最上段に (2026-06-06〜特化)。EV束は参考。 */}
+      <TrifectaCard d={d} finish={finish} />
 
       <TopRecommendationCard d={d} finish={finish} />
 
       {d.result && (() => {
-        // 的中判定は **Plan T (実弾投票束) 基準** (2026-06-06 特化)。
-        // Plan T 束が無い旧 snapshot は旧実弾だった EV束に fallback。
+        // 的中判定は **3連単束 (実弾投票束) 基準** (2026-06-06 特化)。
+        // 3連単束が無い旧 snapshot は旧実弾だった EV束に fallback。
         const tLegs = d.recommended_bundle_t?.legs;
         const tParticipated = Array.isArray(tLegs) && tLegs.length > 0;
         const tHit = !!(finish && tParticipated &&
@@ -172,9 +172,9 @@ export default async function PredictionDetailPage({
         const bundleEmpty = Array.isArray(bundleLegs) && bundleLegs.length === 0;
         const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
           bundleLegs.some((l) => betHits(l.bet_type, l.key, finish)));
-        const usePlanT = tParticipated;
-        const skipped = usePlanT ? false : bundleEmpty;
-        const anyHit = usePlanT ? tHit : bundleHit;
+        const useTrifecta = tParticipated;
+        const skipped = useTrifecta ? false : bundleEmpty;
+        const anyHit = useTrifecta ? tHit : bundleHit;
         const headlineBadge = skipped
           ? <Badge tone="muted">見送り</Badge>
           : anyHit
@@ -204,10 +204,10 @@ export default async function PredictionDetailPage({
               </span>
               {tParticipated ? (
                 <Badge tone={tHit ? "magenta" : "muted"}>
-                  Plan T (実弾) {tHit ? "✓ 的中" : "× 不的中"}
+                  3連単束 (実弾) {tHit ? "✓ 的中" : "× 不的中"}
                 </Badge>
               ) : (
-                <Badge tone="muted">Plan T 見送り</Badge>
+                <Badge tone="muted">3連単束 見送り</Badge>
               )}
               {bundleEmpty ? (
                 <Badge tone="muted">EV束(参考) 見送り</Badge>
@@ -287,7 +287,7 @@ export default async function PredictionDetailPage({
       })()}
 
       {/* 新スキーマ (2026-05-29 後半): Plan A/B 廃止。3連単 は bet_tables[trifecta] に入り
-          他券種と並ぶ。bundle 表示は PlanTCard (実弾) + TopRecommendationCard (EV束参考) で代替。 */}
+          他券種と並ぶ。bundle 表示は TrifectaCard (実弾) + TopRecommendationCard (EV束参考) で代替。 */}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card title="P×O ランキング 上位 30">
@@ -534,16 +534,16 @@ function TopRecommendationCard({
   );
 }
 
-// Plan T「全力的中モード」: 3連単のみ・市場無視・Claude 指数フォーメーション・トリガミ防止あり。
+// 3連単的中モード (全力フォーメーション): 3連単のみ・市場無視・Claude 指数フォーメーション・トリガミ防止あり。
 // recommended_bundle (EV駆動) とは別物。legs は同形なので BundleLegsTable を流用する。
-function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
+function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
   const b = d.recommended_bundle_t;
   if (!b || !b.legs || b.legs.length === 0) return null;
   const settled = !!finish && finish.length >= 3;
   const hit = !!(finish && b.legs.some((l) => betHits(l.bet_type, l.key, finish)));
   const osum = b.odds_summary;
   const torigamiOn = (b.dropped_torigami ?? 0) >= 0 && b.min_payout_ratio != null;
-  // Claude 指数なし (model 縮退) の Plan T は自動投票されない (auto_watch/daemon が enqueue を skip)。
+  // Claude 指数なし (model 縮退) の3連単束は自動投票されない (auto_watch/daemon が enqueue を skip)。
   const claudeMissing = b.rank_source !== "claude";
   const rankLabel = b.rank_source === "claude" ? "Claude 指数" : "モデル指数 (Claude 未実施)";
   // 締切直前に Claude が買い目自体を選定したか (build_trifecta_from_keys)。
@@ -553,7 +553,7 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
       tone={settled && hit ? "active" : "default"}
       title={
         <span className="flex items-center gap-2 flex-wrap">
-          <span>Plan T — 全力的中モード (3連単)</span>
+          <span>3連単的中モード — 全力フォーメーション</span>
           <Badge tone="warn">市場無視</Badge>
           {claudeSelected && <Badge tone="magenta">Claude 買い目選定</Badge>}
           {b.formation && <Badge tone="info">{b.formation} フォーメーション</Badge>}
@@ -566,10 +566,10 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
         市場(オッズ)をランキングに一切使わず、<b>{rankLabel}</b>の上位を本命に3連単フォーメーションを組む。
         1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
         (当たれば投資総額以上を回収)。理論的中率は model 基準なので過信禁物 (楽観バイアス込み)・当たらなければ
-        −EV。<b>実弾投票はこの Plan T 束で行う (2026-06-06〜 固定。EV束はモデル参考値)</b>。
+        −EV。<b>実弾投票はこの 3連単束で行う (2026-06-06〜 固定。EV束はモデル参考値)</b>。
         {claudeMissing && (
           <>
-            {" "}<b className="text-(--color-bad)">この束は Claude 指数が無く model ランキングへ縮退しているため、Plan T 自動投票では
+            {" "}<b className="text-(--color-bad)">この束は Claude 指数が無く model ランキングへ縮退しているため、3連単束の自動投票では
             送信されません</b> (Claude 指数フォーメーションが本質のため)。
           </>
         )}
@@ -608,7 +608,7 @@ function PlanTCard({ d, finish }: { d: PredictionDetail; finish?: number[] }) {
       <div className="mt-4">
         <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} droppedLegs={b.dropped_legs} />
       </div>
-      <PlanTStakePreview bundle={b} />
+      <TrifectaStakePreview bundle={b} />
       <p className="mt-3 text-xs text-(--color-muted)">
         ランキング = {rankLabel} (市場オッズ不使用) · {b.formation} フォーメーション
         {b.bankroll != null ? ` · 購入予算 ¥${b.bankroll.toLocaleString()} 内に収める` : ""}
@@ -789,7 +789,7 @@ function BundleCard({
   const margin = bundle.torigami_margin ?? 1;
   const driftPct = margin > 1 ? Math.round((1 - 1 / margin) * 100) : 0;
   // タイトル/色は dashboard 規約に統一: EV束=highlight / 的中優先=緑(good)。
-  // EV束はモデルのみの参考値 (実弾投票束は Plan T = recommended_bundle_t)。
+  // EV束はモデルのみの参考値 (実弾投票束は 3連単束 = recommended_bundle_t)。
   const titleLabel = isHit
     ? "的中優先AI — まとめ買い"
     : "EV束 (モデル参考) — まとめ買い";
@@ -814,7 +814,7 @@ function BundleCard({
           {!isHit && (validated ? (
             <Badge tone="magenta">claude -p 検証済 (旧記録){bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
           ) : (
-            legs.length > 0 && <Badge tone="muted">参考値・投票対象外 (投票は Plan T)</Badge>
+            legs.length > 0 && <Badge tone="muted">参考値・投票対象外 (投票は3連単束)</Badge>
           ))}
           {finish && (legs.length === 0
             ? <Badge tone="muted">束 見送り</Badge>

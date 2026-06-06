@@ -185,7 +185,7 @@ INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
 BET_ODDSPARK ?=
 BET_IPAT ?=
-# 投票束は Plan T (recommended_bundle_t, 3連単的中モード) 固定 (2026-06-06)。
+# 投票束は 3連単的中モード (recommended_bundle_t) 固定 (2026-06-06)。
 # 旧 BET_BUNDLE / env KEIBA_BET_BUNDLE 切替 (recommended=EV束) は廃止。
 BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,)
 BAND_ARGS := --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE) --bet-lead-sec $(BET_LEAD_SEC) $(if $(LLM_BLEND),--llm-blend $(LLM_BLEND),)
@@ -210,7 +210,7 @@ watch-auto:
 SESSION_ARGS ?=
 watch-auto-bet:
 	@echo "watch-auto-bet: 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
-	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。** 投票束=Plan T (3連単的中モード固定)"
+	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。** 投票束=3連単的中モード固定"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.oddspark_bet --session $(SESSION_ARGS) & \
 		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-oddspark & \
@@ -229,7 +229,7 @@ watch-auto-bet:
 # 認証は env (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。SESSION_ARGS で daemon に追加引数。
 watch-auto-ipat-bet:
 	@echo "watch-auto-ipat-bet: 即PAT 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
-	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。** 投票束=Plan T (3連単的中モード固定)"
+	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。** 投票束=3連単的中モード固定"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.ipat_bet --session $(SESSION_ARGS) & \
 		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-ipat & \

@@ -645,7 +645,7 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
     無ければ oddspark の馬リストだけで市場ブレンド主導の確率を出す。
     save_snapshot=True で data/predictions/<race_id>.json を保存 (dashboard / watch-auto 用)。
     keibago/jra と同じ **2段パイプライン**: phase="score" で Claude 各馬指数をキャッシュして
-    即 return、phase="bet" (既定) で指数を合成した probs から Plan T 束まで生成する。
+    即 return、phase="bet" (既定) で指数を合成した probs から 3連単束まで生成する。
     返り値: {rd, probs, tables, bundle, ...}。
     """
     import gzip
@@ -765,7 +765,7 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
                 hit_points=3, probs=probs,
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
-                # bet 段のみ到達 (score 段は上で early return)。Plan T 3連単買い目選定を Claude に
+                # bet 段のみ到達 (score 段は上で early return)。3連単買い目選定を Claude に
                 # 任せる (指数キャッシュ無しなら内部で機械フォーメーションにフォールバック)。
                 claude_trifecta_select=with_llm,
             )
@@ -773,7 +773,7 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_oddspark] snapshot 保存失敗: {ex}")
         # 旧 claude 調査 (3連単 evidence 補強 + 回収優先束の web 検証) は撤去 (2026-06-06,
-        # Plan T 特化)。Claude は score ステージ指数 + Plan T 選定のみ。
+        # 3連単的中モード特化)。Claude は score ステージ指数 + 3連単買い目選定のみ。
 
     return {
         "rd": rd, "probs": probs, "loc": loc, "used_cache": used_cache,

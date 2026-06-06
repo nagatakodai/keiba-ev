@@ -416,7 +416,7 @@ class WatchAutoManager:
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
-        plan_t_bankroll: int = 10_000,
+        trifecta_bankroll: int = 10_000,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -433,7 +433,7 @@ class WatchAutoManager:
                 bet_payment_method=bet_payment_method,
                 bet_auto_login=bet_auto_login,
                 bet_ipat=bet_ipat,
-                plan_t_bankroll=plan_t_bankroll,
+                trifecta_bankroll=trifecta_bankroll,
             )
 
     async def _start_locked(
@@ -461,14 +461,14 @@ class WatchAutoManager:
         bet_payment_method: str = "opcoin",
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
-        plan_t_bankroll: int = 10_000,
+        trifecta_bankroll: int = 10_000,
     ) -> Job:
-        # 投票束は Plan T (recommended_bundle_t) 固定 (2026-06-06)。旧 KEIBA_BET_BUNDLE 切替は廃止。
-        # Plan T の1レース購入予算は env で全 dispatch subprocess (analyze/keibago/jra/oddspark) に
-        # 伝播する (_save_prediction_snapshot が _plan_t_bankroll で尊重)。束を組む時点の予算なので、
+        # 投票束は 3連単的中モード束 (recommended_bundle_t) 固定 (2026-06-06)。旧 KEIBA_BET_BUNDLE 切替は廃止。
+        # 3連単の1レース購入予算は env で全 dispatch subprocess (analyze/keibago/jra/oddspark) に
+        # 伝播する (_save_prediction_snapshot が _trifecta_bankroll で尊重)。束を組む時点の予算なので、
         # 投票倍率 (bet_stake_multiplier) とは別物。変更はループ再起動が必要 (spawn 時に env が固定)。
-        os.environ["KEIBA_PLAN_T_BANKROLL"] = str(int(plan_t_bankroll))
-        # daemon に渡す掛金倍率 (Plan T 束の各脚 stake を ×N)。
+        os.environ["KEIBA_TRIFECTA_BANKROLL"] = str(int(trifecta_bankroll))
+        # daemon に渡す掛金倍率 (3連単束の各脚 stake を ×N)。
         eff_stake_multiplier = bet_stake_multiplier
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
@@ -556,7 +556,7 @@ class WatchAutoManager:
             "bet_payment_method": bet_payment_method,
             "bet_auto_login": bet_auto_login,
             "bet_ipat": bet_ipat,
-            "plan_t_bankroll": plan_t_bankroll,
+            "trifecta_bankroll": trifecta_bankroll,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -579,7 +579,7 @@ class WatchAutoManager:
                 auto_purchase=bool(cfg.get("bet_auto_purchase")),
                 daily_cap=int(cfg["bet_daily_cap"])
                     if cfg.get("bet_daily_cap") is not None else 50000,
-                # 投票束に対応する倍率 (Plan T 投票なら Plan T 倍率)。上で算出済の eff を使う。
+                # 投票束に対応する倍率 (3連単束の各脚に掛かる倍率)。上で算出済の eff を使う。
                 stake_multiplier=eff_stake_multiplier,
                 payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
@@ -592,7 +592,7 @@ class WatchAutoManager:
                 auto_purchase=bool(cfg.get("bet_auto_purchase")),
                 daily_cap=int(cfg["bet_daily_cap"])
                     if cfg.get("bet_daily_cap") is not None else 50000,
-                # 投票束に対応する倍率 (Plan T 投票なら Plan T 倍率)。上で算出済の eff を使う。
+                # 投票束に対応する倍率 (3連単束の各脚に掛かる倍率)。上で算出済の eff を使う。
                 stake_multiplier=eff_stake_multiplier,
                 auto_login=bool(cfg.get("bet_auto_login")),
             )
@@ -769,8 +769,8 @@ class WatchAutoManager:
                 # されてしまう (例: cap=0 で無効化したつもりが 50000 に戻る)。None のときだけ既定。
                 bet_daily_cap=int(cfg["bet_daily_cap"])
                     if cfg.get("bet_daily_cap") is not None else 50000,
-                # 旧 state 互換: Plan T トグル時代の cfg (bet_plan_t=True) は Plan T 専用倍率を
-                # 使っていたので、そちらを掛金倍率として引き継ぐ (束は今や常に Plan T)。
+                # 旧 state 互換: 旧トグル時代の cfg (bet_plan_t=True) は 3連単専用倍率を
+                # 使っていたので、そちらを掛金倍率として引き継ぐ (束は今や常に3連単束)。
                 bet_stake_multiplier=float(cfg["bet_plan_t_multiplier"])
                     if (cfg.get("bet_plan_t") and cfg.get("bet_plan_t_multiplier") is not None)
                     else float(cfg["bet_stake_multiplier"])
@@ -779,7 +779,10 @@ class WatchAutoManager:
                     if cfg.get("bet_payment_method") else "opcoin",
                 bet_auto_login=bool(cfg.get("bet_auto_login")),
                 bet_ipat=bool(cfg.get("bet_ipat")),
-                plan_t_bankroll=int(cfg["plan_t_bankroll"])
+                # 旧 state 互換: 旧キー plan_t_bankroll で persist された予算も引き継ぐ。
+                trifecta_bankroll=int(cfg["trifecta_bankroll"])
+                    if cfg.get("trifecta_bankroll") is not None
+                    else int(cfg["plan_t_bankroll"])
                     if cfg.get("plan_t_bankroll") is not None else 10_000,
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行

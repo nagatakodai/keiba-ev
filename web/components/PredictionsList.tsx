@@ -123,17 +123,17 @@ export function PredictionsList({
                   nowMs,
                 );
                 const hit = showHits ? raceHitMap?.get(p.race_id) : undefined;
-                // 「的中」ラベルは **Plan T (3連単的中モード, 実弾投票束) のみ**で判定 (2026-06-06 特化)。
-                // Plan T 束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
+                // 「的中」ラベルは **3連単的中モード (実弾投票束) のみ**で判定 (2026-06-06 特化)。
+                // 3連単束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
                 // **bundleSkipped は anyHit より優先**: 賭けていない race は理論値が
                 // 偶然立っていても「的中」ではない (見送り = 不参加)。
-                const usePlanT = !!(hit && hit.plan_t_participated);
+                const useTrifecta = !!(hit && hit.trifecta_bundle_participated);
                 const bundleSkipped = !!(
-                  hit && !usePlanT && hit.bundle_participated === false
+                  hit && !useTrifecta && hit.bundle_participated === false
                 );
                 const anyHit =
                   !bundleSkipped &&
-                  !!(hit && (usePlanT ? hit.plan_t_hit : hit.bundle_hit));
+                  !!(hit && (useTrifecta ? hit.trifecta_bundle_hit : hit.bundle_hit));
                 const rowBg = hit
                   ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
                   : raceTimingRowBg(timing.tone);
@@ -194,12 +194,12 @@ export function PredictionsList({
                             </span>
                           </span>
                           <span className="text-(--color-muted)">·</span>
-                          {hit.plan_t_hit && (
-                            <Badge tone="magenta">Plan T 的中</Badge>
+                          {hit.trifecta_bundle_hit && (
+                            <Badge tone="magenta">3連単束 的中</Badge>
                           )}
                           {hit.bundle_hit && (
-                            <Badge tone={usePlanT ? "muted" : "good"}>
-                              EV束{usePlanT ? "(参考)" : ""}的中{(hit.bundle_hit_bet_types?.length ?? 0) > 0
+                            <Badge tone={useTrifecta ? "muted" : "good"}>
+                              EV束{useTrifecta ? "(参考)" : ""}的中{(hit.bundle_hit_bet_types?.length ?? 0) > 0
                                 ? ` (${hit.bundle_hit_bet_types!.map((bt) => BET_LABELS[bt] ?? bt).join("/")})`
                                 : ""}
                             </Badge>

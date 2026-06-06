@@ -25,7 +25,7 @@ export const metadata: Metadata = {
     template: `%s ｜ ${BRAND_SUFFIX}`,
     default: `ダッシュボード ｜ ${BRAND_SUFFIX}`,
   },
-  description: "中央 (JRA) + 地方 (NAR) 競馬を確率モデル + Claude AI で解析し、3連単的中モード (Plan T) に特化した買い目を提示する競馬予想オーケストレーション AI「競愛」。",
+  description: "中央 (JRA) + 地方 (NAR) 競馬を確率モデル + Claude AI で解析し、3連単的中モードに特化した買い目を提示する競馬予想オーケストレーション AI「競愛」。",
 };
 
 const NAV = [

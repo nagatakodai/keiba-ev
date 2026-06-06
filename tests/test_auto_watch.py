@@ -59,9 +59,9 @@ from src import auto_watch as aw
 
 
 def _write_snapshot(root, race_id, legs, rank_source="claude"):
-    """Plan T 束 (recommended_bundle_t) を持つ snapshot を書く。
+    """3連単束 (recommended_bundle_t) を持つ snapshot を書く。
 
-    投票束は Plan T 固定 (2026-06-06)。recommended_bundle はモデル参考値なので
+    投票束は3連単的中モード固定 (2026-06-06)。recommended_bundle はモデル参考値なので
     enqueue 判定には関与しない (混入していても無視されることを兼ねて書いておく)。
     """
     pred = root / "data" / "predictions"
@@ -84,7 +84,7 @@ def test_enqueue_oddspark_bet_writes_req(tmp_path, monkeypatch):
     assert req.exists()
     d = json.loads(req.read_text())
     assert d["legs"] == 1 and d["total_stake"] == 600
-    assert d["bundle_source"] == "plan_t"   # 投票束は常に Plan T
+    assert d["bundle_source"] == "trifecta"   # 投票束は常に 3連単的中モード
     # 二重投入は False (既存 req)
     assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is False
 
@@ -107,7 +107,7 @@ def test_enqueue_skips_jra(tmp_path, monkeypatch):
 
 
 def test_enqueue_skips_when_no_claude_index(tmp_path, monkeypatch):
-    """Claude 指数なし (rank_source=model に縮退した Plan T 束) は投票しない (enqueue しない)。"""
+    """Claude 指数なし (rank_source=model に縮退した 3連単束) は投票しない (enqueue しない)。"""
     monkeypatch.setattr(aw, "ROOT", tmp_path)
     monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
     _write_snapshot(tmp_path, "2026500527-527-9",
@@ -127,4 +127,4 @@ def test_enqueue_votes_with_claude_index(tmp_path, monkeypatch):
     assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is True
     req = tmp_path / "queue" / "202650052709.req"
     assert req.exists()
-    assert json.loads(req.read_text())["bundle_source"] == "plan_t"
+    assert json.loads(req.read_text())["bundle_source"] == "trifecta"

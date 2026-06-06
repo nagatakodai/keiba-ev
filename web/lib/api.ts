@@ -51,7 +51,7 @@ export type PredictionSummary = {
   start_at: number | null;
   row_count: number;
   // 新スキーマ (2026-05-29 後半): Plan A/B も廃止。3連単 は他券種と並ぶ bet_tables[trifecta] に
-  // 入り、表示は 2 つの bundle (recommended_bundle_t Plan T 実弾 + recommended_bundle EV束参考) に集約。
+  // 入り、表示は 2 つの bundle (recommended_bundle_t 3連単束 実弾 + recommended_bundle EV束参考) に集約。
   // 旧 plan_*_count は backend が 0 を返すように、frontend からも参照しない。
   // 適性指数 top 3 (total 降順)。snapshot に horse_aptitude が無いと空配列。
   top_aptitude?: Array<{ number: number; name: string; total: number }>;
@@ -170,7 +170,7 @@ export type RecommendedBundle = {
   };
 };
 
-// Plan T「全力的中モード」束 (3連単のみ・市場無視・Claude 指数フォーメーション・トリガミ防止あり)。
+// 3連単的中モード束 (3連単のみ・市場無視・Claude 指数フォーメーション・トリガミ防止あり)。
 // legs は RecommendedBundle と同形 (BundleLegsTable 流用可、bet_type は全て "trifecta")。
 export type TrifectaHitmaxBundle = {
   objective: string;              // "trifecta_hitmax"
@@ -262,15 +262,15 @@ export type PredictionDetail = {
   // 適性総合 top N 頭の馬番リスト (Plan G が依拠する集合)。
   aptitude_top_horses?: number[];
   // 新スキーマ (2026-05-29 後半): Plan A/B 自体は廃止。3連単 は bet_tables[trifecta] に入る。
-  // 2 つの bundle を表示する (2026-06-06〜 Plan T 特化):
-  //   recommended_bundle_t    : Plan T 3連単的中モード (**実弾投票束**, 固定)
+  // 2 つの bundle を表示する (2026-06-06〜 3連単的中モード特化):
+  //   recommended_bundle_t    : 3連単的中モード (**実弾投票束**, 固定)
   //   recommended_bundle      : EV束 (モデルのみの参考値、joint Kelly EV 最適、投票しない)
   recommended_bundle?: RecommendedBundle | null;
-  // Plan T「全力的中モード」: 3連単のみ・市場無視・EV/トリガミ無しの model 的中確率 top-K 束。
+  // 3連単的中モード (全力フォーメーション): 3連単のみ・市場無視・EV/トリガミ無しの model 的中確率 top-K 束。
   // recommended_bundle (EV駆動) と完全分離。covered_prob = 理論的中率 (model 基準・過信禁物)。
   recommended_bundle_t?: TrifectaHitmaxBundle | null;
-  plan_t_keys?: number[][];
-  plan_t_params?: {
+  trifecta_keys?: number[][];
+  trifecta_params?: {
     cover?: number; min_points?: number; max_points?: number;
     fixed_k?: number | null; stake_mode?: string; min_odds?: number | null; bankroll?: number;
   } | null;
@@ -322,7 +322,7 @@ export type WatchAutoStatus = {
     aptitude_top?: number | null;
     with_exacta?: boolean;
     with_trio?: boolean;
-    // claude -p (各馬指数 score + Plan T 3連単選定) を使わず確率モデルのみ。
+    // claude -p (各馬指数 score + 3連単買い目選定) を使わず確率モデルのみ。
     no_llm?: boolean;
     // race detection を行う JST 時間帯 (HH:MM-HH:MM)。
     // backend (api/main.py:WatchAutoStartRequest) の default は "09:00-23:45"。
@@ -334,18 +334,19 @@ export type WatchAutoStatus = {
     // 自動購入 (実弾): ON で #gotobuy まで自動。daily_cap で日次上限ガード。
     bet_auto_purchase?: boolean;
     bet_daily_cap?: number;   // 円
-    // セッション中のみ Plan T 束の全 leg stake を N 倍 (100円単位丸め)。per-race 上限 / daily_cap は維持。
+    // セッション中のみ 3連単束の全 leg stake を N 倍 (100円単位丸め)。per-race 上限 / daily_cap は維持。
     bet_stake_multiplier?: number;
     // 支払方法: "opcoin" (OPコイン残, 既定) | "buylimit" (投票資金残, 会員入金)
     bet_payment_method?: "opcoin" | "buylimit";
     // JRA 即PAT 自動投票 (カート投入)。ON で JRA 投票 daemon (headful ブラウザ) を起動。
     bet_ipat?: boolean;
-    // legacy (2026-06-06 以前): 投票束 Plan T トグルと専用倍率。現在は Plan T 固定で送信しない。
-    // 旧 persist 済 config の prefill 互換のため型にだけ残す。
+    // legacy (2026-06-06 以前): 投票束トグル (bet_plan_t) と専用倍率・旧予算キー (plan_t_bankroll)。
+    // 現在は3連単的中モード固定で送信しない。旧 persist 済 config の prefill 互換のため型にだけ残す。
     bet_plan_t?: boolean;
     bet_plan_t_multiplier?: number;
-    // Plan T の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
     plan_t_bankroll?: number;
+    // 3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
+    trifecta_bankroll?: number;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -466,14 +467,14 @@ export type CalibrationRaceItem = {
   bundle_stake?: number;
   bundle_payout?: number;              // 予想オッズ基準
   bundle_payout_final?: number;        // 最終オッズ基準 (result.final_odds × stake)
-  // Plan T「3連単的中モード」bundle (**実弾投票束**, 市場無視・Claude 指数フォーメーション) の的中。
+  // 3連単的中モード bundle (**実弾投票束**, 市場無視・Claude 指数フォーメーション) の的中。
   // 古い snapshot は recommended_bundle_t 欠落 → participated=false。
-  plan_t_hit?: boolean;
-  plan_t_hit_bet_types?: string[];
-  plan_t_participated?: boolean;
-  plan_t_stake?: number;
-  plan_t_payout?: number;              // 予想オッズ基準
-  plan_t_payout_final?: number;        // 最終オッズ基準
+  trifecta_bundle_hit?: boolean;
+  trifecta_bundle_hit_bet_types?: string[];
+  trifecta_bundle_participated?: boolean;
+  trifecta_bundle_stake?: number;
+  trifecta_bundle_payout?: number;              // 予想オッズ基準
+  trifecta_bundle_payout_final?: number;        // 最終オッズ基準
   // 最終オッズ取得済 race か (frontend で「予想/最終」両表示の discriminator)
   has_final_odds?: boolean;
   // snapshot 保存時刻 (ISO8601 JST naive)。チャートでの時系列ソート / 表示用。
@@ -492,9 +493,9 @@ export type CalibrationReport = {
   plans: CalibrationPlan[];
   // EV束 (recommended_bundle, モデル参考・投票しない) の集計
   claude_bundle?: ClaudeBundleAggregate;
-  // Plan T「3連単的中モード」bundle (recommended_bundle_t, **実弾投票束**) の集計。
+  // 3連単的中モード bundle (recommended_bundle_t, **実弾投票束**) の集計。
   // claude_bundle と同形。古い snapshot は 0 集計。
-  plan_t_bundle?: ClaudeBundleAggregate;
+  trifecta_bundle?: ClaudeBundleAggregate;
   races: CalibrationRaceItem[];
 };
 
@@ -551,7 +552,7 @@ export const api = {
     bet_stake_multiplier?: number;
     bet_payment_method?: "opcoin" | "buylimit";
     bet_ipat?: boolean;
-    plan_t_bankroll?: number;
+    trifecta_bankroll?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

@@ -75,7 +75,7 @@ def run_scheduler(
 
 def _main() -> None:
     argv = sys.argv[1:]
-    print("[bet_scheduler] 投票束 = recommended_bundle_t (Plan T 3連単的中モード固定)", flush=True)
+    print("[bet_scheduler] 投票束 = recommended_bundle_t (3連単的中モード固定)", flush=True)
     bet_lead_sec = aw.BET_LEAD_SEC_DEFAULT
     rescan_sec = RESCAN_SEC_DEFAULT
     market_blend = None
