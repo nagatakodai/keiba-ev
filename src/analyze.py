@@ -27,6 +27,7 @@ from rich.table import Table
 
 from . import ev as ev_mod
 from . import llm as llm_mod
+from . import odds_timeline as odds_tl_mod
 from . import portfolio as pf_mod
 from . import speed_chart as _speed_chart_mod
 from .aptitude import AptitudeIndex, compute_aptitudes
@@ -496,6 +497,9 @@ def _run_score_stage(
     3 経路 (netkeiba analyze / scrape_jra / scrape_keibago) から共通で呼ぶ。返り値は
     parse_horse_scores の dict (scores 空なら保存しない)。Claude 不可/未完了なら None。
     """
+    # オッズ変動キャプチャ (Step 1, 追加 fetch ゼロ): score 段で取得済みの fresh odds を
+    # 時系列に記録。LLM 可否に関わらず取る (is_available チェックより前)。
+    odds_tl_mod.capture(race_id, rd, "score")
     if not llm_mod.is_available():
         console.print("[yellow]claude CLI 不可 — score ステージ skip[/yellow]")
         return None
@@ -743,6 +747,10 @@ def _save_prediction_snapshot(
     claude_trifecta_select: bool = False,   # bet 段: 3連単買い目選定を Claude に任せる
     llm_select_model: str = "opus",
 ) -> None:
+    # オッズ変動キャプチャ (Step 1): snapshot 保存時 (= bet 段の fresh odds) を時系列に記録。
+    # netkeiba 経路の score phase は score 段 capture 後に同じ rd でここへ fall-through するが、
+    # odds_hash dedup で重複行にはならない。
+    odds_tl_mod.capture(race_id, rd, "bet")
     # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
     _ = hit_points   # 旧 Plan B 用 (現スキーマでは未使用)

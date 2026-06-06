@@ -173,6 +173,8 @@ snapshot に保存される主要フィールド:
     - **締切前の再判定**: watch-auto の bet 帯は**最新オッズを再取得して estimate_probs〜束生成まで通す** (= 最新オッズでの最終判定)。検索基準を発走→締切に切り替えたのは、レーススケジュールが変動しても「賭けの締切までの lead time」が安定するため。netkeiba/keiba.go.jp/JRA/oddspark いずれの経路も dispatch 時に fresh fetch する。締切=`parse.close_at_for_start(start_at)` で `start_at - CLOSE_LEAD_SEC(=120秒)` で固定。
   - frontend (履歴詳細ページ最上部) は full Kelly を表示しつつ ½ Kelly を実運用推奨として併記 (楽観バイアス対策)、的中時払戻・min_payout_ratio (目標 ≥×margin で色分け)・検証バッジ/調査メモも表示。古い snapshot は欠落 → 近似 Kelly ランキングに fallback。`scripts/backfill_bundle.py` で後付け (start_at/close_at も再パース補正)
 
+**オッズ変動の時系列キャプチャ (`src/odds_timeline.py`, 2026-06-06〜)**: score 段 (締切5-7分前) と bet 段 (締切1-2.5分前) で取得済みの fresh odds を**追加 fetch ゼロ** (= netkeiba rate-limit リスクなし) で `data/cache/odds_timeline/<race_id>.jsonl` に append する。hook は `_run_score_stage` 冒頭 (LLM 可否チェックより前) と `_save_prediction_snapshot` 冒頭の2点で、netkeiba/JRA/keibago/oddspark 全4経路共通。result fetch の `final_odds` (束の脚のみ) と合わせて1レース最大3点の時系列になる。同一オッズ行は odds_hash で dedup (netkeiba 経路 score phase は score 後そのまま snapshot 保存に fall-through するため)、capture 失敗は例外を呑む (解析を止めない)。用途: ①締切直前ドリフトの実測 → `TORIGAMI_MARGIN` の券種別較正 ②late-money momentum (score→bet のオッズ変化) の特徴量化検証。一次分析 (final_odds 150 件 / 束の脚 126 本): 3連単の 最終/bet時 オッズ比 median 0.957・p5 0.38 で、44% が margin 1.10 を食い破る下振れ → NAR 小 pool での自票インパクト疑いも要検証。
+
 ## 確率モデルの保守化 (このプロジェクトで最も重要)
 
 EV の絶対値を「現実の的中率」に近づけることが、長期回収率底上げの **根幹**。
