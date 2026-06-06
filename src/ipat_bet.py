@@ -724,12 +724,20 @@ def _check_horse_box(page, umaban: int) -> None:
     box = box.first
     if box.is_checked():
         return
+    # 固定 navbar の下に行が隠れると click が navbar に遮られるので画面中央へスクロール
+    try:
+        box.evaluate("el => el.scrollIntoView({block: 'center'})")
+    except Exception:  # noqa: BLE001 — スクロール失敗は click 側の auto-scroll に任せる
+        pass
     # span.check (視覚チェックボックス) → label の順で click。各 click 後に状態を確認。
     for target in (f"#no{umaban} ~ span.check", f'label[for="no{umaban}"]'):
         loc = page.locator(target)
         if loc.count() == 0:
             continue
-        loc.first.click()
+        try:
+            loc.first.click(timeout=8_000)
+        except Exception:  # noqa: BLE001 — intercept 等で click 不能なら次候補へ
+            pass
         page.wait_for_timeout(250)
         if box.is_checked():
             return
@@ -739,6 +747,78 @@ def _check_horse_box(page, umaban: int) -> None:
     if not box.is_checked():
         raise IpatBetError(
             f"馬番 {umaban} のチェックに失敗 (span.check / label / force 全て不発) — DOM 要確認")
+
+
+def _check_horse_radio(page, pos: int, umaban: int) -> None:
+    """順序付き (馬単/3連単) の着順列 radio #horse{pos}_no{N} を選択し、**選択を確認**する。
+
+    実機 DOM (2026-06-06 阪神3R 3連単, ユーザ報告):
+        <td class="racer-first">
+          <label for="horse{pos}_no{N}">
+            <input type="radio" id="horse{pos}_no{N}" ...>  ← 実 input は CSS で不可視
+            <span class="check"></span>                      ← これが視覚上の radio
+          </label>
+        </td>
+    checkbox (#no{N}) と同じ構造で、radio を直接 `.check()` すると span.check (行が画面上端だと
+    固定 navbar) がクリックを intercept して Timeout 30000ms → 脚スキップになる。
+    → _check_horse_box と同じ三段 (span.check → label → dispatch_event) で選択し
+    `is_checked()` で確認する。dispatch_event は pointer 遮蔽の影響を受けない最終手段
+    (AngularJS の ng-model[radio] は click イベントで更新される)。
+    """
+    sel = SELECTORS["ordered_horse_check"].format(pos=pos, umaban=umaban)
+    radio = page.locator(sel)
+    if radio.count() == 0:
+        raise IpatBetError(f"着順 radio 不検出 ({sel}) — 取消馬/DOM 変化の可能性")
+    radio = radio.first
+    if radio.is_checked():
+        return
+    if radio.is_disabled():
+        raise IpatBetError(
+            f"着順 {pos} 馬番 {umaban} の radio が disabled — 同馬が他の着順列で選択済 "
+            "(前 leg の残骸) か取消馬。レース再選択で復旧可")
+    # 固定 navbar の下に行が隠れると click が navbar に遮られるので画面中央へスクロール
+    try:
+        radio.evaluate("el => el.scrollIntoView({block: 'center'})")
+    except Exception:  # noqa: BLE001 — スクロール失敗は click 側の auto-scroll に任せる
+        pass
+    for target in (f"{sel} ~ span.check", f'label[for="horse{pos}_no{umaban}"]'):
+        loc = page.locator(target)
+        if loc.count() == 0:
+            continue
+        try:
+            loc.first.click(timeout=8_000)
+        except Exception:  # noqa: BLE001 — intercept 等で click 不能なら次候補へ
+            pass
+        page.wait_for_timeout(250)
+        if radio.is_checked():
+            return
+    # fallback: input へ直接 click イベントを dispatch (要素の重なりを無視して届く)
+    radio.dispatch_event("click")
+    page.wait_for_timeout(200)
+    if not radio.is_checked():
+        raise IpatBetError(
+            f"着順 {pos} 馬番 {umaban} の radio 選択に失敗 "
+            "(span.check / label / dispatch 全て不発) — DOM 要確認")
+
+
+def _ordered_columns_dirty(page, key: list[int]) -> bool:
+    """着順列 radio に「これから選ぶ組と矛盾する選択」が残っているか (前 leg の残骸検知)。
+
+    radio は同一馬を複数列で選べない (ng-disabled) ため、失敗した前 leg の選択が残ると
+    次 leg で必要な馬が disabled になり選択できない。矛盾があれば呼び出し側で式別を
+    選び直してコンポーネントを再描画 (= 選択クリア) する。
+    """
+    for pos in range(1, len(key) + 1):
+        checked = page.locator(f'input[id^="horse{pos}_no"]:checked')
+        if checked.count() == 0:
+            continue
+        try:
+            val = int(checked.first.get_attribute("value") or "0")
+        except (TypeError, ValueError):
+            return True
+        if val != key[pos - 1]:
+            return True
+    return False
 
 
 def _add_leg_to_buylist(page, leg: CartLeg) -> None:
@@ -770,13 +850,27 @@ def _add_leg_to_buylist(page, leg: CartLeg) -> None:
         pass
     # 馬番選択
     if ordered:
+        # 前 leg (失敗時) の着順選択が残ると、必要な馬が他列で選択済 = ng-disabled で
+        # 選べない (radio はクリックで解除できない)。矛盾があれば式別を選び直して
+        # コンポーネントを再描画 = 選択をクリアする。
+        if _ordered_columns_dirty(page, list(leg.key)):
+            other = "win" if leg.bet_type != "win" else "place"
+            page.select_option(SELECTORS["bet_type_select"],
+                               label=_IPAT_BET_LABEL[other])
+            page.wait_for_timeout(400)
+            page.select_option(SELECTORS["bet_type_select"], label=label)
+            page.wait_for_timeout(600)
+            ms = page.locator(SELECTORS["method_select"])
+            if ms.count() > 0:
+                page.select_option(SELECTORS["method_select"], label="通常")
+                page.wait_for_timeout(500)
+            if _ordered_columns_dirty(page, list(leg.key)):
+                raise IpatBetError(
+                    f"着順列に前 leg の選択が残りクリアできない (key={list(leg.key)}) — "
+                    "誤った組番を防ぐため当該脚を中止")
         # 馬単/3連単: key[i] を (i+1)着列の radio で選ぶ (#horse{pos}_no{N})
         for pos, umaban in enumerate(leg.key, 1):
-            sel = SELECTORS["ordered_horse_check"].format(pos=pos, umaban=umaban)
-            r = page.locator(sel)
-            if r.count() == 0:
-                raise IpatBetError(f"着順 radio 不検出 ({sel}) — 取消馬/DOM 変化の可能性")
-            r.first.check()
+            _check_horse_radio(page, pos, umaban)
             page.wait_for_timeout(200)
     else:
         # 単勝/複勝/馬連/ワイド/3連複: 選んだ馬の checkbox #no{N} を check
