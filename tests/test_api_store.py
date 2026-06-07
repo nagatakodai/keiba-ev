@@ -63,3 +63,58 @@ def test_compute_calibration_runs_without_error():
         assert "roi" in p
         assert "hit_rate_ci_low" in p
         assert "hit_rate_ci_high" in p
+
+
+def test_trifecta_bundle_model_fallback_counts_as_skip(tmp_path, monkeypatch):
+    """Claude 指数ゲート: rank_source != "claude" の 3連単束は legs が立っていても
+    実弾投票されない (auto_watch/oddspark_bet/ipat_bet が弾く) ので、計測上も
+    「見送り」(participated=False / stake=0 / hit=False) になる (2026-06-07 ユーザ指示)。"""
+    import json
+    from api import store
+
+    pred_dir = tmp_path / "predictions"
+    res_dir = tmp_path / "results"
+    pred_dir.mkdir()
+    res_dir.mkdir()
+
+    def _write_race(rid: str, rank_source: str):
+        legs = [{
+            "bet_type": "trifecta", "key": [1, 2, 3], "stake": 1000,
+            "payout_if_hit": 50000, "odds": 50.0,
+        }]
+        pred = {
+            "saved_at": "2026-06-06T10:00:00",  # TRIFECTA_CUTOFF 以降 = 計測対象
+            "venue_name": "テスト",
+            "rows": [],
+            "recommended_bundle_t": {"legs": legs, "rank_source": rank_source},
+        }
+        # finish_order = 1-2-3 なので束は「的中」している (= hit が殺されるかの検証になる)
+        result = {"finish_order": [1, 2, 3], "trifecta_payout": 50000}
+        (pred_dir / f"{rid}.json").write_text(json.dumps(pred), encoding="utf-8")
+        (res_dir / f"{rid}.json").write_text(json.dumps(result), encoding="utf-8")
+
+    _write_race("202606060101", "claude")  # 実弾対象 → 参加・的中
+    _write_race("202606060102", "model")   # ゲートで弾かれる → 見送り
+
+    monkeypatch.setattr(store, "PRED_DIR", pred_dir)
+    monkeypatch.setattr(store, "RESULT_DIR", res_dir)
+
+    c = store.compute_calibration()
+    races = {r["race_id"]: r for r in c["races"]}
+
+    claude_race = races["202606060101"]
+    assert claude_race["trifecta_bundle_participated"] is True
+    assert claude_race["trifecta_bundle_hit"] is True
+    assert claude_race["trifecta_bundle_stake"] == 1000
+
+    model_race = races["202606060102"]
+    assert model_race["trifecta_bundle_participated"] is False
+    assert model_race["trifecta_bundle_hit"] is False
+    assert model_race["trifecta_bundle_stake"] == 0
+
+    tb = c["trifecta_bundle"]
+    assert tb["races"] == 2
+    assert tb["participated_races"] == 1
+    assert tb["skipped_races"] == 1
+    assert tb["hits"] == 1
+    assert tb["stake"] == 1000

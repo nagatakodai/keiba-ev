@@ -304,7 +304,15 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         # 3連単的中モード(market 無視・Claude 指数フォーメーション)。
         # 回収優先 bundle と完全分離して集計し、ダッシュボードで並べて見せる。
         # 古い snapshot は recommended_bundle_t 欠落 → participated=False で分母外。
-        b_t = _bundle_stats(pred.get("recommended_bundle_t"))
+        # **Claude 指数ゲート** (2026-06-07 ユーザ指示): rank_source != "claude" の束
+        # (model フォールバック) は auto_watch / oddspark_bet / ipat_bet が実弾投票を
+        # 弾くため、legs が立っていても実際には賭けていない。計測上も「見送り」として
+        # 扱う (participated=False / stake=0 / hit=False) — 賭けていないレースを
+        # 「参加・不的中」に誤計上しない。
+        bundle_t = pred.get("recommended_bundle_t") or {}
+        if bundle_t.get("rank_source") != "claude":
+            bundle_t = {}
+        b_t = _bundle_stats(bundle_t)
 
         races.append(
             {
