@@ -440,21 +440,31 @@ def build_trifecta_select_prompt(
     aptitudes: dict[int, Any] | None = None,
     bankroll: int = 10_000,
     max_points: int = 48,
+    mode: str = "hit",
+    exclude_head: int | None = None,
 ) -> str:
-    """締切直前の 3連単「全力的中」買い目選定 prompt (検索なし・Claude 指数上位から自由構築)。
+    """締切直前の 3連単買い目選定 prompt (検索なし・Claude 指数上位から自由構築)。
 
-    各馬の **Claude 指数 (score 段で web 研究済)** + 適性総合のみを提示し、指数上位を本命に
-    1着→2着→3着 のフォーメーションを **自由に構築**させる。出力は買い目 (ordered triple) の
-    配列のみ。トリガミ防止・配分は後段 (build_trifecta_from_keys) が行う。
+    mode="hit" (全力的中) / mode="recovery" (回収=穴狙い)。各馬の **Claude 指数 (score 段で
+    web 研究済)** + 適性総合のみを提示し、指数上位を本命に 1着→2着→3着 のフォーメーションを
+    **自由に構築**させる。出力は買い目 (ordered triple) の配列のみ。トリガミ防止・配分は後段
+    (build_trifecta_from_keys) が行う。
 
-    **市場は一切見せない**: 3連単的中モードは「市場無視」が本質なので、単勝オッズ・人気はプロンプトに
+    **市場は一切見せない**: 両モードとも「市場無視」が本質なので、単勝オッズ・人気はプロンプトに
     含めない (含めると Claude が市場に引きずられて指数選定が崩れる)。並べ替えも指数→適性→馬番で
     市場フリーにする。購入は **1レース予算 (bankroll) 内に収める**よう点数を絞らせる。
+
+    **回収モードの唯一の例外 (exclude_head)**: 市場1番人気の馬番だけは harness 側でゲート判定
+    (Claude 指数 ≤ 90 なら 1着除外) され、ここに渡される。プロンプトには「この馬を1着に置かない」
+    という指示としてのみ現れる — それ以外の市場情報 (オッズ・人気順) は一切渡さない
+    (ユーザ指示 2026-06-07: 市場は1番人気を1着に入れるか否かの判定のみに使う)。
     """
     r = rd.race
     idx = llm_index or {}
     apt = aptitudes or {}
     horses = [h for h in r.horses if not getattr(h, "absent", False)]
+    recovery = mode == "recovery"
+    mode_label = "回収 (穴狙い)" if recovery else "全力的中"
 
     def _apt_total(n: int) -> float:
         a = apt.get(n)
@@ -468,12 +478,28 @@ def build_trifecta_select_prompt(
     surf = getattr(r, "surface", "") or ""
     rno = getattr(r, "race_number", "") or ""
     lines = [
-        f"# {venue} {rno}R 3連単「全力的中」買い目選定 ({dist}m {surf})",
+        f"# {venue} {rno}R 3連単「{mode_label}」買い目選定 ({dist}m {surf})",
         "あなたは競馬の3連単買い目を組むエキスパート。**各馬の強さ指数 (score 段で web 研究済)** と "
         "適性総合を見て、**指数上位を本命に 1着→2着→3着 のフォーメーション (買い目) を自由に構築**する。",
         "**検索はしない** (締切直前・指数は研究済)。",
         "**重要: このモードは『市場無視』。単勝オッズ・人気・市場の評価は一切与えていないし、"
         "推測もしないこと。あくまで下の Claude 指数 (と適性) だけで強さ順を判断して買い目を組む。**",
+    ]
+    if recovery:
+        lines.append(
+            "**回収モード (穴狙い)**: 的中時の払戻 (回収) を重視する。市場の人気で序列を推測せず、"
+            "Claude 指数だけで強い馬を選ぶ — 指数と市場の乖離がそのまま妙味になる。"
+        )
+        if exclude_head is not None:
+            ex_name = next((getattr(h, "name", "") for h in horses
+                            if getattr(h, "number", None) == exclude_head), "")
+            ex_label = f"馬 {exclude_head}" + (f" ({ex_name})" if ex_name else "")
+            lines.append(
+                f"**【1着除外ルール】{ex_label} は市場1番人気のため、どの買い目でも 1着に置かない** "
+                f"(keys の先頭 ≠ {exclude_head})。2着・3着には置いてよい。"
+                "これ以外の市場情報は一切与えていない (推測もしない)。"
+            )
+    lines += [
         "",
         "## 各馬 (Claude 指数降順)",
         "| 馬番 | 馬名 | 指数(0-100) | 適性総合 |",
@@ -485,16 +511,22 @@ def build_trifecta_select_prompt(
         atot = f"{a.total:.0f}" if a is not None and hasattr(a, "total") else "-"
         lines.append(f"| {n} | {getattr(h, 'name', '')} | "
                      f"{idx.get(n, 0):.0f} | {atot} |")
+    head_rule = (
+        f"- **1着** は指数最上位を 1〜2 頭に**絞る** (指数が拮抗するなら2頭)。"
+        + (f"1着除外ルールの馬 ({exclude_head}) は1着候補から外す。"
+           if recovery and exclude_head is not None else "")
+    )
     lines += [
         "",
-        "## 組み方 (全力的中モード)",
-        f"- **1着** は指数最上位を 1〜2 頭に**絞る** (指数が拮抗するなら2頭)。",
+        f"## 組み方 ({mode_label}モード)",
+        head_rule,
         "- **2着** は中くらい (指数上位 3〜5 頭程度)。**3着** は広めに取る (上位 5〜8 頭程度・"
         "3着づけは妙味も拾う)。head ⊆ mid ⊆ tail に拘らず、指数で妥当な馬を各列に置いてよい。",
         f"- **このレースの購入予算は ¥{bankroll:,}**。買い目の合計購入額が**この予算内に収まる**よう"
         f"点数を絞ること (1点あたり最低 ¥100・100円単位、トリガミ防止後に予算内)。予算 ÷ 100 が"
         f"買える点数の概算上限 (≈{max(1, bankroll // 100)} 点) だが、薄い目を無理に足さず"
-        "「当たりやすさ」を最大化する点数に抑える。",
+        + ("「的中したときの回収の大きさ」と当たりやすさのバランスを取る点数に抑える。"
+           if recovery else "「当たりやすさ」を最大化する点数に抑える。"),
         f"- **総点数の上限は {max_points} 点**。予算と上限の小さい方を超えない。"
         "薄すぎる(指数下位どうしの)目は入れない。",
         "- 取消・極端に指数の低い馬は外す。指数 0 の馬は買い目に入れない。",
@@ -518,10 +550,14 @@ def select_trifecta_stream(
     max_points: int = 48,
     model: str = "opus",
     timeout: int = 75,
+    mode: str = "hit",
+    exclude_head: int | None = None,
 ) -> Iterator[tuple[str, Any]]:
     """締切直前の高速 3連単選定 stream-json。**web 検索なし** (純粋推論で ~10-30s)。
 
-    市場 (単勝オッズ・人気) はプロンプトに含めず Claude 指数のみで選定させる (3連単的中モード=市場無視)。
+    市場 (単勝オッズ・人気) はプロンプトに含めず Claude 指数のみで選定させる (両モード=市場無視)。
+    mode="recovery" (回収=穴狙い) では exclude_head (市場1番人気, 指数ゲート通過済) を
+    1着に置かない指示が加わる — 市場情報はこの除外指示のみ。
     bankroll は 1レース購入予算で、合計購入額をこの予算内に収めるよう点数を絞らせる。
     出力は parse_trifecta_selection で {keys, formation, summary, confidence} に正規化する。
     """
@@ -535,6 +571,7 @@ def select_trifecta_stream(
     prompt = build_trifecta_select_prompt(
         rd, llm_index=llm_index, aptitudes=aptitudes,
         bankroll=bankroll, max_points=max_points,
+        mode=mode, exclude_head=exclude_head,
     )
     cmd = [
         "claude", "-p", prompt,

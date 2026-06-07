@@ -548,13 +548,22 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
   const rankLabel = b.rank_source === "claude" ? "Claude 指数" : "モデル指数 (Claude 未実施)";
   // 締切直前に Claude が買い目自体を選定したか (build_trifecta_from_keys)。
   const claudeSelected = b.selection_source === "claude";
+  // 回収モード (穴狙い): 市場1番人気を1着除外 (Claude 指数 > 90 で解禁)。古い snapshot は mode 欠落 = hit。
+  const recovery = b.mode === "recovery";
+  const modeTitle = recovery ? "3連単回収モード (穴狙い)" : "3連単的中モード — 全力フォーメーション";
   return (
     <Card
       tone={settled && hit ? "active" : "default"}
       title={
         <span className="flex items-center gap-2 flex-wrap">
-          <span>3連単的中モード — 全力フォーメーション</span>
+          <span>{modeTitle}</span>
           <Badge tone="warn">市場無視</Badge>
+          {recovery && b.excluded_head != null && (
+            <Badge tone="info">1着除外: 馬{b.excluded_head} (市場1番人気)</Badge>
+          )}
+          {recovery && b.excluded_head == null && b.market_favorite != null && (
+            <Badge tone="magenta">1番人気 馬{b.market_favorite} 指数{Math.round(b.favorite_claude_index ?? 0)}{">"}90 で1着解禁</Badge>
+          )}
           {claudeSelected && <Badge tone="magenta">Claude 買い目選定</Badge>}
           {b.formation && <Badge tone="info">{b.formation} フォーメーション</Badge>}
           {claudeMissing && <Badge tone="bad">Claude指数なし→自動投票対象外</Badge>}
@@ -564,6 +573,12 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
     >
       <p className="text-xs text-(--color-muted) mb-3">
         市場(オッズ)をランキングに一切使わず、<b>{rankLabel}</b>の上位を本命に3連単フォーメーションを組む。
+        {recovery && (
+          <>
+            <b>回収モード (穴狙い)</b>: 市場1番人気は Claude 指数が 90 を超えない限り
+            <b>1着に置かない</b> (2着・3着は可)。市場情報はこの除外判定のみに使用。{" "}
+          </>
+        )}
         1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
         (当たれば投資総額以上を回収)。理論的中率は model 基準なので過信禁物 (楽観バイアス込み)・当たらなければ
         −EV。<b>実弾投票はこの 3連単束で行う (2026-06-06〜 固定。EV束はモデル参考値)</b>。

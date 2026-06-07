@@ -150,11 +150,14 @@ EV (回収率) = 的中率 × 平均オッズ ÷ 点数
    - **2段の配線**: `auto_watch._run_phase` が score/bet を**別 dedup 名前空間** (`auto_watch_analyzed_score.txt` / `..._bet.txt`) で2回実行。`--score-window/-tolerance` (既定5/2) と `--window/-tolerance` (bet 既定1/1.5)、`--llm-blend`。Makefile は `BAND_ARGS`。
    - **フォールバック**: 指数キャッシュ無し (score 未完/間に合わず/`--no-llm`) → `estimate_probs` の合成が no-op = モデルのみで bet (従来挙動)。snapshot に `llm_win_index`/`llm_blend`/`llm_scored_at`/`llm_fallback` を残す。
    - **要チューニング**: `T_LLM` (指数→確率の鋭さ。生 0-100 softmax は過尖鋭化するので温度で平坦化) と `LLM_BLEND_DEFAULT` (指数 vs モデル) は `ev.py` 定数。arm 前にレース蓄積で sweep 推奨。
-6. **3連単的中モード = 実弾投票束 (2026-06-06〜 特化, 旧称 "Plan T" は廃止)**: 投票束は **`recommended_bundle_t` 固定** (`_t` は trifecta の略)。旧「回収優先AI」(claude -p による EV束 picks/cuts 選定 = `select_bundle_stream`/`_validate_and_update_bundle`) と EV束 (`recommended_bundle`) の投票・`KEIBA_BET_BUNDLE`/`--bet-plan-t`/`--plan-t` 切替は**全て撤去**した。
+6. **3連単束 = 実弾投票束 (2026-06-06〜 特化, 旧称 "Plan T" は廃止)**: 投票束は **`recommended_bundle_t` 固定** (`_t` は trifecta の略)。旧「回収優先AI」(claude -p による EV束 picks/cuts 選定 = `select_bundle_stream`/`_validate_and_update_bundle`) と EV束 (`recommended_bundle`) の投票・`KEIBA_BET_BUNDLE`/`--bet-plan-t`/`--plan-t` 切替は**全て撤去**した。
+   - **モード (2026-06-07〜)**: `--t-mode` / env `KEIBA_TRIFECTA_MODE` / 既定 **`recovery`** (`_trifecta_mode`)。
+     - **`recovery` = 回収モード (穴狙い, 既定)**: **市場1番人気を1着に置かない** (2着/3着は可)。例外として 1番人気の Claude 指数が **90 (`TRIFECTA_RECOVERY_INDEX_GATE`) を超えたら**1着解禁。市場情報はこの**ゲート判定のみ**に使い (`_market_favorite`/`_recovery_exclude_head`)、ランキング・プロンプト・probs には一切渡さない (ユーザ指示: 市場は1番人気を1着に入れるか否かの判定のみ)。除外は二重ガード: ①プロンプトの1着除外指示 (`build_trifecta_select_prompt(mode="recovery", exclude_head=N)`) ②`build_trifecta_from_keys(exclude_head=N)` のハードフィルタ (違反 keys は `dropped_excluded_head` に記録)。機械フォーメーションも `build_trifecta_hitmax(exclude_head=N)` で1着列から除外。単勝オッズが無く1番人気を特定できないときは除外なしに degrade。痕跡は束の `mode`/`excluded_head`/`market_favorite`/`favorite_claude_index` と `trifecta_params` に保存。
+     - **`hit` = 旧 全力的中モード**: 従来挙動 (除外なし)。`--t-mode=hit` で戻せる。
    - **組み方**: score ステージの Claude 指数を ranking に、bet ステージ締切直前に `_claude_select_trifecta` (`llm.select_trifecta_stream`, 検索なし高速・**市場無視** = 単勝オッズをプロンプトに渡さない) が3連単買い目を選定 → `build_trifecta_from_keys` (トリガミ防止つき)。失敗/間に合わず/keys 空なら `build_trifecta_hitmax` の機械フォーメーション (1着 `--t-head-max` / 2着 `--t-mid` / 3着 `--t-tail`) にフォールバック。
    - **1レース購入予算**: `--t-bankroll` / env `KEIBA_TRIFECTA_BANKROLL` (旧 `KEIBA_PLAN_T_BANKROLL` も互換で読む) / 既定 ¥10,000 (`_trifecta_bankroll`)。Web UI からは `trifecta_bankroll` で全 dispatch subprocess に伝播。
-   - **Claude 指数ゲート**: 指数キャッシュが無く model ランキングへ縮退した束 (`rank_source != "claude"`) は **enqueue もカート投入もしない** (auto_watch / oddspark_bet / ipat_bet の二重ガード、ユーザ指示 2026-06-03)。
-   - **EV束 (`recommended_bundle`) はモデルのみの参考値**として snapshot/ダッシュボードに残す (3連単的中モードとの比較計測用)。投票には一切使わない。
+   - **Claude 指数ゲート**: 指数キャッシュが無く model ランキングへ縮退した束 (`rank_source != "claude"`) は **enqueue もカート投入もしない** (auto_watch / oddspark_bet / ipat_bet の二重ガード、ユーザ指示 2026-06-03)。計測上も**見送り**として扱う (api/store.py, 2026-06-07)。
+   - **EV束 (`recommended_bundle`) はモデルのみの参考値**として snapshot/ダッシュボードに残す (3連単束との比較計測用)。投票には一切使わない。
 
 snapshot に保存される主要フィールド:
 - `horse_aptitude`: 各馬の指数 + 内訳 (total 降順)
@@ -162,7 +165,7 @@ snapshot に保存される主要フィールド:
 - `plan_a_keys` / `plan_b_keys` / `plan_c_keys` / `plan_g_keys` / `plan_h1_keys` / `plan_h2_keys` / `plan_f_keys` (3 連単)
 - `bet_tables`: 単勝 / 複勝 の EV top 30 (馬連/ワイド/馬単/3連複 は実オッズが取れず無効 = 空。`build_all_bet_tables` は `rd.other_bets` の非空 type のみ出す)
 - `bet_tables_g`: 各 bet type の Plan G picks
-- `recommended_bundle_t`: **3連単的中モード束 (実弾投票対象, 固定)**。Claude 指数ドリブンの3連単のみ・市場無視・トリガミ防止つき。`rank_source` ("claude"/"model") と `llm_select` (Claude 選定時の summary/confidence/n_keys) を持つ。`trifecta_keys` / `trifecta_params` も併存 (旧 snapshot は `plan_t_keys` / `plan_t_params`)。
+- `recommended_bundle_t`: **3連単束 (実弾投票対象, 固定)**。Claude 指数ドリブンの3連単のみ・市場無視・トリガミ防止つき。`mode` ("recovery"=回収/穴狙い 既定・市場1番人気を1着除外 / "hit"=旧 全力的中。古い snapshot は欠落=hit 相当)、`excluded_head`/`market_favorite`/`favorite_claude_index` (回収モードの1着除外ゲート痕跡)、`rank_source` ("claude"/"model") と `llm_select` (Claude 選定時の summary/confidence/n_keys) を持つ。`trifecta_keys` / `trifecta_params` も併存 (旧 snapshot は `plan_t_keys` / `plan_t_params`)。
 - `recommended_bundle`: EV束 = 全 bet type 横断の **joint (同時) Kelly 最適まとめ買い束** (`src/portfolio.py`)。レースの完全な top-3 結果分布 (全 ordered triple, Σp=1) 上で束全体の E[log(資金)] を最大化した成長率最適配分。独立 Kelly の単純和ではなく相関・排他性を考慮。+EV (P×O≥1.02) が無ければ legs 空 = 見送り。**2026-06-06 以降はモデルのみの参考値 (投票しない)**。
   - **トリガミ防止 (安全マージン付き)**: `odds×stake < 投資総額 × TORIGAMI_MARGIN` の脚を除去 → 残脚で再最適化を収束まで繰り返す。`min_payout_ratio ≥ TORIGAMI_MARGIN` を保証。**margin=1.10** (`src/portfolio.py`) は「束を組んだ時点のオッズ」からの**下振れ緩衝**: 締切直前ドリフトや複勝のレンジ幅で実払戻が下振れしても、~9% までは収支マイナスにならない (margin=1 では保存オッズでしかトリガミ無を保証できず、実オッズ乖離でトリガミ化していた)。`dropped_torigami` に除外数、`torigami_margin` も snapshot に保存。
     - **レンジ型 bet の下限採用**: 複勝は `fuku_min` (下限) を採用 (実払戻 ≥ 下限で確定 → トリガミ保証が崩れない)。これと margin の二段構えで「オッズ乖離 → トリガミ」を防ぐ。

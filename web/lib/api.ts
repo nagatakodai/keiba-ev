@@ -189,6 +189,13 @@ export type TrifectaHitmaxBundle = {
   // "claude" = 締切直前に Claude が3連単買い目を選定 (build_trifecta_from_keys)。
   // 無し/その他 = 機械フォーメーション (build_trifecta_hitmax)。
   selection_source?: string | null;
+  // 3連単束モード: "recovery"=回収(穴狙い, 市場1番人気を1着除外・Claude指数>90で解禁) /
+  // "hit"=旧 全力的中。古い snapshot は欠落 (= hit 相当)。
+  mode?: string | null;
+  excluded_head?: number | null;        // 回収モードで1着から除外した馬番 (市場1番人気)。null=除外なし
+  market_favorite?: number | null;      // 市場1番人気の馬番 (ゲート判定に使用)
+  favorite_claude_index?: number | null; // 1番人気の Claude 指数 (>90 で1着解禁)
+  dropped_excluded_head?: number;       // 1着除外ルール違反でハードフィルタした買い目数
   llm_select?: { summary?: string; confidence?: string; n_keys?: number } | null;
   formation?: string | null;      // "1×4×7" (1着×2着×3着 の頭数)
   head_horses?: number[];         // 1着候補 (絞る)

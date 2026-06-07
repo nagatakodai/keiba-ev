@@ -391,6 +391,7 @@ def build_trifecta_hitmax(
     torigami_margin: float = TORIGAMI_MARGIN,
     min_stake: int = 100,
     stake_unit: int = 100,
+    exclude_head: int | None = None,     # 回収モード: この馬番を 1着列に置かない (2着/3着は可)
 ) -> dict:
     """3連単的中モード (全力フォーメーション): Claude 指数ドリブンの 3連単フォーメーション。
 
@@ -429,6 +430,7 @@ def build_trifecta_hitmax(
         "head_n": 0,
         "formation": None,
         "odds_summary": None,
+        "excluded_head": exclude_head,
     }
 
     # odds 源: absent / odds<=0 を除外して key→odds lookup (build_table と同じガード)。
@@ -455,16 +457,22 @@ def build_trifecta_hitmax(
         base["rank_source"] = "model"
     n = len(rank)
 
+    # 回収モード (穴狙い): 市場1番人気 (exclude_head) を **1着列から除外** (2着/3着列は可)。
+    # ランキング自体は Claude 指数のまま — 市場情報はこの除外のみに使う (呼び出し側でゲート判定)。
+    head_rank = [h for h in rank if h != exclude_head] if exclude_head is not None else rank
+    if not head_rank:
+        return base
+
     # 1着列の頭数: 既定 1。指数 top2 が接戦 (idx[1] ≥ idx[0]·(1−head_gap)) なら 2 頭に (絞りつつ厚く)。
     head_n = 1
-    if n >= 2 and head_max >= 2:
-        top, second = idx[rank[0]], idx[rank[1]]
+    if len(head_rank) >= 2 and head_max >= 2:
+        top, second = idx[head_rank[0]], idx[head_rank[1]]
         if top > 0 and second >= top * (1.0 - head_gap):
             head_n = 2
-    head_n = max(1, min(head_n, head_max, n))
+    head_n = max(1, min(head_n, head_max, len(head_rank)))
     mid_n = min(max(mid_count, head_n), n)         # 2着 中くらい (≥ head)
     tail_n = min(max(tail_count, mid_n), n)        # 3着 広い (≥ mid)
-    head, mid, tail = rank[:head_n], rank[:mid_n], rank[:tail_n]
+    head, mid, tail = head_rank[:head_n], rank[:mid_n], rank[:tail_n]
     base.update(head_horses=list(head), mid_horses=list(mid), tail_horses=list(tail),
                 head_n=head_n, formation=f"{head_n}×{mid_n}×{tail_n}")
 
@@ -539,6 +547,7 @@ def build_trifecta_from_keys(
     min_stake: int = 100,
     stake_unit: int = 100,
     max_points: int = 60,
+    exclude_head: int | None = None,     # 回収モード: この馬番が 1着の key を除外 (Claude 指示違反の保険)
 ) -> dict:
     """Claude が選んだ 3連単 買い目 (keys) からトリガミ防止つき束を組む (3連単的中モードの Claude 選定版)。
 
@@ -547,6 +556,10 @@ def build_trifecta_from_keys(
     保証は build_trifecta_hitmax と同一。買えない (オッズ無し) triple・重複・非相異馬は除外し、
     最大 max_points 点で打ち切る。返り値 objective="trifecta_claude_select" / rank_source="claude" /
     selection_source="claude" (それ以外のフィールドは build_trifecta_hitmax と同形)。
+
+    exclude_head (回収モード): プロンプトで「1着に置かない」と指示済みだが、Claude が指示を破った
+    場合の **ハードフィルタ** として key[0]==exclude_head の買い目をここでも落とす (二重ガード)。
+    除外数は dropped_excluded_head に記録。
     """
     base = {
         "objective": "trifecta_claude_select",
@@ -556,6 +569,7 @@ def build_trifecta_from_keys(
         "rank_source": "claude", "selection_source": "claude",
         "head_horses": [], "mid_horses": [], "tail_horses": [],
         "head_n": 0, "formation": None, "odds_summary": None,
+        "excluded_head": exclude_head, "dropped_excluded_head": 0,
     }
     odds_by_key: dict[tuple, float] = {}
     for t in (trifecta or []):
@@ -581,6 +595,9 @@ def build_trifecta_from_keys(
         if len({a, b, c}) != 3:                # 相異3頭でない
             continue
         if a not in win or b not in win or c not in win:   # 出走馬でない
+            continue
+        if exclude_head is not None and a == exclude_head:  # 回収モード: 1着除外馬 (指示違反の保険)
+            base["dropped_excluded_head"] += 1
             continue
         key = (a, b, c)
         if key in seen:
