@@ -8,6 +8,7 @@ import {
   Input,
   Page,
   PageHeader,
+  Select,
   Stat,
   fmtTime,
   fmtTs,
@@ -78,6 +79,9 @@ export default function WatchAutoPage() {
   const [betMaxStakeMultiplier, setBetMaxStakeMultiplier] = useState("");
   // 3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
   const [trifectaBankroll, setTrifectaBankroll] = useState("10000");
+  // 3連単束モード: recovery=回収(穴狙い, 市場1番人気はClaude指数>90でない限り1着に置かない, 既定) /
+  // hit=旧 全力的中。env KEIBA_TRIFECTA_MODE で全 dispatch subprocess に伝播。
+  const [trifectaMode, setTrifectaMode] = useState<"recovery" | "hit">("recovery");
   // 支払方法: opcoin (OPコイン残, 既定) または buylimit (投票資金残)
   const [betPaymentMethod, setBetPaymentMethod] = useState<"opcoin" | "buylimit">("opcoin");
 
@@ -118,6 +122,8 @@ export default function WatchAutoPage() {
     // 旧 config 互換: 旧キー plan_t_bankroll で persist された予算も読む。
     if (c.trifecta_bankroll != null) setTrifectaBankroll(String(c.trifecta_bankroll));
     else if (c.plan_t_bankroll != null) setTrifectaBankroll(String(c.plan_t_bankroll));
+    if (c.trifecta_mode === "recovery" || c.trifecta_mode === "hit")
+      setTrifectaMode(c.trifecta_mode);
     if (c.bet_payment_method === "buylimit" || c.bet_payment_method === "opcoin")
       setBetPaymentMethod(c.bet_payment_method);
   }
@@ -193,6 +199,7 @@ export default function WatchAutoPage() {
           const v = parseInt(trifectaBankroll, 10);
           return Number.isFinite(v) && v >= 100 ? v : 10000;
         })(),
+        trifecta_mode: trifectaMode,
         bet_payment_method: betPaymentMethod,
       });
       await Promise.all([refreshStatus(), refreshHistory()]);
@@ -397,6 +404,20 @@ export default function WatchAutoPage() {
                 onChange={(e) => setTrifectaBankroll(e.target.value)}
                 disabled={running}
               />
+              <Select
+                label="3連単束モード"
+                value={trifectaMode}
+                onChange={(e) => setTrifectaMode(e.target.value as "recovery" | "hit")}
+                disabled={running}
+                hint={
+                  trifectaMode === "recovery"
+                    ? "市場1番人気は Claude 指数 > 90 でない限り1着に置かない (2・3着は可)"
+                    : "旧 全力的中: 1着除外なし (Claude 指数上位をそのまま1着候補に)"
+                }
+              >
+                <option value="recovery">回収 (穴狙い) — 既定</option>
+                <option value="hit">的中 (旧 全力的中)</option>
+              </Select>
               <Input
                 label="稼働時間帯 (JST HH:MM-HH:MM)"
                 placeholder="09:00-23:45"
@@ -613,7 +634,7 @@ export default function WatchAutoPage() {
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 60}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
+              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 60}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"} / 束=${status?.config?.trifecta_mode === "hit" ? "的中" : "回収(穴狙い)"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
               : "停止中。タイトルをクリックして設定を展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>

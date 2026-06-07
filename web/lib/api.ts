@@ -356,6 +356,9 @@ export type WatchAutoStatus = {
     plan_t_bankroll?: number;
     // 3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
     trifecta_bankroll?: number;
+    // 3連単束モード: "recovery"=回収(穴狙い, 市場1番人気を1着除外・Claude指数>90で解禁, 既定) /
+    // "hit"=旧 全力的中。旧 persist 済 config は欠落 (= recovery 扱い)。
+    trifecta_mode?: "recovery" | "hit";
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -567,6 +570,7 @@ export const api = {
     bet_payment_method?: "opcoin" | "buylimit";
     bet_ipat?: boolean;
     trifecta_bankroll?: number;
+    trifecta_mode?: "recovery" | "hit";
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,
