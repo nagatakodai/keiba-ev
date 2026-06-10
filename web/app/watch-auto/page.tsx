@@ -47,7 +47,9 @@ export default function WatchAutoPage() {
   // キャッシュ + 投票を予約 → 締切 bet_lead_sec 秒前に自動発火 (最新オッズ→束→投票)。
   const [scoreWindow, setScoreWindow] = useState("5");
   const [scoreTolerance, setScoreTolerance] = useState("2");
-  const [betLeadSec, setBetLeadSec] = useState("60");
+  // 既定 150s (2026-06-11 実測ベース: bet dispatch 31-95s + daemon poll + カート投入 20-40s。
+  // 旧 60s は締切に間に合わず不成立=賭け逃しが出ていた)。
+  const [betLeadSec, setBetLeadSec] = useState("150");
   // 空 = backend 既定 (ev.LLM_BLEND_DEFAULT=0.5)。Claude 指数 vs モデルの合成重み。
   const [llmBlend, setLlmBlend] = useState("");
   const [intervalSec, setIntervalSec] = useState("60");

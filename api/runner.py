@@ -39,6 +39,23 @@ WATCH_STATE_FILE = ROOT / "data" / "cache" / "watch_auto_state.json"
 _ALIVE_JOBS: "set[Job]" = set()
 
 
+def _per_race_cap(bet_bundle: str, ev_bankroll: int, trifecta_bankroll: int,
+                  stake_multiplier: float, max_stake_multiplier: float | None) -> int:
+    """投票 daemon の per-race 上限 (--max-stake, 円)。
+
+    基準は**実際に束を組む予算** (ev=EV束なら ev_bankroll / trifecta なら trifecta_bankroll、
+    最低 ¥10,000 = 旧基準) × 倍率 (上限専用倍率があればそれ、無ければ掛金倍率≥1)。
+    旧来は daemon 側の基準が ¥10,000 固定で、ev_bankroll を上げると束合計が上限を超え
+    全 req が「投入しない」になっていた (2026-06-11 bughunt #5)。
+    """
+    base = max(10_000, int(ev_bankroll if bet_bundle == "ev" else trifecta_bankroll))
+    if max_stake_multiplier is not None and max_stake_multiplier > 0:
+        mult = float(max_stake_multiplier)
+    else:
+        mult = max(1.0, float(stake_multiplier or 1.0))
+    return max(100, int(round(base * mult / 100.0)) * 100)
+
+
 def _child_preexec() -> None:
     """子プロセスの fork 後 / exec 前に呼ばれる初期化。
 
@@ -107,6 +124,10 @@ class Job:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
+                # StreamReader の行バッファ上限 (既定 64KB)。子の 1 行が超えると readline が
+                # ValueError → 未読 pipe で wait() が永久に返らず Job が running 固定になる
+                # (2026-06-11 bughunt #9)。1MB に拡大 + _pump 側でチャンク読み退避。
+                limit=2 ** 20,
                 # setsid + PR_SET_PDEATHSIG: グループで殺せて、親死亡時にも安全。
                 preexec_fn=_child_preexec,
             )
@@ -127,7 +148,18 @@ class Job:
         assert self._proc is not None and self._proc.stdout is not None
         try:
             while True:
-                raw = await self._proc.stdout.readline()
+                try:
+                    raw = await self._proc.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError):
+                    # 1 行が limit 超 — 行として読めないのでチャンクで読み捨てて続行
+                    # (ここで抜けると未読 pipe で wait() が固まり Job が running 固定になる)。
+                    raw = await self._proc.stdout.read(65536)
+                    if not raw:
+                        break
+                    await self._append({"stream": "stdout",
+                                        "text": f"[line>limit を {len(raw)}B 切詰め] "
+                                                + raw[:500].decode("utf-8", "replace")})
+                    continue
                 if not raw:
                     break
                 try:
@@ -136,6 +168,15 @@ class Job:
                     text = repr(raw)
                 await self._append({"stream": "stdout", "text": text})
         finally:
+            # wait 前に残データを drain する (未読データで transport が paused のままだと
+            # pipes disconnected にならず wait() が永久に返らない)。
+            try:
+                while True:
+                    leftover = await asyncio.wait_for(self._proc.stdout.read(65536), timeout=5)
+                    if not leftover:
+                        break
+            except (asyncio.TimeoutError, ValueError, Exception):  # noqa: BLE001
+                pass
             await self._proc.wait()
             self.return_code = self._proc.returncode
             # cancel 経由で止まった場合は status を上書きしない
@@ -512,21 +553,33 @@ class WatchAutoManager:
                        else bet_payment_method)
             cfg_login = (bool(cfg["bet_auto_login"]) if "bet_auto_login" in cfg
                          else bet_auto_login)
-            if bet_oddspark and not self.bet_running:
+            # 【2026-06-11 bughunt #10】どの daemon を貼り直すかの toggle 自体も cfg 由来に
+            # する (リクエスト値だと投票 OFF で稼働中に stale form から ON の start が来ると
+            # 投票 daemon+scheduler が起動し、config/persist=OFF のまま実弾経路が動く)。
+            cfg_oddspark = bool(cfg.get("bet_oddspark")) if cfg else bet_oddspark
+            cfg_ipat = bool(cfg.get("bet_ipat")) if cfg else bet_ipat
+            cfg_max_stake = _per_race_cap(
+                str(cfg.get("bet_bundle") or "trifecta"),
+                int(cfg.get("ev_bankroll") or 5_000),
+                int(cfg.get("trifecta_bankroll") or 10_000),
+                cfg_mult, cfg_max_mult)
+            if cfg_oddspark and not self.bet_running:
                 await self._start_betting_daemon(
                     auto_purchase=cfg_auto, daily_cap=cfg_cap,
                     stake_multiplier=cfg_mult,
                     max_stake_multiplier=cfg_max_mult,
+                    max_stake=cfg_max_stake,
                     payment_method=cfg_pay, auto_login=cfg_login)
-            if bet_ipat and not self.ipat_bet_running:
+            if cfg_ipat and not self.ipat_bet_running:
                 await self._start_ipat_daemon(
                     auto_purchase=cfg_auto, daily_cap=cfg_cap,
                     stake_multiplier=cfg_mult,
                     max_stake_multiplier=cfg_max_mult,
+                    max_stake=cfg_max_stake,
                     auto_login=cfg_login)
-            if (bet_oddspark or bet_ipat) and not self.scheduler_running:
+            if (cfg_oddspark or cfg_ipat) and not self.scheduler_running:
                 await self._start_scheduler(
-                    bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
+                    bet_oddspark=cfg_oddspark, bet_ipat=cfg_ipat,
                     bet_lead_sec=int(self._config.get("bet_lead_sec", 60)),
                     market_blend=self._config.get("market_blend"),
                     aptitude_top=self._config.get("aptitude_top"),
@@ -634,9 +687,13 @@ class WatchAutoManager:
                 auto_purchase=bool(cfg.get("bet_auto_purchase")),
                 daily_cap=int(cfg["bet_daily_cap"])
                     if cfg.get("bet_daily_cap") is not None else 50000,
-                # 投票束に対応する倍率 (3連単束の各脚に掛かる倍率)。上で算出済の eff を使う。
+                # 投票束に対応する倍率 (束の各脚に掛かる倍率)。上で算出済の eff を使う。
                 stake_multiplier=eff_stake_multiplier,
                 max_stake_multiplier=cfg.get("bet_max_stake_multiplier"),
+                # per-race 上限は実際の束予算に連動 (2026-06-11 bughunt #5)
+                max_stake=_per_race_cap(bet_bundle, ev_bankroll, trifecta_bankroll,
+                                        eff_stake_multiplier,
+                                        cfg.get("bet_max_stake_multiplier")),
                 payment_method=str(cfg["bet_payment_method"])
                     if cfg.get("bet_payment_method") else "opcoin",
                 auto_login=bool(cfg.get("bet_auto_login")),
@@ -648,9 +705,13 @@ class WatchAutoManager:
                 auto_purchase=bool(cfg.get("bet_auto_purchase")),
                 daily_cap=int(cfg["bet_daily_cap"])
                     if cfg.get("bet_daily_cap") is not None else 50000,
-                # 投票束に対応する倍率 (3連単束の各脚に掛かる倍率)。上で算出済の eff を使う。
+                # 投票束に対応する倍率 (束の各脚に掛かる倍率)。上で算出済の eff を使う。
                 stake_multiplier=eff_stake_multiplier,
                 max_stake_multiplier=cfg.get("bet_max_stake_multiplier"),
+                # per-race 上限は実際の束予算に連動 (2026-06-11 bughunt #5)
+                max_stake=_per_race_cap(bet_bundle, ev_bankroll, trifecta_bankroll,
+                                        eff_stake_multiplier,
+                                        cfg.get("bet_max_stake_multiplier")),
                 auto_login=bool(cfg.get("bet_auto_login")),
             )
         # 投票発火デーモン (締切 bet_lead_sec 秒前に精密発火, watch poll とは独立)。
@@ -703,6 +764,7 @@ class WatchAutoManager:
                                  daily_cap: int = 50000,
                                  stake_multiplier: float = 1.0,
                                  max_stake_multiplier: float | None = None,
+                                 max_stake: int | None = None,
                                  auto_login: bool = False) -> None:
         """JRA 即PAT 投票 daemon (`ipat_bet --session`) を起動。oddspark daemon の JRA 版。
 
@@ -719,6 +781,11 @@ class WatchAutoManager:
         if self.ipat_bet_job is not None and self.ipat_bet_job.status in ("pending", "running"):
             return
         cmd = [PY, "-m", "src.ipat_bet", "--session", f"--daily-cap={daily_cap}"]
+        if max_stake is not None and max_stake > 0:
+            # per-race 上限を実際の束予算 (ev_bankroll/trifecta_bankroll) に連動させる
+            # (2026-06-11 bughunt #5: 旧来は基準 ¥10,000 固定で、ev_bankroll>10,000 だと
+            # 束合計が上限超過 → 全 req が「投入しない」で .done = 賭け逃しになっていた)。
+            cmd.append(f"--max-stake={max_stake}")
         if auto_login:
             cmd.append("--auto-login")
         if auto_purchase:
@@ -749,6 +816,7 @@ class WatchAutoManager:
                                     daily_cap: int = 50000,
                                     stake_multiplier: float = 1.0,
                                     max_stake_multiplier: float | None = None,
+                                    max_stake: int | None = None,
                                     payment_method: str = "opcoin",
                                     auto_login: bool = False) -> None:
         """オッズパーク投票 daemon (`oddspark_bet --session`) を起動。
@@ -770,6 +838,9 @@ class WatchAutoManager:
             return
         cmd = [PY, "-m", "src.oddspark_bet", "--session", f"--daily-cap={daily_cap}",
                f"--payment={payment_method}"]
+        if max_stake is not None and max_stake > 0:
+            # per-race 上限を実際の束予算に連動 (2026-06-11 bughunt #5 — ipat 側と同じ)
+            cmd.append(f"--max-stake={max_stake}")
         if auto_login:
             cmd.append("--auto-login")
         if auto_purchase:

@@ -389,7 +389,10 @@ def parse_jra_past_runs(html: str, *, limit: int = 12) -> list[PastRun]:
             date=date,
             venue=cells[1],
             race_class=cells[2],
-            surface={"芝": "芝", "ダ": "ダ", "障": "障"}.get(sdm.group(1) or "", "ダ"),
+            # canonical は netkeiba/oddspark と同じ「ダート/障害」(2026-06-11 修正:
+            # 旧「ダ」は speed_index/speed_chart の文字列一致に外れ、ダート走が芝の
+            # 基準タイム/馬場指数で指数化され speed_v2/pace_v2 が無言で消えていた)。
+            surface={"芝": "芝", "ダ": "ダート", "障": "障害"}.get(sdm.group(1) or "", "ダート"),
             distance=int(sdm.group(2)),
             going=cells[4],
             field_size=int(cells[5]) if cells[5].isdigit() else 0,
@@ -430,7 +433,7 @@ def parse_jra_race_header(html: str) -> dict:
             out["distance"] = int(m.group(1).replace(",", ""))
         except ValueError:
             pass
-        out["surface"] = {"芝": "芝", "ダート": "ダ", "障害": "障"}[m.group(2)]
+        out["surface"] = m.group(2)   # canonical: 芝/ダート/障害 (2026-06-11 修正)
     # race_class = レース条件セル (例 category "3歳" + class "未勝利" → "3歳未勝利")。
     # 実機: <div class="cell category">3歳</div><div class="cell class">未勝利</div>。
     parts = []

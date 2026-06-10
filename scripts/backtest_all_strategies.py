@@ -97,19 +97,16 @@ def leg_hit_and_final_odds(
         hit = key[0] == top3[0]
         fo_v = final_odds.get(f"win:{key[0]}") if hit else None
     elif bt == "place":
-        if final_odds:
-            hit = f"place:{key[0]}" in final_odds
-            fo_v = final_odds.get(f"place:{key[0]}")
-        else:
-            hit = key[0] in set(fo[: n_places(n_horses)])
-            fo_v = None
+        # 【2026-06-11 修正】hit は**着順+頭数ベース**で判定する。旧実装の
+        # 「final_odds にキーが在れば的中」は netkeiba result (払戻=当たり組のみ) 前提で、
+        # keibago/jra fallback result は final_odds に**全組合せ**を保存するため
+        # 全脚が的中扱い (実測 57 脚誤 hit / EV束 ROI +52.6pt 上振れ) になっていた。
+        # final_odds は的中脚のオッズ lookup のみに使う。
+        hit = key[0] in set(fo[: n_places(n_horses)])
+        fo_v = final_odds.get(f"place:{key[0]}") if hit else None
     elif bt == "wide":
-        if final_odds:
-            hit = f"wide:{fo_key(key, False)}" in final_odds
-            fo_v = final_odds.get(f"wide:{fo_key(key, False)}")
-        else:
-            hit = set(key) <= fset
-            fo_v = None
+        hit = set(key) <= fset
+        fo_v = final_odds.get(f"wide:{fo_key(key, False)}") if hit else None
     elif bt == "quinella":
         hit = set(key) == set(top3[:2])
         fo_v = final_odds.get(f"quinella:{fo_key(key, False)}") if hit else None
@@ -445,7 +442,8 @@ def main() -> int:
         pt = (snap.get("bet_tables") or {}).get("place") or []
         place_odds = {int(r["key"][0]): float(r.get("odds") or 0) for r in pt if r.get("key")}
         if fodds:
-            phit = f"place:{pick['n']}" in fodds
+            # 着順+頭数ベース判定 (キー存在判定は keibago/jra の全組 final_odds で誤 hit)
+            phit = pick["n"] in set(fo[: n_places(n_horses)])
             pfinal = fodds.get(f"place:{pick['n']}", 0.0) if phit else 0.0
         else:
             phit = pick["n"] in set(fo[: n_places(n_horses)])
@@ -465,9 +463,11 @@ def main() -> int:
             for a, b in ((0, 1), (0, 2), (1, 2)):
                 pair = sorted([top3[a], top3[b]])
                 k = f"wide:{pair[0]}-{pair[1]}"
-                hit = k in fodds
+                # 着順ベース判定 (キー存在判定は keibago/jra の全組 final_odds で誤 hit)
+                hit = set(pair) <= fset
                 strategies["model_box3_wide"].append(
-                    {"rid": rid, "jra": jra, "hit": hit, "snap_odds": 0.0, "final": fodds.get(k, 0.0), "has_final": True}
+                    {"rid": rid, "jra": jra, "hit": hit, "snap_odds": 0.0,
+                     "final": fodds.get(k, 0.0) if hit else 0.0, "has_final": True}
                 )
                 qhit = set(pair) == set(fo[:2])
                 qk = f"quinella:{pair[0]}-{pair[1]}"

@@ -22,6 +22,8 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
         return []
     items: list[dict[str, Any]] = []
     for path in PRED_DIR.glob("*.json"):
+        if path.name.endswith(".llm.json"):
+            continue   # score 段の指数キャッシュ (ghost 行・race_id 重複の原因) は除外
         try:
             d = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -206,6 +208,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
     EV_CUTOFF_ISO_JST = "2026-06-10T18:21:00"
     if PRED_DIR.exists():
         for pred_path in sorted(PRED_DIR.glob("*.json")):
+            if pred_path.name.endswith(".llm.json"):
+                continue   # 指数キャッシュは計測対象外 (result join 不成立で偶然 skip されていたが明示ガード)
             race_id = pred_path.stem
             result_path = RESULT_DIR / f"{race_id}.json"
             if not result_path.exists():

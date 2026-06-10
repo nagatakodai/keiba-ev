@@ -265,7 +265,7 @@ class WatchAutoStartRequest(BaseModel):
     # None で各 analyze の既定 (ev.LLM_BLEND_DEFAULT=0.5)。
     llm_blend: float | None = Field(default=None, ge=0.0, le=1.0)
     # 締切の何秒前に投票を発火するか (score 完了で予約、この秒数で発火)。既定 60=締切1分前。
-    bet_lead_sec: int = Field(default=60, ge=0, le=600)
+    bet_lead_sec: int = Field(default=150, ge=0, le=600)
     interval_sec: int = 60
     ev_max: float | None = None
     min_prob: float | None = None

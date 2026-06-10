@@ -93,7 +93,7 @@ def test_parse_jra_past_runs():
     assert len(runs) == 2
     r0 = runs[0]
     assert r0.date == "2026.5.16" and r0.venue == "新潟"
-    assert r0.surface == "ダ" and r0.distance == 1200 and r0.going == "良"
+    assert r0.surface == "ダート" and r0.distance == 1200 and r0.going == "良"
     assert r0.field_size == 15 and r0.popularity == 9
     assert r0.finish_pos is None                       # 4着以下は None (1/2/3 のみ int)
     assert "古川" in r0.jockey and r0.body_weight == 426
@@ -112,7 +112,9 @@ _HEADER_HTML = (
 
 def test_parse_jra_race_header():
     h = jra.parse_jra_race_header(_HEADER_HTML)
-    assert h["distance"] == 1400 and h["surface"] == "ダ"
+    # canonical は「ダート」(2026-06-11 修正: 旧「ダ」は speed_index/speed_chart の
+    # 文字列一致に外れ、ダート走が芝の基準タイムで指数化されていた)
+    assert h["distance"] == 1400 and h["surface"] == "ダート"
     assert h["race_class"] == "3歳未勝利"
 
 

@@ -1183,6 +1183,26 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
         sess.close()
 
 
+# セッション/ブラウザ喪失を示すエラーメッセージ断片。これらは「このレース固有の確定エラー」
+# ではなく daemon 全体の機能停止なので、req を .done に落とさず残置し、daemon を fail-fast
+# 終了させる (2026-06-11 bughunt #4 — 旧実装はセッション切れ後も生存し続け、新規 req を
+# 全て .done で静かに消費 = 賭け逃しが継続、UI の bet_running も true のままだった)。
+_SESSION_DEAD_MARKERS = (
+    "セッション切れ", "ログインし直", "Target closed", "Target page",
+    "browser has been closed", "Browser closed", "page has been closed",
+    "context or browser has been closed", "Connection closed",
+)
+
+
+class SessionDeadError(RuntimeError):
+    """セッション/ブラウザ喪失 (daemon は fail-fast 終了して人の再起動を待つ)。"""
+
+
+def _is_session_dead_error(ex: Exception) -> bool:
+    msg = str(ex)
+    return any(m in msg for m in _SESSION_DEAD_MARKERS)
+
+
 def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None:
     """queue を1巡: 各 <rid>.req の snapshot 束をカート投入し、処理確定なら .done に rename。
 
@@ -1203,8 +1223,16 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
             if status == "dup":
                 print(f"[oddspark_bet] {rid} は投入済 (skip)")
         except OddsparkBetError as ex:
+            if _is_session_dead_error(ex):
+                print(f"[oddspark_bet] {rid}: セッション/ブラウザ喪失 — req 残置で daemon 終了 "
+                      f"(再起動すれば残 req を拾う): {ex}")
+                raise SessionDeadError(str(ex)) from ex
             print(f"[oddspark_bet] {rid} skip: {ex}")
         except Exception as ex:  # noqa: BLE001 — ブラウザ/通信 glitch は一過性とみなす
+            if _is_session_dead_error(ex):
+                print(f"[oddspark_bet] {rid}: セッション/ブラウザ喪失 — req 残置で daemon 終了 "
+                      f"(再起動すれば残 req を拾う): {ex}")
+                raise SessionDeadError(str(ex)) from ex
             attempts[rid] = attempts.get(rid, 0) + 1
             terminal = attempts[rid] >= max_attempts
             note = "上限到達→打ち切り" if terminal else f"再試行 {attempts[rid]}/{max_attempts}"

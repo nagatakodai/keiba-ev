@@ -285,7 +285,8 @@ def parse_horse_history(html: str, *, limit: int = 12) -> list[PastRun]:
                    if (m := _DIST_CELL_RE.match(cell)) and 800 <= int(m.group(2)) <= 4000), None)
         if dm is None:
             continue
-        surface = {"芝": "芝", "ダ": "ダ", "障": "障"}.get(dm.group(1) or "", "ダ")
+        # canonical は「ダート/障害」(netkeiba/oddspark と同語彙, 2026-06-11 修正)
+        surface = {"芝": "芝", "ダ": "ダート", "障": "障害"}.get(dm.group(1) or "", "ダート")
         # 馬場 (距離の後 / タイムの前) と頭数 (馬場の直後)
         going, field_size = "", 0
         for i in range(2, ti):

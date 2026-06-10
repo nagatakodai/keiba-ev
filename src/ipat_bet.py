@@ -478,7 +478,14 @@ class BettingSession:
             da = self.page.locator(SELECTORS["delete_all"])
             if da.count() > 0:
                 da.first.click()
-                self.page.wait_for_timeout(500)
+                self.page.wait_for_timeout(700)
+                # 削除確認は Angular の error-window (native dialog ではないので
+                # page.on("dialog") では閉じない) — btn-ok を明示 click。
+                ok = self.page.locator(
+                    '.ipat-error-window button.btn-ok, .error-window button.btn-ok')
+                if ok.count() > 0:
+                    ok.first.click()
+                    self.page.wait_for_timeout(500)
                 print("[ipat_bet] 購入予定リストを全削除しました")
         except Exception:  # noqa: BLE001
             pass
@@ -532,6 +539,15 @@ class BettingSession:
             tag = "[magenta]" if p_status == "ok" else "[yellow]" if p_status == "skipped" else "[red]"
             print(f"  {tag}→ 自動購入 {p_status}:[/] {p_msg}")
             mode_note = f"自動購入 ({p_status})"
+            if p_status != "ok":
+                # 【2026-06-11 bughunt #3, oddspark d5c9970 の移植】ok 以外 (failed/skipped) は
+                # 購入予定リストに当該レースの脚が残る。IPAT は購入時に合計金額の確認入力
+                # (当該レース分のみを fill) が必須なので、leftover が残ると次レース以降の
+                # 自動購入が**毎回 金額不一致で failed** = 賭け逃し cascade。さらに人が後で
+                # 「購入する」を押すと溜まった複数レース分を一括購入し per-race 上限を迂回する。
+                # → リストを全削除して leftover を断つ (確定済み投票には影響しない)。
+                print("  [yellow]→ ok 以外のため購入予定リストを全削除 (leftover 防止)[/]")
+                self._clear_buylist()
         else:
             mode_note = "**購入確定は人が押す**"
         print(f"[ipat_bet] {label or netkeiba_rid}: {ok}/{len(legs)} 点 投入。{mode_note} "
@@ -668,6 +684,21 @@ def _apply_stake_multiplier(legs: list[CartLeg], multiplier: float) -> list[Cart
         print(f"[stake_multiplier] ×{multiplier} で ¥100 未満になった {dropped} 脚を除去 "
               f"(floor で ¥100 に張り付けると縮小が無効化されるため)")
     return out
+
+
+# 当方 bet_type → IPAT 式別 select の option ラベル (実機 DOM の表示名と完全一致, 全角注意)。
+# ３連複/３連単 は **全角 "３"** (select option が "３連複"/"３連単")。
+# 【2026-06-11 復元】d389b55 の _apply_stake_multiplier 書き換えがこの定義ブロックを
+# 誤って巻き込み削除し、全券種が _add_leg_to_buylist の 1 行目で NameError →
+# IPAT 投票が全停止 + req が .done 消費される regression になっていた (bughunt 第3R)。
+_IPAT_BET_LABEL = {
+    "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
+    "exacta": "馬単", "trio": "３連複", "trifecta": "３連単",
+}
+# 単一列 (checkbox #no{N}) で投入できる券種: 選んだ馬で組成 (馬連/ワイド=2頭, 3連複=3頭)。
+_SINGLE_COLUMN_BETS = {"win", "place", "quinella", "wide", "trio"}
+# 順序付き (着順列 radio #horse{pos}_no{N}): 馬単=1着/2着, 3連単=1着/2着/3着。
+_ORDERED_BETS = {"exacta", "trifecta"}
 
 
 def _dismiss_deposit_dialog(page) -> None:
@@ -1033,6 +1064,26 @@ def run_session(*, headful: bool = True, manual_login: bool = True,
         sess.close()
 
 
+# セッション/ブラウザ喪失を示すエラーメッセージ断片。これらは「このレース固有の確定エラー」
+# ではなく daemon 全体の機能停止なので、req を .done に落とさず残置し、daemon を fail-fast
+# 終了させる (2026-06-11 bughunt #4 — 旧実装はセッション切れ後も生存し続け、新規 req を
+# 全て .done で静かに消費 = 賭け逃しが継続、UI の bet_running も true のままだった)。
+_SESSION_DEAD_MARKERS = (
+    "セッション切れ", "ログインし直", "Target closed", "Target page",
+    "browser has been closed", "Browser closed", "page has been closed",
+    "context or browser has been closed", "Connection closed",
+)
+
+
+class SessionDeadError(RuntimeError):
+    """セッション/ブラウザ喪失 (daemon は fail-fast 終了して人の再起動を待つ)。"""
+
+
+def _is_session_dead_error(ex: Exception) -> bool:
+    msg = str(ex)
+    return any(m in msg for m in _SESSION_DEAD_MARKERS)
+
+
 def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None:
     """queue を1巡: 各 <rid>.req の snapshot 束を投入し、処理確定なら .done に rename。"""
     for req in sorted(QUEUE_DIR.glob("*.req")):
@@ -1048,8 +1099,16 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
             if status == "dup":
                 print(f"[ipat_bet] {rid} は投入済 (skip)")
         except IpatBetError as ex:
+            if _is_session_dead_error(ex):
+                print(f"[ipat_bet] {rid}: セッション/ブラウザ喪失 — req 残置で daemon 終了 "
+                      f"(再起動すれば残 req を拾う): {ex}")
+                raise SessionDeadError(str(ex)) from ex
             print(f"[ipat_bet] {rid} skip: {ex}")
         except Exception as ex:  # noqa: BLE001 — ブラウザ/通信 glitch は一過性
+            if _is_session_dead_error(ex):
+                print(f"[ipat_bet] {rid}: セッション/ブラウザ喪失 — req 残置で daemon 終了 "
+                      f"(再起動すれば残 req を拾う): {ex}")
+                raise SessionDeadError(str(ex)) from ex
             attempts[rid] = attempts.get(rid, 0) + 1
             terminal = attempts[rid] >= max_attempts
             note = "上限到達→打ち切り" if terminal else f"再試行 {attempts[rid]}/{max_attempts}"

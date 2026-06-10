@@ -75,7 +75,8 @@ def run_scheduler(
 
 def _main() -> None:
     argv = sys.argv[1:]
-    print("[bet_scheduler] 投票束 = recommended_bundle_t (3連単的中モード固定)", flush=True)
+    print(f"[bet_scheduler] 投票束 = {aw._bet_bundle_field()} "
+          f"({aw._bet_bundle_source()}; env KEIBA_BET_BUNDLE で切替, 既定 ev)", flush=True)
     bet_lead_sec = aw.BET_LEAD_SEC_DEFAULT
     rescan_sec = RESCAN_SEC_DEFAULT
     market_blend = None

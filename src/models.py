@@ -93,8 +93,8 @@ class PastRun:
     surface: str = ""            # "芝" / "ダート" / "障害"
     distance: int = 0            # m
     going: str = ""              # 馬場 "良" / "稍" / "重" / "不"
-    winner_time_sec: float = 0.0 # Data05 の勝ち馬タイム (秒換算)
-    time_diff_sec: float = 0.0   # Data07 の括弧内。winner との時間差 (秒、+=遅れ、-=リード)
+    winner_time_sec: float = 0.0 # 勝ち馬タイム (秒換算)。netkeiba は Data05(自走)−diff で再構成
+    time_diff_sec: float = 0.0   # winner との時間差 (秒、+=遅れ。勝ち馬行は 0 に clamp)
     field_size: int = 0          # 出走頭数
     horse_number: int = 0        # 当該馬の馬番
     popularity: int = 0          # 人気

@@ -103,9 +103,10 @@ def _mark_analyzed(race_id: str, phase: str = "bet") -> None:
 # 2段パイプライン: score 完了で「このレースを締切 BET_LEAD_SEC 秒前に投票せよ」を予約し、
 # bet は band スキャンせず**予約時刻が来たら発火**する (= 締切1分前を探さず締切1分前に撃つ)。
 BET_SCHEDULE_DIR = ROOT / "data/cache/auto_watch_bet_schedule"
-# 締切の何秒前に投票を発火するか (既定 60 = 締切1分前)。poll 間隔ぶん遅れ得るので、daemon の
-# カート投入+確定が締切に間に合うよう余裕を見て調整可 (--bet-lead-sec)。
-BET_LEAD_SEC_DEFAULT = 60
+# 締切の何秒前に投票を発火するか。既定 150 (2026-06-11 実測ベースに統一: bet dispatch
+# 31-95s + daemon poll ~5s + カート投入 20-40s — 旧既定 60s では締切に間に合わず
+# enqueue が締切直前〜超過になり不成立=賭け逃しが出ていた)。--bet-lead-sec で調整可。
+BET_LEAD_SEC_DEFAULT = 150
 
 
 def _write_bet_schedule(race: dict) -> None:
@@ -615,7 +616,8 @@ def main(
     """1 巡だけ実行。2段: score 帯で考察→指数キャッシュ+**締切前 bet を予約** → 予約時刻 (締切
     bet_lead_sec 秒前) が来た bet を**自動発火** (最新オッズ→束→enqueue)。"""
     if (bet_oddspark or bet_ipat):
-        console.print(f"[dim]bet enqueue 束 = {_bet_bundle_field()} (3連単的中モード固定)[/dim]")
+        console.print(f"[dim]bet enqueue 束 = {_bet_bundle_field()} "
+                      f"({_bet_bundle_source()}; env KEIBA_BET_BUNDLE で切替, 既定 ev)[/dim]")
     now_dt = datetime.now()
     now_ts = int(now_dt.timestamp())
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -649,7 +651,7 @@ def main(
         "score", score_window, score_tolerance, now_ts,
         market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
         bet_oddspark=bet_oddspark, bet_ipat=bet_ipat, dry_run=dry_run, llm_blend=llm_blend,
-        fire_between=_fire_now,
+        fire_between=_fire_now, bet_lead_sec=bet_lead_sec,
     )
 
 
@@ -664,7 +666,7 @@ def _run_phase(
     phase: str, window_min: float, tolerance_min: float, now_ts: int,
     *, market_blend, aptitude_top, no_llm: bool,
     bet_oddspark: bool, bet_ipat: bool, dry_run: bool, llm_blend,
-    fire_between=None,
+    fire_between=None, bet_lead_sec: int = BET_LEAD_SEC_DEFAULT,
 ) -> None:
     """1 巡分の race 検出→dispatch を 1 phase 実行する。phase=score は指数キャッシュのみ、
     phase=bet は束生成+enqueue+result fetch スケジュール。dedup は phase 名前空間で独立。
@@ -716,7 +718,7 @@ def _run_phase(
             try:
                 _write_bet_schedule(race)
                 cl = race.get("close_at", 0)
-                when = (datetime.fromtimestamp(cl - BET_LEAD_SEC_DEFAULT).strftime("%H:%M:%S")
+                when = (datetime.fromtimestamp(cl - bet_lead_sec).strftime("%H:%M:%S")
                         if cl else "?")
                 console.print(f"  [cyan]→ bet 予約: {rid} を 締切前に発火 (≈ {when})[/cyan]")
             except Exception as e:  # noqa: BLE001

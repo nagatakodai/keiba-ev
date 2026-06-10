@@ -178,15 +178,16 @@ TOLERANCE ?= 1.5
 SCORE_WINDOW ?= 5
 SCORE_TOLERANCE ?= 2
 LLM_BLEND ?=
-# 締切75秒前に発火: 発火後 daemon のカート投入+確定に ~20-40s かかるため、最新オッズを保ちつつ
-# ~締切40s前着で不成立を避ける緩衝。不成立が出るなら +15s、出なければ -15s で締切寄せに調整。
-BET_LEAD_SEC ?= 75
+# 締切150秒前に発火 (2026-06-11 実測ベースに統一): bet dispatch (fresh fetch+確率+束生成) が
+# 実測 31-95s + daemon poll ~5s + カート投入 ~20-40s かかるため、60-75s では締切に間に合わず
+# 不成立 (賭け逃し) が出ていた。auto_watch/Web UI の既定とも同値。締切寄せに調整可。
+BET_LEAD_SEC ?= 150
 INTERVAL_SEC ?= 60
 ACTIVE_HOURS ?= 09:00-23:45
 BET_ODDSPARK ?=
 BET_IPAT ?=
-# 投票束は 3連単的中モード (recommended_bundle_t) 固定 (2026-06-06)。
-# 旧 BET_BUNDLE / env KEIBA_BET_BUNDLE 切替 (recommended=EV束) は廃止。
+# 投票束は env KEIBA_BET_BUNDLE で切替 (2026-06-10 復活): ev=EV束 (既定) / trifecta=3連単束。
+# 例: `KEIBA_BET_BUNDLE=trifecta make watch-auto-bet`
 BET_ARGS := $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,)
 BAND_ARGS := --score-window $(SCORE_WINDOW) --score-tolerance $(SCORE_TOLERANCE) --bet-lead-sec $(BET_LEAD_SEC) $(if $(LLM_BLEND),--llm-blend $(LLM_BLEND),)
 # 投票発火の専用デーモン (watch-auto の poll とは独立に締切 BET_LEAD_SEC 秒前ちょうどに撃つ)。
@@ -203,13 +204,20 @@ odds-capture:
 
 watch-auto:
 	@echo "watch-auto: SCORE $(SCORE_WINDOW)〜$(SCORE_TOLERANCE)分 / BET $(WINDOW)±$(TOLERANCE)分 / $(INTERVAL_SEC)秒おき / Ctrl+C で終了"
-	@while true; do \
-		$(PY) -m src.auto_watch \
-			$(BAND_ARGS) \
-			--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) $(BET_ARGS) || true; \
-		echo "[next poll in $(INTERVAL_SEC)s]"; \
-		sleep $(INTERVAL_SEC); \
-	done
+	@# BET_ODDSPARK/BET_IPAT 指定時は bet_scheduler を併走させる (2026-06-11 bughunt #12):
+	@# tick 量子化 (60s + 長い score dispatch) だけだと発火窓 (BET_LEAD_SEC) を跨いで
+	@# 締切超過の賭け逃しが出る。scheduler は締切 BET_LEAD_SEC 秒前に精密発火する。
+	@bash -c 'trap "kill 0" EXIT INT TERM; \
+		if [ -n "$(BET_ODDSPARK)$(BET_IPAT)" ]; then \
+			$(PY) -m src.bet_scheduler $(SCHED_ARGS) $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,) & \
+		fi; \
+		while true; do \
+			$(PY) -m src.auto_watch \
+				$(BAND_ARGS) \
+				--active-hours $(ACTIVE_HOURS) $(CAP_ARGS) $(BET_ARGS) || true; \
+			echo "[next poll in $(INTERVAL_SEC)s]"; \
+			sleep $(INTERVAL_SEC); \
+		done'
 
 # --- 投票ブラウザ + watch-auto を 1 コマンドで起動 (--bet-oddspark 強制) ---
 # oddspark 常駐 betting daemon (headful・起動時に人がブラウザでログイン → poll 検出) を
@@ -219,7 +227,7 @@ watch-auto:
 SESSION_ARGS ?=
 watch-auto-bet:
 	@echo "watch-auto-bet: 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
-	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。** 投票束=3連単的中モード固定"
+	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。** 投票束=KEIBA_BET_BUNDLE (既定 ev=EV束)"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.oddspark_bet --session $(SESSION_ARGS) & \
 		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-oddspark & \
@@ -238,7 +246,7 @@ watch-auto-bet:
 # 認証は env (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。SESSION_ARGS で daemon に追加引数。
 watch-auto-ipat-bet:
 	@echo "watch-auto-ipat-bet: 即PAT 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
-	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。** 投票束=3連単的中モード固定"
+	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。** 投票束=KEIBA_BET_BUNDLE (既定 ev=EV束)"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
 		$(PY) -m src.ipat_bet --session $(SESSION_ARGS) & \
 		$(PY) -m src.bet_scheduler $(SCHED_ARGS) --bet-ipat & \

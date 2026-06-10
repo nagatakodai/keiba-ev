@@ -343,8 +343,15 @@ def _parse_horse_table(soup: BeautifulSoup) -> list[Horse]:
         # 単勝オッズ / 人気
         win_odds = _to_float(_cell_text(cells, [9]))
 
-        # 取消判定 (馬名行に「取消」クラスや背景色)
-        absent = bool(row.select_one(".Cancel") or "取消" in row.get_text())
+        # 取消/除外判定 (2026-06-11 bughunt 修正): 実 HTML では Cancel クラスは
+        # <tr class="HorseList Cancel"> の **tr 自身**に付き (子孫でなく)、セル側は
+        # <td class="Cancel_Txt">除外</td>。旧 row.select_one(".Cancel") は子孫検索なので
+        # 恒常 no-op で、「除外」馬が absent にならず確率・束ランキングに混入していた。
+        _row_classes = row.get("class") or []
+        _row_text = row.get_text()
+        absent = ("Cancel" in _row_classes
+                  or bool(row.select_one(".Cancel_Txt"))
+                  or "取消" in _row_text or "除外" in _row_text)
 
         href = name_a.get("href", "") if name_a else ""
         horse_id = ""
@@ -602,7 +609,11 @@ def parse_past_runs(html: str) -> dict[int, list[PastRun]]:
 
     各 `tr.HorseList` に `td.Past` が最大 5 個ぶら下がっており、それぞれ 1 走分。
     `Ranking_1/2/3` クラスで 1-3 着判定。4 着以下は finish_pos=None で返す。
-    Data05 のタイムは「勝ち馬タイム」、Data07 の括弧内は「当該馬との時間差」(+=遅れ)。
+    Data05 のタイムは**当該馬自身の走破時計**、Data07 の括弧内は「勝ち馬との時間差」(+=遅れ)。
+    (2026-06-11 修正: 旧実装は Data05 を勝ち馬タイムと誤解釈し own_time に着差を二重加算、
+    スピード指数が平均 -1.6pt / 最大 ±9.5pt 系統的に歪んでいた。実測: 同一過去レースを
+    共有する 1,223 組すべてで Data05−diff が全馬一致 (=勝ち時計)、結果ページ突合 95 件
+    全てで Data05 == 当該馬の確定タイム。)
     """
     soup = BeautifulSoup(html, "lxml")
     table = soup.select_one("table.Shutuba_Past5_Table") or soup.select_one("table.Shutuba_Past_Table")
@@ -679,7 +690,7 @@ def _parse_one_past_run(d_item: Tag, *, ranking_cls: list[str]) -> PastRun | Non
         surface_raw = md2.group(1)
         surface = {"芝": "芝", "ダ": "ダート", "障": "障害"}.get(surface_raw, surface_raw)
         distance = int(md2.group(2))
-    winner_time_sec = _parse_time_to_sec(data05)
+    own_time_from_data05 = _parse_time_to_sec(data05)   # 当該馬の自走時計 (勝ち時計ではない)
     going = ""
     strong = d_item.select_one(".Data05 strong")
     if strong:
@@ -734,7 +745,7 @@ def _parse_one_past_run(d_item: Tag, *, ranking_cls: list[str]) -> PastRun | Non
             body_weight = int(mb.group(1))
             body_weight_diff = int(mb.group(2))
 
-    # 勝ち馬との時間差 (Data07 の括弧内)
+    # 勝ち馬との時間差 (Data07 の括弧内)。勝ち馬行は「2着との差」の負値が入る。
     data07 = _text(d_item, ".Data07")
     time_diff_sec = 0.0
     if data07:
@@ -761,8 +772,11 @@ def _parse_one_past_run(d_item: Tag, *, ranking_cls: list[str]) -> PastRun | Non
         surface=surface,
         distance=distance,
         going=going,
-        winner_time_sec=winner_time_sec,
-        time_diff_sec=time_diff_sec,
+        # winner_time = Data05(自走時計) − diff。勝ち馬行の diff は負 (2着との差) なので
+        # 0 に clamp し、own_time (= winner + diff) == Data05 を全行で保証する。
+        winner_time_sec=(max(own_time_from_data05 - max(time_diff_sec, 0.0), 0.0)
+                         if own_time_from_data05 > 0 else 0.0),
+        time_diff_sec=max(time_diff_sec, 0.0),
         field_size=field_size,
         horse_number=horse_number,
         popularity=popularity,
