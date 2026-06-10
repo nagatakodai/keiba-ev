@@ -786,8 +786,9 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
     llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(race_id)
 
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
-    s = sum(1.0 / o for o in win_odds.values()) or 1.0
-    mwp = {n: (1.0 / o) / s for n, o in win_odds.items()}
+    # 未正規化 1/odds (Σ=overround>1) を渡す — de-vig が overround を観測できるように
+    # 正規化しない (正規化済みだと power_method_overround が no-op 化する)。
+    mwp = {n: 1.0 / o for n, o in win_odds.items()}
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp,
                                   speed_v2_blend=ev_mod.SPEED_V2_BLEND_LIVE,
                                   llm_win_index=llm_index, llm_blend=llm_blend,

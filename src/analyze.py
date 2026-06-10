@@ -576,6 +576,12 @@ TRIFECTA_MODE_DEFAULT = "recovery"
 # 回収モードで市場1番人気を1着候補に**許す** Claude 指数の閾値 (これを「超え」たら解禁)。
 TRIFECTA_RECOVERY_INDEX_GATE = 90.0
 
+# 回収モードの1着除外を適用する単勝オッズの下限。これ**未満**の「鉄板」1番人気は除外しない。
+# 根拠 (favorite-longshot bias の国内実測): 単勝 1.0-1.4 倍帯は複勝率 ~89%・単勝回収率 ~94%
+# と市場が「買い足りない」側 (過小評価) で、機械的に1着から外すと的中率を大きく失うだけで
+# 回収も改善しない。1番人気の過大評価が成り立つのは概ね 2 倍台以上。
+TRIFECTA_RECOVERY_EXCLUDE_MIN_ODDS = 1.5
+
 
 def _trifecta_mode(explicit: str | None = None) -> str:
     """3連単束のモードを解決する。明示 (CLI --t-mode) → env KEIBA_TRIFECTA_MODE → 既定 recovery。
@@ -589,8 +595,8 @@ def _trifecta_mode(explicit: str | None = None) -> str:
     return TRIFECTA_MODE_DEFAULT
 
 
-def _market_favorite(rd) -> int | None:
-    """市場1番人気 (単勝オッズ最小) の馬番。オッズが1頭も無ければ None。"""
+def _market_favorite(rd) -> tuple[int | None, float | None]:
+    """市場1番人気 (単勝オッズ最小) の (馬番, 単勝オッズ)。オッズが1頭も無ければ (None, None)。"""
     best_n: int | None = None
     best_o: float | None = None
     for h in rd.race.horses:
@@ -601,7 +607,7 @@ def _market_favorite(rd) -> int | None:
             continue
         if best_o is None or float(wo) < best_o:
             best_n, best_o = h.number, float(wo)
-    return best_n
+    return best_n, best_o
 
 
 def _recovery_exclude_head(rd, llm_win_index) -> tuple[int | None, int | None, float | None]:
@@ -611,14 +617,21 @@ def _recovery_exclude_head(rd, llm_win_index) -> tuple[int | None, int | None, f
     1着に置かない (2着/3着は可)。市場情報はこのゲート判定のみに使い、ランキング・プロンプト
     には渡さない (ユーザ指示 2026-06-07: 市場は1番人気を1着に入れるか否かの判定のみ)。
     オッズが無く1番人気を特定できないときは除外なし (純 Claude 指数) に degrade。
+
+    オッズ帯ゲート (2026-06-10): 単勝 TRIFECTA_RECOVERY_EXCLUDE_MIN_ODDS (1.5) **未満**の
+    鉄板1番人気は除外しない。1.0-1.4 倍帯は国内実測で回収率 ~94% と過小評価側 (古典的 FLB)
+    であり、外すと的中率を失うだけ — 「1番人気の過大評価」は 2 倍台以上で成り立つ。
     """
-    fav = _market_favorite(rd)
+    fav, fav_odds = _market_favorite(rd)
     if fav is None:
         return None, None, None
     fidx = (llm_win_index or {}).get(fav)
-    if fidx is not None and float(fidx) > TRIFECTA_RECOVERY_INDEX_GATE:
-        return None, fav, float(fidx)   # 指数がゲート超え → 1着解禁
-    return fav, fav, (float(fidx) if fidx is not None else None)
+    fidx_f = float(fidx) if fidx is not None else None
+    if fav_odds is not None and fav_odds < TRIFECTA_RECOVERY_EXCLUDE_MIN_ODDS:
+        return None, fav, fidx_f       # 鉄板帯 (FLB 過小評価側) → 1着除外しない
+    if fidx_f is not None and fidx_f > TRIFECTA_RECOVERY_INDEX_GATE:
+        return None, fav, fidx_f       # 指数がゲート超え → 1着解禁
+    return fav, fav, fidx_f
 
 
 def _trifecta_bankroll(explicit: int | None = None) -> int:
@@ -821,16 +834,30 @@ def _save_prediction_snapshot(
     # netkeiba 経路の score phase は score 段 capture 後に同じ rd でここへ fall-through するが、
     # odds_hash dedup で重複行にはならない。
     odds_tl_mod.capture(race_id, rd, "bet")
-    # 回収優先 (joint Kelly, EV 最適) の recommended_bundle のみ計算 (実弾で買う対象)。
+    # EV束 (joint Kelly, モデルのみの参考値 — 実弾投票には使わない)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
     _ = hit_points   # 旧 Plan B 用 (現スキーマでは未使用)
     recommended_bundle = None
+    # 無情報ガード: fundamental が一様縮退 (past_runs 無し等) のときは EV束を組まない。
+    # 一様 fundamental × 市場ブレンドは「市場の平坦化 = 大穴の偽 +EV」を生む
+    # (β=0 時代は EV=odds/n で最長オッズを自動購入していた事故の根)。
+    model_no_info = True
     if probs is not None:
         try:
-            cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
-            recommended_bundle = pf_mod.build_bundle(cands, probs, prioritize="yield")
-        except Exception as ex:  # noqa: BLE001
-            console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
+            model_no_info = ev_mod.fundamental_no_info(rd)
+        except Exception:  # noqa: BLE001
+            model_no_info = False   # 判定不能なら従来動作 (組む) に倒す
+        if model_no_info:
+            console.print("[yellow]EV束: fundamental 無情報 (一様縮退) → 見送り[/yellow]")
+        else:
+            try:
+                cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
+                # kelly_fraction=0.5 (½Kelly): full Kelly は確率の楽観誤差に対して配分が
+                # 過大化し成長率が負になり得る (実測: 予測的中率45.8% vs 実測20.8%)。
+                recommended_bundle = pf_mod.build_bundle(
+                    cands, probs, prioritize="yield", kelly_fraction=0.5)
+            except Exception as ex:  # noqa: BLE001
+                console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
     # 3連単的中モード (全力フォーメーション): Claude 指数ドリブンの3連単フォーメーション・市場無視・トリガミ防止あり。
     # recommended_bundle (EV駆動) とは別物として併走計測する (実弾購入は別フラグ判断)。
     # 市場無視を保証するため probs_t (market_blend=0 の model-only) を使い、ランキングは Claude 指数。
@@ -843,8 +870,12 @@ def _save_prediction_snapshot(
     t_exclude_head = t_favorite = t_favorite_idx = None
     if t_mode == "recovery":
         t_exclude_head, t_favorite, t_favorite_idx = _recovery_exclude_head(rd, llm_win_index)
+        _, t_fav_odds = _market_favorite(rd)
         if t_favorite is None:
             console.print("[dim]回収モード: 単勝オッズ無く市場1番人気を特定できない → 1着除外なし (純 Claude 指数)[/dim]")
+        elif t_exclude_head is None and t_fav_odds is not None and t_fav_odds < TRIFECTA_RECOVERY_EXCLUDE_MIN_ODDS:
+            console.print(f"[dim]回収モード: 市場1番人気 馬{t_favorite} は単勝 {t_fav_odds:.1f} 倍 < "
+                          f"{TRIFECTA_RECOVERY_EXCLUDE_MIN_ODDS} の鉄板帯 (FLB 過小評価側) → 1着除外しない[/dim]")
         elif t_exclude_head is None:
             console.print(f"[dim]回収モード: 市場1番人気 馬{t_favorite} は Claude 指数 "
                           f"{t_favorite_idx:.0f} > {TRIFECTA_RECOVERY_INDEX_GATE:.0f} → 1着解禁[/dim]")
@@ -933,6 +964,8 @@ def _save_prediction_snapshot(
             "trained_at": (lgbm_info or {}).get("trained_at"),
             "engine": "lgbm" if (lgbm_info and lgbm_info.get("available")) else "linear-fallback",
         } if lgbm_info is not None else {"engine": "unknown"},
+        # fundamental が一様縮退 (past_runs 無し等) で EV束を見送ったか (無情報ガードの痕跡)。
+        "model_no_info": model_no_info,
         # 回収優先 bet_tables (3連単 を含む全 7 券種、各 P×O 降順 top 30)
         "bet_tables": bet_tables_serial,
         "bet_tables_g": (
@@ -960,6 +993,7 @@ def _save_prediction_snapshot(
             "market_favorite": t_favorite,
             "favorite_claude_index": t_favorite_idx,
             "recovery_index_gate": TRIFECTA_RECOVERY_INDEX_GATE,
+            "recovery_exclude_min_odds": TRIFECTA_RECOVERY_EXCLUDE_MIN_ODDS,
         },
         # 2段パイプライン: Claude 考察由来の各馬指数を model fundamental に合成した痕跡。
         # llm_win_index=null は score 未完了/未実施 (= モデルのみ) のフォールバックを意味する。

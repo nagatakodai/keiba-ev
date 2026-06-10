@@ -44,6 +44,37 @@ _MAX_TOTAL_FRACTION = 0.9999
 # 1.10 → オッズ 9% 下振れまで吸収。複勝/ワイドのレンジ下限採用 (parse 側) と二段構え。
 TORIGAMI_MARGIN = 1.10
 
+# 券種別オッズドリフトシェード (E[確定オッズ/bet時オッズ | 的中] の保守的推定)。
+# パリミュチュエルの実払戻は bet 時オッズでなく確定オッズで決まる。実測
+# (data/results の final_odds × snapshot 保存オッズ, 2026-06-10 時点 n=185 脚):
+#   place median 0.891 (52.9% が margin1.10 突破) / trifecta median 1.009 p25 0.727 /
+#   wide median 1.067 p25 0.793 / exacta median 0.709 (n=6)。
+# 締切直前は informed money が入り「的中する組番ほど直前に売れて配当が下がる」
+# (arXiv:2509.14645) ため、的中条件付きの下振れは無条件 median より大きい。
+# EV 判定・Kelly 配分・トリガミ判定の **意思決定にのみ** このシェードを掛ける
+# (表示の odds/payout_if_hit は名目のまま)。値は scripts/bundle_calibration_report.py
+# の実測で定期的に較正すること。
+DRIFT_SHADE: dict[str, float] = {
+    "win": 1.00,       # median 1.315 (n=13) — 上振れ観測だが保守的に 1.0 でキャップ
+    "place": 0.85,
+    "quinella": 0.90,
+    "wide": 0.90,
+    "exacta": 0.85,
+    "trio": 0.85,
+    "trifecta": 0.85,
+}
+_DRIFT_SHADE_DEFAULT = 0.90
+
+# px_o (P×O) の上限ゲート。市場効率 (P×O ≈ 払戻率 0.72-0.80) の下で px_o が 2 を超える
+# 脚は「モデルが市場の ~3 倍の確率を主張」しており、実測ではほぼ常にモデルの楽観誤差
+# (実測楽観係数: win ×4.18 / wide ×2.59 / place ×2.42, n=1869 脚)。+EV ではなく
+# モデル誤差として yield pool から除外する。
+PXO_CEILING = 2.0
+
+
+def _drift_shade(bet_type: str) -> float:
+    return DRIFT_SHADE.get(bet_type, _DRIFT_SHADE_DEFAULT)
+
 
 def enumerate_outcomes(
     probs: Probabilities, *, eps: float = 1e-9
@@ -211,18 +242,26 @@ def build_bundle(
     if prioritize == "hit":
         pool = [
             c for c in candidates
-            if c.get("odds", 0) > 1.0 and c.get("prob", 0.0) > 0.0
+            if c.get("odds", 0) * _drift_shade(c.get("bet_type", "")) > 1.0
+            and c.get("prob", 0.0) > 0.0
         ]
         pool.sort(key=lambda c: c.get("prob", 0.0), reverse=True)
         pool = pool[:hit_max_legs]
     else:
-        pool = [
-            c for c in candidates
-            if c.get("odds", 0) > 1.0 and c.get("px_o", 0.0) >= pxo_floor
-        ]
-        for c in pool:
-            o = c["odds"]
-            c["_kelly_ind"] = (c["px_o"] - 1.0) / (o - 1.0)
+        # yield 経路の EV 判定はドリフトシェード込み (px_o×shade ≥ floor) で行う。
+        # さらに px_o > PXO_CEILING の脚は「市場との乖離が大き過ぎる = モデル楽観誤差」
+        # として除外する (実測で px_o>2 帯の的中はほぼ予測の 1/3-1/4)。
+        pool = []
+        for c in candidates:
+            sh = _drift_shade(c.get("bet_type", ""))
+            o_eff = c.get("odds", 0) * sh
+            pxo_eff = c.get("px_o", 0.0) * sh
+            if o_eff <= 1.0 or pxo_eff < pxo_floor:
+                continue
+            if c.get("px_o", 0.0) > PXO_CEILING:
+                continue
+            c["_kelly_ind"] = (pxo_eff - 1.0) / (o_eff - 1.0)
+            pool.append(c)
         pool.sort(key=lambda c: c["_kelly_ind"], reverse=True)
         pool = pool[:max_legs]
 
@@ -251,12 +290,15 @@ def build_bundle(
 
     # pool 全体の hit 行列 H_full[b, ω] = odds_b (当たり) / 0 を 1 度だけ構築。
     # トリガミ除去ループは active 部分集合の行を抜き出して再最適化する。
+    # Kelly 最適化・期待値・トリガミ判定にはドリフトシェード後のオッズを使う
+    # (実払戻は確定オッズ = bet 時より下振れし得るため、意思決定は保守側で行う)。
     H_full = np.zeros((len(pool), len(outcomes)), dtype=np.float64)
     for bi, c in enumerate(pool):
         bt, key, odds = c["bet_type"], tuple(c["key"]), c["odds"]
+        odds_eff = odds * _drift_shade(bt)
         for wi, (a, b, cc) in enumerate(outcomes):
             if _bet_hits(bt, key, a, b, cc):
-                H_full[bi, wi] = odds
+                H_full[bi, wi] = odds_eff
 
     active = list(range(len(pool)))           # pool への index
     f_active = np.zeros(0)
@@ -292,17 +334,23 @@ def build_bundle(
         if not avoid_torigami or not kept_local:
             f_active, stakes_active = f_opt, stakes
             break
-        # トリガミ脚: payout (odds×stake) < 投資総額 S × margin → 下振れで収支マイナス化
+        # トリガミ脚: payout (odds×shade×stake) < 投資総額 S × margin → 下振れで収支マイナス化。
+        # shade は券種別の的中時ドリフト推定 — 名目オッズでなく期待実払戻で判定する。
         thresh = S * torigami_margin
         offenders = [
             i for i in kept_local
-            if pool[active[i]]["odds"] * stakes[i] < thresh - 1e-9
+            if pool[active[i]]["odds"] * _drift_shade(pool[active[i]]["bet_type"]) * stakes[i]
+            < thresh - 1e-9
         ]
         if not offenders:
             f_active, stakes_active = f_opt, stakes
             break
         # 最も payout カバレッジの低い脚を 1 本落として再最適化 (S が減り残りは楽になる)
-        worst = min(offenders, key=lambda i: pool[active[i]]["odds"] * stakes[i])
+        worst = min(
+            offenders,
+            key=lambda i: pool[active[i]]["odds"]
+            * _drift_shade(pool[active[i]]["bet_type"]) * stakes[i],
+        )
         n_dropped_torigami += 1
         # 除去脚を記録 (この iteration で割り当てられていた stake/払戻ごと) → frontend で取り消し線表示。
         dc = pool[active[worst]]
@@ -374,6 +422,10 @@ def build_bundle(
     base["dropped_torigami"] = n_dropped_torigami
     base["dropped_legs"] = dropped_legs       # 買わなかった脚 (reason=torigami|budget)。取り消し線表示用。
     base["torigami_margin"] = float(torigami_margin)
+    # 意思決定に使った券種別ドリフトシェード (後検証用の痕跡)。
+    base["drift_shade"] = {
+        bt: _drift_shade(bt) for bt in sorted({c["bet_type"] for c in pool})
+    }
     return base
 
 
@@ -513,7 +565,8 @@ def build_trifecta_hitmax(
     # build_bundle の汎用フィールドを base にマージしつつ 3連単束固有を上書き。
     base.update({k: bundle[k] for k in bundle if k in base or k in (
         "min_payout_ratio", "dropped_torigami", "dropped_legs",
-        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes")})
+        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes",
+        "drift_shade")})
     base["objective"] = "trifecta_hitmax"
     base["legs"] = bundle.get("legs", [])
     base["total_stake"] = bundle.get("total_stake", 0)
@@ -632,7 +685,8 @@ def build_trifecta_from_keys(
     )
     base.update({k: bundle[k] for k in bundle if k in base or k in (
         "min_payout_ratio", "dropped_torigami", "dropped_legs",
-        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes")})
+        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes",
+        "drift_shade")})
     base["objective"] = "trifecta_claude_select"
     base["rank_source"] = "claude"
     base["selection_source"] = "claude"

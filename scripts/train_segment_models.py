@@ -66,12 +66,13 @@ def _softmax(x, t):
 
 
 def _devig(odds):
+    # power_method_overround には **未正規化** 1/odds (Σ=overround>1) を渡す。
+    # 以前は raw/raw.sum() を渡しており k=1 の恒等写像 (no-op) だった (2026-06-10 修正)。
     raw = 1.0 / np.asarray(odds, float)
-    raw = raw / raw.sum()
     d = power_method_overround({i: float(raw[i]) for i in range(len(raw))})
     v = np.array([d[i] for i in range(len(raw))], float)
     s = v.sum()
-    return v / s if s > 0 else raw
+    return v / s if s > 0 else raw / raw.sum()
 
 
 def _race_arrays(df):

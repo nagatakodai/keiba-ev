@@ -556,10 +556,12 @@ def _pair_bets(combos: list[tuple[int, int, float]], bet_type: str) -> list[BetO
 
 
 def market_win_probs_from_tanfuku(horses: list[OddsparkHorse]) -> dict[int, float]:
-    """単勝オッズ → 市場暗黙 1 着率 (1/odds 正規化)。estimate_probs(market_win_override=) 用。"""
-    raw = {h.number: 1.0 / h.win_odds for h in horses if h.win_odds > 0}
-    s = sum(raw.values())
-    return {k: v / s for k, v in raw.items()} if s > 0 else {}
+    """単勝オッズ → 市場暗黙 1 着率 (**未正規化** 1/odds, Σ=overround>1)。
+
+    estimate_probs(market_win_override=) 用。de-vig (power_method_overround) が
+    overround を観測できるよう正規化しない (正規化済みを渡すと de-vig が no-op 化する)。
+    """
+    return {h.number: 1.0 / h.win_odds for h in horses if h.win_odds > 0}
 
 
 def overlay_oddspark_odds(rd: RaceData, horses: list[OddsparkHorse]) -> RaceData:

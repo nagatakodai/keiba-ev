@@ -485,7 +485,8 @@ def main(
     # 各レースで「モデル確率の高い順 top-K triple」をそれぞれ ¥100 で買う想定。
     # 的中時 payout = result.html の 3 連単払戻金。
     # 注意: これは "Plan A/B/C" の本番ロジックではなく、純粋な top-K 機械購入。
-    # 控除率 22.5% → 期待 ROI は ~77.5%。100% を超えれば長期黒字。
+    # 3連単の控除率は 27.5% (払戻率 72.5%, JRA/NAR とも) → 期待 ROI は ~72.5%。
+    # 100% を超えれば長期黒字。(旧記述「控除 22.5%」は馬連/ワイド系の値で誤り)
     if payout_cache:
         console.rule("[bold]3 連単 synthetic top-K 購入 ROI[/bold]")
         tbl4 = Table(
@@ -501,7 +502,7 @@ def main(
                 roi = m["roi"][k]
                 if roi >= 1.0:
                     s = f"[bold green]{roi*100:.1f}%[/]"
-                elif roi >= 0.775:
+                elif roi >= 0.725:
                     s = f"[green]{roi*100:.1f}%[/]"
                 else:
                     s = f"[red]{roi*100:.1f}%[/]"
@@ -522,8 +523,8 @@ def main(
                 f"(Δ vs Market only: {(prod_t['roi'][10]-market_roi_10)*100:+.2f} pt)"
             )
         console.print(
-            "[dim]控除率 22.5% より理論期待 ROI は ~77.5%。"
-            "実 ROI が 77.5% を超え、かつ市場単独より高い β が β=0.78 の妥当性。[/dim]"
+            "[dim]3連単の控除率 27.5% より理論期待 ROI は ~72.5%。"
+            "実 ROI が 72.5% を超え、かつ市場単独より高い β が β=0.78 の妥当性。[/dim]"
         )
 
     # ---- Plan A/B/C/H1 synthetic ROI (real trifecta odds から production plan_*) ----
@@ -747,7 +748,7 @@ def main(
                 roi = d["roi"]
                 if roi >= 1.0:
                     rs = f"[bold green]{roi*100:.0f}%[/]"
-                elif roi >= 0.775:
+                elif roi >= 0.725:
                     rs = f"[green]{roi*100:.0f}%[/]"
                 else:
                     rs = f"[red]{roi*100:.0f}%[/]"
@@ -768,7 +769,7 @@ def main(
             )
         console.print(
             "[dim]Plan A/B/C は P×O ≥ 1.02 で EV filter する production logic。"
-            "Plan H1 は EV 不問で確率上位 3 点。控除率 22.5% より理論期待 ROI ~77.5%。"
+            "Plan H1 は EV 不問で確率上位 3 点。3連単の控除率 27.5% より理論期待 ROI ~72.5%。"
             "1.0 を超える β が長期黒字。[/dim]"
         )
     elif TRIFECTA_CACHE_DIR.exists() and not odds_cache:

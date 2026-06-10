@@ -21,7 +21,29 @@ import yaml
 
 from .models import BetEvRow, BetOdds, EvRow, Horse, Probabilities, RaceData, TrifectaOdds
 
-# 競馬市場の平均控除率 ≒ 20% (中央競馬の場合 / WIN 単勝)。3 連単は 22.5%。
+# 券種別の払戻率 (= 1 − 控除率)。市場効率なら P×O ≈ この値に張り付く。
+# JRA は公式公表値 (2014-06 改定以降)。NAR は主催者により 70-80% で設定可だが
+# 代表値 (船橋/高知等の現行スケジュール) を置く: 馬連/ワイドが 75% と JRA (77.5%)
+# より重く、3連複も 72.5% と重い点に注意 (= NAR の pair 系は構造的に不利)。
+# ※従来この箇所に「3連単は控除 22.5%」と書かれていたが誤り — 22.5% は馬連/ワイド系
+#   (JRA) の控除率で、3連単の控除は JRA/NAR とも 27.5% (払戻率 72.5%)。
+PAYOUT_RATE: dict[tuple[str, str], float] = {
+    ("jra", "win"): 0.800, ("jra", "place"): 0.800,
+    ("jra", "quinella"): 0.775, ("jra", "wide"): 0.775,
+    ("jra", "exacta"): 0.750, ("jra", "trio"): 0.750,
+    ("jra", "trifecta"): 0.725,
+    ("nar", "win"): 0.800, ("nar", "place"): 0.800,
+    ("nar", "quinella"): 0.750, ("nar", "wide"): 0.750,
+    ("nar", "exacta"): 0.750, ("nar", "trio"): 0.725,
+    ("nar", "trifecta"): 0.725,
+}
+
+
+def payout_rate(bet_type: str, segment: str = "jra") -> float:
+    """券種×セグメント (jra/nar) の払戻率。未知の組合せは保守的に 0.725。"""
+    return PAYOUT_RATE.get((segment, bet_type), 0.725)
+
+
 # `P × O = 1.0` が理論上の +EV ライン。確率モデルの楽観バイアスを差し引いて
 # 1.02 をフロアにする (KEIRIN 版と同様の運用)。
 PXO_FLOOR = 1.02
@@ -59,16 +81,23 @@ LGBM_TEMPERATURE = 0.4
 #   - T_LLM: raw 指数 (0-100) を softmax(v / T_LLM) で 1着率分布に変換する温度。
 #            生値 (T=1) だと exp(100) で過尖鋭化し1頭に集中するため大きめの温度で平坦化する。
 #            T=25 なら 100 vs 50 の差が win 比 ~7倍 (model の spread と同程度)。
-# 実験戦略 (ユーザ指示 2026-06-01): **人気/オッズ (市場) を選抜に使わず、速度図表(model) と
-# Claude 指数のみで賭ける**。N=7,000 バックテストで「公開データの win 確率は市場を OOS で
-# 上回れない (β-MLE=1.0)」が確定したため、市場追随でなく『速度+Claude が市場とズレる所で
-# value を狙う』contrarian 実験に切替え、今後のライブで検証する。
-#   - MARKET_BLEND_LIVE=0.0: 市場ブレンドを無効化 (estimate_probs の market 分岐を skip)。
-#   - LLM_BLEND_DEFAULT=0.5: speed(model) と Claude を 50/50 合成 (per-horse は support で
+# 【market_blend=0 contrarian 実験の終了 (2026-06-10)】
+# 2026-06-01〜の「市場無視 (MARKET_BLEND_LIVE=0.0)」live 実験は実測で失敗が確定した:
+#   - live 蓄積 N=146 の勝者 log-loss: market単独 1.595 < +Claude 1.629 < model+market 1.634
+#     (scripts/validate_claude_value.py) — モデルは市場から価値を**引いて**いた。
+#   - β=0 では past_runs 欠損時に fundamental が一様分布に縮退し、EV=odds/n で
+#     「最長オッズを自動購入」する事故が実発生 (snapshot 2026650608-608-5: 全馬 prob=0.1000
+#     のまま 単勝39.9倍/ワイド47.4倍 を購入)。
+#   - 実弾系列の実測 ROI: EV束 69.7% (n=284) / 3連単束 claude 53.7% (n=99) /
+#     recovery モード 14.9% (n=26) — 全系列が大幅マイナス。
+# → live を市場アンカー (β=BLEND_DEFAULT=0.78) に復帰。Claude 指数・速度図表は
+#   fundamental 側に残り「市場とズレる所」は px_o (P×O) として引き続き観測される。
+# β の再推定は scripts/fit_blend_mle.py (Benter 2-step, α+β 自由) で live 蓄積データから
+# 定期的に行うこと (N=146 時点の示唆は β≈1.0 = 市場ほぼ支配)。
+#   - LLM_BLEND_DEFAULT=0.5: fundamental 段での model×Claude 合成重み (per-horse は support で
 #     スケール = Claude が根拠を持つ馬だけ最大0.5 まで動かす)。
-# BLEND_DEFAULT(=0.78) は backtest/holdout の参照用に残す (live は MARKET_BLEND_LIVE を使う)。
 LLM_BLEND_DEFAULT = 0.5
-MARKET_BLEND_LIVE = 0.0
+MARKET_BLEND_LIVE = BLEND_DEFAULT
 T_LLM = 25.0
 
 # v2 速度図表 (実データ par+pace+trip, src/speed_chart.py) を LightGBM fundamental と
@@ -153,9 +182,12 @@ def estimate_probs(
 
     # 市場ブレンド。market_win_override があれば trifecta より優先 (oddspark 単勝
     # フォールバック等、3連単オッズが無い経路で単勝オッズから市場率を渡す用途)。
+    # de-vig (power method) には **未正規化** の暗黙率 (Σ=overround>1) が必要。
+    # 正規化済みを渡すと k=1 (恒等写像) に縮退して favorite-longshot bias 補正が
+    # 一切効かない (2026-06-10 修正)。override も呼び出し元が未正規化 1/odds を渡す。
     win = fundamental_win
     if market_blend > 0 and (market_win_override or rd.trifecta):
-        market_raw = market_win_override or market_win_probs(rd.trifecta)
+        market_raw = market_win_override or market_win_probs(rd.trifecta, normalize=False)
         if market_raw:
             market = market_raw
             try:
@@ -218,11 +250,13 @@ def estimate_probs(
 
 
 def power_method_overround(raw_probs: dict[int, float], *, tol: float = 1e-6, max_iter: int = 60) -> dict[int, float]:
-    """Power-method de-overround (Clarke 2017): Σ p_i^(1/k) = 1 を満たす k を Brent 法で解く。
+    """Power-method de-overround (Clarke 2017): Σ p_i^(1/k) = 1 を満たす k を bisection で解く。
 
-    raw_probs は「1/odds を正規化しただけの暗黙率」(= Σ=1)。これを power 変換で
-    favorite-longshot bias を補正する。k > 1 で人気馬寄り、k < 1 で大穴寄りに歪む。
-    JRA / NAR は overround が大きいため k は通常 1.0-1.2 の間に収まる。
+    raw_probs は **未正規化の暗黙率 1/odds** (= Σ=overround>1) を渡すこと。
+    Σ=1 に正規化済みの入力では解が厳密に k=1 (恒等写像) になり、de-vig も
+    favorite-longshot bias 補正も一切働かない (2026-06-10 に発覚した no-op バグ)。
+    未正規化入力なら 1/k>1 の power 縮小が「低確率ほど相対的に大きく削る」形で
+    働き、本命寄せ (FLB の古典補正) になる。
     """
     if not raw_probs:
         return raw_probs
@@ -312,6 +346,28 @@ def _fundamental_win_probs(horses, feats, segment: str | None = None,
         if sv2:
             base = _loglinear_blend(base, sv2, speed_v2_blend)
     return base
+
+
+def fundamental_no_info(rd, *, speed_v2_blend: float = 0.0) -> bool:
+    """fundamental (市場・Claude 指数を入れる前のモデル確率) が無情報 (一様縮退) かを判定。
+
+    past_runs が無い等で特徴量が全馬同値だと fundamental は厳密に一様分布になる。
+    一様 fundamental を市場とブレンドすると「市場の平坦化 = 大穴の確率を機械的に
+    持ち上げる」ことになり、大穴側に偽の +EV (px_o>1) が出る (β=0 では EV=odds/n で
+    最長オッズ自動購入になっていた)。EV束はこの状態では組んではいけない — 呼び出し側
+    (analyze) が True のとき recommended_bundle を見送りにする。
+    """
+    horses = [h for h in rd.race.horses if not h.absent]
+    if not horses:
+        return True
+    from .features import build_features
+
+    feats = build_features(rd)
+    f = _fundamental_win_probs(horses, feats, segment_of_rd(rd), speed_v2_blend=speed_v2_blend)
+    if not f:
+        return True
+    vals = list(f.values())
+    return (max(vals) - min(vals)) < 1e-9
 
 
 # 補強根拠件数 (support) → llm_blend に掛ける per-horse 係数。根拠の無い馬は 0 (= モデル/市場に
@@ -568,10 +624,15 @@ def _lgbm_predict(horses, feats, segment: str | None = None) -> dict[int, float]
         return None
 
 
-def market_win_probs(trifecta: Iterable[TrifectaOdds]) -> dict[int, float]:
+def market_win_probs(
+    trifecta: Iterable[TrifectaOdds], *, normalize: bool = True
+) -> dict[int, float]:
     """3 連単オッズを 1 着で marginalize した market-implied 1 着率。
 
-    `sum_{b,c} 1/odds(a,b,c)` を計算し、全体で正規化。控除率は正規化で吸収される。
+    `sum_{b,c} 1/odds(a,b,c)` を計算する。normalize=True で全体を Σ=1 に正規化
+    (控除率は正規化で吸収)。**de-vig (power_method_overround) に渡す場合は
+    normalize=False の未正規化値 (Σ=overround>1) を使うこと** — 正規化済みを
+    渡すと power method が k=1 の恒等写像に縮退し FLB 補正が効かない。
     """
     raw: dict[int, float] = {}
     for t in trifecta:
@@ -582,6 +643,8 @@ def market_win_probs(trifecta: Iterable[TrifectaOdds]) -> dict[int, float]:
     s = sum(raw.values())
     if s <= 0:
         return {}
+    if not normalize:
+        return raw
     return {k: v / s for k, v in raw.items()}
 
 
