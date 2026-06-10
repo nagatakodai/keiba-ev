@@ -97,6 +97,7 @@ export default async function PredictionDetailPage({
   const topByProb = [...allProbRows].sort((a, b) => b.prob - a.prob).slice(0, 20);
 
   const finish = d.result?.finish_order;
+  const nRunners = nRunnersOf(d);
 
   return (
     <Page>
@@ -173,13 +174,17 @@ export default async function PredictionDetailPage({
         // 実弾既定束) は EV束、それ以前は 3連単束 (無ければ旧実弾だった EV束に fallback)。
         // dashboard / calibrate / PredictionsList と同じ規則 (乖離すると headline が矛盾する)。
         const tLegs = d.recommended_bundle_t?.legs;
-        const tParticipated = Array.isArray(tLegs) && tLegs.length > 0;
+        // Claude 指数ゲート: rank_source != "claude" (model 縮退) の3連単束は自動投票
+        // されない (auto_watch/daemon の二重ガード) ため、headline でも「見送り」扱い。
+        // api/store.py の計測規則と揃える (乖離すると dashboard と headline が矛盾する)。
+        const tParticipated = d.recommended_bundle_t?.rank_source === "claude" &&
+          Array.isArray(tLegs) && tLegs.length > 0;
         const tHit = !!(finish && tParticipated &&
-          tLegs!.some((l) => betHits(l.bet_type, l.key, finish)));
+          tLegs!.some((l) => betHits(l.bet_type, l.key, finish, nRunners)));
         const bundleLegs = d.recommended_bundle?.legs;
         const bundleEmpty = !Array.isArray(bundleLegs) || bundleLegs.length === 0;
         const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
-          bundleLegs.some((l) => betHits(l.bet_type, l.key, finish)));
+          bundleLegs.some((l) => betHits(l.bet_type, l.key, finish, nRunners)));
         const useEv = isEvMeasured(d.saved_at);
         const useTrifecta = !useEv && tParticipated;
         const skipped = useEv ? bundleEmpty : useTrifecta ? false : bundleEmpty;
@@ -223,7 +228,12 @@ export default async function PredictionDetailPage({
                   3連単束{useEv ? "(参考)" : " (実弾)"} {tHit ? "✓ 的中" : "× 不的中"}
                 </Badge>
               ) : (
-                <Badge tone="muted">3連単束 見送り</Badge>
+                <Badge tone="muted">
+                  3連単束 見送り
+                  {d.recommended_bundle_t?.legs?.length &&
+                    d.recommended_bundle_t.rank_source !== "claude"
+                    ? " (Claude指数なし→投票せず)" : ""}
+                </Badge>
               )}
             </div>
           </Card>
@@ -249,6 +259,7 @@ export default async function PredictionDetailPage({
           tables={d.bet_tables}
           tablesG={d.bet_tables_g}
           finish={finish}
+          nRunners={nRunners}
         />
       )}
 
@@ -349,10 +360,27 @@ type EffCandidate = {
   hit: boolean;
 };
 
+// 出走頭数の推定 (複勝の頭数ルール用): win_probs_model → bet_tables.win →
+// horse_aptitude の順 (api/store.py の n_runners 推定と同じ規則)。≤18 頭なので
+// bet_tables.win の top-30 cap には掛からない = 実頭数。不明なら null (従来 top-3)。
+function nRunnersOf(d: PredictionDetail): number | null {
+  const wpm = d.win_probs_model;
+  if (wpm && Object.keys(wpm).length > 0) return Object.keys(wpm).length;
+  const win = d.bet_tables?.win;
+  if (win && win.length > 0) return win.length;
+  if (d.horse_aptitude && d.horse_aptitude.length > 0) return d.horse_aptitude.length;
+  return null;
+}
+
 // bet type ごとの finish 的中判定 (既存の placeHits/wideHits/finishKeyForBetType を流用)。
-function betHits(betType: string, key: number[], finish?: number[]): boolean {
+function betHits(
+  betType: string,
+  key: number[],
+  finish?: number[],
+  nRunners?: number | null,
+): boolean {
   if (!finish) return false;
-  if (betType === "place") return placeHits(key, finish);
+  if (betType === "place") return placeHits(key, finish, nRunners);
   if (betType === "wide") return wideHits(key, finish);
   if (betType === "trifecta") {
     if (finish.length < 3) return false;
@@ -369,6 +397,7 @@ function quarterKelly(kelly: number): number {
 
 function collectEfficientCandidates(d: PredictionDetail, finish?: number[]): EffCandidate[] {
   const out: EffCandidate[] = [];
+  const nR = nRunnersOf(d);
   const seen = new Set<string>();
   const push = (
     betType: string,
@@ -384,7 +413,7 @@ function collectEfficientCandidates(d: PredictionDetail, finish?: number[]): Eff
     const id = `${betType}:${key.join("-")}`;
     if (seen.has(id)) return;
     seen.add(id);
-    out.push({ betType, key, prob, odds, pxo, tier, kelly, hit: betHits(betType, key, finish) });
+    out.push({ betType, key, prob, odds, pxo, tier, kelly, hit: betHits(betType, key, finish, nR) });
   };
   // 3 連単: LLM 補強後があれば優先
   const triRows = d.evidence_rows ?? d.rows;
@@ -468,6 +497,7 @@ function TopRecommendationCard({
         finish={finish}
         finalOdds={d.result?.final_odds}
         evRegime={isEvMeasured(d.saved_at)}
+        nRunners={nRunnersOf(d)}
       />
     );
   }
@@ -543,7 +573,8 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
   const b = d.recommended_bundle_t;
   if (!b || !b.legs || b.legs.length === 0) return null;
   const settled = !!finish && finish.length >= 3;
-  const hit = !!(finish && b.legs.some((l) => betHits(l.bet_type, l.key, finish)));
+  const nR = nRunnersOf(d);
+  const hit = !!(finish && b.legs.some((l) => betHits(l.bet_type, l.key, finish, nR)));
   const osum = b.odds_summary;
   const torigamiOn = (b.dropped_torigami ?? 0) >= 0 && b.min_payout_ratio != null;
   // Claude 指数なし (model 縮退) の3連単束は自動投票されない (auto_watch/daemon が enqueue を skip)。
@@ -625,7 +656,7 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
         </div>
       )}
       <div className="mt-4">
-        <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} droppedLegs={b.dropped_legs} />
+        <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} droppedLegs={b.dropped_legs} nRunners={nR} />
       </div>
       <TrifectaStakePreview bundle={b} />
       <p className="mt-3 text-xs text-(--color-muted)">
@@ -651,6 +682,7 @@ function BundleLegsTable({
   finish,
   finalOdds,
   droppedLegs,
+  nRunners,
 }: {
   legs: BundleLeg[];
   finish?: number[];
@@ -658,6 +690,8 @@ function BundleLegsTable({
   finalOdds?: Record<string, number>;
   // 買わなかった脚 (= トリガミ防止 or 予算で除外)。取り消し線で末尾に併記。
   droppedLegs?: DroppedLeg[];
+  // 出走頭数 (複勝の頭数ルール用)。null/未指定なら従来 top-3 判定。
+  nRunners?: number | null;
 }) {
   const hasFinal = !!finalOdds && Object.keys(finalOdds).length > 0;
   const dropped = droppedLegs ?? [];
@@ -683,7 +717,7 @@ function BundleLegsTable({
         <tbody>
           {legs.map((l) => {
             const k = l.key.join("-");
-            const hit = betHits(l.bet_type, l.key, finish);
+            const hit = betHits(l.bet_type, l.key, finish, nRunners);
             const fo = finalOdds?.[`${l.bet_type}:${k}`];
             // 予想→最終で乖離した方向に色付け (上昇=緑/下落=赤)。
             const foTone =
@@ -789,6 +823,7 @@ function BundleCard({
   variant = "yield",
   finalOdds,
   evRegime = false,
+  nRunners,
 }: {
   bundle: RecommendedBundle;
   finish?: number[];
@@ -798,6 +833,8 @@ function BundleCard({
   finalOdds?: Record<string, number>;
   // EV束計測レジーム (saved_at >= EV_CUTOFF): EV束が実弾既定束 (2026-06-10〜)。
   evRegime?: boolean;
+  // 出走頭数 (複勝の頭数ルール用)。null/未指定なら従来 top-3 判定。
+  nRunners?: number | null;
 }) {
   const isHit = variant === "hit";
   const legs = bundle.legs ?? [];
@@ -806,7 +843,7 @@ function BundleCard({
   const halfApplied = (bundle.kelly_fraction ?? 1) <= 0.75;
   const half = Math.round(bundle.total_stake / 2 / 100) * 100;
   const nTypes = new Set(legs.map((l) => l.bet_type)).size;
-  const bundleHit = finish ? legs.some((l) => betHits(l.bet_type, l.key, finish)) : false;
+  const bundleHit = finish ? legs.some((l) => betHits(l.bet_type, l.key, finish, nRunners)) : false;
   // EV束は 2026-06-06 以降モデルのみの参考値 (claude -p 検証=回収優先AI は撤去、投票しない)。
   // validated バッジは旧 snapshot の記録としてのみ表示される。
   const validated = !isHit && bundle.llm_review?.validated === true;
@@ -903,7 +940,7 @@ function BundleCard({
               }
             />
           </div>
-          <BundleLegsTable legs={legs} finish={finish} finalOdds={finalOdds} />
+          <BundleLegsTable legs={legs} finish={finish} finalOdds={finalOdds} nRunners={nRunners} />
           {bundle.llm_review?.validated && (bundle.llm_review.summary || (bundle.llm_review.cuts?.length ?? 0) > 0) && (
             <div className="mt-3 rounded-md border border-(--color-magenta)/30 bg-(--color-magenta)/5 p-3 text-xs">
               <span className="font-bold text-(--color-magenta)">claude -p 調査:</span>{" "}
@@ -1305,10 +1342,14 @@ function finishKeyForBetType(bt: string, finish?: number[]): string | null {
   return null;
 }
 
-// 複勝専用: 「該当 key (1 馬) が finish の top3 に入っているか」を判定。
-function placeHits(key: number[], finish?: number[]): boolean {
+// 複勝専用: 「該当 key (1 馬) が finish の払戻対象に入っているか」を判定。
+// 出走頭数ルール (2026-06-11 bughunt 第4R, backend portfolio._bet_hits と同じ):
+// 7頭以下は複勝2着まで・4頭以下は発売なし。頭数不明 (null) は従来どおり top3。
+function placeHits(key: number[], finish?: number[], nRunners?: number | null): boolean {
   if (!finish || finish.length < 3 || key.length !== 1) return false;
-  return finish.slice(0, 3).includes(key[0]);
+  if (nRunners != null && nRunners <= 4) return false;
+  const paying = nRunners != null && nRunners <= 7 ? finish.slice(0, 2) : finish.slice(0, 3);
+  return paying.includes(key[0]);
 }
 
 // ワイド専用: 「該当 key (2 馬) が finish の top3 のうち 2 頭を含むか」を判定。
@@ -1325,11 +1366,14 @@ function BetTable({
   rows,
   rowsG,
   finish,
+  nRunners,
 }: {
   bt: string;
   rows: BetEvRow[];
   rowsG?: BetEvRow[];
   finish?: number[];
+  // 出走頭数 (複勝の頭数ルール用)。null/未指定なら従来 top-3 判定。
+  nRunners?: number | null;
 }) {
   if (rows.length === 0) return null;
   const finishKey = finishKeyForBetType(bt, finish);
@@ -1371,7 +1415,7 @@ function BetTable({
                 bt === "wide"
                   ? wideHits(r.key, finish)
                   : bt === "place"
-                    ? placeHits(r.key, finish)
+                    ? placeHits(r.key, finish, nRunners)
                     : finishKey === k;
               const inG = gKeySet.has(k);
               return (
@@ -1418,10 +1462,12 @@ function BetTablesCard({
   tables,
   tablesG,
   finish,
+  nRunners,
 }: {
   tables: Record<string, BetEvRow[]>;
   tablesG?: Record<string, BetEvRow[]>;
   finish?: number[];
+  nRunners?: number | null;
 }) {
   // bet type の表示順: リスク低 → 高 (単勝 → 複勝 → 馬連 → ワイド → 馬単 → 3 連複)
   const order = ["win", "place", "quinella", "wide", "exacta", "trio"];
@@ -1445,6 +1491,7 @@ function BetTablesCard({
           rows={tables[bt]}
           rowsG={tablesG?.[bt]}
           finish={finish}
+          nRunners={nRunners}
         />
       ))}
       <p className="text-xs text-(--color-muted) mt-2">

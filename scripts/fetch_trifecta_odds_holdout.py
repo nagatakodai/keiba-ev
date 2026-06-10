@@ -103,7 +103,11 @@ def main() -> int:
             try:
                 htmls: list[str] = []
                 blocked = False
-                for jiku in range(1, n_h + 1):
+                # 注意 (2026-06-11): jiku は軸馬番。n_h (頭数) で回すと取消レースで
+                # 馬番 > n_h の出走馬の1着オッズを取りこぼす。holdout dataset は頭数しか
+                # 持たないため、保守的に「頭数+2」まで余分に巡回する (存在しない jiku の
+                # ページは組ゼロで無害、取消が3頭以上のレースは稀)。
+                for jiku in range(1, min(n_h + 3, 19)):
                     url = odds_get_form_url(rid, "b8", jiku=jiku)
                     page.goto(url, wait_until="domcontentloaded", timeout=args.timeout_ms)
                     page.wait_for_timeout(args.settle_ms)

@@ -286,6 +286,19 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             key = leg.get("key") or []
             return f"{bt}:{'-'.join(str(k) for k in key)}"
 
+        # 同着 (dead heat) 対応 (2026-06-11 bughunt 第4R): netkeiba-html result の
+        # final_odds は**払戻があった組のみ**の payout テーブル。finish_order は同着の
+        # 片側しか持てないため、leg_id がテーブルに載っていれば finish 不一致でも実払戻
+        # あり = 的中。keibago/jra/auto の final_odds は束の全脚のオッズ snapshot
+        # (的中と無関係に載る) なのでこの経路では使わない。
+        _payout_table = final_odds if result.get("source") == "netkeiba-html" else {}
+
+        def _leg_hit(leg: dict) -> bool:
+            if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])),
+                         a3, b3, c3, n_runners):
+                return True
+            return _leg_id_for(leg) in _payout_table
+
         def _bundle_stats(bundle: dict | None) -> dict:
             """bundle dict → {legs, hit_legs, stake, payout(予想), payout_final(最終),
             participated, hit} の集計。
@@ -295,11 +308,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             final_odds 不在脚は snapshot odds に fallback (= payout と同じ値)。
             """
             legs = (bundle or {}).get("legs") or []
-            hit_legs = [
-                leg for leg in legs
-                if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])),
-                             a3, b3, c3, n_runners)
-            ]
+            hit_legs = [leg for leg in legs if _leg_hit(leg)]
             payout_snapshot = sum(int(leg.get("payout_if_hit", 0)) for leg in hit_legs)
             # 実払戻 (最終オッズ × stake) を計算。final_odds 不在脚は snapshot odds で補完。
             payout_final = 0

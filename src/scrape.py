@@ -186,18 +186,23 @@ def _is_empty_block_html(html: str) -> bool:
 def fetch_trifecta_full(
     race_id: str,
     *,
-    n_horses: int,
+    n_horses: int | None = None,
+    jiku_numbers: list[int] | None = None,
     settle_ms: int = 1500,
     timeout_ms: int = 60_000,
 ) -> list[str]:
     """3 連単オッズを全 1 着馬ぶん AJAX 取得して HTML 配列で返す。
 
     呼び出し側で `parse_trifecta_html_list` に渡して TrifectaOdds に変換する。
-    n_horses は出走頭数 (取消含まず)。1..n_horses 全てに対して fetch する。
+    **jiku_numbers (出走馬の馬番リスト) を渡すこと** — jiku は「軸馬番」であり頭数ではない。
+    旧 n_horses (頭数で 1..n を巡回) は後方互換で残すが、取消馬がいると
+    n_horses < 最大馬番 になり**馬番 > n_horses の出走馬の1着オッズを丸ごと取りこぼす**
+    (2026-06-11 bughunt: 全レースの 5.0% で発生、大本命欠落で市場ブレンドが崩壊する実例を再現)。
 
     途中で netkeiba CloudFront 400 を検出したら `NetkeibaBlocked` を投げる
     (partial 取得して silent に空オッズで進むのを防ぐ)。
     """
+    jikus = list(jiku_numbers) if jiku_numbers else list(range(1, (n_horses or 0) + 1))
     htmls: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -211,7 +216,7 @@ def fetch_trifecta_full(
         )
         page = ctx.new_page()
         try:
-            for jiku in range(1, n_horses + 1):
+            for jiku in jikus:
                 url = odds_get_form_url(race_id, "b8", jiku=jiku)
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                 page.wait_for_timeout(settle_ms)
@@ -272,18 +277,22 @@ def fetch_odds_per_jiku(
     race_id: str,
     type_: str,
     *,
-    n_horses: int,
+    n_horses: int | None = None,
+    jiku_numbers: list[int] | None = None,
     settle_ms: int = 1500,
     timeout_ms: int = 60_000,
 ) -> list[str]:
     """jiku iteration が必要な odds page (b5 馬単 / b6 3 連複 / b8 3 連単) を全軸馬ぶん取得。
 
     馬単は jiku=1 着馬、3 連複は jiku=軸馬 1 頭、3 連単は jiku=1 着馬。
+    **jiku_numbers (出走馬の馬番リスト) を渡すこと** — jiku は軸馬番であり頭数ではない
+    (fetch_trifecta_full と同じ取消レース取りこぼしの修正, 2026-06-11)。
     """
     if type_ not in ("b5", "b6", "b8"):
         raise ValueError(
             f"fetch_odds_per_jiku は b5/b6/b8 のみ対応。{type_} は fetch_odds_simple を使う。"
         )
+    jikus = list(jiku_numbers) if jiku_numbers else list(range(1, (n_horses or 0) + 1))
     htmls: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -297,7 +306,7 @@ def fetch_odds_per_jiku(
         )
         page = ctx.new_page()
         try:
-            for jiku in range(1, n_horses + 1):
+            for jiku in jikus:
                 url = odds_get_form_url(race_id, type_, jiku=jiku)
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                 page.wait_for_timeout(settle_ms)

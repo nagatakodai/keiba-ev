@@ -153,6 +153,15 @@ def main() -> None:
         top3 = set(fo[:3])
 
         # --- 複勝 ---
+        # 出走頭数ルール (2026-06-11 bughunt 第4R): 7頭以下は複勝2着まで・4頭以下は
+        # 発売なし。win_rows は実頭数 (≤18 で top-30 cap 非該当) なので長さで判定。
+        n_run = len(win_rows)
+        if n_run <= 4:
+            paying_place: set[int] = set()
+        elif n_run <= 7:
+            paying_place = set(fo[:2])
+        else:
+            paying_place = top3
         place_rows = (d.get("bet_tables") or {}).get("place") or []
         if place_rows:
             p3 = place3_prob(win, len(win))
@@ -169,7 +178,7 @@ def main() -> None:
                     a = agg[("place", seg, thr)]
                     a["n"] += 1
                     a["stake"] += 100
-                    if h in top3:
+                    if h in paying_place:
                         a["hits"] += 1
                         f_odds = final.get(f"place:{h}") or odds
                         a["ret"] += f_odds * 100

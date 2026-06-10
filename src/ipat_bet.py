@@ -506,6 +506,19 @@ class BettingSession:
         if total > self.max_total_stake:
             raise IpatBetError(
                 f"レース合計 ¥{total:,} > 上限 ¥{self.max_total_stake:,} — 投入しない (誤入力防止)")
+        # ログイン状態プローブ (2026-06-11 bughunt, oddspark _goto_matome と対):
+        # IPAT のサーバ側セッション失効は SPA がログイン画面へ戻るだけで、従来は
+        # _select_course_race の「レースボタン不検出」(マーカー非該当の IpatBetError) に
+        # 化けて req が .done で静かに消費されていた。logged_in_marker (text=ログアウト)
+        # 不在ならマーカー該当文言で raise → SessionDeadError → daemon fail-fast + req 残置。
+        try:
+            if self.page.locator(SELECTORS["logged_in_marker"]).count() == 0:
+                raise IpatBetError(
+                    "セッション切れの可能性 (ログアウトリンク不在) — ログインし直してください")
+        except IpatBetError:
+            raise
+        except Exception:  # noqa: BLE001 — locator 自体の失敗はブラウザ死系 (別マーカーが拾う)
+            pass
         venue = _jra_venue_name(netkeiba_rid)
         rno = _race_no(netkeiba_rid)
         # 場・レースは1回だけ選択 (式別を変えても racecard は維持される)

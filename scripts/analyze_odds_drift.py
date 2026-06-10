@@ -375,7 +375,10 @@ def main():
     print(f"{'group':<34}{'n':>6}{'1/med':>8}{'1/p25':>8}{'1/p10':>8}{'1/p5':>8}")
     for c in ("NAR", "JRA"):
         for bt in BT_JA:
-            xs = [r[3] for r in both if r[0] == bt and r[1] == c]
+            # margin はトリガミ (的中したのに払戻<投資) 防止用なので**的中組のみ**で
+            # 分位点を取る (2026-06-11 bughunt 第4R: 外れ組は払戻に関与せず、混ぜると
+            # 分布が外れ組のドリフトに支配されて margin が過大/過小に振れる)。
+            xs = [r[3] for r in both if r[0] == bt and r[1] == c and r[4]]
             if len(xs) < 8:
                 continue
             print(f"{c+' '+BT_JA[bt]:<34}{len(xs):>6}"

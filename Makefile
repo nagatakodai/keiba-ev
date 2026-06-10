@@ -204,13 +204,12 @@ odds-capture:
 
 watch-auto:
 	@echo "watch-auto: SCORE $(SCORE_WINDOW)〜$(SCORE_TOLERANCE)分 / BET $(WINDOW)±$(TOLERANCE)分 / $(INTERVAL_SEC)秒おき / Ctrl+C で終了"
-	@# BET_ODDSPARK/BET_IPAT 指定時は bet_scheduler を併走させる (2026-06-11 bughunt #12):
-	@# tick 量子化 (60s + 長い score dispatch) だけだと発火窓 (BET_LEAD_SEC) を跨いで
-	@# 締切超過の賭け逃しが出る。scheduler は締切 BET_LEAD_SEC 秒前に精密発火する。
+	@# bet_scheduler は**投票 OFF (paper) でも常時併走** (2026-06-11 bughunt):
+	@# scheduler 無しだと発火が tick 量子化 (60s + 長い score dispatch) され、混雑日に
+	@# ~22% のレースが予約破棄 = bet snapshot/結果取得が無く計測から消える。
+	@# enqueue は bet フラグでゲート済みなので paper でも実弾は飛ばない。
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
-		if [ -n "$(BET_ODDSPARK)$(BET_IPAT)" ]; then \
-			$(PY) -m src.bet_scheduler $(SCHED_ARGS) $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,) & \
-		fi; \
+		$(PY) -m src.bet_scheduler $(SCHED_ARGS) $(if $(BET_ODDSPARK),--bet-oddspark,) $(if $(BET_IPAT),--bet-ipat,) & \
 		while true; do \
 			$(PY) -m src.auto_watch \
 				$(BAND_ARGS) \

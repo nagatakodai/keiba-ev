@@ -176,7 +176,7 @@ export default function WatchAutoPage() {
       await api.startWatch({
         score_window: Number.isFinite(parseFloat(scoreWindow)) ? parseFloat(scoreWindow) : 5,
         score_tolerance: Number.isFinite(parseFloat(scoreTolerance)) ? parseFloat(scoreTolerance) : 2,
-        bet_lead_sec: parseInt(betLeadSec) || 60,
+        bet_lead_sec: parseInt(betLeadSec) || 150,
         llm_blend: llmBlend === "" ? null : parseFloat(llmBlend),
         interval_sec: parseInt(intervalSec) || 60,
         ev_max: evMax === "" ? null : parseFloat(evMax),

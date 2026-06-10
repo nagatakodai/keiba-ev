@@ -160,7 +160,14 @@ def main() -> None:
                 hit = _leg_hits(bt, key, fo, n_runners)
                 fok = _final_odds_key(bt, key)
                 f_odds = final.get(fok)
-                if f_odds and l.get("odds"):
+                # 同着 (dead heat): netkeiba-html の final_odds は払戻組のみの payout
+                # テーブルなので、載っていれば finish_order 不一致でも実払戻あり = 的中。
+                if not hit and r.get("source") == "netkeiba-html" and f_odds:
+                    hit = True
+                # ドリフトは**的中脚のみ**で測る (2026-06-11 bughunt 第4R): netkeiba-html
+                # の final は的中組しか持たず keibago/jra は全脚持つため、無条件に集める
+                # とソース毎にサンプル構成が違う歪んだ分布になる。
+                if hit and f_odds and l.get("odds"):
                     drift[bt].append(f_odds / l["odds"])
                 if hit:
                     c["hits"] += 1

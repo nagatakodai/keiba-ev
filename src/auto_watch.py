@@ -844,6 +844,19 @@ def _run_phase(
                 console.print(f"[red]bet 発火 (interleave) 失敗: {e}[/red]")
 
 
+# 発火しても投入が間に合わない最低残り時間 (秒)。dispatch 31-95s + daemon poll ~5s +
+# カート投入 20-40s の実測に対し、これ未満で撃っても締切後投入で不成立 = 無駄打ち。
+# env KEIBA_MIN_FIRE_RUNWAY で上書き可。
+MIN_FIRE_RUNWAY_SEC = int(os.environ.get("KEIBA_MIN_FIRE_RUNWAY") or 40)
+# 同時締切クラスタ用の並列 dispatch 上限。claim (atomic rename) が排他を保証するので
+# 並列化は安全。直列だと同時締切ペアの2件目が dispatch 1件分 (31-95s) 遅れて締切超過
+# する (2026-06-11 bughunt — 実データに gap=0s の同時締切ペアが日常的に存在)。
+FIRE_MAX_PARALLEL = int(os.environ.get("KEIBA_FIRE_MAX_PARALLEL") or 3)
+# bet 発火の失敗再試行 cooldown (秒)。恒常失敗レース (取消等) が close_at 最小のため
+# 毎 pass 先頭で再 dispatch されて後続をブロックするのを防ぐ。
+FIRE_FAILED_COOLDOWN_SEC = 120
+
+
 def _fire_due_bets(
     now_ts: int, *, bet_lead_sec: int, market_blend, aptitude_top, no_llm: bool,
     llm_blend, bet_oddspark: bool, bet_ipat: bool, dry_run: bool,
@@ -852,21 +865,21 @@ def _fire_due_bets(
 
     band スキャンせず予約時刻ベース。締切を過ぎた予約は破棄 (撃っても不成立)。発火済 (rc==0)
     は予約を消し analyzed_bet で二重防止。未発走 (まだ時刻でない) はそのまま残す。
+    複数レースが同時に発火帯へ入ったら **並列 dispatch** する (claim が排他を保証)。
     """
     sched = _read_bet_schedule()
     if not sched:
         return
     _cleanup_stale_claims()
     analyzed = _load_analyzed("bet")
-    # **締切が近い順**に処理する (旧実装はファイル名順 = 場コード順で、最緊急レースが
-    # 前のレースの長い dispatch の後回しになり締切超過していた, 2026-06-10 bughunt)。
+    # **締切が近い順**に処理する (最緊急レースを先に claim する)。
     sched.sort(key=lambda r: int(r.get("close_at") or 0) or 2 ** 62)
+
+    # ── phase 1: ガード + claim — 発火対象を確定 ──
+    to_fire: list[dict] = []
     for race in sched:
         rid = race["race_id"]
         close_at = int(race.get("close_at") or 0)
-        # dispatch は数十秒かかるため now は予約ごとに再取得する (引数 now_ts は tick
-        # 開始時刻で stale — 旧実装は stale now で「締切経過」判定をすり抜け、締切後に
-        # dispatch/enqueue まで実行していた)。
         now = int(time.time())
         if rid in analyzed:
             _remove_bet_schedule(rid)
@@ -882,6 +895,18 @@ def _fire_due_bets(
         if close_at - now > bet_lead_sec:
             continue
         secs = close_at - now
+        # 残り時間が dispatch+カート投入に足りない → 撃っても買えないので破棄
+        # (snapshot だけ作って計測上「投票」に見える乖離も防ぐ, 2026-06-11 bughunt)
+        if secs < MIN_FIRE_RUNWAY_SEC:
+            console.print(f"[yellow]bet 予約破棄 (残り {secs}s < {MIN_FIRE_RUNWAY_SEC}s — "
+                          f"投入が間に合わない): {rid}[/yellow]")
+            _remove_bet_schedule(rid)
+            continue
+        # 直近で dispatch 失敗したレースは cooldown (恒常失敗レースが毎 pass 先頭で
+        # 後続をブロックするのを防ぐ。締切が来れば上の破棄ガードが掃除する)
+        if _recently_failed(rid, now, cooldown_sec=FIRE_FAILED_COOLDOWN_SEC):
+            console.print(f"[dim]bet 発火 skip (failed cooldown): {rid}[/dim]")
+            continue
         tag = f"{race.get('venue')} {race.get('race_no')}R 締切まで {secs}s"
         if dry_run:
             console.print(f"[bold green]bet 発火:[/bold green] {tag} ({rid})")
@@ -893,7 +918,15 @@ def _fire_due_bets(
             console.print(f"[dim]bet 発火 skip (他プロセスが処理中): {rid}[/dim]")
             continue
         console.print(f"[bold green]bet 発火:[/bold green] {tag} ({rid})")
-        nkrid = race.get("netkeiba_race_id", rid)
+        to_fire.append(race)
+
+    if not to_fire:
+        return
+
+    # ── phase 2: 並列 dispatch (claim 済 = 排他保証済) ──
+    def _dispatch_one(race: dict) -> tuple[dict, int, int, int]:
+        nkrid = race.get("netkeiba_race_id", race["race_id"])
+        started = int(time.time())
         if race.get("source") == "keibabook":
             rc = _dispatch_jra(nkrid, race.get("start_at", 0),
                                market_blend=market_blend, aptitude_top=aptitude_top,
@@ -902,12 +935,46 @@ def _fire_due_bets(
             rc = _dispatch_nar_fallback(nkrid, race.get("start_at", 0),
                                         market_blend=market_blend, aptitude_top=aptitude_top,
                                         no_llm=no_llm, phase="bet", llm_blend=llm_blend)
+        return race, rc, started, int(time.time())
+
+    results: list[tuple[dict, int, int, int]] = []
+    if len(to_fire) == 1:
+        results.append(_dispatch_one(to_fire[0]))
+    else:
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=FIRE_MAX_PARALLEL) as ex:
+            futs = {ex.submit(_dispatch_one, r): r for r in to_fire}
+            for f in _cf.as_completed(futs):
+                try:
+                    results.append(f.result())
+                except Exception as e:  # noqa: BLE001
+                    r = futs[f]
+                    console.print(f"[red]bet 発火 dispatch 例外 race={r['race_id']}: {e}[/red]")
+                    _unclaim_bet_schedule(r["race_id"])
+
+    # ── phase 3: 逐次後処理 (mark/enqueue/result fetch) ──
+    for race, rc, started, finished in results:
+        rid = race["race_id"]
+        close_at = int(race.get("close_at") or 0)
+        nkrid = race.get("netkeiba_race_id", rid)
+        # bet 発火も history に記録する (失敗 cooldown / dispatch 所要時間の実測に使う)
+        _append_history({
+            "started_at": started, "finished_at": finished, "phase": "bet",
+            "race_id": rid, "netkeiba_race_id": nkrid, "url": race.get("url", ""),
+            "venue": race.get("venue"), "race_no": race.get("race_no"),
+            "start_at": race.get("start_at", 0), "close_at": close_at, "rc": rc,
+        })
         if rc != 0:
-            console.print(f"[red]bet 発火 analyze 失敗 rc={rc} race={rid} (次tickで再試行)[/red]")
-            _unclaim_bet_schedule(rid)   # 予約に戻す (締切前なら次tickで再試行)
+            console.print(f"[red]bet 発火 analyze 失敗 rc={rc} race={rid} (cooldown 後再試行)[/red]")
+            _unclaim_bet_schedule(rid)   # 予約に戻す (締切前なら cooldown 後に再試行)
             continue
         _mark_analyzed(rid, "bet")
         _release_bet_claim(rid)
+        # 締切再チェック: dispatch 完了が締切を跨いだら enqueue しない
+        # (daemon 投入は不成立確定 — 計測と実投票の乖離を防ぐ, 2026-06-11 bughunt)
+        if close_at and int(time.time()) >= close_at:
+            console.print(f"[yellow]enqueue skip (dispatch 完了が締切後): {rid}[/yellow]")
+            continue
         if bet_oddspark:
             try:
                 if _enqueue_oddspark_bet(rid, nkrid):
@@ -926,7 +993,7 @@ def _fire_due_bets(
                 console.print(f"  [cyan]→ result fetch scheduled:[/cyan] {rid}")
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]schedule_result_fetch 失敗: {e}[/red]")
-        _drain_pending(label="post-bet")
+    _drain_pending(label="post-bet")
 
 
 if __name__ == "__main__":

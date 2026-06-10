@@ -111,9 +111,12 @@ def fetch_and_parse(
             import sys
             print(f"[fetch_and_parse] past runs fetch/parse failed: {ex}", file=sys.stderr)
 
-    n_horses = len([h for h in rd.race.horses if not h.absent])
+    # jiku は「軸馬番」— 頭数で 1..n を回すと取消レースで馬番 > 頭数 の出走馬の
+    # 1着オッズを丸ごと取りこぼす (2026-06-11 bughunt 修正)。馬番リストで回す。
+    active_numbers = [h.number for h in rd.race.horses if not h.absent]
+    n_horses = len(active_numbers)
     if n_horses >= 3:
-        htmls = fetch_trifecta_full(race_id, n_horses=n_horses)
+        htmls = fetch_trifecta_full(race_id, jiku_numbers=active_numbers)
         rd.trifecta = parse_trifecta_multi(htmls)
     else:
         rd.trifecta = []
@@ -145,7 +148,7 @@ def fetch_and_parse(
     if with_exacta and n_horses >= 2:
         # 馬単 (b5) は jiku iteration が必要 (3 連単と同形) で重い
         try:
-            htmls = fetch_odds_per_jiku(race_id, "b5", n_horses=n_horses)
+            htmls = fetch_odds_per_jiku(race_id, "b5", jiku_numbers=active_numbers)
             merged_ex: dict[tuple[int, int], float] = {}
             for h in htmls:
                 merged_ex.update(parse_pair_odds(h, "b5"))
@@ -156,7 +159,7 @@ def fetch_and_parse(
             print(f"[fetch_and_parse] exacta fetch/parse failed: {ex}", file=sys.stderr)
     if with_trio and n_horses >= 3:
         try:
-            htmls = fetch_odds_per_jiku(race_id, "b6", n_horses=n_horses)
+            htmls = fetch_odds_per_jiku(race_id, "b6", jiku_numbers=active_numbers)
             merged: dict[tuple[int, int, int], float] = {}
             for h in htmls:
                 merged.update(parse_trio(h))

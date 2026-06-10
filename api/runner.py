@@ -30,6 +30,24 @@ PY = str(ROOT / ".venv" / "bin" / "python")
 if not Path(PY).exists():
     PY = sys.executable  # fallback
 
+# bet 発火の既定 lead (秒)。src/auto_watch.BET_LEAD_SEC_DEFAULT と同値を保つこと
+# (auto_watch を import すると uvicorn に重依存が乗るため数値を複製)。
+# 2026-06-11: 60 → 150 統一の取り漏らし (runner に 60 が残り、旧 persisted state 経由で
+# 「締切超過 enqueue」構成が復活し得た) の修正。
+BET_LEAD_SEC_DEFAULT = 150
+
+
+def _migrate_lead(v) -> int:
+    """persisted config の bet_lead_sec を読む。旧既定 60 は legacy 値として 150 に migrate
+    (60 は実測で締切に間に合わない構成 — ユーザが意図的に 60 を選んだ可能性より、旧既定の
+    残骸である可能性が圧倒的に高い)。それ以外の明示値は尊重する。"""
+    try:
+        lead = int(v)
+    except (TypeError, ValueError):
+        return BET_LEAD_SEC_DEFAULT
+    return BET_LEAD_SEC_DEFAULT if lead == 60 else lead
+
+
 # watch-auto の「動いていた / 動かしたい」状態を永続化するファイル。
 # lifespan startup で読んで auto-resume する。ローカル運用なのでファイル直書き。
 WATCH_STATE_FILE = ROOT / "data" / "cache" / "watch_auto_state.json"
@@ -440,7 +458,7 @@ class WatchAutoManager:
         score_window: float = 5,
         score_tolerance: float = 2,
         llm_blend: float | None = None,
-        bet_lead_sec: int = 60,
+        bet_lead_sec: int = BET_LEAD_SEC_DEFAULT,
         interval_sec: int = 60,
         ev_max: float | None = None,
         min_prob: float | None = None,
@@ -493,7 +511,7 @@ class WatchAutoManager:
         score_window: float = 5,
         score_tolerance: float = 2,
         llm_blend: float | None = None,
-        bet_lead_sec: int = 60,
+        bet_lead_sec: int = BET_LEAD_SEC_DEFAULT,
         interval_sec: int,
         ev_max: float | None,
         min_prob: float | None,
@@ -577,10 +595,10 @@ class WatchAutoManager:
                     max_stake_multiplier=cfg_max_mult,
                     max_stake=cfg_max_stake,
                     auto_login=cfg_login)
-            if (cfg_oddspark or cfg_ipat) and not self.scheduler_running:
+            if not self.scheduler_running:   # 2026-06-11: paper でも常時併走 (上記参照)
                 await self._start_scheduler(
                     bet_oddspark=cfg_oddspark, bet_ipat=cfg_ipat,
-                    bet_lead_sec=int(self._config.get("bet_lead_sec", 60)),
+                    bet_lead_sec=_migrate_lead(self._config.get("bet_lead_sec")),
                     market_blend=self._config.get("market_blend"),
                     aptitude_top=self._config.get("aptitude_top"),
                     no_llm=bool(self._config.get("no_llm")),
@@ -715,20 +733,24 @@ class WatchAutoManager:
                 auto_login=bool(cfg.get("bet_auto_login")),
             )
         # 投票発火デーモン (締切 bet_lead_sec 秒前に精密発火, watch poll とは独立)。
-        # betting (oddspark/ipat) が ON のときだけ起動する。
-        if bet_oddspark or bet_ipat:
-            await self._start_scheduler(
-                bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
-                bet_lead_sec=int(self._config.get("bet_lead_sec", 60)),
-                market_blend=self._config.get("market_blend"),
-                aptitude_top=self._config.get("aptitude_top"),
-                no_llm=bool(self._config.get("no_llm")),
-                llm_blend=self._config.get("llm_blend"),
-            )
+        # 【2026-06-11 bughunt #4】投票 OFF (paper 計測) でも常時併走させる:
+        # scheduler 無しだと発火が watch tick (score dispatch 中央値 274s でブロック) に
+        # 量子化され、6場開催日は ~22% のレースが予約破棄 = bet snapshot も result fetch
+        # 予約も無く計測から無痕跡に消えていた (混雑時間帯に系統集中する選択バイアス)。
+        # enqueue は bet フラグで別途ゲート済みなので、paper でも snapshot 保存+結果取得
+        # のみで実弾は飛ばない。
+        await self._start_scheduler(
+            bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
+            bet_lead_sec=_migrate_lead(self._config.get("bet_lead_sec")),
+            market_blend=self._config.get("market_blend"),
+            aptitude_top=self._config.get("aptitude_top"),
+            no_llm=bool(self._config.get("no_llm")),
+            llm_blend=self._config.get("llm_blend"),
+        )
         return self.job
 
     async def _start_scheduler(self, *, bet_oddspark: bool, bet_ipat: bool,
-                               bet_lead_sec: int = 60, market_blend=None,
+                               bet_lead_sec: int = BET_LEAD_SEC_DEFAULT, market_blend=None,
                                aptitude_top=None, no_llm: bool = False,
                                llm_blend=None) -> None:
         """bet_scheduler (締切 bet_lead_sec 秒前に精密発火) を別 subprocess で起動。
@@ -895,7 +917,7 @@ class WatchAutoManager:
                 score_tolerance=float(cfg.get("score_tolerance", 2)),
                 llm_blend=(float(cfg["llm_blend"])
                            if cfg.get("llm_blend") is not None else None),
-                bet_lead_sec=int(cfg.get("bet_lead_sec", 60)),
+                bet_lead_sec=_migrate_lead(cfg.get("bet_lead_sec")),
                 interval_sec=int(cfg.get("interval_sec", 60)),
                 ev_max=cfg.get("ev_max"),
                 min_prob=cfg.get("min_prob"),

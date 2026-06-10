@@ -201,11 +201,16 @@ def estimate_probs(
             if ms > 0:
                 market = {k: v / ms for k, v in market.items()}
 
+            # 【2026-06-11 bughunt 修正】blend のキー集合は **fundamental_win (= 非absent
+            # 出走馬) に制限**する。旧実装は和集合 (fundamental | market) で回しており、
+            # market 側にしか居ない馬番 (取消馬がオッズ売止め前の desync 窓で混入した等)
+            # が正の確率で probs.win に合流 → enumerate_outcomes が不可能 outcome に質量を
+            # 配り、build_bundle の n_runners (複勝頭数ルールの境界) も 1 ずれていた。
             if blend_method == "loglinear":
                 alpha = max(1.0 - market_blend, 0.0)
                 beta = max(market_blend, 0.0)
                 logs: dict[int, float] = {}
-                for k in set(fundamental_win) | set(market):
+                for k in fundamental_win:
                     f = max(fundamental_win.get(k, 0.0), 1e-9)
                     pi = max(market.get(k, 0.0), 1e-9)
                     logs[k] = alpha * math.log(f) + beta * math.log(pi)
@@ -218,7 +223,7 @@ def estimate_probs(
                 blended = {
                     k: (1.0 - market_blend) * fundamental_win.get(k, 0.0)
                     + market_blend * market.get(k, 0.0)
-                    for k in set(fundamental_win) | set(market)
+                    for k in fundamental_win
                 }
                 bs = sum(blended.values())
                 if bs > 0:
