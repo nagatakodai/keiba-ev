@@ -359,6 +359,11 @@ export type WatchAutoStatus = {
     // 3連単束モード: "recovery"=回収(穴狙い, 市場1番人気を1着除外・Claude指数>90で解禁, 既定) /
     // "hit"=旧 全力的中。旧 persist 済 config は欠落 (= recovery 扱い)。
     trifecta_mode?: "recovery" | "hit";
+    // 投票束 (2026-06-10 復活): "ev"=EV束 (recommended_bundle, 推奨既定) / "trifecta"=3連単束。
+    // 旧 persist 済 config は欠落 (= 旧挙動 trifecta 扱い、resume 側で互換処理)。
+    bet_bundle?: "ev" | "trifecta";
+    // EV束の1レース予算 (円)。½Kelly なので実投入は通常この10-30%。
+    ev_bankroll?: number;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -571,6 +576,8 @@ export const api = {
     bet_ipat?: boolean;
     trifecta_bankroll?: number;
     trifecta_mode?: "recovery" | "hit";
+    bet_bundle?: "ev" | "trifecta";
+    ev_bankroll?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

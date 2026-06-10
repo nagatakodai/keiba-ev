@@ -419,6 +419,8 @@ class WatchAutoManager:
         bet_ipat: bool = False,
         trifecta_bankroll: int = 10_000,
         trifecta_mode: str = "recovery",
+        bet_bundle: str = "ev",
+        ev_bankroll: int = 5_000,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -438,6 +440,8 @@ class WatchAutoManager:
                 bet_ipat=bet_ipat,
                 trifecta_bankroll=trifecta_bankroll,
                 trifecta_mode=trifecta_mode,
+                bet_bundle=bet_bundle,
+                ev_bankroll=ev_bankroll,
             )
 
     async def _start_locked(
@@ -468,8 +472,17 @@ class WatchAutoManager:
         bet_ipat: bool = False,
         trifecta_bankroll: int = 10_000,
         trifecta_mode: str = "recovery",
+        bet_bundle: str = "ev",
+        ev_bankroll: int = 5_000,
     ) -> Job:
-        # 投票束は 3連単束 (recommended_bundle_t) 固定 (2026-06-06)。旧 KEIBA_BET_BUNDLE 切替は廃止。
+        # 投票束の切替 (2026-06-10 復活): env KEIBA_BET_BUNDLE で auto_watch (enqueue 判定) と
+        # 投票 daemon (oddspark/ipat, 同 env を継承) に伝播。ev=EV束 (既定) / trifecta=3連単束。
+        # 既知値以外は安全側で ev に倒す (API 境界は Literal 検証済だが resume の旧 state ガード)。
+        if bet_bundle not in ("ev", "trifecta"):
+            bet_bundle = "ev"
+        os.environ["KEIBA_BET_BUNDLE"] = bet_bundle
+        # EV束の1レース予算 (build_bundle の bankroll)。env で全 dispatch subprocess に伝播。
+        os.environ["KEIBA_EV_BANKROLL"] = str(int(ev_bankroll))
         # 3連単の1レース購入予算は env で全 dispatch subprocess (analyze/keibago/jra/oddspark) に
         # 伝播する (_save_prediction_snapshot が _trifecta_bankroll で尊重)。束を組む時点の予算なので、
         # 投票倍率 (bet_stake_multiplier) とは別物。変更はループ再起動が必要 (spawn 時に env が固定)。
@@ -574,6 +587,8 @@ class WatchAutoManager:
             "bet_ipat": bet_ipat,
             "trifecta_bankroll": trifecta_bankroll,
             "trifecta_mode": trifecta_mode,
+            "bet_bundle": bet_bundle,
+            "ev_bankroll": ev_bankroll,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -822,6 +837,12 @@ class WatchAutoManager:
                 # 旧 state (mode キー無し) は既定 recovery。不正値は _start_locked 側でも recovery に倒す。
                 trifecta_mode=str(cfg["trifecta_mode"])
                     if cfg.get("trifecta_mode") else "recovery",
+                # 旧 state (bet_bundle キー無し) は旧挙動 = 3連単束を維持 (resume で投票束が
+                # 黙って EV束に切り替わるのを防ぐ)。新規開始の既定は ev (main.py の Literal 既定)。
+                bet_bundle=str(cfg["bet_bundle"])
+                    if cfg.get("bet_bundle") else "trifecta",
+                ev_bankroll=int(cfg["ev_bankroll"])
+                    if cfg.get("ev_bankroll") is not None else 5_000,
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

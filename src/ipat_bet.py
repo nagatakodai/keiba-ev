@@ -252,17 +252,26 @@ def _race_no(netkeiba_rid: str) -> int:
     return int(netkeiba_rid[10:12])
 
 
-# 投票束は **3連単的中モード (recommended_bundle_t) 固定** (ユーザ指示 2026-06-06)。
-# 旧 EV束 (recommended_bundle) 投票と env KEIBA_BET_BUNDLE / --plan-t 切替は廃止。
-_BUNDLE_FIELD_T = "recommended_bundle_t"
+# 投票束の切替 (env KEIBA_BET_BUNDLE / req の bundle_source, 2026-06-10 に復活):
+#   "ev" = recommended_bundle (EV束, 既定) / "trifecta" = recommended_bundle_t (3連単束)。
+# oddspark_bet と同じ解決規則 (req の enqueue 時意図 → env → 既定 ev)。
+_BUNDLE_FIELDS = {"ev": "recommended_bundle", "trifecta": "recommended_bundle_t"}
+_BET_BUNDLE_DEFAULT = "ev"
+
+
+def _resolve_bundle_source(source_override: str | None = None) -> str:
+    for v in (source_override, os.environ.get("KEIBA_BET_BUNDLE")):
+        v = (v or "").strip().lower()
+        if v in _BUNDLE_FIELDS:
+            return v
+    return _BET_BUNDLE_DEFAULT
 
 
 def _legs_from_snapshot(netkeiba_rid: str, source_override: str | None = None) -> tuple[list[CartLeg], str]:
-    """snapshot の 3連単束 legs → CartLeg。(legs, race_label) を返す。
+    """snapshot の投票束 legs → CartLeg。(legs, race_label) を返す。
 
-    source_override (queue の .req に記録された enqueue 時の意図) は互換のため受けるが、
-    投票束は3連単的中モード固定なので常に recommended_bundle_t を読む (旧 "recommended" req も
-    3連単束として処理 = EV束を誤って投票しない)。
+    束は _resolve_bundle_source (req の bundle_source → env KEIBA_BET_BUNDLE → 既定 ev) で
+    解決する。3連単束のときのみ Claude 指数ゲート (rank_source≠claude は投票しない) を適用。
 
     snapshot ファイル名は内部 race_id `<cup>-<si>-<rn>` (odds 源非依存で共通)。netkeiba 12桁 rid →
     内部 race_id 変換は `parse._split_race_id` を使う (oddspark_bet._legs_from_snapshot と同形)。
@@ -274,12 +283,13 @@ def _legs_from_snapshot(netkeiba_rid: str, source_override: str | None = None) -
     if not path.exists():
         raise IpatBetError(f"snapshot が無い: {path} (先に analyze で生成)")
     snap = json.loads(path.read_text(encoding="utf-8"))
-    _ = source_override   # 3連単的中モード固定 (旧 req 互換のため引数だけ残す)
-    field = _BUNDLE_FIELD_T
+    source = _resolve_bundle_source(source_override)
+    field = _BUNDLE_FIELDS[source]
     bundle = snap.get(field) or {}
-    # 3連単的中モードは Claude 指数フォーメーションが本質。指数が無く model ランキングへ縮退した束
+    # 3連単束は Claude 指数フォーメーションが本質。指数が無く model ランキングへ縮退した束
     # (rank_source != "claude") は投票しない (ユーザ指示 2026-06-03)。enqueue 側でも弾くが daemon でも二重に防ぐ。
-    if bundle.get("rank_source") != "claude":
+    # EV束 (市場+モデル駆動) にはこのゲートは適用しない。
+    if source == "trifecta" and bundle.get("rank_source") != "claude":
         raise IpatBetError("3連単束は Claude 指数なし (rank_source≠claude) — 投票しない")
     legs = [CartLeg(bet_type=l["bet_type"], key=list(l["key"]), stake=int(l.get("stake", 0)))
             for l in (bundle.get("legs") or []) if int(l.get("stake", 0)) > 0]
@@ -1001,7 +1011,8 @@ def _to_netkeiba_rid(arg: str) -> str:
 
 def _main() -> None:
     argv = sys.argv[1:]
-    print("[ipat_bet] 投票束 = recommended_bundle_t (3連単的中モード固定)")
+    src = _resolve_bundle_source()
+    print(f"[ipat_bet] 投票束 = {_BUNDLE_FIELDS[src]} ({src}; env KEIBA_BET_BUNDLE / req の bundle_source で切替)")
     if "--session" in argv:
         poll = 5
         daily_cap = DAILY_CAP_DEFAULT
@@ -1063,7 +1074,7 @@ def _main() -> None:
               "[--max-stake-multiplier=3]\n"
               "    per-race 上限: --max-stake=N (円) > --max-stake-multiplier=N (基準¥10,000×N) "
               "> 掛金倍率連動 (既定)\n"
-              "    投票束は 3連単的中モード (recommended_bundle_t) 固定")
+              "    投票束: env KEIBA_BET_BUNDLE=ev|trifecta (既定 ev = EV束)")
         raise SystemExit(2)
     try:
         rid = _to_netkeiba_rid(args[0])

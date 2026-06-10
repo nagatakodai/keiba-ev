@@ -58,22 +58,23 @@ import json
 from src import auto_watch as aw
 
 
-def _write_snapshot(root, race_id, legs, rank_source="claude"):
-    """3連単束 (recommended_bundle_t) を持つ snapshot を書く。
+def _write_snapshot(root, race_id, legs, rank_source="claude", ev_legs=None):
+    """3連単束 (recommended_bundle_t) + EV束 (recommended_bundle) を持つ snapshot を書く。
 
-    投票束は3連単的中モード固定 (2026-06-06)。recommended_bundle はモデル参考値なので
-    enqueue 判定には関与しない (混入していても無視されることを兼ねて書いておく)。
+    投票束は env KEIBA_BET_BUNDLE で切替 (2026-06-10 復活, 既定 ev)。3連単フローのテストは
+    env=trifecta を設定して使う。
     """
     pred = root / "data" / "predictions"
     pred.mkdir(parents=True, exist_ok=True)
     (pred / f"{race_id}.json").write_text(json.dumps({
         "race_id": race_id,
-        "recommended_bundle": {"legs": []},   # EV束 (参考値) — 投票には使われない
+        "recommended_bundle": {"legs": ev_legs or []},
         "recommended_bundle_t": {"legs": legs, "rank_source": rank_source},
     }, ensure_ascii=False), encoding="utf-8")
 
 
 def test_enqueue_oddspark_bet_writes_req(tmp_path, monkeypatch):
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "trifecta")
     monkeypatch.setattr(aw, "ROOT", tmp_path)
     monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
     _write_snapshot(tmp_path, "2026500527-527-9",
@@ -90,6 +91,7 @@ def test_enqueue_oddspark_bet_writes_req(tmp_path, monkeypatch):
 
 
 def test_enqueue_skips_empty_bundle(tmp_path, monkeypatch):
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "trifecta")
     monkeypatch.setattr(aw, "ROOT", tmp_path)
     monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
     _write_snapshot(tmp_path, "2026500527-527-5", [])   # 見送り
@@ -99,6 +101,7 @@ def test_enqueue_skips_empty_bundle(tmp_path, monkeypatch):
 
 def test_enqueue_skips_jra(tmp_path, monkeypatch):
     """JRA (投票 joCode 無し) は oddspark で投票不可 → enqueue しない。"""
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "trifecta")
     monkeypatch.setattr(aw, "ROOT", tmp_path)
     monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
     _write_snapshot(tmp_path, "2026940527-527-9",
@@ -108,6 +111,7 @@ def test_enqueue_skips_jra(tmp_path, monkeypatch):
 
 def test_enqueue_skips_when_no_claude_index(tmp_path, monkeypatch):
     """Claude 指数なし (rank_source=model に縮退した 3連単束) は投票しない (enqueue しない)。"""
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "trifecta")
     monkeypatch.setattr(aw, "ROOT", tmp_path)
     monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
     _write_snapshot(tmp_path, "2026500527-527-9",
@@ -119,6 +123,7 @@ def test_enqueue_skips_when_no_claude_index(tmp_path, monkeypatch):
 
 def test_enqueue_votes_with_claude_index(tmp_path, monkeypatch):
     """Claude 指数あり (rank_source=claude) なら通常どおり enqueue。"""
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "trifecta")
     monkeypatch.setattr(aw, "ROOT", tmp_path)
     monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
     _write_snapshot(tmp_path, "2026500527-527-9",
@@ -128,3 +133,43 @@ def test_enqueue_votes_with_claude_index(tmp_path, monkeypatch):
     req = tmp_path / "queue" / "202650052709.req"
     assert req.exists()
     assert json.loads(req.read_text())["bundle_source"] == "trifecta"
+
+
+# --- 投票束切替 (env KEIBA_BET_BUNDLE, 2026-06-10 復活) ---
+
+
+def test_bundle_source_default_is_ev(monkeypatch):
+    monkeypatch.delenv("KEIBA_BET_BUNDLE", raising=False)
+    assert aw._bet_bundle_source() == "ev"
+    assert aw._bet_bundle_field() == "recommended_bundle"
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "trifecta")
+    assert aw._bet_bundle_field() == "recommended_bundle_t"
+    monkeypatch.setenv("KEIBA_BET_BUNDLE", "bogus")   # 不正値は既定 ev に倒す
+    assert aw._bet_bundle_source() == "ev"
+
+
+def test_enqueue_ev_bundle(tmp_path, monkeypatch):
+    """EV束モード: recommended_bundle の legs で enqueue。rank_source ゲートは適用しない。"""
+    monkeypatch.delenv("KEIBA_BET_BUNDLE", raising=False)   # 既定 ev
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    _write_snapshot(tmp_path, "2026500527-527-9",
+                    [],   # 3連単束は空 (EV束モードでは見ない)
+                    rank_source="model",
+                    ev_legs=[{"bet_type": "win", "key": [4], "stake": 300},
+                             {"bet_type": "wide", "key": [4, 10], "stake": 200}])
+    assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is True
+    d = json.loads((tmp_path / "queue" / "202650052709.req").read_text())
+    assert d["bundle_source"] == "ev"
+    assert d["legs"] == 2 and d["total_stake"] == 500
+
+
+def test_enqueue_ev_bundle_skips_empty(tmp_path, monkeypatch):
+    """EV束モード: EV束が空 (見送り) なら 3連単束に legs があっても enqueue しない。"""
+    monkeypatch.delenv("KEIBA_BET_BUNDLE", raising=False)
+    monkeypatch.setattr(aw, "ROOT", tmp_path)
+    monkeypatch.setattr(aw, "BET_QUEUE_DIR", tmp_path / "queue")
+    _write_snapshot(tmp_path, "2026500527-527-9",
+                    [{"bet_type": "trifecta", "key": [1, 2, 3], "stake": 100}],
+                    rank_source="claude", ev_legs=[])
+    assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is False

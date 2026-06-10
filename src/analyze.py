@@ -634,6 +634,29 @@ def _recovery_exclude_head(rd, llm_win_index) -> tuple[int | None, int | None, f
     return fav, fav, fidx_f
 
 
+EV_BANKROLL_DEFAULT = 10_000
+
+
+def _ev_bankroll(explicit: int | None = None) -> int:
+    """EV束 (recommended_bundle) の1レース予算を解決する。
+
+    明示 → env KEIBA_EV_BANKROLL → 既定 ¥10,000 (旧来の build_bundle 既定と同値 =
+    snapshot の歴史的互換)。½Kelly + シェード込み +EV ゲートにより実投入は通常
+    予算の 10-30% 程度に収まる。Web UI 経由は env で全 dispatch subprocess に伝播。
+    """
+    if explicit is not None and explicit > 0:
+        return int(explicit)
+    env = (os.environ.get("KEIBA_EV_BANKROLL") or "").strip()
+    if env:
+        try:
+            v = int(float(env))
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return EV_BANKROLL_DEFAULT
+
+
 def _trifecta_bankroll(explicit: int | None = None) -> int:
     """3連単の1レース購入予算を解決する。
 
@@ -854,8 +877,10 @@ def _save_prediction_snapshot(
                 cands = pf_mod.candidates_from_ev_rows(rows, bet_tables)
                 # kelly_fraction=0.5 (½Kelly): full Kelly は確率の楽観誤差に対して配分が
                 # 過大化し成長率が負になり得る (実測: 予測的中率45.8% vs 実測20.8%)。
+                # bankroll は env KEIBA_EV_BANKROLL (Web UI から伝播) → 既定 ¥10,000。
                 recommended_bundle = pf_mod.build_bundle(
-                    cands, probs, prioritize="yield", kelly_fraction=0.5)
+                    cands, probs, prioritize="yield", kelly_fraction=0.5,
+                    bankroll=_ev_bankroll())
             except Exception as ex:  # noqa: BLE001
                 console.print(f"[yellow]recommended_bundle 計算失敗: {ex}[/yellow]")
     # 3連単的中モード (全力フォーメーション): Claude 指数ドリブンの3連単フォーメーション・市場無視・トリガミ防止あり。

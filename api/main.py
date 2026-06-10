@@ -308,9 +308,14 @@ class WatchAutoStartRequest(BaseModel):
     # **headful なので `make api` は DISPLAY のある端末で起動**。認証は env
     # (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。bet_oddspark と独立に ON 可。
     bet_ipat: bool = False
-    # 投票束は 3連単的中モード (recommended_bundle_t) **固定** (2026-06-06)。
-    # 旧トグル bet_plan_t / 専用倍率 bet_plan_t_multiplier (EV束との切替) は廃止。旧クライアントが
-    # 送ってきても Pydantic が無視する (extra ignore)。
+    # 投票束の切替 (2026-06-10 レビュー後に復活): ev=EV束 (recommended_bundle, 既定・推奨) /
+    # trifecta=3連単束 (recommended_bundle_t)。env KEIBA_BET_BUNDLE で auto_watch (enqueue 判定) と
+    # 投票 daemon (oddspark/ipat) に伝播。EV束は全脚がシェード込み P×O≥1.02 を通過した時のみ
+    # legs が立つため**大半のレースは見送り**になる (それが正しい挙動)。
+    bet_bundle: Literal["ev", "trifecta"] = "ev"
+    # EV束の1レース予算 (円)。env KEIBA_EV_BANKROLL で伝播。½Kelly なので実投入は通常この
+    # 10-30%。実測で +EV が未実証のため計測モード ¥5,000 を初期推奨とする。
+    ev_bankroll: int = Field(default=5_000, ge=100, le=10_000_000)
     # 3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
     # 全 dispatch subprocess に env KEIBA_TRIFECTA_BANKROLL で伝播 (analyze/keibago/jra/oddspark が尊重)。
     # 投票時の倍率 (bet_stake_multiplier) とは別: これは束を組む時点の予算、倍率は購入時のスケール。
@@ -349,6 +354,8 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         bet_ipat=req.bet_ipat,
         trifecta_bankroll=req.trifecta_bankroll,
         trifecta_mode=req.trifecta_mode,
+        bet_bundle=req.bet_bundle,
+        ev_bankroll=req.ev_bankroll,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "ipat_bet_running": WATCH.ipat_bet_running,

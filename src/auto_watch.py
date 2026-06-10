@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -37,26 +38,42 @@ IPAT_BET_QUEUE_DIR = ROOT / "data/cache/ipat_bet_queue"  # = ipat_bet.QUEUE_DIR 
 console = Console()
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
-# 投票束は **3連単的中モード (recommended_bundle_t) 固定** (ユーザ指示 2026-06-06)。
-# 旧 EV束 (recommended_bundle) の投票/claude 選定 (回収優先AI) は廃止。recommended_bundle は
-# snapshot にモデルのみの参考値として残るが、enqueue/投票には一切使わない。
+# 投票束の切替 (env KEIBA_BET_BUNDLE, 2026-06-10 レビュー後に復活):
+#   "ev"       = recommended_bundle (EV束)。修正後 (de-vig / β=0.78 / 券種別シェード /
+#                px_o≤2.0 / ½Kelly / トリガミ=シェード込み) は全脚が「シェード込み P×O ≥ 1.02」
+#                を通過した時のみ legs が立つ = **大半のレースは見送り** (それが正しい挙動)。
+#   "trifecta" = recommended_bundle_t (3連単束, Claude 指数ドリブン・市場無視)。
+# 既定 "ev" (2026-06-10 実測: 3連単束は全系列 ROI 14-83% / Claude 選定脚 flat 44% と -EV 確定。
+# EV束の旧実測 66.9% は β=0 事故 (一様確率で最長オッズ購入) 込みの数字で修正後は別物 —
+# +EV 未実証なのは同じだが、唯一「買う前に毎脚の採算ゲート」を通る束なので実弾既定にする)。
+BET_BUNDLE_DEFAULT = "ev"
+_BUNDLE_FIELDS = {"ev": "recommended_bundle", "trifecta": "recommended_bundle_t"}
+
+
 def _bet_bundle_source() -> str:
-    """投票束 source token。常に "trifecta" (3連単的中モード特化。旧称 "plan_t")。"""
-    return "trifecta"
+    """投票束 source token ("ev" | "trifecta")。env KEIBA_BET_BUNDLE → 既定 ev。"""
+    v = (os.environ.get("KEIBA_BET_BUNDLE") or "").strip().lower()
+    return v if v in _BUNDLE_FIELDS else BET_BUNDLE_DEFAULT
 
 
 def _bet_bundle_field() -> str:
-    return "recommended_bundle_t"
+    return _BUNDLE_FIELDS[_bet_bundle_source()]
 
 
-def _trifecta_missing_claude_index(d: dict) -> bool:
-    """Claude 指数が無い (= model fallback) かを返す (True なら投票しない)。
+def _bundle_not_bettable(d: dict) -> tuple[bool, str]:
+    """(投票してはいけないか, 理由) を返す。
 
-    3連単的中モードは Claude 各馬指数フォーメーションが本質なので、指数キャッシュが
-    無く model ランキングへ縮退した束 (rank_source != "claude") は投票しない (ユーザ指示 2026-06-03)。
+    - 共通: legs が空 (見送り/未生成) なら投票しない。
+    - 3連単束のみ: Claude 指数が無く model ランキングへ縮退した束 (rank_source != "claude")
+      は投票しない (ユーザ指示 2026-06-03)。EV束は市場+モデル駆動なのでこのゲートは不要。
     """
     bundle = d.get(_bet_bundle_field()) or {}
-    return bundle.get("rank_source") != "claude"
+    legs = [l for l in (bundle.get("legs") or []) if int(l.get("stake", 0)) > 0]
+    if not legs:
+        return True, "束が空 (見送り)"
+    if _bet_bundle_source() == "trifecta" and bundle.get("rank_source") != "claude":
+        return True, "Claude 指数なし (rank_source≠claude)"
+    return False, ""
 
 
 # 2段パイプライン: score / bet で dedup 名前空間を分ける。同一 race を score で済ませても
@@ -172,13 +189,13 @@ def _enqueue_oddspark_bet(race_id: str, netkeiba_rid: str) -> bool:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
-    if _trifecta_missing_claude_index(d):
-        console.print(f"[yellow]3連単束 enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
+    not_bettable, reason = _bundle_not_bettable(d)
+    if not_bettable:
+        if "見送り" not in reason:   # 束空はログ不要 (大半のレースが正常な見送り)
+            console.print(f"[yellow]{_bet_bundle_source()}束 enqueue skip: {reason} — 投票しない ({netkeiba_rid})[/yellow]")
         return False
     legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]
-    if not legs:
-        return False   # 見送り (束が空) は投入しない
     BET_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     req = BET_QUEUE_DIR / f"{netkeiba_rid}.req"
     if req.exists() or (BET_QUEUE_DIR / f"{netkeiba_rid}.done").exists():
@@ -213,13 +230,13 @@ def _enqueue_ipat_bet(race_id: str, netkeiba_rid: str) -> bool:
         d = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return False
-    if _trifecta_missing_claude_index(d):
-        console.print(f"[yellow]3連単束 enqueue skip: Claude 指数なし (rank_source≠claude) — 投票しない ({netkeiba_rid})[/yellow]")
+    not_bettable, reason = _bundle_not_bettable(d)
+    if not_bettable:
+        if "見送り" not in reason:   # 束空はログ不要 (大半のレースが正常な見送り)
+            console.print(f"[yellow]{_bet_bundle_source()}束 enqueue skip: {reason} — 投票しない ({netkeiba_rid})[/yellow]")
         return False
     legs = [l for l in ((d.get(_bet_bundle_field()) or {}).get("legs") or [])
             if int(l.get("stake", 0)) > 0]
-    if not legs:
-        return False   # 見送り (束が空) は投入しない
     IPAT_BET_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     req = IPAT_BET_QUEUE_DIR / f"{netkeiba_rid}.req"
     if req.exists() or (IPAT_BET_QUEUE_DIR / f"{netkeiba_rid}.done").exists():
