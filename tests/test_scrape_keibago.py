@@ -177,23 +177,27 @@ def test_parse_deba_table_missing_link_no_mispair():
 
 
 def test_parse_deba_table_absent_detection():
-    """取消/除外表示のある馬は absent=True (2026-06-10 bughunt 修正)。
+    """取消/除外の**全文語**がある馬は absent=True (2026-06-10 bughunt 修正 第2版)。
 
-    最終馬のブロックは </table> で打ち切るため、ページ下部の凡例「取消」を
-    誤検出して最終馬が常に absent になることはない。
+    実ページ構造を模倣: 各馬ブロックは馬柱ミニテーブル (</table> 入り) を含み、
+    取消表示 (`<td class="info">出走取消</td>`) はその**後**に来る — 第1版の
+    「最初の </table> で打ち切り」では検出できなかった回帰防止。
+    bare「取消」(現役馬の馬柱の過去走取消歴 = pastRank) には誤反応しないこと。
     """
     html = (
         '<table><td rowspan="5" class="horseNum">1</td>'
         '<a class="horseName" href="x?k_lineageLoginCode=111">ホースA</a>'
-        '<td>出走取消</td>'
+        '<table><tr><td>馬柱ミニテーブル</td></tr></table>'   # ブロック内に </table> がある実構造
+        '<td class="info">出走取消</td>'
         '<td rowspan="5" class="horseNum">2</td>'
         '<a class="horseName" href="x?k_lineageLoginCode=222">ホースB</a>'
+        '<table><tr><td class="pastRank">取消</td></tr></table>'   # 過去走の取消歴 → 誤検出しない
         '</table>'
         '<div>凡例: 取消・除外は網掛け表示</div>'
     )
     assert kg.parse_deba_table(html) == [
-        (1, "ホースA", "111", True),    # 出走取消 → absent
-        (2, "ホースB", "222", False),   # 凡例の「取消」は </table> 外 → 誤検出しない
+        (1, "ホースA", "111", True),    # ネスト </table> の後の 出走取消 を検出できる
+        (2, "ホースB", "222", False),   # pastRank の bare 取消 / 凡例には誤反応しない
     ]
 
 

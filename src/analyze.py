@@ -423,7 +423,9 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
         "summary": parsed.get("summary", ""),
         "confidence": parsed.get("confidence", ""),
     }
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = out.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, out)   # アトミック (並行 read の torn JSON 防止)
     console.print(f"[dim]llm scores: {out.relative_to(ROOT)} ({len(payload['scores'])} 頭)[/dim]")
 
 
@@ -450,18 +452,24 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
                 return None, None, "strength", scored_at, None
         except ValueError:
             pass
+    # isinstance ガード: `or {}` は falsy しか救済せず、非 dict (list 等) だと .items() で
+    # AttributeError → bet dispatch ごと死ぬ (llm.parse_horse_scores と同じ防御, 2026-06-10)。
     scores = {}
-    for k, v in (d.get("scores") or {}).items():
-        try:
-            scores[int(k)] = float(v)
-        except (ValueError, TypeError):
-            continue
+    src_scores = d.get("scores")
+    if isinstance(src_scores, dict):
+        for k, v in src_scores.items():
+            try:
+                scores[int(k)] = float(v)
+            except (ValueError, TypeError):
+                continue
     support = {}
-    for k, v in (d.get("support") or {}).items():
-        try:
-            support[int(k)] = max(0, int(float(v)))
-        except (ValueError, TypeError):
-            continue
+    src_support = d.get("support")
+    if isinstance(src_support, dict):
+        for k, v in src_support.items():
+            try:
+                support[int(k)] = max(0, int(float(v)))
+            except (ValueError, TypeError):
+                continue
     scale = d.get("scale") or "strength"
     alerts = llm_mod._normalize_alerts(d.get("alerts"))
     return (scores or None), (support or None), scale, scored_at, (alerts or None)
@@ -551,12 +559,20 @@ def _run_score_stage(
     if not saw_result:
         console.print("[yellow]score 未完了 — 指数キャッシュせず (bet はモデルのみ)[/yellow]")
         return None
-    parsed = llm_mod.parse_horse_scores("".join(chunks))
-    if parsed.get("scores"):
-        _save_llm_scores(race_id, parsed, model=model)
-        console.print(f"[cyan]score 完了 → {len(parsed['scores'])} 頭に指数付与[/cyan]")
-    else:
-        console.print("[yellow]score 出力に scores 無し — キャッシュせず[/yellow]")
+    # parse〜保存も try で包む: parse_horse_scores は raise しない契約だが、想定外の
+    # 出力形で例外が漏れると dispatch subprocess ごと rc≠0 で死に、bet 予約まで
+    # 失われる (2026-06-10 bughunt)。score は縮退可能 (モデルのみで bet) なので
+    # ここで握って None を返す。
+    try:
+        parsed = llm_mod.parse_horse_scores("".join(chunks))
+        if parsed.get("scores"):
+            _save_llm_scores(race_id, parsed, model=model)
+            console.print(f"[cyan]score 完了 → {len(parsed['scores'])} 頭に指数付与[/cyan]")
+        else:
+            console.print("[yellow]score 出力に scores 無し — キャッシュせず[/yellow]")
+            return None
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[yellow]score 出力の parse/保存に失敗: {ex} — キャッシュせず (bet はモデルのみ)[/yellow]")
         return None
     return parsed
 
@@ -1096,7 +1112,13 @@ def _save_prediction_snapshot(
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    # tmp+replace のアトミック書込: snapshot は投票 daemon (_legs_from_snapshot) と
+    # 並行 dispatch (bet_scheduler × watch tick) から同時に読み書きされ得る。
+    # 非アトミック write_text だと torn JSON を読んだ daemon が当該レースを
+    # terminal (.done) にして賭け逃しになる (2026-06-10 bughunt)。
+    tmp = out.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, out)
     console.print(f"[dim]prediction snapshot: {out.relative_to(ROOT)}[/dim]")
 
 

@@ -150,6 +150,52 @@ def _remove_bet_schedule(race_id: str) -> None:
         pass
 
 
+def _claim_bet_schedule(race_id: str) -> bool:
+    """予約ファイルを `.firing` に atomic rename して発火権を claim する。
+
+    bet_scheduler と watch-auto tick は常時併走しており (Makefile watch-auto-bet /
+    Web UI 投票 ON)、二重防止 (_mark_analyzed) が数十秒の dispatch **完了後**にしか
+    走らないため、同一レースを両プロセスが同時 dispatch していた (2026-06-10 bughunt:
+    fresh odds 二重 fetch + claude -p 二重課金 + snapshot 並行上書き)。rename は
+    POSIX で atomic — 成功した 1 プロセスだけが発火する。
+    """
+    try:
+        os.rename(BET_SCHEDULE_DIR / f"{race_id}.json",
+                  BET_SCHEDULE_DIR / f"{race_id}.firing")
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _unclaim_bet_schedule(race_id: str) -> None:
+    """dispatch 失敗 (rc≠0) 時に claim を予約へ戻す (締切前なら次 tick で再試行)。"""
+    try:
+        os.rename(BET_SCHEDULE_DIR / f"{race_id}.firing",
+                  BET_SCHEDULE_DIR / f"{race_id}.json")
+    except OSError:
+        pass
+
+
+def _release_bet_claim(race_id: str) -> None:
+    """発火完了 (rc==0) 後に claim ファイルを削除する。"""
+    try:
+        (BET_SCHEDULE_DIR / f"{race_id}.firing").unlink()
+    except OSError:
+        pass
+
+
+def _cleanup_stale_claims(max_age_sec: int = 900) -> None:
+    """claim したまま死んだプロセスの `.firing` 残骸を掃除 (15分超 = レースは終わっている)。"""
+    if not BET_SCHEDULE_DIR.exists():
+        return
+    for p in BET_SCHEDULE_DIR.glob("*.firing"):
+        try:
+            if time.time() - p.stat().st_mtime > max_age_sec:
+                p.unlink()
+        except OSError:
+            continue
+
+
 def _append_history(record: dict) -> None:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
@@ -576,12 +622,17 @@ def main(
 
     _drain_pending(label="pre-analyze")
 
+    def _fire_now() -> None:
+        # now は呼び出しの都度取得する (直列 dispatch 中に時間が大きく進むため、
+        # tick 開始時刻の now_ts を使い回すと締切判定が stale になる)。
+        _fire_due_bets(
+            int(time.time()), bet_lead_sec=bet_lead_sec,
+            market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
+            llm_blend=llm_blend, bet_oddspark=bet_oddspark, bet_ipat=bet_ipat, dry_run=dry_run,
+        )
+
     # 予約済 bet の発火は active-hours 外でも行う (締切は時刻で来るため)。result fetch も継続。
-    _fire_due_bets(
-        now_ts, bet_lead_sec=bet_lead_sec,
-        market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
-        llm_blend=llm_blend, bet_oddspark=bet_oddspark, bet_ipat=bet_ipat, dry_run=dry_run,
-    )
+    _fire_now()
 
     if not _in_active_hours(now_dt, active_hours):
         console.print(
@@ -598,16 +649,29 @@ def main(
         "score", score_window, score_tolerance, now_ts,
         market_blend=market_blend, aptitude_top=aptitude_top, no_llm=no_llm,
         bet_oddspark=bet_oddspark, bet_ipat=bet_ipat, dry_run=dry_run, llm_blend=llm_blend,
+        fire_between=_fire_now,
     )
+
+
+# score dispatch を打つ最低 runway (締切までの残り秒)。これ未満では score が完了しても
+# bet 発火 (締切 bet_lead_sec 前) に間に合わない (実測: score dispatch 中央値 274s) ため、
+# LLM コストだけ消費して指数が使われない。予約は dispatch 前に書かれているので、
+# skip しても bet はモデルのみで発火する。env KEIBA_SCORE_MIN_RUNWAY で上書き可。
+SCORE_MIN_RUNWAY_SEC = int(os.environ.get("KEIBA_SCORE_MIN_RUNWAY") or 240)
 
 
 def _run_phase(
     phase: str, window_min: float, tolerance_min: float, now_ts: int,
     *, market_blend, aptitude_top, no_llm: bool,
     bet_oddspark: bool, bet_ipat: bool, dry_run: bool, llm_blend,
+    fire_between=None,
 ) -> None:
     """1 巡分の race 検出→dispatch を 1 phase 実行する。phase=score は指数キャッシュのみ、
     phase=bet は束生成+enqueue+result fetch スケジュール。dedup は phase 名前空間で独立。
+
+    fire_between: 各 dispatch の後に呼ぶ callback (= _fire_due_bets)。score dispatch は
+    1 件で数分かかる (実測 中央値274s) ため、直列ループ中に bet 発火時刻が来たレースを
+    取りこぼさないよう、レース間で発火チェックを挟む (2026-06-10 bughunt)。
     """
     label = "考察(score)" if phase == "score" else "投票(bet)"
     console.print(
@@ -625,6 +689,8 @@ def _run_phase(
         return
 
     analyzed = _load_analyzed(phase)
+    # 締切が近い順に処理 (直列 dispatch が長いので、緊急なレースを先に)。
+    due.sort(key=lambda r: int(r.get("close_at") or 0) or 2 ** 62)
     for race in due:
         rid = race["race_id"]
         mins = race["delta_sec"] / 60.0
@@ -641,6 +707,32 @@ def _run_phase(
         if dry_run:
             console.print(f"  [dim]dry-run: {race['url']}[/dim]")
             continue
+        if phase == "score":
+            # bet 予約は score dispatch の**前**に書く (score の成否と独立に bet を発火させる)。
+            # 旧実装は rc==0 のときだけ予約しており、score の一過性失敗/timeout 1 回で
+            # そのレースの賭けが丸ごと消えていた (cooldown 300s > 帯幅 120s で帯内再試行も
+            # 不可能, 2026-06-10 bughunt)。指数キャッシュが無ければ bet 段はモデルのみで
+            # 縮退する (3連単束は Claude ゲートで自動見送り / EV束は採算ゲートのみ)。
+            try:
+                _write_bet_schedule(race)
+                cl = race.get("close_at", 0)
+                when = (datetime.fromtimestamp(cl - BET_LEAD_SEC_DEFAULT).strftime("%H:%M:%S")
+                        if cl else "?")
+                console.print(f"  [cyan]→ bet 予約: {rid} を 締切前に発火 (≈ {when})[/cyan]")
+            except Exception as e:  # noqa: BLE001
+                console.print(f"[red]bet 予約失敗: {e}[/red]")
+            # 残り runway が score 完了に足りなければ dispatch しない (LLM コスト節約。
+            # 予約済みなので bet はモデルのみで発火する)。直列ループで前のレースの
+            # dispatch に数分かかった後は band 判定時より大幅に時間が進んでいる。
+            close_at_i = int(race.get("close_at") or 0)
+            remaining = close_at_i - int(time.time()) if close_at_i else 10 ** 9
+            if remaining < SCORE_MIN_RUNWAY_SEC:
+                console.print(
+                    f"[yellow]score dispatch skip (残り {remaining}s < {SCORE_MIN_RUNWAY_SEC}s — "
+                    f"完了見込みなし。bet は予約済み・モデルのみで発火): {tag}[/yellow]")
+                _mark_analyzed(rid, phase)
+                analyzed.add(rid)
+                continue
         started_at = int(time.time())
         if race.get("source") == "keibabook":
             rc = _dispatch_jra(
@@ -658,17 +750,7 @@ def _run_phase(
         if rc == 0:
             _mark_analyzed(rid, phase)
             analyzed.add(rid)
-            # score 完了 → このレースを「締切 BET_LEAD_SEC 秒前に投票」予約する。
-            # bet はこの予約時刻が来たら発火する (band スキャンしない)。
-            if phase == "score":
-                try:
-                    _write_bet_schedule(race)
-                    cl = race.get("close_at", 0)
-                    when = (datetime.fromtimestamp(cl - BET_LEAD_SEC_DEFAULT).strftime("%H:%M:%S")
-                            if cl else "?")
-                    console.print(f"  [cyan]→ bet 予約: {rid} を 締切前に発火 (≈ {when})[/cyan]")
-                except Exception as e:  # noqa: BLE001
-                    console.print(f"[red]bet 予約失敗: {e}[/red]")
+            # (bet 予約は score dispatch の**前**に書き込み済み — 上記参照。)
             # enqueue + result fetch は bet 帯のみ (score 帯は指数キャッシュだけ)。
             if phase == "bet":
                 if bet_oddspark:
@@ -712,6 +794,14 @@ def _run_phase(
             "close_at": race["close_at"],
             "rc": rc,
         })
+        # 直列 dispatch (score は1件数分) の間に bet 発火時刻が来たレースを取りこぼさない
+        # よう、レース間で発火チェックを挟む (2026-06-10 bughunt: 長い score 中に他レースの
+        # 締切が来て投票ゼロになる系統的賭け逃しの修正)。
+        if fire_between is not None:
+            try:
+                fire_between()
+            except Exception as e:  # noqa: BLE001
+                console.print(f"[red]bet 発火 (interleave) 失敗: {e}[/red]")
 
 
 def _fire_due_bets(
@@ -726,29 +816,43 @@ def _fire_due_bets(
     sched = _read_bet_schedule()
     if not sched:
         return
+    _cleanup_stale_claims()
     analyzed = _load_analyzed("bet")
+    # **締切が近い順**に処理する (旧実装はファイル名順 = 場コード順で、最緊急レースが
+    # 前のレースの長い dispatch の後回しになり締切超過していた, 2026-06-10 bughunt)。
+    sched.sort(key=lambda r: int(r.get("close_at") or 0) or 2 ** 62)
     for race in sched:
         rid = race["race_id"]
         close_at = int(race.get("close_at") or 0)
+        # dispatch は数十秒かかるため now は予約ごとに再取得する (引数 now_ts は tick
+        # 開始時刻で stale — 旧実装は stale now で「締切経過」判定をすり抜け、締切後に
+        # dispatch/enqueue まで実行していた)。
+        now = int(time.time())
         if rid in analyzed:
             _remove_bet_schedule(rid)
             continue
         if not close_at:
             continue
         # 締切を過ぎた予約は破棄 (発火しても締切後で不成立)
-        if now_ts >= close_at:
+        if now >= close_at:
             console.print(f"[dim]bet 予約破棄 (締切経過): {rid}[/dim]")
             _remove_bet_schedule(rid)
             continue
         # まだ発火時刻 (締切 bet_lead_sec 秒前) に達していない
-        if close_at - now_ts > bet_lead_sec:
+        if close_at - now > bet_lead_sec:
             continue
-        secs = close_at - now_ts
+        secs = close_at - now
         tag = f"{race.get('venue')} {race.get('race_no')}R 締切まで {secs}s"
-        console.print(f"[bold green]bet 発火:[/bold green] {tag} ({rid})")
         if dry_run:
+            console.print(f"[bold green]bet 発火:[/bold green] {tag} ({rid})")
             console.print(f"  [dim]dry-run: {race.get('url')}[/dim]")
             continue
+        # 原子的 claim: 予約を .firing に rename できたプロセスだけが発火する
+        # (bet_scheduler と watch tick の併走による二重 dispatch 防止)。
+        if not _claim_bet_schedule(rid):
+            console.print(f"[dim]bet 発火 skip (他プロセスが処理中): {rid}[/dim]")
+            continue
+        console.print(f"[bold green]bet 発火:[/bold green] {tag} ({rid})")
         nkrid = race.get("netkeiba_race_id", rid)
         if race.get("source") == "keibabook":
             rc = _dispatch_jra(nkrid, race.get("start_at", 0),
@@ -760,9 +864,10 @@ def _fire_due_bets(
                                         no_llm=no_llm, phase="bet", llm_blend=llm_blend)
         if rc != 0:
             console.print(f"[red]bet 発火 analyze 失敗 rc={rc} race={rid} (次tickで再試行)[/red]")
-            continue   # 予約は残す (締切前なら次tickで再試行)
+            _unclaim_bet_schedule(rid)   # 予約に戻す (締切前なら次tickで再試行)
+            continue
         _mark_analyzed(rid, "bet")
-        _remove_bet_schedule(rid)
+        _release_bet_claim(rid)
         if bet_oddspark:
             try:
                 if _enqueue_oddspark_bet(rid, nkrid):

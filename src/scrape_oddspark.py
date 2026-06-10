@@ -491,19 +491,29 @@ def parse_triple_list(html: str, *, ordered: bool) -> list[tuple[tuple[int, ...]
 
     ordered=True は 3連単 (順あり)、False は 3連複 (順不同, key は昇順)。
     9999.9 (表示飽和) は下限値 10000.0 に置換 (_desaturate)。
+
+    **セル境界固定の2段抽出 (2026-06-10 bughunt 修正)**: 旧 regex は
+    `<td>.*?(\\d+\\.\\d).*?</td>` の `.*?` が re.DOTALL で </td> 境界を越えるため、
+    取消馬の行 (`<td> - </td>`, 数値なし) の th が**次の有効行のオッズを盗み**
+    誤った組にオッズが付いていた (実機再現: 笠松6R axis=2 で (2,1,3)=2995.8 —
+    本来 (2,3,4) のオッズ — を生成し、正規 8 組が欠落)。td セルを先に切り出し、
+    セル内に数値が無ければ (dash = 取消/発売前) その行を skip する。
     """
     sep = "→" if ordered else "[-－]"
     pat = re.compile(
         r'<th[^>]*>\s*(\d+)\s*' + sep + r'\s*(\d+)\s*' + sep + r'\s*(\d+)\s*</th>'
-        r'\s*<td[^>]*>.*?(\d{1,5}\.\d).*?</td>',
+        r'\s*<td[^>]*>(.*?)</td>',
         re.DOTALL,
     )
     out: list[tuple[tuple[int, ...], float]] = []
-    for a, b, c, od in pat.findall(html):
+    for a, b, c, cell in pat.findall(html):
+        om = re.search(r"\d{1,5}\.\d", cell)
+        if not om:
+            continue   # dash 行 (取消/発売前) — 次行のオッズを盗まない
         key = (int(a), int(b), int(c))
         if not ordered:
             key = tuple(sorted(key))
-        out.append((key, _desaturate(float(od))))
+        out.append((key, _desaturate(float(om.group(0)))))
     return out
 
 
@@ -834,7 +844,10 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
         d["odds_source"] = source
-        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        import os as _os
+        _os.replace(tmp, p)   # アトミック (daemon の並行 read 対策)
     except (OSError, json.JSONDecodeError):
         pass
 

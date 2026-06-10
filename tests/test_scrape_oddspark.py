@@ -54,6 +54,24 @@ def test_parse_tanfuku_rowspan_second_horse():
     assert h8.win_odds == 97.9 and (h8.place_min, h8.place_max) == (11.1, 22.0)
 
 
+def test_parse_triple_list_skips_dash_rows():
+    """取消馬の dash 行 (`<td> - </td>`) が次行のオッズを盗まない (2026-06-10 bughunt 修正)。
+
+    旧 regex は `.*?` が </td> 境界を越え、dash 行の th が次の有効行のオッズと
+    結合して誤った組にオッズが付いていた (実機: 笠松6R で (2,1,3)=2995.8 を生成し
+    正規 8 組が欠落)。セル境界固定の2段抽出で dash 行は skip、後続行は正しく付く。
+    """
+    html = (
+        '<th>2 → 1 → 3</th><td> - </td>'              # 1番取消 → オッズなし
+        '<th>2 → 3 → 4</th><td><span>2995.8</span></td>'
+        '<th>2 → 3 → 5</th><td><span>1234.5</span></td>'
+    )
+    out = dict(op.parse_triple_list(html, ordered=True))
+    assert (2, 1, 3) not in out                        # dash 行は組を作らない
+    assert out[(2, 3, 4)] == 2995.8                    # オッズを盗まれない
+    assert out[(2, 3, 5)] == 1234.5
+
+
 def test_parse_triple_list_desaturates_9999():
     """oddspark 3連単の表示飽和 9999.9 は下限値 10000.0 に置換 (2026-06-10 bughunt 修正)。
 

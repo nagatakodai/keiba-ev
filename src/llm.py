@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Iterator
@@ -43,8 +44,12 @@ def _start_kill_timer(proc: "subprocess.Popen", timeout: int):
     return timer, timed_out
 
 
-def _finalize_claude_proc(proc, timer, timed_out) -> list[tuple[str, Any]]:
-    """read loop 後の後始末 (watchdog 解除 + reap)。yield すべき error 一覧を返す。"""
+def _finalize_claude_proc(proc, timer, timed_out, err_file=None) -> list[tuple[str, Any]]:
+    """read loop 後の後始末 (watchdog 解除 + reap)。yield すべき error 一覧を返す。
+
+    err_file は _spawn_claude が stderr を書いている一時ファイル (無ければ旧来の
+    proc.stderr PIPE を読む)。異常終了時のみ末尾 ~600 文字を読み、必ず close する。
+    """
     timer.cancel()
     errs: list[tuple[str, Any]] = []
     try:
@@ -58,10 +63,44 @@ def _finalize_claude_proc(proc, timer, timed_out) -> list[tuple[str, Any]]:
     if timed_out[0]:
         errs.append(("error", "claude timeout"))
     elif proc.returncode not in (0, None):
-        err = (proc.stderr.read() if proc.stderr else "")[:600]
+        err = ""
+        if err_file is not None:
+            try:
+                err_file.seek(0, 2)
+                size = err_file.tell()
+                err_file.seek(max(0, size - 600))
+                err = err_file.read()[:600]
+            except Exception:  # noqa: BLE001
+                err = ""
+        elif proc.stderr:
+            err = (proc.stderr.read() or "")[:600]
         if err:
             errs.append(("error", f"claude exit {proc.returncode}: {err}"))
+    if err_file is not None:
+        try:
+            err_file.close()
+        except Exception:  # noqa: BLE001
+            pass
     return errs
+
+
+def _spawn_claude(cmd: list[str]) -> tuple["subprocess.Popen", Any]:
+    """claude subprocess を **stderr=一時ファイル** で起動する。(proc, err_file) を返す。
+
+    stderr=PIPE だと streaming 中に誰も drain しないため、CLI/MCP のログが pipe
+    buffer (64KB) を超えた時点で child=stderr write ブロック / parent=stdout read
+    ブロックの deadlock になり、kill timer (score 段は 15 分) 発火まで全ブロックして
+    **完成済みの score 結果ごと喪失**していた (2026-06-10 bughunt 実再現)。
+    一時ファイルなら無制限に書けて deadlock しない。エラー時は
+    _finalize_claude_proc(err_file=) が末尾を読み、正常時もそこで close される。
+    """
+    err_f = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(
+        cmd, cwd=str(ROOT),
+        stdout=subprocess.PIPE, stderr=err_f,
+        text=True, bufsize=1, env=_claude_env(),
+    )
+    return proc, err_f
 
 
 def _balanced_json(text: str, start: int) -> dict | None:
@@ -318,11 +357,7 @@ def score_horses_stream(
         "--allowedTools", ",".join(ALLOWED_TOOLS),
         "--disallowedTools", DISALLOWED_TOOLS,
     ]
-    proc = subprocess.Popen(
-        cmd, cwd=str(ROOT),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=_claude_env(),
-    )
+    proc, _err_f = _spawn_claude(cmd)
     assert proc.stdout is not None
     timer, timed_out = _start_kill_timer(proc, timeout)
     try:
@@ -348,7 +383,7 @@ def score_horses_stream(
     except Exception as e:  # noqa: BLE001
         yield ("error", f"stream parse error: {e}")
     finally:
-        for ev in _finalize_claude_proc(proc, timer, timed_out):
+        for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=_err_f):
             yield ev
 
 
@@ -409,11 +444,16 @@ def parse_horse_scores(text: str) -> dict:
         except (ValueError, TypeError):
             continue
     support: dict[int, int] = {}
-    for k, v in (raw.get("support") or {}).items():
-        try:
-            support[int(k)] = max(0, int(float(v)))
-        except (ValueError, TypeError):
-            continue
+    # `or {}` は falsy しか救済しない — LLM が support を list 等の非 dict で返すと
+    # .items() で AttributeError になり score dispatch 全体が死ぬ (2026-06-10 bughunt)。
+    # scores/notes/alerts と同じく isinstance ガードで「壊れた出力は raise しない」契約を守る。
+    sup_raw = raw.get("support")
+    if isinstance(sup_raw, dict):
+        for k, v in sup_raw.items():
+            try:
+                support[int(k)] = max(0, int(float(v)))
+            except (ValueError, TypeError):
+                continue
     notes = raw.get("notes") if isinstance(raw.get("notes"), dict) else {}
     return {
         "scores": scores,
@@ -584,11 +624,7 @@ def select_trifecta_stream(
         "--allowedTools", "",                       # ツール一切なし = 検索しない・高速
         "--disallowedTools", _TRIFECTA_SELECT_DISALLOWED,
     ]
-    proc = subprocess.Popen(
-        cmd, cwd=str(ROOT),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=_claude_env(),
-    )
+    proc, _err_f = _spawn_claude(cmd)
     assert proc.stdout is not None
     timer, timed_out = _start_kill_timer(proc, timeout)
     try:
@@ -612,7 +648,7 @@ def select_trifecta_stream(
     except Exception as e:  # noqa: BLE001
         yield ("error", f"stream parse error: {e}")
     finally:
-        for ev in _finalize_claude_proc(proc, timer, timed_out):
+        for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=_err_f):
             yield ev
 
 

@@ -225,12 +225,18 @@ def parse_deba_table(html: str) -> list[tuple[int, str, str, bool]]:
     **次の馬の CODE と誤ってペアにしない** (= 馬柱を別馬に付ける最悪の取り違えを防ぐ)。
     リンクが無い馬は code 空で残す (馬は落とさない)。
 
-    **absent (2026-06-10 bughunt 修正)**: ブロック内の 出走取消/競走除外/発走除外/取消
-    表示を検出して absent=True を返す。旧実装は取消馬を出走馬として返しており、
-    estimate_probs (absent でしかフィルタしない) で取消馬に確率が割り当てられ、
-    実弾3連単束のフォーメーションが崩壊していた (実測: 笠松6R で取消馬が rank 2位)。
-    最終馬のブロックは </table> で打ち切ってから検出する (ページ下部の凡例
-    「取消」等を誤検出して最終馬を常に absent にしない)。
+    **absent (2026-06-10 bughunt 修正, 第2版)**: ブロック内の **全文語**
+    (出走取消/競走除外/発走除外) を検出して absent=True を返す。旧実装は取消馬を
+    出走馬として返しており、estimate_probs (absent でしかフィルタしない) で取消馬に
+    確率が割り当てられ、実弾3連単束のフォーメーションが崩壊していた (実測: 笠松6R で
+    取消馬が rank 2位)。
+    第1版の「</table> で打ち切ってから検出」は**実ページで常に no-op だった**:
+    各馬ブロックには馬柱ミニテーブルの </table> が必ず含まれ、取消表示
+    (`<td class="info">出走取消</td>`) はその後に来るため検出されなかった。
+    打ち切りは撤去し、ブロック全体を全文語のみで検索する — bare「取消」を使うと
+    現役馬の馬柱の過去走取消歴 (pastRank) に誤反応する (実測: 本日 12 レース 13 頭)
+    ため全文語限定が必須。全文語はページ凡例にも pastRank にも現れないことを
+    本日の全取消ありレース (5/5) で実測確認済。
     """
     out: list[tuple[int, str, str, bool]] = []
     marks = list(re.finditer(r'class="horseNum"[^>]*>\s*(\d+)\s*</td>', html))
@@ -239,9 +245,7 @@ def parse_deba_table(html: str) -> list[tuple[int, str, str, bool]]:
         end = marks[i + 1].start() if i + 1 < len(marks) else len(html)
         block = html[m.end():end]   # この馬のブロック内だけを探索
         lm = re.search(r'k_lineageLoginCode=(\d+)"[^>]*>\s*([^<]+?)\s*</a>', block)
-        tbl_end = block.find("</table>")
-        scan = block[:tbl_end] if tbl_end != -1 else block
-        absent = bool(re.search(r"出走取消|競走除外|発走除外|取消", scan))
+        absent = bool(re.search(r"出走取消|競走除外|発走除外", block))
         out.append((num, lm.group(2).strip() if lm else "",
                     lm.group(1) if lm else "", absent))
     return out
@@ -471,7 +475,10 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
         d["odds_source"] = source
-        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        import os as _os
+        _os.replace(tmp, p)   # アトミック (daemon の並行 read 対策)
     except (OSError, json.JSONDecodeError):
         pass
 

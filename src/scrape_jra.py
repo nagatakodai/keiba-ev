@@ -695,7 +695,10 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
         d["odds_source"] = source
-        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        import os as _os
+        _os.replace(tmp, p)   # アトミック (daemon の並行 read 対策)
     except (OSError, json.JSONDecodeError):
         pass
 

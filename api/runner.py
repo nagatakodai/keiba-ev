@@ -494,18 +494,36 @@ class WatchAutoManager:
         # 以前はここより前で env を書き換えており「loop=旧束 / 再起動 daemon=新束」に分裂し、
         # レースごとに実弾の束が非決定的に変わるバグだった。束/予算の変更は停止→開始のみ。
         if self.job is not None and self.job.status in ("pending", "running"):
+            # 【重要 2026-06-10 bughunt #2】貼り直す daemon のパラメタも**リクエスト値でなく
+            # persist 済み self._config の値**を使う (env と同じ規則。scheduler は元々 config
+            # から読んでおり、daemon だけリクエスト値だと「loop=旧束 × daemon=新倍率/自動購入」
+            # という誰も設定していない混成で実弾が動き、UI 表示 (config) とも矛盾していた)。
+            # 設定変更は停止→開始のフル再起動のみで反映される。
+            cfg = self._config or {}
+            cfg_auto = (bool(cfg["bet_auto_purchase"]) if "bet_auto_purchase" in cfg
+                        else bet_auto_purchase)
+            cfg_cap = (int(cfg["bet_daily_cap"]) if cfg.get("bet_daily_cap") is not None
+                       else bet_daily_cap)
+            cfg_mult = (float(cfg["bet_stake_multiplier"])
+                        if cfg.get("bet_stake_multiplier") is not None
+                        else eff_stake_multiplier)
+            cfg_max_mult = cfg.get("bet_max_stake_multiplier", bet_max_stake_multiplier)
+            cfg_pay = (str(cfg["bet_payment_method"]) if cfg.get("bet_payment_method")
+                       else bet_payment_method)
+            cfg_login = (bool(cfg["bet_auto_login"]) if "bet_auto_login" in cfg
+                         else bet_auto_login)
             if bet_oddspark and not self.bet_running:
                 await self._start_betting_daemon(
-                    auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
-                    stake_multiplier=eff_stake_multiplier,
-                    max_stake_multiplier=bet_max_stake_multiplier,
-                    payment_method=bet_payment_method, auto_login=bet_auto_login)
+                    auto_purchase=cfg_auto, daily_cap=cfg_cap,
+                    stake_multiplier=cfg_mult,
+                    max_stake_multiplier=cfg_max_mult,
+                    payment_method=cfg_pay, auto_login=cfg_login)
             if bet_ipat and not self.ipat_bet_running:
                 await self._start_ipat_daemon(
-                    auto_purchase=bet_auto_purchase, daily_cap=bet_daily_cap,
-                    stake_multiplier=eff_stake_multiplier,
-                    max_stake_multiplier=bet_max_stake_multiplier,
-                    auto_login=bet_auto_login)
+                    auto_purchase=cfg_auto, daily_cap=cfg_cap,
+                    stake_multiplier=cfg_mult,
+                    max_stake_multiplier=cfg_max_mult,
+                    auto_login=cfg_login)
             if (bet_oddspark or bet_ipat) and not self.scheduler_running:
                 await self._start_scheduler(
                     bet_oddspark=bet_oddspark, bet_ipat=bet_ipat,
