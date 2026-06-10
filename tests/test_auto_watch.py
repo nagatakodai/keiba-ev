@@ -173,3 +173,46 @@ def test_enqueue_ev_bundle_skips_empty(tmp_path, monkeypatch):
                     [{"bet_type": "trifecta", "key": [1, 2, 3], "stake": 100}],
                     rank_source="claude", ev_legs=[])
     assert aw._enqueue_oddspark_bet("2026500527-527-9", "202650052709") is False
+
+
+# --- bet 予約の atomic claim (二重 dispatch 防止, 2026-06-10 bughunt) ---
+
+
+def test_claim_bet_schedule_atomic(tmp_path, monkeypatch):
+    """予約 claim は 1 プロセスだけが成功し、unclaim で予約に戻り、release で消える。"""
+    monkeypatch.setattr(aw, "BET_SCHEDULE_DIR", tmp_path / "sched")
+    race = {"race_id": "2026500527-527-9", "netkeiba_race_id": "202650052709",
+            "close_at": 9999999999, "start_at": 9999999999}
+    aw._write_bet_schedule(race)
+    sched_json = tmp_path / "sched" / "2026500527-527-9.json"
+    firing = tmp_path / "sched" / "2026500527-527-9.firing"
+    assert sched_json.exists()
+    # 1 回目の claim は成功し .firing に移る
+    assert aw._claim_bet_schedule("2026500527-527-9") is True
+    assert not sched_json.exists() and firing.exists()
+    # 2 回目 (併走プロセス相当) は失敗 = 二重 dispatch しない
+    assert aw._claim_bet_schedule("2026500527-527-9") is False
+    # dispatch 失敗 → unclaim で予約に戻る (次 tick で再試行可能)
+    aw._unclaim_bet_schedule("2026500527-527-9")
+    assert sched_json.exists() and not firing.exists()
+    # 成功時は claim → release で完全に消える
+    assert aw._claim_bet_schedule("2026500527-527-9") is True
+    aw._release_bet_claim("2026500527-527-9")
+    assert not sched_json.exists() and not firing.exists()
+
+
+def test_cleanup_stale_claims(tmp_path, monkeypatch):
+    """孤児 .firing (claim したまま死んだプロセスの残骸) は max_age 超で掃除される。"""
+    import os
+    import time as _time
+    monkeypatch.setattr(aw, "BET_SCHEDULE_DIR", tmp_path / "sched")
+    (tmp_path / "sched").mkdir()
+    stale = tmp_path / "sched" / "old.firing"
+    fresh = tmp_path / "sched" / "new.firing"
+    stale.write_text("{}")
+    fresh.write_text("{}")
+    old_t = _time.time() - 1200
+    os.utime(stale, (old_t, old_t))
+    aw._cleanup_stale_claims(max_age_sec=900)
+    assert not stale.exists()      # 15 分超 → 掃除
+    assert fresh.exists()          # 直近 claim は残す
