@@ -863,6 +863,11 @@ def _save_prediction_snapshot(
     # 市場無視を保証するため probs_t (market_blend=0 の model-only) を使い、ランキングは Claude 指数。
     recommended_bundle_t = None
     probs_for_t = probs_t if probs_t is not None else probs
+    if probs_t is None:
+        # probs_t 未指定 = market-free 保証なし。live 既定 β=0.78 では probs は市場ブレンド済み
+        # なので、呼び出し元が probs_t を渡し忘れると実弾束の配分・トリガミ判定が市場汚染される
+        # (2026-06-10 review で keibago/jra/oddspark 経路の regression として実発生 → 修正済)。
+        console.print("[yellow]⚠ probs_t 未指定 — 3連単束の market-free 保証なし (blended probs にフォールバック)[/yellow]")
     trifecta_bankroll = _trifecta_bankroll(trifecta_bankroll)   # 明示 → env → 既定 ¥10,000
     t_mode = _trifecta_mode(trifecta_mode)                      # 明示 → env → 既定 recovery
     # 回収モード (穴狙い): 市場1番人気を1着から除外 (Claude 指数 > 90 で解禁)。
@@ -1025,7 +1030,8 @@ def _save_prediction_snapshot(
             "mid": trifecta_mid, "tail": trifecta_tail,
             "avoid_torigami": (not trifecta_no_torigami), "bankroll": trifecta_bankroll,
             # 市場無視を保証: 3連単束は market_blend=0 の model-only probs を使用 (review 指摘対応)。
-            "market_blend": 0.0, "rank_by": "claude_index",
+            # probs_t 未指定のフォールバック時は保証が無いので null を記録 (虚偽痕跡の防止)。
+            "market_blend": (0.0 if probs_t is not None else None), "rank_by": "claude_index",
             # 3連単束モード (recovery=回収/穴狙い: 市場1番人気を1着除外, hit=旧 全力的中)。
             # 市場情報は excluded_head のゲート判定のみに使用 (2026-06-07 ユーザ指示)。
             "mode": t_mode,

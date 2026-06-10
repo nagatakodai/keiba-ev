@@ -132,8 +132,6 @@ def main() -> None:
     n_races = 0
     for rf in sorted(glob.glob(str(RES_DIR / "*.json"))):
         rid = os.path.basename(rf)[:-5]
-        if args.since and rid[:8] < args.since:
-            continue
         pf = PRED_DIR / f"{rid}.json"
         if not pf.exists():
             continue
@@ -142,6 +140,9 @@ def main() -> None:
         if len(fo) < 3:
             continue
         d = json.load(open(pf))
+        # 日付フィルタは saved_at で行う (race_id 先頭8桁は年+場コードで日付ではない)。
+        if args.since and (d.get("saved_at") or "")[:10].replace("-", "") < args.since:
+            continue
         win_rows = (d.get("bet_tables") or {}).get("win") or []
         win = anchor_probs(win_rows)
         if not win:

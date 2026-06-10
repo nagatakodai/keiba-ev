@@ -83,8 +83,8 @@ LGBM_TEMPERATURE = 0.4
 #            T=25 なら 100 vs 50 の差が win 比 ~7倍 (model の spread と同程度)。
 # 【market_blend=0 contrarian 実験の終了 (2026-06-10)】
 # 2026-06-01〜の「市場無視 (MARKET_BLEND_LIVE=0.0)」live 実験は実測で失敗が確定した:
-#   - live 蓄積 N=146 の勝者 log-loss: market単独 1.595 < +Claude 1.629 < model+market 1.634
-#     (scripts/validate_claude_value.py) — モデルは市場から価値を**引いて**いた。
+#   - live 蓄積 N=146 の勝者 log-loss: market単独 1.601 < +Claude 1.626 < model+market 1.629
+#     (scripts/validate_claude_value.py, de-vig 修正後の再計測) — モデルは市場から価値を**引いて**いた。
 #   - β=0 では past_runs 欠損時に fundamental が一様分布に縮退し、EV=odds/n で
 #     「最長オッズを自動購入」する事故が実発生 (snapshot 2026650608-608-5: 全馬 prob=0.1000
 #     のまま 単勝39.9倍/ワイド47.4倍 を購入)。

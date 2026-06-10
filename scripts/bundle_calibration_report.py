@@ -87,8 +87,6 @@ def load_pairs(since: str | None):
     pairs = []
     for rf in sorted(glob.glob(str(RES_DIR / "*.json"))):
         rid = os.path.basename(rf)[:-5]
-        if since and rid[:8] < since:
-            continue
         pf = PRED_DIR / f"{rid}.json"
         if not pf.exists():
             continue
@@ -97,6 +95,10 @@ def load_pairs(since: str | None):
         if len(fo) < 3:
             continue
         d = json.load(open(pf))
+        # 日付フィルタは snapshot の saved_at で行う。race_id 先頭8桁は「年+場コード」で
+        # 日付ではない (NAR は rid[6:10] が MMDD、JRA は回/日) ため rid 比較は誤フィルタになる。
+        if since and (d.get("saved_at") or "")[:10].replace("-", "") < since:
+            continue
         pairs.append((rid, d, r))
     return pairs
 

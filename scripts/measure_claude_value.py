@@ -73,7 +73,8 @@ def market_devig(snap: dict) -> dict[int, float]:
     }
     if not odds:
         return {}
-    raw = _norm({k: 1.0 / v for k, v in odds.items()})
+    # 未正規化 1/odds のまま de-vig へ (正規化すると k=1 no-op, 2026-06-10 修正)
+    raw = {k: 1.0 / v for k, v in odds.items()}
     try:
         pm = E.power_method_overround(raw)
     except Exception:

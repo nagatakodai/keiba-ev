@@ -95,9 +95,11 @@ def _normalize(d: dict[int, float]) -> dict[int, float]:
 
 
 def _market_implied(win_odds: dict[int, float], floor: float = 1e-9) -> dict[int, float]:
-    """単勝オッズ → 1/odds 正規化 → power-method de-vig した市場暗黙 1 着率。"""
+    """単勝オッズ → **未正規化** 1/odds → power-method de-vig した市場暗黙 1 着率。
+
+    正規化してから渡すと k=1 の恒等写像になり de-vig が no-op 化する (2026-06-10 修正,
+    production estimate_probs と同手順)。de-vig 後に floor + 正規化。"""
     raw = {k: 1.0 / o for k, o in win_odds.items() if o and o > 0}
-    raw = _normalize(raw)
     if not raw:
         return {}
     try:
@@ -229,6 +231,25 @@ def evaluate_race(
         if k:
             stored_win[int(k[0])] = float(r.get("prob") or 0.0)
     stored_win = {k: v for k, v in stored_win.items() if v > 0}
+
+    # ── 新レジーム (2026-06-10〜, MARKET_BLEND_LIVE=0.78) 対応 ──
+    # win_probs_model (= probs_t.win, market_blend=0 で Claude 合成済) があればそれを
+    # stored として使う — 旧 β=0 時代の bet_tables.win と同形なので既存の復元ロジック
+    # (Claude 剥がし) がそのまま適用できる。新レジームの snapshot (model_no_info キーが
+    # 存在する) なのに win_probs_model が無い場合、bet_tables.win は市場ブレンド済みで
+    # fundamental を復元できない → 既定 (require_no_market_blend) で除外する。
+    wpm_raw = snap.get("win_probs_model")
+    if wpm_raw:
+        stored_win = {}
+        for k, v in wpm_raw.items():
+            try:
+                if float(v) > 0:
+                    stored_win[int(k)] = float(v)
+            except (ValueError, TypeError):
+                continue
+    elif "model_no_info" in snap and require_no_market_blend:
+        return {"rid": rid, "skip": "market-blended snapshot (win_probs_model 無し, β>0 レジーム)"}
+
     if not stored_win:
         return {"rid": rid, "skip": "no stored win probs"}
 
@@ -275,18 +296,10 @@ def evaluate_race(
     # ── model fundamental 復元 (baked Claude を剥がす) ──
     fundamental = _recover_fundamental(stored_win, claude, baked_blend, support, market_floor)
 
-    # 市場ブレンド痕跡の heuristic 検出: 剥がした fundamental が市場とほぼ一致するなら
-    # 元々市場ブレンドが効いていた (= 純 fundamental でない) 可能性。require 時は除外。
+    # 市場ブレンド snapshot の除外は上の「新レジーム対応」(win_probs_model / model_no_info
+    # キーによる決定的判定) で実施済み。相関ヒューリスティック (旧 pass 実装 = 機能して
+    # いなかった) は廃止。
     market_blend_suspect = False
-    if market and require_no_market_blend:
-        # corr(fundamental, market) が極端に高い (人気馬に張り付く) と疑う閾値
-        common = [k for k in fundamental if k in market]
-        if len(common) >= 3:
-            fv = [fundamental[k] for k in common]
-            mv = [market[k] for k in common]
-            # cosine 的な一致度 (両方 0-1 確率)。ここでは単純に L1 距離で代用しない。
-            # 実際の live snapshot は market_blend=0 なので通常 suspect にならない。
-            pass  # heuristic は過剰除外を避け、odds_source 判定に委ねる (下記注記)
 
     # ── 3 通りの勝者 1 着確率 ──
     # (a) market only

@@ -183,7 +183,7 @@ snapshot に保存される主要フィールド:
 
 snapshot 349 × results 324 の突合 + live 蓄積データの MLE (multi-agent レビュー + 検証) で確定した事実:
 
-1. **勝率次元でモデルは市場に勝てていない**: Benter 型 conditional logit (α,β **自由**) の MLE (`scripts/fit_blend_mle.py`, N=324) は **α=0.016 (95%CI [-0.27, +0.32]), β=0.949** — モデル成分の独立情報は統計的にゼロ。勝者 log-loss も market 単独 1.595 < +Claude 1.629 < model+market 1.634 (`scripts/validate_claude_value.py`, N=146)。「モデルと市場の乖離 (px_o>1) を買う」は構造的に adverse selection。
+1. **勝率次元でモデルは市場に勝てていない**: Benter 型 conditional logit (α,β **自由**) の MLE (`scripts/fit_blend_mle.py`, N=324) は **α=0.016 (95%CI [-0.27, +0.32]), β=0.949** — モデル成分の独立情報は統計的にゼロ。勝者 log-loss も market 単独 1.601 < +Claude 1.626 < model+market 1.629 (`scripts/validate_claude_value.py`, N=146, de-vig 修正後の再計測)。「モデルと市場の乖離 (px_o>1) を買う」は構造的に adverse selection。
 2. **全実弾系列が大幅 -EV** (実測 ROI, `scripts/bundle_calibration_report.py`): EV束 66.9% (n=292) / 3連単束 claude 旧hit 82.8% (n=57) / 新hit 11.9% (n=18) / **recovery 14.9% (n=26)** / Claude 選定 3連単脚の flat ¥100 でも **44.0%** (2,715脚) — 選定自体に正の edge は無い (flat でランダム以下)。
 3. **市場アンカー型クロスプール (Dr.Z 系) も現データでは -EV** (`scripts/backtest_market_anchor.py`): 単勝アンカー × Discounted Harville (λ を live 結果で MLE 較正: λ2=0.68/λ3=0.62 でも) px_o>1 の複勝/3連単 flat 買いは NAR 3連単 ~27% / 複勝 ~48-64%。**閾値を上げるほど悪化 = 高 px_o はチェーン側の誤り**で、NAR の exotic pool は単勝外挿より正確だった。snapshot の `market_anchor_ev` でペーパー計測は継続 (JRA は n 不足で未結論 — pool が深い JRA で要観測)。
 4. **修正済の重大バグ** (commit ce8cb64): ①de-vig (power_method_overround) が正規化済み入力で k=1 恒等写像の no-op ②live β=0 (市場無視実験) は past_runs 欠損時に一様分布へ縮退し **EV=odds/n で最長オッズを自動購入** ③EV/Kelly/トリガミが bet 時オッズのままでドリフト未補正 (的中時 place median 0.891) ④full Kelly がコード強制 (½Kelly は表示のみ) ⑤3連単控除率の 22.5% 誤記 (正: 27.5%) ⑥recovery モードが 1.0-1.4 倍の鉄板1番人気 (FLB 過小評価側, 回収率~94%) まで一律1着除外。

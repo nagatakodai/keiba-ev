@@ -214,9 +214,8 @@ def main() -> int:
     def _market_prob(g: pd.DataFrame) -> pd.Series:
         raw = {int(r.horse_number): (1.0 / r.win_odds) if r.win_odds and r.win_odds > 0 else 0.0
                for r in g.itertuples()}
-        s = sum(raw.values())
-        if s > 0:
-            raw = {k: v / s for k, v in raw.items()}
+        # 未正規化 1/odds (Σ=overround>1) のまま de-vig へ —
+        # 正規化すると power_method が k=1 の恒等写像に縮退する (2026-06-10 修正)
         try:
             corrected = power_method_overround(raw)
         except Exception:

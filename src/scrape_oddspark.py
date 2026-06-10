@@ -737,6 +737,12 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
                                   speed_v2_blend=ev_mod.SPEED_V2_BLEND_LIVE,
                                   llm_win_index=llm_index, llm_blend=llm_blend,
                                   llm_support=llm_support, llm_scale=llm_scale)
+    # 3連単束 (実弾) 用の market-free probs (市場無視保証。netkeiba 経路と同パターン —
+    # 渡さないと snapshot 側で blended probs にフォールバックし実弾束が市場汚染される)。
+    probs_t = probs if market_blend == 0 else ev_mod.estimate_probs(
+        rd, market_blend=0.0, speed_v2_blend=ev_mod.SPEED_V2_BLEND_LIVE,
+        llm_win_index=llm_index, llm_blend=llm_blend,
+        llm_support=llm_support, llm_scale=llm_scale)
     tables = {bt: ev_mod.build_bet_table(rd.other_bets.get(bt, []), probs, bet_type=bt)
               for bt in ("win", "place", "quinella", "wide", "exacta", "trio")}
     # 3連単 EV table (rd.trifecta 由来)
@@ -764,7 +770,7 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
             az_mod._save_prediction_snapshot(
                 race_id, rd, tri_table, plan_rows, aptitudes, snap_bet_tables, apt_top,
                 market_signals, feats=feats, lgbm_info=ev_mod.lgbm_status(),
-                hit_points=3, probs=probs,
+                hit_points=3, probs=probs, probs_t=probs_t,
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
                 # bet 段のみ到達 (score 段は上で early return)。3連単買い目選定を Claude に

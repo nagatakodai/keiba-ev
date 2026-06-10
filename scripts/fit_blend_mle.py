@@ -51,8 +51,6 @@ def load_races(since: str | None):
     races = []
     for rf in sorted(glob.glob(str(RES_DIR / "*.json"))):
         rid = os.path.basename(rf)[:-5]
-        if since and rid[:8] < since:
-            continue
         pf = PRED_DIR / f"{rid}.json"
         if not pf.exists():
             continue
@@ -61,14 +59,22 @@ def load_races(since: str | None):
         if not fo:
             continue
         d = json.load(open(pf))
+        # 日付フィルタは saved_at で行う (race_id 先頭8桁は年+場コードで日付ではない)。
+        if since and (d.get("saved_at") or "")[:10].replace("-", "") < since:
+            continue
         win_rows = (d.get("bet_tables") or {}).get("win") or []
         odds = {row["key"][0]: row["odds"] for row in win_rows if row.get("odds", 0) > 0}
         if len(odds) < 3:
             continue
-        # f: 新フィールド優先、無ければ旧 β=0 時代の bet_tables.win prob
+        # f: 新フィールド優先、無ければ旧 β=0 時代の bet_tables.win prob。
+        # 新レジーム (model_no_info キーあり = MARKET_BLEND_LIVE=0.78 以降) なのに
+        # win_probs_model が無い snapshot は bet_tables.win が市場ブレンド済みで
+        # fundamental 不明 → fit から除外 (混ぜると α が市場へ偽膨張する)。
         wpm = d.get("win_probs_model")
         if wpm:
             f = {int(k): float(v) for k, v in wpm.items()}
+        elif "model_no_info" in d:
+            continue
         else:
             f = {row["key"][0]: row.get("prob") or 0.0 for row in win_rows}
         horses = [n for n in odds if f.get(n, 0.0) > 0]
