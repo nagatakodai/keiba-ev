@@ -38,10 +38,14 @@ def test_parse_tanfuku_extracts_real_horses():
     assert (fav.place_min, fav.place_max) == (1.0, 1.0)
 
 
-def test_market_win_probs_from_tanfuku_normalized():
+def test_market_win_probs_from_tanfuku_unnormalized():
+    # de-vig (power_method_overround) が overround を観測できるよう **未正規化** 1/odds を
+    # 返す仕様 (2026-06-10〜)。正規化済みを渡すと power method が k=1 の no-op に縮退する。
     horses = op.parse_tanfuku(_TANFUKU_HTML)
     mwp = op.market_win_probs_from_tanfuku(horses)
-    assert abs(sum(mwp.values()) - 1.0) < 1e-9
+    for h in horses:
+        if h.win_odds > 0:
+            assert abs(mwp[h.number] - 1.0 / h.win_odds) < 1e-12
     # 単勝 1.2 の馬が最大の市場暗黙率
     assert max(mwp, key=mwp.get) == 5
 

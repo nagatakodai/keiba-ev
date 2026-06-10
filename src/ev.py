@@ -648,6 +648,49 @@ def market_win_probs(
     return {k: v / s for k, v in raw.items()}
 
 
+def market_anchor_probs(rd: RaceData) -> Probabilities | None:
+    """市場アンカー確率 (モデル・Claude を一切使わない): 単勝オッズ → de-vig → Discounted Harville。
+
+    Dr.Z (Hausch-Ziemba) 系クロスプール戦略の確率源。単勝 pool は最も効率的
+    (live N=324 の MLE で α≈0, β≈0.95 — モデルは市場に上乗せ無し) なので、これを
+    アンカーに「複勝/ワイド/3連単 pool が単勝 pool と整合しない歪み」を px_o>1 として
+    検出する。馬の強さを市場より知る必要が無く、pool 間の相対ミスプライスだけを突く。
+
+    単勝オッズが 3 頭未満なら None (3連単 marginalize へは fallback しない —
+    3連単 pool 自身をアンカーにすると自己参照でクロスプール歪みが消えるため)。
+    """
+    raw: dict[int, float] = {}
+    for h in rd.race.horses:
+        if getattr(h, "absent", False):
+            continue
+        wo = getattr(h, "win_odds", 0)
+        if wo and float(wo) > 0:
+            raw[h.number] = 1.0 / float(wo)
+    if len(raw) < 3:
+        for b in (rd.other_bets or {}).get("win", []):
+            if getattr(b, "absent", False) or getattr(b, "odds", 0) <= 0:
+                continue
+            raw[b.key[0]] = 1.0 / float(b.odds)
+    if len(raw) < 3:
+        return None
+    try:
+        win = power_method_overround(raw)
+    except Exception:
+        s = sum(raw.values())
+        win = {k: v / s for k, v in raw.items()}
+    s = sum(win.values())
+    if s <= 0:
+        return None
+    win = {k: v / s for k, v in win.items()}
+    # λ は segment 較正値 (無ければ文献値)。show-bias は使わない (純市場アンカー)。
+    seg_meta = _segment_booster_meta(segment_of_rd(rd))[1] or {}
+    lambda_2 = float(seg_meta.get("lambda_2_mle") or DEFAULT_LAMBDA_2)
+    lambda_3 = float(seg_meta.get("lambda_3_mle") or DEFAULT_LAMBDA_3)
+    place2 = {k: max(v, 1e-9) ** lambda_2 for k, v in win.items()}
+    place3 = {k: max(v, 1e-9) ** lambda_3 for k, v in win.items()}
+    return Probabilities(win=win, place2=place2, place3=place3)
+
+
 def load_probs(path: str | None, fallback: Probabilities) -> Probabilities:
     if not path:
         return fallback

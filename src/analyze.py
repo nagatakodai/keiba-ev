@@ -924,6 +924,38 @@ def _save_prediction_snapshot(
             f"{' / トリガミ防止' if not trifecta_no_torigami else ''}"
             f"{f' / 1着除外 馬{t_exclude_head}' if t_exclude_head is not None else ''}[/magenta]"
         )
+    # 市場アンカー型クロスプール EV (Dr.Z 系, ペーパー計測のみ — 投票には使わない)。
+    # 単勝 pool は最も効率的 (live N=324 MLE: α≈0, β≈0.95 = モデルの上乗せ無し) なので、
+    # 単勝アンカーの確率で他 pool (複勝/ワイド/3連単等) の歪みをスキャンし、shade 込み
+    # px_o ≥ 1.0 の行を snapshot に記録する。蓄積後に仮想 ROI を検証して arm を判断する。
+    market_anchor_ev = None
+    try:
+        probs_m = ev_mod.market_anchor_probs(rd)
+        if probs_m is not None:
+            ma_tables = dict(ev_mod.build_all_bet_tables(rd, probs_m) or {})
+            rows_m = ev_mod.build_table(rd, probs_m)
+            if rows_m:
+                ma_tables["trifecta"] = ev_mod.trifecta_to_bet_evrow(rows_m)
+            ma: dict[str, list] = {}
+            for bt, brows in ma_tables.items():
+                if bt == "win":
+                    continue   # 単勝はアンカー自身 (常に px_o≈払戻率) なので対象外
+                sh = pf_mod.DRIFT_SHADE.get(bt, 0.90)
+                pos = [
+                    {"key": list(r.key), "odds": r.odds, "prob": r.prob,
+                     "px_o": r.px_o, "px_o_shaded": round(r.px_o * sh, 4)}
+                    for r in brows if r.px_o * sh >= 1.0
+                ]
+                pos.sort(key=lambda x: x["px_o_shaded"], reverse=True)
+                if pos:
+                    ma[bt] = pos[:10]
+            market_anchor_ev = ma or None
+            if market_anchor_ev:
+                n_pos = sum(len(v) for v in market_anchor_ev.values())
+                console.print(f"[dim]市場アンカー クロスプール候補 (paper): "
+                              f"{n_pos} 点 ({', '.join(market_anchor_ev)})[/dim]")
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[dim]market_anchor_ev 計算失敗: {ex}[/dim]")
     # 回収優先 bet_tables に 3連単 (rows = P×O 降順 top 30) を含める
     bet_tables_serial = _serialize_bet_tables(bet_tables) if bet_tables else {}
     if rows:
@@ -966,6 +998,14 @@ def _save_prediction_snapshot(
         } if lgbm_info is not None else {"engine": "unknown"},
         # fundamental が一様縮退 (past_runs 無し等) で EV束を見送ったか (無情報ガードの痕跡)。
         "model_no_info": model_no_info,
+        # 市場フリーの model 確率 (= probs_t.win, Claude 指数込み・市場ブレンド無し)。
+        # scripts/fit_blend_mle.py が Benter 2-step (α,β 自由) の MLE 推定に使う。
+        # β=0.78 でブレンド済みの bet_tables.win からは fundamental を復元できないため
+        # ここに生値を残す (2026-06-10〜)。
+        "win_probs_model": ({str(k): float(v) for k, v in probs_t.win.items()}
+                            if probs_t is not None and getattr(probs_t, "win", None) else None),
+        # 市場アンカー型クロスプール EV 候補 (Dr.Z 系ペーパー計測, shade込み px_o≥1.0 のみ)。
+        "market_anchor_ev": market_anchor_ev,
         # 回収優先 bet_tables (3連単 を含む全 7 券種、各 P×O 降順 top 30)
         "bet_tables": bet_tables_serial,
         "bet_tables_g": (

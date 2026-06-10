@@ -26,12 +26,23 @@ def _rd(odds: dict[int, float]) -> RaceData:
 
 def test_market_favorite_lowest_odds():
     rd = _rd({1: 5.2, 2: 1.8, 3: 12.0})
-    assert _market_favorite(rd) == 2
+    assert _market_favorite(rd) == (2, 1.8)
 
 
 def test_market_favorite_none_without_odds():
     rd = _rd({1: 0.0, 2: 0.0})
-    assert _market_favorite(rd) is None
+    assert _market_favorite(rd) == (None, None)
+
+
+def test_recovery_gate_skips_teppan_favorite():
+    """単勝 1.5 倍未満の鉄板1番人気は除外しない (FLB: 1.0-1.4 倍帯は過小評価側)。"""
+    rd = _rd({1: 1.3, 2: 5.0, 3: 9.0})
+    ex, fav, fidx = _recovery_exclude_head(rd, {1: 50.0})
+    assert ex is None and fav == 1 and fidx == 50.0
+    # 1.5 倍ちょうどは除外対象 (未満のみ鉄板扱い)
+    rd2 = _rd({1: 1.5, 2: 5.0})
+    ex2, _, _ = _recovery_exclude_head(rd2, {1: 50.0})
+    assert ex2 == 1
 
 
 def test_recovery_gate_excludes_favorite_below_threshold():

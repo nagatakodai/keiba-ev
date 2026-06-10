@@ -179,6 +179,21 @@ snapshot に保存される主要フィールド:
 **オッズ変動の時系列キャプチャ (`src/odds_timeline.py`, 2026-06-06〜)**: score 段 (締切5-7分前) と bet 段 (締切1-2.5分前) で取得済みの fresh odds を**追加 fetch ゼロ** (= netkeiba rate-limit リスクなし) で `data/cache/odds_timeline/<race_id>.jsonl` に append する。hook は `_run_score_stage` 冒頭 (LLM 可否チェックより前) と `_save_prediction_snapshot` 冒頭の2点で、netkeiba/JRA/keibago/oddspark 全4経路共通。result fetch の `final_odds` (束の脚のみ) と合わせて1レース最大3点の時系列になる。同一オッズ行は odds_hash で dedup (netkeiba 経路 score phase は score 後そのまま snapshot 保存に fall-through するため)、capture 失敗は例外を呑む (解析を止めない)。用途: ①締切直前ドリフトの実測 → `TORIGAMI_MARGIN` の券種別較正 ②late-money momentum (score→bet のオッズ変化) の特徴量化検証。一次分析 (final_odds 150 件 / 束の脚 126 本): 3連単の 最終/bet時 オッズ比 median 0.957・p5 0.38 で、44% が margin 1.10 を食い破る下振れ → NAR 小 pool での自票インパクト疑いも要検証。
 - **Step 2 = poll daemon (`src/odds_capture.py` / `make odds-capture`)**: 締切前 `--window` 分 (既定30) に入ったレースを `--capture-interval` 秒おき (既定180) に polling して同じ timeline に stage="poll" で append。**netkeiba は使わない** — NAR は keiba.go.jp (`find_keibago_race`+`fetch_keibago_bets`, 静的GET全6券種)、JRA は JRA 公式 (`find_jra_race`+`fetch_jra_bets`, POST chain 全7券種、token 使い捨て前提で毎回 find から walk)。discovery は watch-auto と共通の `auto_watch.discover_today_races` (oddspark NAR list + 競馬ブック×JRA公式 join、`_list_due_races` から抽出したもの)。ファイル名は `_normalize_race_id` で predictions/results と同じ join key。失敗/同一オッズは 300s cooldown。watch-auto とは独立プロセスなので投票 dispatch latency に影響しない。実機確認済 (佐賀12R 全6券種、組合せ数整合)。
 
+## 2026-06-10 全面レビューの実測結論 (最重要 — 戦略判断はここを起点に)
+
+snapshot 349 × results 324 の突合 + live 蓄積データの MLE (multi-agent レビュー + 検証) で確定した事実:
+
+1. **勝率次元でモデルは市場に勝てていない**: Benter 型 conditional logit (α,β **自由**) の MLE (`scripts/fit_blend_mle.py`, N=324) は **α=0.016 (95%CI [-0.27, +0.32]), β=0.949** — モデル成分の独立情報は統計的にゼロ。勝者 log-loss も market 単独 1.595 < +Claude 1.629 < model+market 1.634 (`scripts/validate_claude_value.py`, N=146)。「モデルと市場の乖離 (px_o>1) を買う」は構造的に adverse selection。
+2. **全実弾系列が大幅 -EV** (実測 ROI, `scripts/bundle_calibration_report.py`): EV束 66.9% (n=292) / 3連単束 claude 旧hit 82.8% (n=57) / 新hit 11.9% (n=18) / **recovery 14.9% (n=26)** / Claude 選定 3連単脚の flat ¥100 でも **44.0%** (2,715脚) — 選定自体に正の edge は無い (flat でランダム以下)。
+3. **市場アンカー型クロスプール (Dr.Z 系) も現データでは -EV** (`scripts/backtest_market_anchor.py`): 単勝アンカー × Discounted Harville (λ を live 結果で MLE 較正: λ2=0.68/λ3=0.62 でも) px_o>1 の複勝/3連単 flat 買いは NAR 3連単 ~27% / 複勝 ~48-64%。**閾値を上げるほど悪化 = 高 px_o はチェーン側の誤り**で、NAR の exotic pool は単勝外挿より正確だった。snapshot の `market_anchor_ev` でペーパー計測は継続 (JRA は n 不足で未結論 — pool が深い JRA で要観測)。
+4. **修正済の重大バグ** (commit ce8cb64): ①de-vig (power_method_overround) が正規化済み入力で k=1 恒等写像の no-op ②live β=0 (市場無視実験) は past_runs 欠損時に一様分布へ縮退し **EV=odds/n で最長オッズを自動購入** ③EV/Kelly/トリガミが bet 時オッズのままでドリフト未補正 (的中時 place median 0.891) ④full Kelly がコード強制 (½Kelly は表示のみ) ⑤3連単控除率の 22.5% 誤記 (正: 27.5%) ⑥recovery モードが 1.0-1.4 倍の鉄板1番人気 (FLB 過小評価側, 回収率~94%) まで一律1着除外。
+5. **学習系の既知の構造問題 (未修正・次の宿題)**: train/valid の「時系列 split」が実際は **会場コード split** (`train.py _race_id_to_unix` が race_id の int ソート → 年内は会場コードが上位桁。valid = 帯広ばんえい645+佐賀+高知のみ・期間は train と完全重複)。ばんえい (別競技) が平地と同一 NAR モデルに混入。**T/λ/β の旧較正値と Phase 19-23 の結論はこの split 上のもので信頼できない**。日付ベース split (NAR は rid[6:10]=MMDD, JRA は開催日を HTML から) + ばんえい分離 + 再学習が必要。
+
+**運用指針 (実測が覆るまで)**:
+- 3連単束の実弾は計測モード (`KEIBA_TRIFECTA_BANKROLL=2000` 程度) に下げ、`bundle_calibration_report.py` の rolling ROI が 100% を超える系列が出るまで上げない。全系列 -30%〜-85% の現状で ¥10,000/R は確定的資金流出。
+- 定点観測 (全て読み取り専用・常設): `bundle_calibration_report.py` (週次: 系列ROI/楽観係数/ドリフト→DRIFT_SHADE 較正) / `fit_blend_mle.py` (+100レース毎: α が CI で 0 を離れたら model に意味が出た合図) / `backtest_market_anchor.py` / `validate_claude_value.py`。
+- 新規 edge 候補の優先順: ①**odds_timeline の late-money momentum** (score→bet のオッズ変化は informed money の痕跡 — arXiv:2509.14645 は直前変化とリターンの相関を実証。データ捕捉済・未検証) ②JRA クロスプールのペーパー継続 ③日付 split 修正 + ばんえい分離 + 再学習。
+
 ## 確率モデルの保守化 (このプロジェクトで最も重要)
 
 EV の絶対値を「現実の的中率」に近づけることが、長期回収率底上げの **根幹**。
@@ -238,7 +253,9 @@ production 設定 (Phase 23 後):
 
 Plan A/B/C は検索 MCP の補強根拠で慎重にフィルタし、Plan G/H1/H2 は当て枠として小ロット試行することを推奨。
 
-### 唯一 robust に確認された +EV 設定: 単勝 β=0.78
+### 唯一 robust に確認された「対市場 +7-8pt」設定: 単勝 β=0.78 (絶対 ROI は <100% に注意)
+
+⚠ **2026-06-10 補正**: この節の「+EV」は誤解を招く表現 — β=0.78 は**市場 (β=1.0) に 7-8pt 勝つ**が、絶対 ROI は 88-96% で**控除 (20%) には負けている** (= 打ち続ければ -4〜-12%)。また下記の W3/W4 は会場コード split (上記レビュー結論 5) 上の評価で、時系列 OOS ではない点も信頼度を下げる。live N=324 の MLE では β≈0.95 が示唆されている。
 
 `scripts/sliding_window_eval.py` で 2 つの独立 validation window で単勝 ROI を β sweep した結果:
 
