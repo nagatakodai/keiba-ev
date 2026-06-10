@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
-import {
+import { isEvMeasured,
   api,
   type BetEvRow,
   type BundleLeg,
@@ -169,19 +169,21 @@ export default async function PredictionDetailPage({
       )}
 
       {d.result && (() => {
-        // 的中判定は **3連単束 (実弾投票束) 基準** (2026-06-06 特化)。
-        // 3連単束が無い旧 snapshot は旧実弾だった EV束に fallback。
+        // 的中判定は**実弾投票束**基準: EV束計測対象 (saved_at >= EV_CUTOFF, 2026-06-10〜
+        // 実弾既定束) は EV束、それ以前は 3連単束 (無ければ旧実弾だった EV束に fallback)。
+        // dashboard / calibrate / PredictionsList と同じ規則 (乖離すると headline が矛盾する)。
         const tLegs = d.recommended_bundle_t?.legs;
         const tParticipated = Array.isArray(tLegs) && tLegs.length > 0;
         const tHit = !!(finish && tParticipated &&
           tLegs!.some((l) => betHits(l.bet_type, l.key, finish)));
         const bundleLegs = d.recommended_bundle?.legs;
-        const bundleEmpty = Array.isArray(bundleLegs) && bundleLegs.length === 0;
+        const bundleEmpty = !Array.isArray(bundleLegs) || bundleLegs.length === 0;
         const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
           bundleLegs.some((l) => betHits(l.bet_type, l.key, finish)));
-        const useTrifecta = tParticipated;
-        const skipped = useTrifecta ? false : bundleEmpty;
-        const anyHit = useTrifecta ? tHit : bundleHit;
+        const useEv = isEvMeasured(d.saved_at);
+        const useTrifecta = !useEv && tParticipated;
+        const skipped = useEv ? bundleEmpty : useTrifecta ? false : bundleEmpty;
+        const anyHit = useEv ? bundleHit : useTrifecta ? tHit : bundleHit;
         const headlineBadge = skipped
           ? <Badge tone="muted">見送り</Badge>
           : anyHit
@@ -209,19 +211,19 @@ export default async function PredictionDetailPage({
               <span className="text-xs text-(--color-muted) font-bold tracking-wider uppercase">
                 Bundle 別
               </span>
+              {bundleEmpty ? (
+                <Badge tone="muted">EV束{useEv ? " (実弾既定)" : "(参考)"} 見送り</Badge>
+              ) : (
+                <Badge tone={bundleHit ? "good" : "muted"}>
+                  EV束{useEv ? " (実弾既定)" : "(参考)"} {bundleHit ? "✓ 的中" : "× 不的中"}
+                </Badge>
+              )}
               {tParticipated ? (
                 <Badge tone={tHit ? "magenta" : "muted"}>
-                  3連単束 (実弾) {tHit ? "✓ 的中" : "× 不的中"}
+                  3連単束{useEv ? "(参考)" : " (実弾)"} {tHit ? "✓ 的中" : "× 不的中"}
                 </Badge>
               ) : (
                 <Badge tone="muted">3連単束 見送り</Badge>
-              )}
-              {bundleEmpty ? (
-                <Badge tone="muted">EV束(参考) 見送り</Badge>
-              ) : (
-                <Badge tone={bundleHit ? "good" : "muted"}>
-                  EV束(参考) {bundleHit ? "✓ 的中" : "× 不的中"}
-                </Badge>
               )}
             </div>
           </Card>
@@ -465,6 +467,7 @@ function TopRecommendationCard({
         bundle={d.recommended_bundle}
         finish={finish}
         finalOdds={d.result?.final_odds}
+        evRegime={isEvMeasured(d.saved_at)}
       />
     );
   }
@@ -581,7 +584,8 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
         )}
         1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
         (当たれば投資総額以上を回収)。理論的中率は model 基準なので過信禁物 (楽観バイアス込み)・当たらなければ
-        −EV。<b>実弾投票はこの 3連単束で行う (2026-06-06〜 固定。EV束はモデル参考値)</b>。
+        −EV。実弾投票束は <b>watch-auto の「投票束」設定 (env KEIBA_BET_BUNDLE)</b> で切替 —
+        2026-06-10 以降の既定は <b>EV束</b> で、この3連単束が実弾になるのは trifecta 選択時のみ。
         {claudeMissing && (
           <>
             {" "}<b className="text-(--color-bad)">この束は Claude 指数が無く model ランキングへ縮退しているため、3連単束の自動投票では
@@ -784,16 +788,22 @@ function BundleCard({
   finish,
   variant = "yield",
   finalOdds,
+  evRegime = false,
 }: {
   bundle: RecommendedBundle;
   finish?: number[];
-  // "yield" = EV束 (モデル参考・投票しない・highlight) / "hit" = 旧 的中優先 (廃止済の旧 snapshot 用・緑)
+  // "yield" = EV束 / "hit" = 旧 的中優先 (廃止済の旧 snapshot 用・緑)
   variant?: "yield" | "hit";
   // result.final_odds (leg_id → 最終確定オッズ)。legs テーブルで 予想/最終 を併記。
   finalOdds?: Record<string, number>;
+  // EV束計測レジーム (saved_at >= EV_CUTOFF): EV束が実弾既定束 (2026-06-10〜)。
+  evRegime?: boolean;
 }) {
   const isHit = variant === "hit";
   const legs = bundle.legs ?? [];
+  // ½Kelly がコード適用済 (kelly_fraction=0.5, 2026-06-10〜) なら total_stake は既に実弾額。
+  // 旧 snapshot (kelly_fraction=1.0/欠落) のみ「½ Kelly 推奨」の再半減表示を出す。
+  const halfApplied = (bundle.kelly_fraction ?? 1) <= 0.75;
   const half = Math.round(bundle.total_stake / 2 / 100) * 100;
   const nTypes = new Set(legs.map((l) => l.bet_type)).size;
   const bundleHit = finish ? legs.some((l) => betHits(l.bet_type, l.key, finish)) : false;
@@ -807,7 +817,9 @@ function BundleCard({
   // EV束はモデルのみの参考値 (実弾投票束は 3連単束 = recommended_bundle_t)。
   const titleLabel = isHit
     ? "的中優先AI — まとめ買い"
-    : "EV束 (モデル参考) — まとめ買い";
+    : evRegime
+      ? "EV束 (実弾既定束) — まとめ買い"
+      : "EV束 (モデル参考) — まとめ買い";
   const titleColor = isHit ? "text-(--color-good)" : "text-(--color-highlight)";
   return (
     <Card
@@ -829,7 +841,9 @@ function BundleCard({
           {!isHit && (validated ? (
             <Badge tone="magenta">claude -p 検証済 (旧記録){bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
           ) : (
-            legs.length > 0 && <Badge tone="muted">参考値・投票対象外 (投票は3連単束)</Badge>
+            legs.length > 0 && (evRegime
+              ? <Badge tone="magenta">実弾投票束 (KEIBA_BET_BUNDLE=ev 既定)</Badge>
+              : <Badge tone="muted">参考値・投票対象外 (投票は3連単束)</Badge>)
           ))}
           {finish && (legs.length === 0
             ? <Badge tone="muted">束 見送り</Badge>
@@ -852,7 +866,9 @@ function BundleCard({
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             <Stat
-              label="まとめ買い総額 (full Kelly)"
+              label={halfApplied
+                ? "まとめ買い総額 (½ Kelly 適用済 = 実弾額)"
+                : "まとめ買い総額 (full Kelly)"}
               value={
                 <span>
                   ¥{bundle.total_stake.toLocaleString()}
@@ -862,7 +878,11 @@ function BundleCard({
                 </span>
               }
             />
-            <Stat label="½ Kelly (保守・推奨)" value={`¥${half.toLocaleString()}`} />
+            {halfApplied ? (
+              <Stat label="適用 Kelly 比" value={`×${(bundle.kelly_fraction ?? 1).toFixed(2)}`} />
+            ) : (
+              <Stat label="½ Kelly (保守・推奨)" value={`¥${half.toLocaleString()}`} />
+            )}
             <Stat label="束の的中率 (1点以上)" value={fmtPct(bundle.bundle_hit_prob, 1)} />
             <Stat
               label={margin > 1 ? `最小 払戻/投資 (目標 ≥×${margin.toFixed(2)})` : "最小 払戻/投資 (トリガミ無)"}
@@ -908,8 +928,12 @@ function BundleCard({
             </span>
             。モデル期待回収 ×{bundle.expected_return.toFixed(2)}{" "}
             <span className="text-(--color-warn)">(確率モデルの楽観バイアス込み・参考値)</span>。
-            full Kelly は攻め過ぎになりやすく、確率推定が楽観な本モデルでは
-            <span className="font-bold"> ½ Kelly (各 stake 半額)</span> が実運用の推奨。
+            {halfApplied ? (
+              <>表示の stake は <span className="font-bold">½ Kelly 適用済み (= 自動投票が積む実弾額)</span>。</>
+            ) : (
+              <>full Kelly は攻め過ぎになりやすく、確率推定が楽観な本モデルでは
+              <span className="font-bold"> ½ Kelly (各 stake 半額)</span> が実運用の推奨。</>
+            )}
             候補 {bundle.n_candidates} 点から選択。
           </p>
         </>

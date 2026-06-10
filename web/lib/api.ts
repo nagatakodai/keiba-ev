@@ -525,6 +525,13 @@ export type CalibrationReport = {
   races: CalibrationRaceItem[];
 };
 
+// api/store.py の EV_CUTOFF_ISO_JST と同値 (修正版 EV束が実弾既定束になった時点)。
+// 詳細ページ等は calibrate API を引かずに snapshot の saved_at とこの定数で
+// 「EV束計測対象 (実弾既定束 = EV束)」かを判定する。値を変える時は store と同時に。
+export const EV_CUTOFF_ISO = "2026-06-10T18:21:00";
+export const isEvMeasured = (savedAt?: string | null): boolean =>
+  !!savedAt && savedAt >= EV_CUTOFF_ISO;
+
 // --- Endpoints ---
 
 export const api = {

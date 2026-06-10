@@ -20,7 +20,7 @@ import Link from "next/link";
 import { LogStream } from "@/components/LogStream";
 import { PendingRecorder } from "@/components/PendingRecorder";
 import { useWatchStatus } from "@/components/WatchStatusContext";
-import {
+import { isEvMeasured,
   api,
   type PredictionDetail,
   type WatchAutoHistoryItem,
@@ -524,8 +524,19 @@ export default function WatchAutoPage() {
               </label>
               {(betOddspark || betIpat) && (
                 <p className="basis-full text-xs text-(--color-muted)">
-                  投票束は <b>3連単的中モード (市場無視)</b> 固定。
-                  <b>Claude 指数が無いレースは自動 skip</b> します (rank_source≠claude は投票しない)。
+                  {betBundle === "ev" ? (
+                    <>
+                      投票束は <b>EV束 (recommended_bundle)</b>。シェード込み P×O≥1.02 を通過した
+                      脚のみ投票し、大半のレースは見送り。
+                      <b className="text-(--color-warn)">Claude 指数ゲートは適用されません</b>
+                      (指数なしのレースでも +EV があれば投票されます)。
+                    </>
+                  ) : (
+                    <>
+                      投票束は <b>3連単束 (市場無視・既定 回収モード)</b>。
+                      <b>Claude 指数が無いレースは自動 skip</b> します (rank_source≠claude は投票しない)。
+                    </>
+                  )}
                 </p>
               )}
             </div>
@@ -778,7 +789,7 @@ export default function WatchAutoPage() {
                   <th className="py-2 pr-3">締切</th>
                   <th className="py-2 pr-3">発走</th>
                   <th className="py-2 pr-3">状態</th>
-                  <th className="py-2 pr-3">3連単束 (実弾)</th>
+                  <th className="py-2 pr-3">投票束</th>
                   <th className="py-2 pr-3">詳細</th>
                 </tr>
               </thead>
@@ -816,6 +827,13 @@ export default function WatchAutoPage() {
                     <td className="py-1.5 pr-3 mono text-xs font-semibold text-(--color-good)">
                       {pickStatus === "loading" ? (
                         <span className="text-(--color-muted)">…</span>
+                      ) : isEvMeasured(p?.saved_at) ? (
+                        // EV束レジーム (2026-06-10〜): 実弾は EV束 (券種混在)。脚を 種別:組 で列挙。
+                        (p?.recommended_bundle?.legs?.length ?? 0) > 0
+                          ? p!.recommended_bundle!.legs!
+                              .map((l) => `${l.bet_type}:${l.key.join("-")}`)
+                              .join(" / ")
+                          : "見送り"
                       ) : (
                         fmtPicks(p?.recommended_bundle_t?.legs?.map((l) => l.key) ?? [])
                       )}
