@@ -196,6 +196,7 @@ snapshot 349 × results 324 の突合 + live 蓄積データの MLE (multi-agent
 - 3連単束の実弾は計測モード (`KEIBA_TRIFECTA_BANKROLL=2000` 程度) に下げ、`bundle_calibration_report.py` の rolling ROI が 100% を超える系列が出るまで上げない。全系列 -30%〜-85% の現状で ¥10,000/R は確定的資金流出。
 - 定点観測 (全て読み取り専用・常設): `bundle_calibration_report.py` (週次: 系列ROI/楽観係数/ドリフト→DRIFT_SHADE 較正) / `fit_blend_mle.py` (+100レース毎: α が CI で 0 を離れたら model に意味が出た合図) / `backtest_market_anchor.py` / `validate_claude_value.py`。
 - 新規 edge 候補の優先順: ①**odds_timeline の late-money momentum** (score→bet のオッズ変化は informed money の痕跡 — arXiv:2509.14645 は直前変化とリターンの相関を実証。データ捕捉済・未検証) ②JRA クロスプールのペーパー継続 ③日付 split 修正 + ばんえい分離 + 再学習。
+- **再学習の宿題 (2026-06-11 bughunt 第3R で必須化)**: ①netkeiba 馬柱 Data05 の解釈修正 (旧: 勝ち時計と誤解釈し own_time に着差を二重加算 → スピード指数が平均-1.6pt/最大±9.5pt 歪み) ②surface 語彙統一 (keibago/JRA「ダ」→「ダート」) により、**par_times.json / all.parquet / LGBM / T・λ較正は旧 semantics のまま** — `data/raw` から dataset 再生成 → par 再集計 → 再学習 → 再較正を一括で行うこと (上記③の日付 split 修正と同時にやるのが効率的)。それまで live は β=0.78 の市場アンカーが支配的なので致命ではないが、model 成分は新旧 semantics が混在する。
 
 ## 確率モデルの保守化 (このプロジェクトで最も重要)
 
