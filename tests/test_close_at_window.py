@@ -43,9 +43,12 @@ def test_list_due_races_uses_close_at_window(monkeypatch):
                 for r in races]
     monkeypatch.setattr(auto_watch, "fetch_race_list_oddspark", lambda *a, **k: op_races)
     monkeypatch.setattr(auto_watch, "fetch_race_list_keibabook", lambda *a, **k: [])
-    out = auto_watch._list_due_races(window_min=5, tolerance_min=2, now_ts=now)
+    out, future_all = auto_watch._list_due_races(window_min=5, tolerance_min=2, now_ts=now)
     detected = {r["race_no"] for r in out}
     assert detected == {2, 3}, f"5〜7分(締切基準)圏内は 7/9分前(発走基準) のみ、got {detected}"
+    # future_all = 締切が未来の当日全レース (bet 予約プリパス用, 2026-06-11)。
+    # race1 は締切 3 分前 (未来) なので含まれ、4 レース全て締切未来 → 4 件。
+    assert {r["race_no"] for r in future_all} == {1, 2, 3, 4}
     # close_at が start_at - 120 で乗っている
     for r in out:
         assert r["close_at"] == r["start_at"] - CLOSE_LEAD_SEC

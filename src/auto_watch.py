@@ -161,8 +161,16 @@ def _claim_bet_schedule(race_id: str) -> bool:
     POSIX で atomic — 成功した 1 プロセスだけが発火する。
     """
     try:
-        os.rename(BET_SCHEDULE_DIR / f"{race_id}.json",
-                  BET_SCHEDULE_DIR / f"{race_id}.firing")
+        dst = BET_SCHEDULE_DIR / f"{race_id}.firing"
+        os.rename(BET_SCHEDULE_DIR / f"{race_id}.json", dst)
+        # mtime を claim 時刻に更新する (2026-06-11 bughunt): rename は予約書込時の
+        # mtime を引き継ぐため、score 帯を広く設定した運用 (締切 16 分以上前に予約) では
+        # claim 直後から _cleanup_stale_claims の 900s 判定を超えており、併走プロセスの
+        # 掃除が**発火処理中の .firing を即削除** → 失敗時の unclaim (再試行) が消えていた。
+        try:
+            os.utime(dst, None)
+        except OSError:
+            pass
         return True
     except (FileNotFoundError, OSError):
         return False
@@ -401,30 +409,39 @@ def discover_today_races(today: str) -> list[dict]:
     return races
 
 
-def _list_due_races(window_min: float, tolerance_min: float, now_ts: int) -> list[dict]:
-    """当日開催 (discover_today_races) から締切 N±M 分のレースを抽出。"""
+def _list_due_races(window_min: float, tolerance_min: float,
+                    now_ts: int) -> tuple[list[dict], list[dict]]:
+    """当日開催 (discover_today_races) から締切 N〜N+M 分のレースを抽出。
+
+    返り値 (due, future_all)。future_all = 締切が未来の当日全レース (正規化済) で、
+    bet 予約のプリパス用 (2026-06-11 bughunt: 予約が score 帯検出に単一依存だと、
+    直列 dispatch で tick が帯幅を超えた時に帯を跳び越したレースの予約・投票・
+    snapshot・計測が**無痕跡に消える**)。
+
+    検出帯は「**締切まで** window〜window+tolerance 分」の片側 (+のみ)。締切は発走の
+    CLOSE_LEAD_SEC 秒前で固定 (parse.close_at_for_start)。締切基準にすることで、レース
+    スケジュールが変わっても「賭けの締切前の lead time」が一定になる。
+    片側 (+のみ) なのは window 分以上のリードを必ず確保し、締切間際の解析を防ぐため。
+    """
     today = datetime.fromtimestamp(now_ts).strftime("%Y%m%d")
     races = discover_today_races(today)
 
-    # 検出帯は「**締切まで** window〜window+tolerance 分」の片側 (+のみ)。締切は発走の
-    # CLOSE_LEAD_SEC 秒前で固定 (parse.close_at_for_start)。締切基準にすることで、レース
-    # スケジュールが変わっても「賭けの締切前の lead time」が一定になる。
-    # 片側 (+のみ) なのは window 分以上のリードを必ず確保し、締切間際の解析を防ぐため。
     from .parse import close_at_for_start
     low_sec = window_min * 60
     high_sec = (window_min + tolerance_min) * 60
 
     out: list[dict] = []
+    future_all: list[dict] = []
     for r in races:
         start_at = r.get("start_at") or 0
         if start_at <= 0:
             continue
         close_at = close_at_for_start(start_at)
         delta = close_at - now_ts   # 締切までの秒数
-        if not (low_sec <= delta <= high_sec):
+        if delta <= 0:
             continue
         rid = r["race_id"]
-        out.append({
+        rec = {
             "race_id": _normalize_race_id(rid),
             "netkeiba_race_id": rid,
             "url": r["url"],
@@ -434,9 +451,13 @@ def _list_due_races(window_min: float, tolerance_min: float, now_ts: int) -> lis
             "venue": r["venue"],
             "race_no": r["race_no"],
             "source": r.get("source", "netkeiba"),
-        })
+        }
+        future_all.append(rec)
+        if low_sec <= delta <= high_sec:
+            out.append(rec)
     out.sort(key=lambda x: x["start_at"])
-    return out
+    future_all.sort(key=lambda x: x["start_at"])
+    return out, future_all
 
 
 def _normalize_race_id(netkeiba_rid: str) -> str:
@@ -682,10 +703,34 @@ def _run_phase(
         f"(= 発走 {window_min + 2:g}〜{window_min + tolerance_min + 2:g} 分前)"
     )
     try:
-        due = _list_due_races(window_min, tolerance_min, now_ts)
+        due, future_all = _list_due_races(window_min, tolerance_min, now_ts)
     except Exception as e:
         console.print(f"[red]race_list 取得失敗: {e}[/red]")
         return
+
+    # ── bet 予約のプリパス (帯検出と独立・冪等, 2026-06-11 bughunt) ──
+    # 締切が未来の当日全レースに予約を書く。予約自体は ¥0 コスト (発火時に最新オッズで
+    # 束を組み、束が空/ゲート不通過なら見送り)。これで「帯を跨いで score されなかった
+    # レース」も bet 発火・snapshot・計測に乗る (旧実装は score 帯で検出されたレース
+    # のみ予約され、長い直列 dispatch で帯を跳び越すと無痕跡に消えていた)。
+    if phase == "score" and not dry_run and future_all:
+        analyzed_bet = _load_analyzed("bet")
+        n_new = 0
+        for r in future_all:
+            rid_n = r["race_id"]
+            if (rid_n in analyzed_bet
+                    or (BET_SCHEDULE_DIR / f"{rid_n}.json").exists()
+                    or (BET_SCHEDULE_DIR / f"{rid_n}.firing").exists()):
+                continue
+            try:
+                _write_bet_schedule(r)
+                n_new += 1
+            except Exception:  # noqa: BLE001
+                continue
+        if n_new:
+            console.print(f"[dim]bet 予約プリパス: {n_new} レースを新規予約 "
+                          f"(当日未来 {len(future_all)} レース)[/dim]")
+
     if not due:
         console.print(f"[dim]該当レースなし ({label})[/dim]")
         return
@@ -710,19 +755,12 @@ def _run_phase(
             console.print(f"  [dim]dry-run: {race['url']}[/dim]")
             continue
         if phase == "score":
-            # bet 予約は score dispatch の**前**に書く (score の成否と独立に bet を発火させる)。
-            # 旧実装は rc==0 のときだけ予約しており、score の一過性失敗/timeout 1 回で
-            # そのレースの賭けが丸ごと消えていた (cooldown 300s > 帯幅 120s で帯内再試行も
-            # 不可能, 2026-06-10 bughunt)。指数キャッシュが無ければ bet 段はモデルのみで
-            # 縮退する (3連単束は Claude ゲートで自動見送り / EV束は採算ゲートのみ)。
-            try:
-                _write_bet_schedule(race)
-                cl = race.get("close_at", 0)
-                when = (datetime.fromtimestamp(cl - bet_lead_sec).strftime("%H:%M:%S")
-                        if cl else "?")
-                console.print(f"  [cyan]→ bet 予約: {rid} を 締切前に発火 (≈ {when})[/cyan]")
-            except Exception as e:  # noqa: BLE001
-                console.print(f"[red]bet 予約失敗: {e}[/red]")
+            # (bet 予約はプリパスで当日全レースに書込済み — score の成否・帯検出と独立に
+            # bet が発火する。2026-06-10/11 bughunt の二段修正。)
+            cl = race.get("close_at", 0)
+            when = (datetime.fromtimestamp(cl - bet_lead_sec).strftime("%H:%M:%S")
+                    if cl else "?")
+            console.print(f"  [cyan]→ bet 発火予定 ≈ {when} (予約はプリパス済)[/cyan]")
             # 残り runway が score 完了に足りなければ dispatch しない (LLM コスト節約。
             # 予約済みなので bet はモデルのみで発火する)。直列ループで前のレースの
             # dispatch に数分かかった後は band 判定時より大幅に時間が進んでいる。

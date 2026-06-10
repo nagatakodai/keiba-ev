@@ -187,9 +187,20 @@ def test_claim_bet_schedule_atomic(tmp_path, monkeypatch):
     sched_json = tmp_path / "sched" / "2026500527-527-9.json"
     firing = tmp_path / "sched" / "2026500527-527-9.firing"
     assert sched_json.exists()
+    # 予約の mtime を古く偽装 (score 帯を広く取る運用 = 締切16分以上前の予約を模倣)
+    import os as _os
+    import time as _time
+    old_t = _time.time() - 1100
+    _os.utime(sched_json, (old_t, old_t))
     # 1 回目の claim は成功し .firing に移る
     assert aw._claim_bet_schedule("2026500527-527-9") is True
     assert not sched_json.exists() and firing.exists()
+    # claim は mtime を claim 時刻に更新する (2026-06-11 bughunt: rename が予約書込時の
+    # 古い mtime を引き継ぐと、併走プロセスの _cleanup_stale_claims (900s 判定) が
+    # 発火処理中の .firing を即削除し、失敗時の unclaim 再試行が消えていた)
+    assert _time.time() - firing.stat().st_mtime < 60
+    aw._cleanup_stale_claims(max_age_sec=900)
+    assert firing.exists()   # 掃除に消されない
     # 2 回目 (併走プロセス相当) は失敗 = 二重 dispatch しない
     assert aw._claim_bet_schedule("2026500527-527-9") is False
     # dispatch 失敗 → unclaim で予約に戻る (次 tick で再試行可能)
