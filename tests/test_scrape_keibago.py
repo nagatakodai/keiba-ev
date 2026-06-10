@@ -153,8 +153,8 @@ _HISTORY = """
 
 def test_parse_deba_table_horse_ids():
     d = kg.parse_deba_table(_DEBA)
-    assert d == [(1, "ワイドマルガリータ", "30006401886"),
-                 (2, "シアトルプリンセス", "30062400996")]
+    assert d == [(1, "ワイドマルガリータ", "30006401886", False),
+                 (2, "シアトルプリンセス", "30062400996", False)]
 
 
 def test_parse_deba_table_missing_link_no_mispair():
@@ -170,9 +170,30 @@ def test_parse_deba_table_missing_link_no_mispair():
         '<a class="horseName" href="x?k_lineageLoginCode=333">ホースC</a>'
     )
     assert kg.parse_deba_table(html) == [
-        (1, "ホースA", "111"),
-        (2, "", ""),          # 次の馬の ID を借りない
-        (3, "ホースC", "333"),  # 落とさない
+        (1, "ホースA", "111", False),
+        (2, "", "", False),          # 次の馬の ID を借りない
+        (3, "ホースC", "333", False),  # 落とさない
+    ]
+
+
+def test_parse_deba_table_absent_detection():
+    """取消/除外表示のある馬は absent=True (2026-06-10 bughunt 修正)。
+
+    最終馬のブロックは </table> で打ち切るため、ページ下部の凡例「取消」を
+    誤検出して最終馬が常に absent になることはない。
+    """
+    html = (
+        '<table><td rowspan="5" class="horseNum">1</td>'
+        '<a class="horseName" href="x?k_lineageLoginCode=111">ホースA</a>'
+        '<td>出走取消</td>'
+        '<td rowspan="5" class="horseNum">2</td>'
+        '<a class="horseName" href="x?k_lineageLoginCode=222">ホースB</a>'
+        '</table>'
+        '<div>凡例: 取消・除外は網掛け表示</div>'
+    )
+    assert kg.parse_deba_table(html) == [
+        (1, "ホースA", "111", True),    # 出走取消 → absent
+        (2, "ホースB", "222", False),   # 凡例の「取消」は </table> 外 → 誤検出しない
     ]
 
 

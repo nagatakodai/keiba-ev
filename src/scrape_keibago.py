@@ -214,8 +214,8 @@ def _date_key(s: str) -> tuple[int, int, int]:
         return (0, 0, 0)
 
 
-def parse_deba_table(html: str) -> list[tuple[int, str, str]]:
-    """出馬表 (DebaTable) → [(馬番, 馬名, k_lineageLoginCode)]。
+def parse_deba_table(html: str) -> list[tuple[int, str, str, bool]]:
+    """出馬表 (DebaTable) → [(馬番, 馬名, k_lineageLoginCode, absent)]。
 
     各馬は `<td rowspan="5" class="horseNum">N</td>` に続く
     `<a class="horseName" href="../DataRoom/HorseMarkInfo?k_lineageLoginCode=CODE">名</a>`。
@@ -224,15 +224,26 @@ def parse_deba_table(html: str) -> list[tuple[int, str, str]]:
     **馬ブロック単位で探す**: 取消等でリンクが無い馬があっても、その馬の馬番を
     **次の馬の CODE と誤ってペアにしない** (= 馬柱を別馬に付ける最悪の取り違えを防ぐ)。
     リンクが無い馬は code 空で残す (馬は落とさない)。
+
+    **absent (2026-06-10 bughunt 修正)**: ブロック内の 出走取消/競走除外/発走除外/取消
+    表示を検出して absent=True を返す。旧実装は取消馬を出走馬として返しており、
+    estimate_probs (absent でしかフィルタしない) で取消馬に確率が割り当てられ、
+    実弾3連単束のフォーメーションが崩壊していた (実測: 笠松6R で取消馬が rank 2位)。
+    最終馬のブロックは </table> で打ち切ってから検出する (ページ下部の凡例
+    「取消」等を誤検出して最終馬を常に absent にしない)。
     """
-    out: list[tuple[int, str, str]] = []
+    out: list[tuple[int, str, str, bool]] = []
     marks = list(re.finditer(r'class="horseNum"[^>]*>\s*(\d+)\s*</td>', html))
     for i, m in enumerate(marks):
         num = int(m.group(1))
         end = marks[i + 1].start() if i + 1 < len(marks) else len(html)
         block = html[m.end():end]   # この馬のブロック内だけを探索
         lm = re.search(r'k_lineageLoginCode=(\d+)"[^>]*>\s*([^<]+?)\s*</a>', block)
-        out.append((num, lm.group(2).strip() if lm else "", lm.group(1) if lm else ""))
+        tbl_end = block.find("</table>")
+        scan = block[:tbl_end] if tbl_end != -1 else block
+        absent = bool(re.search(r"出走取消|競走除外|発走除外|取消", scan))
+        out.append((num, lm.group(2).strip() if lm else "",
+                    lm.group(1) if lm else "", absent))
     return out
 
 
@@ -412,27 +423,30 @@ def check_consistency(other_bets: dict, trifecta: list) -> dict:
 
 def build_keibago_racedata(
     netkeiba_rid: str,
-    deba: list[tuple[int, str, str]],
+    deba: list[tuple[int, str, str, bool]],
     win_odds: dict[int, float],
     *,
     fetch_past: bool = True,
 ) -> RaceData:
     """cache 出馬表が無い場合の RaceData を keiba.go.jp の出馬表(DebaTable)から構築。
 
-    deba = [(馬番, 馬名, k_lineageLoginCode)]。fetch_past=True で各馬の HorseMarkInfo
+    deba = [(馬番, 馬名, k_lineageLoginCode, absent)]。fetch_past=True で各馬の HorseMarkInfo
     (競走成績) から **馬柱 (past_runs) を取得**して付与 → build_features が効き、
     estimate_probs が市場主導でなくモデルの edge を反映できる (= netkeiba/oddspark 非依存)。
     leakage 防止: HorseMarkInfo は対象 race 自身も含むので **対象 race 日付以降を除外** +
     直近5走に制限 (netkeiba 馬柱の窓に合わせる)。live (発走前) では対象 race は未走で no-op。
+    取消馬 (absent=True) は Horse.absent を立て、馬柱 fetch も skip する。
     """
     venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
-    horse_rows = [Horse(number=n, name=nm, win_odds=win_odds.get(n, 0.0))
-                  for n, nm, _ln in deba]
+    horse_rows = [Horse(number=n, name=nm, win_odds=win_odds.get(n, 0.0), absent=ab)
+                  for n, nm, _ln, ab in deba]
     if fetch_past:
         race_date = (f"{netkeiba_rid[:4]}.{netkeiba_rid[6:8]}.{netkeiba_rid[8:10]}"
                      if is_nar_race_id(netkeiba_rid) else "")
-        ln_by_num = {n: ln for n, _nm, ln in deba}
+        ln_by_num = {n: ln for n, _nm, ln, _ab in deba}
         for h in horse_rows:
+            if h.absent:
+                continue   # 取消馬の馬柱は取らない (fundamental 汚染 + 無駄 fetch 防止)
             ln = ln_by_num.get(h.number, "")
             if ln:
                 runs = fetch_horse_past_runs(ln)
@@ -512,10 +526,12 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
             # 出馬表 + HorseMarkInfo の馬柱で確率モデルをフル稼働 (公式自給)
             rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True)
         else:
-            # DebaTable 取れず → 単複の馬リストのみ (past_runs なし=市場ブレンド主導)
+            # DebaTable 取れず → 単複の馬リストのみ (past_runs なし=市場ブレンド主導)。
+            # 単複ページは発売対象馬のみ (取消馬は単勝が数値でなく載らない) → absent=False。
             hl = parse_horse_list(_get(_odds_url(loc, _EP["tanfuku"])))
             rd = build_keibago_racedata(
-                netkeiba_rid, [(n, nm, "") for n, nm, _od in hl], win_odds, fetch_past=False)
+                netkeiba_rid, [(n, nm, "", False) for n, nm, _od in hl], win_odds,
+                fetch_past=False)
 
     if start_at and not rd.race.start_at:
         from .parse import close_at_for_start
@@ -524,6 +540,17 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
 
     rd.other_bets = {bt: v for bt, v in other.items() if v}
     rd.trifecta = trifecta
+
+    # 取消/除外の二段ガード (2026-06-10 bughunt): fresh 単勝オッズ (発売中) に無い馬は
+    # 取消・除外とみなして absent に昇格する。DebaTable の absent 検出 (一段目) の保険 +
+    # cached netkeiba 出馬表経路 (stale な取消前の馬が残る) も塞ぐ。score の Claude 対象・
+    # 確率 (estimate_probs は absent でフィルタ)・束から外れる。
+    _fresh_win = {b.key[0] for b in other.get("win", []) if b.odds > 0}
+    if _fresh_win:
+        for _h in rd.race.horses:
+            if _h.number not in _fresh_win and not _h.absent:
+                _h.absent = True
+                _h.win_odds = 0.0
 
     from . import analyze as az_mod
     from .aptitude import compute_aptitudes

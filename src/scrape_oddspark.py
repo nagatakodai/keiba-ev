@@ -275,32 +275,44 @@ def _date_key(s: str) -> tuple[int, int, int]:
         return (0, 0, 0)
 
 
+def _is_horse_name(s: str) -> bool:
+    """実在の馬名か (空 / 数字・記号のみ = サマリ行等の混入は False)。"""
+    return bool(s) and not re.fullmatch(r"[\d.\s\-－]+", s)
+
+
 def parse_tanfuku(html: str) -> list[OddsparkHorse]:
     """単複 (betType=1) ページの table → [OddsparkHorse]。
 
-    行構造: [枠番, 馬番, 馬名, 単勝, 複勝 "min - max"]
+    行構造は **2 レイアウト** (2026-06-10 bughunt 修正):
+      - 同枠1頭目 (または1枠1頭): [枠番, 馬番, 馬名, 単勝, 複勝 "min - max"]
+      - **同枠2頭目以降**: 枠 td が rowspan で省略され [馬番, 馬名, 単勝, 複勝]
+    旧実装は cells[1] 固定で馬番を読んでおり、rowspan 行 (9頭以上で頻出) の馬を
+    **行ごと取りこぼしていた** (実測: 笠松4R 12頭中4頭欠落・欠落馬が1番人気の
+    レースも複数 → 市場率/1番人気判定/馬柱が全て歪む)。馬番セルの位置は
+    「数字セルの直後に馬名 (非数字) セル」が来る位置で判定する。
     """
     out: list[OddsparkHorse] = []
     for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL):
         lineage_m = re.search(r"HorseDetail\.do\?lineageNb=(\d+)", tr)  # 馬柱取得用 ID
         cells = [_clean(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.DOTALL)]
         cells = [c for c in cells if c]
-        if len(cells) < 4 or not re.match(r"^\d{1,2}$", cells[1] if len(cells) > 1 else ""):
+        if len(cells) < 4:
             continue
-        # 馬番 = cells[1], 馬名 = cells[2], 単勝 = 最初の x.y, 複勝 = "min - max"
-        try:
-            number = int(cells[1])
-        except ValueError:
+        # 馬番セル位置の判定: [枠, 馬番, 馬名, ...] なら idx=1、rowspan 行 [馬番, 馬名, ...]
+        # なら idx=0。馬名は必ず非数字を含む (数字のみ = サマリ行) ので一意に決まる。
+        if re.match(r"^\d{1,2}$", cells[1]) and len(cells) > 2 and _is_horse_name(cells[2]):
+            idx = 1
+        elif re.match(r"^\d{1,2}$", cells[0]) and _is_horse_name(cells[1]):
+            idx = 0
+        else:
             continue
-        name = cells[2]
-        # 馬名が空 or 数字のみ (= 別テーブル/枠サマリの混入行) は除外。
-        # 実在の馬名は必ずカナ等の非数字を含む。
-        if not name or re.fullmatch(r"[\d.\s\-－]+", name):
-            continue
-        win_m = re.search(r"^\d{1,4}\.\d$", cells[3]) if len(cells) > 3 else None
-        win_odds = float(cells[3]) if win_m else 0.0
+        number = int(cells[idx])
+        name = cells[idx + 1]
+        win_cell = cells[idx + 2] if len(cells) > idx + 2 else ""
+        win_m = re.search(r"^\d{1,4}\.\d$", win_cell)
+        win_odds = float(win_cell) if win_m else 0.0
         place_min = place_max = 0.0
-        for c in cells[3:]:
+        for c in cells[idx + 2:]:
             pm = re.search(r"(\d{1,4}\.\d)\s*[-－]\s*(\d{1,4}\.\d)", c)
             if pm:
                 place_min, place_max = float(pm.group(1)), float(pm.group(2))
@@ -462,10 +474,23 @@ def parse_trio_grid(html: str) -> list[tuple[tuple[int, int, int], float]]:
     return sorted(out.items(), key=lambda kv: kv[1])
 
 
+# oddspark のオッズ表示は 9999.9 で飽和する (実オッズ ≥10000 は全て 9999.9 と表示。
+# 実測 2026-06-10 笠松4R: keiba.go.jp 照合で 12882.7〜219006.5 の 33 組が全部 9999.9)。
+# 額面のまま使うと大穴の EV/払戻見込みが最大 ~22 倍過小 → 下限値 10000.0 に置換して
+# 「少なくとも1万倍」として扱う (EV は依然過小=保守側だが、飽和値をそのまま信じない)。
+_ODDSPARK_SATURATED = 9999.9
+_ODDSPARK_SATURATED_FLOOR = 10000.0
+
+
+def _desaturate(od: float) -> float:
+    return _ODDSPARK_SATURATED_FLOOR if od == _ODDSPARK_SATURATED else od
+
+
 def parse_triple_list(html: str, *, ordered: bool) -> list[tuple[tuple[int, ...], float]]:
     """3連複(a-b-c)/3連単(a → b → c) のリスト表 → [(key, odds)]。
 
     ordered=True は 3連単 (順あり)、False は 3連複 (順不同, key は昇順)。
+    9999.9 (表示飽和) は下限値 10000.0 に置換 (_desaturate)。
     """
     sep = "→" if ordered else "[-－]"
     pat = re.compile(
@@ -478,7 +503,7 @@ def parse_triple_list(html: str, *, ordered: bool) -> list[tuple[tuple[int, ...]
         key = (int(a), int(b), int(c))
         if not ordered:
             key = tuple(sorted(key))
-        out.append((key, float(od)))
+        out.append((key, _desaturate(float(od))))
     return out
 
 
@@ -704,6 +729,16 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
             TrifectaOdds(key=k, odds=o, popularity=i)
             for i, (k, o) in enumerate(bets.trifecta, 1)
         ]
+
+    # 取消/除外の二段ガード (2026-06-10 bughunt): fresh 単勝オッズ (発売中) に無い馬は
+    # 取消・除外とみなして absent に昇格 (keibago/jra 経路と同パターン)。
+    # selectHorseNb (horse_options) は取消馬も含む全出走馬を返すため必須。
+    _fresh_win = {h.number for h in bets.tanfuku if h.win_odds > 0 or h.place_min > 0}
+    if _fresh_win:
+        for _h in rd.race.horses:
+            if _h.number not in _fresh_win and not _h.absent:
+                _h.absent = True
+                _h.win_odds = 0.0
 
     from . import analyze as az_mod
     from .aptitude import compute_aptitudes

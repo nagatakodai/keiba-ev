@@ -27,6 +27,48 @@ _TANFUKU_HTML = """
 """
 
 
+# rowspan 構造 (同枠2頭): 枠 td が rowspan で省略され、2頭目の行は [馬番, 馬名, 単勝, 複勝]。
+_TANFUKU_ROWSPAN_HTML = """
+<table>
+<tr><th>枠</th><th>馬番</th><th>馬名</th><th>単勝</th><th>複勝</th></tr>
+<tr><td rowspan="2">5</td><td>5</td><td>カガヤキスター</td><td>2.1</td><td>1.1 - 1.5</td></tr>
+<tr><td>6</td><td><a href="HorseDetail.do?lineageNb=12345">カレンヒロ</a></td><td>139.8</td><td>15.0 - 30.2</td></tr>
+<tr><td rowspan="2">6</td><td>7</td><td>サードホース</td><td>8.8</td><td>2.0 - 4.4</td></tr>
+<tr><td>8</td><td>エイトホース</td><td>97.9</td><td>11.1 - 22.0</td></tr>
+</table>
+"""
+
+
+def test_parse_tanfuku_rowspan_second_horse():
+    """同枠2頭目 (枠 td が rowspan で省略された4セル行) を取りこぼさない (2026-06-10 bughunt 修正)。
+
+    旧実装は cells[1] 固定で馬番を読み、rowspan 行の馬を行ごと捨てていた
+    (実測: 笠松4R 12頭中4頭欠落・欠落馬が市場1番人気のレースも複数)。
+    """
+    horses = op.parse_tanfuku(_TANFUKU_ROWSPAN_HTML)
+    assert [h.number for h in horses] == [5, 6, 7, 8]
+    h6 = next(h for h in horses if h.number == 6)
+    assert h6.name == "カレンヒロ" and h6.win_odds == 139.8
+    assert h6.lineage_nb == "12345"          # rowspan 行でも馬柱 ID が取れる
+    h8 = next(h for h in horses if h.number == 8)
+    assert h8.win_odds == 97.9 and (h8.place_min, h8.place_max) == (11.1, 22.0)
+
+
+def test_parse_triple_list_desaturates_9999():
+    """oddspark 3連単の表示飽和 9999.9 は下限値 10000.0 に置換 (2026-06-10 bughunt 修正)。
+
+    実オッズ >=10000 は全て 9999.9 と表示される (実測: 笠松4R で 33 組、実値は
+    12882.7〜219006.5)。額面採用だと大穴の EV/払戻見込みが最大 ~22 倍過小。
+    """
+    html = (
+        '<th>1 → 2 → 3</th><td><span>9999.9</span></td>'
+        '<th>1 → 2 → 4</th><td><span>123.4</span></td>'
+    )
+    out = dict(op.parse_triple_list(html, ordered=True))
+    assert out[(1, 2, 3)] == 10000.0
+    assert out[(1, 2, 4)] == 123.4
+
+
 def test_parse_tanfuku_extracts_real_horses():
     horses = op.parse_tanfuku(_TANFUKU_HTML)
     nums = [h.number for h in horses]
@@ -98,7 +140,8 @@ _TRIFECTA_HTML = """
 
 def test_parse_triple_list_trifecta_ordered():
     tri = op.parse_triple_list(_TRIFECTA_HTML, ordered=True)
-    assert tri == [((1, 2, 3), 10.5), ((1, 2, 4), 9999.9)]
+    # 9999.9 は表示飽和 (実オッズ >=10000) → 下限値 10000.0 に置換される (2026-06-10)
+    assert tri == [((1, 2, 3), 10.5), ((1, 2, 4), 10000.0)]
 
 
 # 3連複: 1着軸ごとに別テーブル (table per axis)。全テーブルを舐めて完全列挙する。
