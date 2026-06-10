@@ -524,18 +524,30 @@ def _apply_stake_multiplier(legs: list["CartLeg"], multiplier: float) -> list["C
     """各 leg.stake を multiplier 倍し ¥100 単位で切り捨てた新しい CartLeg リストを返す。
 
     **小数倍に対応** (例 ×1.5)。stake×倍率 を ¥100 単位で **切り捨て (floor)** する。切り捨ては
-    実投票額を下げる方向 (賭け過ぎない) なので安全側。ただし整数倍と違い、脚間の stake 比率が
-    ¥100 単位 floor で僅かに動くため build_bundle のトリガミ保証 (各脚 payout ≥ 投資総額×margin)
-    は**厳密には保てない** (CartLeg は odds を持たず再検証不能)。margin=1.10 の緩衝内に収まる
-    小さなズレ。最低 ¥100。multiplier<=0 / ==1.0 は no-op。
+    実投票額を下げる方向 (賭け過ぎない) なので安全側。
+
+    【2026-06-10 bughunt #4】倍率<1 で ¥100 未満になる脚は **floor せず除去** する。
+    旧実装は max(100, ...) で ¥100 に張り付けており、EV束のような小口多脚 (¥100-300/脚)
+    では縮小がほぼ無効化 (×0.1 のつもりが実投入は意図の数倍) + 脚間 stake 比率の崩壊で
+    トリガミ保証も壊れていた。除去は S (投資総額) を下げる方向なので残脚の
+    payout/総額 比はむしろ改善する = 安全側。全脚除去なら空リスト (呼び出し側が
+    「脚なし」として中止する)。脚間比率は ¥100 floor で僅かに動くため厳密な
+    トリガミ保証は CartLeg に odds が無い以上 daemon 側で再検証できない点は従来通り。
+    multiplier<=0 / ==1.0 は no-op。
     """
     if multiplier <= 0 or multiplier == 1.0:
         return legs
     out: list[CartLeg] = []
+    dropped = 0
     for l in legs:
-        # stake × 倍率 を ¥100 単位で切り捨て (floor)。最低 ¥100。
-        scaled = max(100, int(l.stake * multiplier // 100) * 100)
+        scaled = int(l.stake * multiplier // 100) * 100
+        if scaled < 100:
+            dropped += 1
+            continue
         out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=scaled))
+    if dropped:
+        print(f"[stake_multiplier] ×{multiplier} で ¥100 未満になった {dropped} 脚を除去 "
+              f"(floor で ¥100 に張り付けると縮小が無効化されるため)")
     return out
 
 
@@ -911,6 +923,9 @@ class BettingSession:
             return ("dup", 0)
         if self.stake_multiplier != 1.0:
             legs = _apply_stake_multiplier(legs, self.stake_multiplier)
+        if not legs:
+            raise OddsparkBetError(
+                f"倍率 ×{self.stake_multiplier} 適用後に脚が残らない (全脚 ¥100 未満) — 投入しない")
         total = sum(l.stake for l in legs)
         if total > self.max_total_stake:
             raise OddsparkBetError(

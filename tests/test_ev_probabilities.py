@@ -52,12 +52,19 @@ def test_win_total_one(probs_name, request):
     assert total == pytest.approx(1.0, abs=1e-9)
 
 
-@pytest.mark.parametrize("probs_name", ["probs_4h", "probs_8h"])
-def test_place_total_three(probs_name, request):
-    """複勝合計 = 3 (3 ポジション × 1 馬)。"""
-    probs = request.getfixturevalue(probs_name)
-    total = sum(place_prob((i,), probs) for i in probs.win)
-    assert total == pytest.approx(3.0, abs=1e-9)
+def test_place_total_by_runner_count(probs_4h, probs_8h):
+    """複勝合計は出走頭数ルールに従う (2026-06-10 修正):
+      8 頭以上 → 3.0 (3着まで) / 5-7 頭 → 2.0 (2着まで) / 4 頭以下 → 0.0 (発売なし)。"""
+    # 8 頭: top-3 → 合計 3
+    total8 = sum(place_prob((i,), probs_8h) for i in probs_8h.win)
+    assert total8 == pytest.approx(3.0, abs=1e-9)
+    # 6 頭: top-2 → 合計 2
+    base6 = {1: 0.30, 2: 0.25, 3: 0.18, 4: 0.12, 5: 0.09, 6: 0.06}
+    probs_6h = Probabilities(win=dict(base6), place2=dict(base6), place3=dict(base6))
+    total6 = sum(place_prob((i,), probs_6h) for i in probs_6h.win)
+    assert total6 == pytest.approx(2.0, abs=1e-9)
+    # 4 頭: 複勝発売なし → 全馬 0
+    assert all(place_prob((i,), probs_4h) == 0.0 for i in probs_4h.win)
 
 
 @pytest.mark.parametrize("probs_name", ["probs_4h", "probs_8h"])

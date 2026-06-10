@@ -475,25 +475,12 @@ class WatchAutoManager:
         bet_bundle: str = "ev",
         ev_bankroll: int = 5_000,
     ) -> Job:
-        # 投票束の切替 (2026-06-10 復活): env KEIBA_BET_BUNDLE で auto_watch (enqueue 判定) と
-        # 投票 daemon (oddspark/ipat, 同 env を継承) に伝播。ev=EV束 (既定) / trifecta=3連単束。
-        # 既知値以外は安全側で ev に倒す (API 境界は Literal 検証済だが resume の旧 state ガード)。
+        # 投票束/予算系の値検証 (env への適用は early-return 判定の**後** — 下記参照)。
         if bet_bundle not in ("ev", "trifecta"):
             bet_bundle = "ev"
-        os.environ["KEIBA_BET_BUNDLE"] = bet_bundle
-        # EV束の1レース予算 (build_bundle の bankroll)。env で全 dispatch subprocess に伝播。
-        os.environ["KEIBA_EV_BANKROLL"] = str(int(ev_bankroll))
-        # 3連単の1レース購入予算は env で全 dispatch subprocess (analyze/keibago/jra/oddspark) に
-        # 伝播する (_save_prediction_snapshot が _trifecta_bankroll で尊重)。束を組む時点の予算なので、
-        # 投票倍率 (bet_stake_multiplier) とは別物。変更はループ再起動が必要 (spawn 時に env が固定)。
-        os.environ["KEIBA_TRIFECTA_BANKROLL"] = str(int(trifecta_bankroll))
-        # 3連単束モード (recovery=回収/穴狙い 既定, hit=旧 全力的中) も env で全 dispatch に伝播
-        # (_save_prediction_snapshot が _trifecta_mode で尊重)。既知値以外は安全側で既定 recovery に
-        # 倒す (API 境界は Literal 検証済だが resume の旧 state 等の不正値ガード)。
         if trifecta_mode not in ("recovery", "hit"):
             trifecta_mode = "recovery"
-        os.environ["KEIBA_TRIFECTA_MODE"] = trifecta_mode
-        # daemon に渡す掛金倍率 (3連単束の各脚 stake を ×N)。
+        # daemon に渡す掛金倍率 (各脚 stake を ×N)。
         eff_stake_multiplier = bet_stake_multiplier
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
         # 二重 spawn 防止のため return する。
@@ -501,6 +488,11 @@ class WatchAutoManager:
         # でループが先に起動済の状態で「開始」を押す/ブラウザを閉じた後に再度「開始」を押した
         # ときに、early-return だけだと**ブラウザが出ない**ため (ユーザ報告: 開始してもブラウザが
         # 起動しない)。ループ稼働中でも要求された daemon が未稼働なら起動だけ補う。
+        # 【重要 2026-06-10 bughunt】この貼り直し経路では **env (KEIBA_BET_BUNDLE 等) を
+        # リクエスト値で書き換えない**。env は稼働中 watch loop が spawn 時に継承した値の
+        # ままにしておくことで、貼り直した daemon/scheduler が loop と同じ束/予算を継承する。
+        # 以前はここより前で env を書き換えており「loop=旧束 / 再起動 daemon=新束」に分裂し、
+        # レースごとに実弾の束が非決定的に変わるバグだった。束/予算の変更は停止→開始のみ。
         if self.job is not None and self.job.status in ("pending", "running"):
             if bet_oddspark and not self.bet_running:
                 await self._start_betting_daemon(
@@ -523,6 +515,19 @@ class WatchAutoManager:
                     no_llm=bool(self._config.get("no_llm")),
                     llm_blend=self._config.get("llm_blend"))
             return self.job
+
+        # ── フル開始経路: ここで初めて env をリクエスト値で確定する ──
+        # 投票束の切替 (2026-06-10 復活): env KEIBA_BET_BUNDLE で auto_watch (enqueue 判定) と
+        # 投票 daemon (oddspark/ipat, 同 env を継承) に伝播。ev=EV束 (既定) / trifecta=3連単束。
+        os.environ["KEIBA_BET_BUNDLE"] = bet_bundle
+        # EV束の1レース予算 (build_bundle の bankroll)。env で全 dispatch subprocess に伝播。
+        os.environ["KEIBA_EV_BANKROLL"] = str(int(ev_bankroll))
+        # 3連単の1レース購入予算は env で全 dispatch subprocess (analyze/keibago/jra/oddspark) に
+        # 伝播する (_save_prediction_snapshot が _trifecta_bankroll で尊重)。束を組む時点の予算なので、
+        # 投票倍率 (bet_stake_multiplier) とは別物。変更はループ再起動が必要 (spawn 時に env が固定)。
+        os.environ["KEIBA_TRIFECTA_BANKROLL"] = str(int(trifecta_bankroll))
+        # 3連単束モード (recovery=回収/穴狙い 既定, hit=旧 全力的中) も env で全 dispatch に伝播。
+        os.environ["KEIBA_TRIFECTA_MODE"] = trifecta_mode
 
         # Python ラッパで while ループを回す (api/_watch_loop.py)。
         # bash を挟むと SIGKILL 時に孫プロセスが孤児化するため。

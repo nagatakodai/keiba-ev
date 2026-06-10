@@ -41,8 +41,16 @@ export default async function CalibratePage({
 
   const confidence = calibrationConfidence(cal.race_count);
   const lastUpdated = fmtRelativeFromNow(cal.last_updated_at);
-  const tb = cal.trifecta_bundle;       // 3連単的中モード (実弾投票束, 2026-06-06〜固定)
-  const yb = cal.claude_bundle;       // EV束 (モデル参考・投票しない)
+  // 実弾既定束: watch-auto の bet_bundle 設定に追従 (dashboard と同ロジック, 2026-06-10〜)。
+  // tb = 実弾既定束 / yb = もう一方 (参考)。EV 側は β=0 事故時代込みの claude_bundle ではなく
+  // EV_CUTOFF 以降のみの ev_bundle を使う。
+  const watch = await api.watchStatus().catch(() => null);
+  const activeBundleKind: "ev" | "trifecta" =
+    watch?.config?.bet_bundle ?? (watch?.running ? "trifecta" : "ev");
+  const activeBundleLabel = activeBundleKind === "ev" ? "EV束" : "3連単束";
+  const tb = activeBundleKind === "ev" ? cal.ev_bundle : cal.trifecta_bundle;
+  const yb = activeBundleKind === "ev" ? cal.trifecta_bundle : cal.ev_bundle;
+  const ybLabel = activeBundleKind === "ev" ? "3連単束" : "EV束";
   // 回収率は **最終オッズ基準** (roi_final)。最終が無い旧 result は roi に fallback。
   const roiPct = (b?: { roi: number; roi_final?: number } | null) =>
     b ? `${Math.round((b.roi_final ?? b.roi) * 100)}%` : "—";
@@ -57,7 +65,7 @@ export default async function CalibratePage({
     <Page>
       <PageHeader
         title="確率較正"
-        subtitle="計算 EV と実 EV のオフセット (tier ratio) + 3連単束 (実弾) / EV束 (参考) bundle の実績。サンプル 30+ で初めて判断材料になる。"
+        subtitle="計算 EV と実 EV のオフセット (tier ratio) + 実弾投票束 (watch-auto の束設定に追従) の実績。サンプル 30+ で初めて判断材料になる。"
       />
 
       <div>
@@ -92,10 +100,10 @@ export default async function CalibratePage({
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
-          ※ 全て 3連単的中モード (実弾投票束) 基準
+          ※ 全て {activeBundleLabel} (実弾投票束) 基準
           {yb && yb.participated_races > 0 && (
             <span className="ml-1">
-              ／ EV束 (参考): 的中率 {fmtPct(yb.hit_rate, 1)} · 回収率 {roiPct(yb)}
+              ／ {ybLabel} (参考): 的中率 {fmtPct(yb.hit_rate, 1)} · 回収率 {roiPct(yb)}
             </span>
           )}
           ／ 集計対象 {cal.race_count} レース ／
@@ -151,12 +159,17 @@ export default async function CalibratePage({
           // 旧 table 形式は info 密度が低いため。
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5">
             {cal.races.map((r) => {
-              // 「的中」ラベルは **3連単束 (実弾投票束) のみ**で判定 (2026-06-06 特化)。
-              // 3連単束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
+              // 「的中」ラベルは**実弾投票束**で判定: EV束計測対象 (ev_measured, 2026-06-10〜)
+              // は EV束 (bundle_*)、それ以前は 3連単束 (無ければ旧実弾だった EV束に fallback)。
               // 見送り (束が空) は理論値が立っていても的中扱いせず、row 自体をグレー bg に。
-              const useTrifecta = !!r.trifecta_bundle_participated;
-              const bundleSkipped = !useTrifecta && r.bundle_participated === false;
-              const anyHit = !bundleSkipped && !!(useTrifecta ? r.trifecta_bundle_hit : r.bundle_hit);
+              const useEv = !!r.ev_measured;
+              const useTrifecta = !useEv && !!r.trifecta_bundle_participated;
+              const bundleSkipped = useEv
+                ? r.bundle_participated === false
+                : !useTrifecta && r.bundle_participated === false;
+              const anyHit =
+                !bundleSkipped &&
+                !!(useEv ? r.bundle_hit : useTrifecta ? r.trifecta_bundle_hit : r.bundle_hit);
               const rowBg = bundleSkipped
                 ? "bg-(--color-panel-2)"          // 見送り = グレー系
                 : anyHit
@@ -182,11 +195,16 @@ export default async function CalibratePage({
                     {bundleSkipped ? (
                       <Badge tone="muted">見送り</Badge>
                     ) : anyHit ? (
-                      <Badge tone="magenta">{useTrifecta ? "3連単束 的中" : "的中 (旧EV束)"}</Badge>
+                      <Badge tone="magenta">
+                        {useEv ? "EV束 的中" : useTrifecta ? "3連単束 的中" : "的中 (旧EV束)"}
+                      </Badge>
                     ) : (
                       <Badge tone="muted">不的中</Badge>
                     )}
-                    {useTrifecta && r.bundle_hit && (
+                    {useEv && r.trifecta_bundle_hit && (
+                      <Badge tone="muted">3連単束(参考)</Badge>
+                    )}
+                    {!useEv && useTrifecta && r.bundle_hit && (
                       <Badge tone="muted">EV束(参考)</Badge>
                     )}
                   </div>

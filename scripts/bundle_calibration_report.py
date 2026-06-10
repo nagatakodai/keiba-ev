@@ -45,12 +45,17 @@ def _final_odds_key(bet_type: str, key: list) -> str:
     return f"{bet_type}:{'-'.join(map(str, key))}"
 
 
-def _leg_hits(bet_type: str, key: list, fo: list[int]) -> bool:
+def _leg_hits(bet_type: str, key: list, fo: list[int], n_runners: int | None = None) -> bool:
     a, b, c = fo[0], fo[1], fo[2]
     top3 = {a, b, c}
     if bet_type == "win":
         return key[0] == a
     if bet_type == "place":
+        # 出走頭数ルール: 7頭以下は複勝2着まで・4頭以下は発売なし (2026-06-10 bughunt 修正)
+        if n_runners is not None and n_runners <= 4:
+            return False
+        if n_runners is not None and n_runners <= 7:
+            return key[0] in (a, b)
         return key[0] in top3
     if bet_type == "quinella":
         return set(key) == {a, b}
@@ -127,6 +132,12 @@ def main() -> None:
         fo = r["finish_order"]
         final = r.get("final_odds") or {}
         tri_payout = r.get("trifecta_payout")
+        # 出走頭数 (複勝の頭数ルール用)。win_probs_model → bet_tables.win で推定。
+        n_runners = None
+        for src_field in (d.get("win_probs_model"), (d.get("bet_tables") or {}).get("win")):
+            if src_field:
+                n_runners = len(src_field)
+                break
 
         for kind, b in (("ev", d.get("recommended_bundle")),
                         ("t", d.get("recommended_bundle_t"))):
@@ -146,7 +157,7 @@ def main() -> None:
                 c = bt_cal[bt]
                 c["n"] += 1
                 c["pred"] += l.get("prob") or 0.0
-                hit = _leg_hits(bt, key, fo)
+                hit = _leg_hits(bt, key, fo, n_runners)
                 fok = _final_odds_key(bt, key)
                 f_odds = final.get(fok)
                 if f_odds and l.get("odds"):

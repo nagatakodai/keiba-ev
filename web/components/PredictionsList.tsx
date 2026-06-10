@@ -123,17 +123,28 @@ export function PredictionsList({
                   nowMs,
                 );
                 const hit = showHits ? raceHitMap?.get(p.race_id) : undefined;
-                // 「的中」ラベルは **3連単的中モード (実弾投票束) のみ**で判定 (2026-06-06 特化)。
-                // 3連単束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback。
+                // 「的中」ラベルは**実弾投票束**で判定: EV束計測対象 (ev_measured,
+                // 2026-06-10〜 実弾既定束) は EV束 (bundle_*)、それ以前は 3連単束
+                // (無ければ旧実弾だった EV束に fallback)。
                 // **bundleSkipped は anyHit より優先**: 賭けていない race は理論値が
                 // 偶然立っていても「的中」ではない (見送り = 不参加)。
-                const useTrifecta = !!(hit && hit.trifecta_bundle_participated);
+                const useEv = !!(hit && hit.ev_measured);
+                const useTrifecta =
+                  !useEv && !!(hit && hit.trifecta_bundle_participated);
                 const bundleSkipped = !!(
-                  hit && !useTrifecta && hit.bundle_participated === false
+                  hit &&
+                  (useEv
+                    ? hit.bundle_participated === false
+                    : !useTrifecta && hit.bundle_participated === false)
                 );
                 const anyHit =
                   !bundleSkipped &&
-                  !!(hit && (useTrifecta ? hit.trifecta_bundle_hit : hit.bundle_hit));
+                  !!(hit &&
+                    (useEv
+                      ? hit.bundle_hit
+                      : useTrifecta
+                        ? hit.trifecta_bundle_hit
+                        : hit.bundle_hit));
                 const rowBg = hit
                   ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
                   : raceTimingRowBg(timing.tone);
@@ -195,7 +206,9 @@ export function PredictionsList({
                           </span>
                           <span className="text-(--color-muted)">·</span>
                           {hit.trifecta_bundle_hit && (
-                            <Badge tone="magenta">3連単束 的中</Badge>
+                            <Badge tone={useEv ? "muted" : "magenta"}>
+                              3連単束{useEv ? "(参考)" : ""} 的中
+                            </Badge>
                           )}
                           {hit.bundle_hit && (
                             <Badge tone={useTrifecta ? "muted" : "good"}>

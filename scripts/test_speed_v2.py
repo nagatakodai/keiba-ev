@@ -46,10 +46,10 @@ def _softmax(x, t):
 
 
 def _devig(odds):
-    raw = 1.0 / np.asarray(odds, float); raw = raw / raw.sum()
+    raw = 1.0 / np.asarray(odds, float)   # 未正規化のまま de-vig (正規化すると no-op)
     d = power_method_overround({i: float(raw[i]) for i in range(len(raw))})
     v = np.array([d[i] for i in range(len(raw))], float); s = v.sum()
-    return v / s if s > 0 else raw
+    return v / s if s > 0 else raw / raw.sum()
 
 
 def _races(df, feats):

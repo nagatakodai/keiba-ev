@@ -123,10 +123,21 @@ def enumerate_outcomes(
     return outcomes, arr
 
 
-def _bet_hits(bet_type: str, key: Sequence[int], a: int, b: int, c: int) -> bool:
+def _bet_hits(bet_type: str, key: Sequence[int], a: int, b: int, c: int,
+              n_runners: int | None = None) -> bool:
+    """bet が outcome (a,b,c) で当たるか。
+
+    n_runners (出走頭数) を渡すと複勝の頭数ルールを適用する:
+    7 頭以下は 2 着まで・4 頭以下は発売なし (= 常に False)。None は従来の top-3
+    (旧 snapshot 等で頭数不明のときの後方互換)。
+    """
     if bet_type == "win":
         return len(key) == 1 and key[0] == a
     if bet_type == "place":
+        if n_runners is not None and n_runners <= 4:
+            return False
+        if n_runners is not None and n_runners <= 7:
+            return len(key) == 1 and key[0] in (a, b)
         return len(key) == 1 and key[0] in (a, b, c)
     if bet_type == "exacta":
         return len(key) == 2 and key[0] == a and key[1] == b
@@ -292,12 +303,14 @@ def build_bundle(
     # トリガミ除去ループは active 部分集合の行を抜き出して再最適化する。
     # Kelly 最適化・期待値・トリガミ判定にはドリフトシェード後のオッズを使う
     # (実払戻は確定オッズ = bet 時より下振れし得るため、意思決定は保守側で行う)。
+    # 複勝は出走頭数ルール (7頭以下=2着まで) を hit 判定に適用する。
+    n_runners = sum(1 for p in probs.win.values() if p > 0)
     H_full = np.zeros((len(pool), len(outcomes)), dtype=np.float64)
     for bi, c in enumerate(pool):
         bt, key, odds = c["bet_type"], tuple(c["key"]), c["odds"]
         odds_eff = odds * _drift_shade(bt)
         for wi, (a, b, cc) in enumerate(outcomes):
-            if _bet_hits(bt, key, a, b, cc):
+            if _bet_hits(bt, key, a, b, cc, n_runners):
                 H_full[bi, wi] = odds_eff
 
     active = list(range(len(pool)))           # pool への index

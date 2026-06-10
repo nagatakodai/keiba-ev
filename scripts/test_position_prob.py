@@ -27,7 +27,7 @@ def _ri(rid):
 
 
 def _market_top3(odds):
-    raw = 1.0 / np.asarray(odds, float); raw = raw / raw.sum()
+    raw = 1.0 / np.asarray(odds, float)   # 未正規化のまま de-vig (正規化すると no-op)
     d = power_method_overround({i: float(raw[i]) for i in range(len(raw))})
     w = np.array([d[i] for i in range(len(raw))], float); w = w / w.sum()
     s = w ** LAM3; p3 = s / s.sum() * 3.0

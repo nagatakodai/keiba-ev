@@ -551,6 +551,13 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(race_id)
 
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
+    # fresh 単勝オッズを Horse.win_odds に overlay (oddspark 経路の overlay_oddspark_odds と
+    # 同パターン)。cached netkeiba 出馬表利用時は h.win_odds が cache 時点の stale 値のままで、
+    # _market_favorite (recovery モードの1番人気特定・1.5倍帯ゲート) と market_anchor_probs が
+    # 古いオッズで誤判定していた (2026-06-10 bughunt 修正)。
+    for _h in rd.race.horses:
+        if _h.number in win_odds:
+            _h.win_odds = win_odds[_h.number]
     # 未正規化 1/odds (Σ=overround>1) を渡す — de-vig が overround を観測できるように
     # 正規化しない (正規化済みだと power_method_overround が no-op 化する)。
     mwp = {n: 1.0 / o for n, o in win_odds.items()}

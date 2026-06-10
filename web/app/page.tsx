@@ -1,9 +1,6 @@
-import Link from "next/link";
 import {
   api,
   type CalibrationReport,
-  type PredictionSummary,
-  type WatchAutoHistoryItem,
 } from "@/lib/api";
 import {
   Badge,
@@ -14,46 +11,13 @@ import {
   calibrationConfidence,
   fmtPct,
   fmtRelativeFromNow,
-  fmtServerDateTime,
   fmtYen,
-  parsePlanLabel,
-  planAccentClass,
-  planBarClass,
-  raceTimingRowBg,
-  raceTimingStatus,
-  savedAtDate,
-  todayJST,
-  type PlanLetter,
 } from "@/components/ui";
 import { AutoRefresh } from "@/components/AutoRefresh";
-import { PredictionsList } from "@/components/PredictionsList";
 
 export const dynamic = "force-dynamic";
 
 type RaceHit = CalibrationReport["races"][number];
-
-function PlanHitTag({ plan, hit }: { plan: PlanLetter; hit: boolean }) {
-  return hit ? (
-    <span className={`font-bold ${planAccentClass(plan)}`}>{plan} ✓</span>
-  ) : (
-    <span className="font-bold text-(--color-muted)">{plan} ×</span>
-  );
-}
-
-function roiTone(roi: number): "good" | "warn" | "bad" {
-  if (roi >= 1) return "good";
-  if (roi >= 0.85) return "warn";
-  return "bad";
-}
-
-type PlanWithCi = {
-  hits: number;
-  participated_races: number;
-  hit_rate: number;
-  roi: number;
-  roi_ci_low?: number;
-  roi_ci_high?: number;
-};
 
 function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
@@ -272,143 +236,13 @@ function DistroBar({
   );
 }
 
-// 表示方針: CI 範囲を常に [low, high] で出す。
-// ±X 形式は CI が対称な前提だが、ROI の bootstrap CI は小サンプルだと
-// 強く skewed (下限 0 ・上限大) になるので「±1849%」のように本来の
-// 情報量より広く見える誤った印象を与える。
-function planRoiHint(p: PlanWithCi): string {
-  const base = `hit ${p.hits}/${p.participated_races} (${fmtPct(p.hit_rate, 1)})`;
-  if (p.roi_ci_low === undefined || p.roi_ci_high === undefined) return base;
-  const tail =
-    p.participated_races < 30 ? " · 参考値 (n<30)" : "";
-  return `${base} · CI [${fmtRoiPct(p.roi_ci_low)}, ${fmtRoiPct(p.roi_ci_high)}]${tail}`;
-}
-
-// 小サンプル時は tone を warn に落として、ROI 値だけで緑表示しない。
-function planStatTone(
-  p: PlanWithCi | undefined,
-): "default" | "good" | "warn" | "bad" {
-  if (!p || p.participated_races === 0) return "default";
-  if (p.participated_races < 30) return "warn"; // n<30 は判断材料未満
-  return roiTone(p.roi);
-}
-
-// 最新 / 最新の的中 で共用する 1 行レンダラ。
-function PredictionRowItem({
-  p,
-  hit,
-  nowMs,
-  closeAtMap,
-  startAtMap,
-}: {
-  p: PredictionSummary;
-  hit: RaceHit | undefined;
-  nowMs: number;
-  closeAtMap?: Map<string, number>;
-  startAtMap?: Map<string, number>;
-}) {
-  const closeAt = p.close_at ?? closeAtMap?.get(p.race_id) ?? null;
-  const startAt = p.start_at ?? startAtMap?.get(p.race_id) ?? null;
-  const timing = raceTimingStatus(closeAt, startAt, p.has_result, nowMs);
-  // 「的中」ラベルは**実弾投票束**で判定: EV束計測対象 (ev_measured, 2026-06-10〜 実弾既定束)
-  // は EV束 (bundle_*)、それ以前は 3連単束 (無ければ旧実弾だった EV束に fallback)。
-  // **skipped は anyHit より優先**: 賭けていない race は理論値が立っていても「的中」ではない。
-  const useEv = !!(hit && hit.ev_measured);
-  const useTrifecta = !useEv && !!(hit && hit.trifecta_bundle_participated);
-  const bundleSkipped = !!(
-    hit &&
-    (useEv
-      ? hit.bundle_participated === false
-      : !useTrifecta && hit.bundle_participated === false)
-  );
-  const anyHit =
-    !bundleSkipped &&
-    !!(hit &&
-      (useEv ? hit.bundle_hit : useTrifecta ? hit.trifecta_bundle_hit : hit.bundle_hit));
-  const rowBg = hit
-    ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
-    : raceTimingRowBg(timing.tone);
-
-  return (
-    <li
-      className={`py-2.5 flex items-center gap-3 -mx-4 px-4 ${rowBg}`}
-    >
-      <Link
-        href={`/predictions/${p.race_id}`}
-        className="flex-1 group min-w-0"
-      >
-        <div className="flex items-center gap-2 text-sm flex-wrap">
-          <span className="font-medium truncate">
-            {p.venue_name} {p.race_number}R
-          </span>
-          <Badge tone="muted">{p.race_class}</Badge>
-          {hit ? (
-            anyHit ? (
-              <Badge tone="good">的中</Badge>
-            ) : bundleSkipped ? (
-              <Badge tone="muted">見送り</Badge>
-            ) : (
-              <Badge tone="bad">不的中</Badge>
-            )
-          ) : (
-            <Badge tone={timing.tone}>{timing.label}</Badge>
-          )}
-          {p.has_evidence ? (
-            <Badge tone="magenta">補強済</Badge>
-          ) : !p.has_result ? (
-            <Badge tone="muted">評価待ち</Badge>
-          ) : null}
-        </div>
-        {hit ? (
-          <div className="text-xs tabnum mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-            <span>
-              着順{" "}
-              <span className="font-bold mono">{hit.finish.join("-")}</span>
-            </span>
-            <span className="text-(--color-muted)">·</span>
-            {hit.bundle_hit && (
-              <Badge tone={hit.ev_measured ? "good" : "muted"}>EV束 的中</Badge>
-            )}
-            {hit.trifecta_bundle_hit && (
-              <Badge tone={hit.ev_measured ? "muted" : "good"}>3連単束 的中</Badge>
-            )}
-            {hit.payout > 0 && (
-              <>
-                <span className="text-(--color-muted)">·</span>
-                <span className="font-bold text-(--color-good)">
-                  ¥{hit.payout.toLocaleString()}
-                </span>
-              </>
-            )}
-          </div>
-        ) : (
-          <div className="text-xs text-(--color-muted) mt-0.5 tabnum flex flex-wrap gap-x-1.5">
-            <span>{fmtServerDateTime(p.saved_at)}</span>
-            <span>·</span>
-            <span>候補 {p.row_count}</span>
-          </div>
-        )}
-      </Link>
-      <Link
-        href={`/predictions/${p.race_id}`}
-        className="text-xs text-(--color-accent) hover:underline shrink-0"
-      >
-        詳細
-      </Link>
-    </li>
-  );
-}
+// (旧 PredictionRowItem は dead code だったため削除 2026-06-10 — per-race 行の描画は
+// /predictions の PredictionsList と /calibrate に存在し、そちらが ev_measured 対応済み)
 
 export default async function DashboardPage() {
-  const [preds, cal, watch, watchHist] = await Promise.all([
-    api.listPredictions(200).catch(() => ({
-      items: [] as PredictionSummary[],
-    })),
+  const [cal, watch] = await Promise.all([
     api.calibrate().catch(() => null),
     api.watchStatus().catch(() => null),
-    api
-      .watchHistory(500)
-      .catch(() => ({ items: [] as WatchAutoHistoryItem[] })),
   ]);
 
   const trifectaBundle = cal?.trifecta_bundle;
@@ -419,15 +253,6 @@ export default async function DashboardPage() {
     watch?.config?.bet_bundle ?? (watch?.running ? "trifecta" : "ev");
   const activeBundle = activeBundleKind === "ev" ? evBundle : trifectaBundle;
   const activeBundleLabel = activeBundleKind === "ev" ? "EV束" : "3連単束";
-
-  const raceHitMap = new Map<string, RaceHit>();
-  for (const r of cal?.races ?? []) raceHitMap.set(r.race_id, r);
-  const closeAtMap = new Map<string, number>();
-  const startAtMap = new Map<string, number>();
-  for (const h of watchHist.items) {
-    if (h.race_id && h.close_at) closeAtMap.set(h.race_id, h.close_at);
-    if (h.race_id && h.start_at != null) startAtMap.set(h.race_id, h.start_at);
-  }
 
   const nowMs = Date.now();
   // 予測履歴セクションを削除したので related な集計は不要。

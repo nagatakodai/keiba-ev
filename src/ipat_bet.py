@@ -492,6 +492,9 @@ class BettingSession:
             raise IpatBetError(f"JRA レースではない (IPAT 投票対象外): {netkeiba_rid}")
         if self.stake_multiplier != 1.0:
             legs = _apply_stake_multiplier(legs, self.stake_multiplier)
+        if not legs:
+            raise IpatBetError(
+                f"倍率 ×{self.stake_multiplier} 適用後に脚が残らない (全脚 ¥100 未満) — 投入しない")
         total = sum(l.stake for l in legs)
         if total > self.max_total_stake:
             raise IpatBetError(
@@ -637,33 +640,34 @@ class BettingSession:
 
 
 def _apply_stake_multiplier(legs: list[CartLeg], multiplier: float) -> list[CartLeg]:
-    """leg.stake を multiplier 倍し ¥100 単位で切り捨てる。**小数倍に対応** (例 ×1.5)。
+    """各 leg.stake を multiplier 倍し ¥100 単位で切り捨てた新しい CartLeg リストを返す。
 
-    stake×倍率 を ¥100 単位で **切り捨て (floor)** する。切り捨ては実投票額を下げる方向なので
-    安全側。整数倍と違い脚間の stake 比率が ¥100 単位 floor で僅かに動くためトリガミ保証
-    (各脚 payout ≥ 投資総額×margin) は厳密には保てない (CartLeg に odds 無く再検証不能) が、
-    margin=1.10 の緩衝内に収まる小さなズレ。最低 ¥100。multiplier<=0 / ==1.0 は no-op。
+    **小数倍に対応** (例 ×1.5)。stake×倍率 を ¥100 単位で **切り捨て (floor)** する。切り捨ては
+    実投票額を下げる方向 (賭け過ぎない) なので安全側。
+
+    【2026-06-10 bughunt #4】倍率<1 で ¥100 未満になる脚は **floor せず除去** する。
+    旧実装は max(100, ...) で ¥100 に張り付けており、EV束のような小口多脚 (¥100-300/脚)
+    では縮小がほぼ無効化 (×0.1 のつもりが実投入は意図の数倍) + 脚間 stake 比率の崩壊で
+    トリガミ保証も壊れていた。除去は S (投資総額) を下げる方向なので残脚の
+    payout/総額 比はむしろ改善する = 安全側。全脚除去なら空リスト (呼び出し側が
+    「脚なし」として中止する)。脚間比率は ¥100 floor で僅かに動くため厳密な
+    トリガミ保証は CartLeg に odds が無い以上 daemon 側で再検証できない点は従来通り。
+    multiplier<=0 / ==1.0 は no-op。
     """
     if multiplier <= 0 or multiplier == 1.0:
         return legs
-    out = []
+    out: list[CartLeg] = []
+    dropped = 0
     for l in legs:
-        # stake × 倍率 を ¥100 単位で切り捨て (floor)。最低 ¥100。
-        scaled = max(100, int(l.stake * multiplier // 100) * 100)
-        out.append(CartLeg(bet_type=l.bet_type, key=l.key, stake=scaled))
+        scaled = int(l.stake * multiplier // 100) * 100
+        if scaled < 100:
+            dropped += 1
+            continue
+        out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=scaled))
+    if dropped:
+        print(f"[stake_multiplier] ×{multiplier} で ¥100 未満になった {dropped} 脚を除去 "
+              f"(floor で ¥100 に張り付けると縮小が無効化されるため)")
     return out
-
-
-# 当方 bet_type → IPAT 式別 select の option ラベル (実機 DOM の表示名と完全一致, 全角注意)。
-# ３連複/３連単 は **全角 "３"** (select option が "３連複"/"３連単")。
-_IPAT_BET_LABEL = {
-    "win": "単勝", "place": "複勝", "quinella": "馬連", "wide": "ワイド",
-    "exacta": "馬単", "trio": "３連複", "trifecta": "３連単",
-}
-# 単一列 (checkbox #no{N}) で投入できる券種: 選んだ馬で組成 (馬連/ワイド=2頭, 3連複=3頭)。
-_SINGLE_COLUMN_BETS = {"win", "place", "quinella", "wide", "trio"}
-# 順序付き (着順列 radio #horse{pos}_no{N}): 馬単=1着/2着, 3連単=1着/2着/3着。
-_ORDERED_BETS = {"exacta", "trifecta"}
 
 
 def _dismiss_deposit_dialog(page) -> None:
@@ -757,6 +761,56 @@ def _check_horse_box(page, umaban: int) -> None:
     if not box.is_checked():
         raise IpatBetError(
             f"馬番 {umaban} のチェックに失敗 (span.check / label / force 全て不発) — DOM 要確認")
+
+
+def _checked_horse_boxes(page) -> list[int]:
+    """単一列券種の馬番 checkbox (#no{N}) で現在 checked の馬番一覧。"""
+    try:
+        ids = page.evaluate(
+            "() => Array.from(document.querySelectorAll('input[id]'))"
+            ".filter(e => /^no\\d+$/.test(e.id) && e.checked).map(e => e.id)")
+    except Exception:  # noqa: BLE001
+        return []
+    return [int(i[2:]) for i in ids]
+
+
+def _clear_horse_boxes(page) -> None:
+    """前 leg の失敗残骸 (checked のままの #no{N}) を全て解除する。
+
+    【2026-06-10 bughunt】単一列券種 (単勝/複勝/馬連/ワイド/3連複) には ordered の
+    `_ordered_columns_dirty` に相当する残骸ガードが無く、前 leg が途中失敗 (click
+    intercept Timeout 等) で checkbox を残すと、_check_horse_box が既チェックを黙って
+    吸収して**要求していない組番**をセットしていた (EV束は同種連続脚が常態なので
+    実弾主経路)。解除も check と同じ三段 (span.check → label → force)。
+    解除できない残骸が残る場合は呼び出し側の検証 (checked 集合 == key 集合) が
+    当該脚を中止する。
+    """
+    for umaban in _checked_horse_boxes(page):
+        box = page.locator(f"#no{umaban}")
+        if box.count() == 0:
+            continue
+        box = box.first
+        try:
+            box.evaluate("el => el.scrollIntoView({block: 'center'})")
+        except Exception:  # noqa: BLE001
+            pass
+        for target in (f"#no{umaban} ~ span.check", f'label[for="no{umaban}"]'):
+            loc = page.locator(target)
+            if loc.count() == 0:
+                continue
+            try:
+                loc.first.click(timeout=5_000)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(150)
+            if not box.is_checked():
+                break
+        if box.is_checked():
+            try:
+                box.uncheck(force=True)
+                page.wait_for_timeout(100)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _check_horse_radio(page, pos: int, umaban: int) -> None:
@@ -883,9 +937,20 @@ def _add_leg_to_buylist(page, leg: CartLeg) -> None:
             _check_horse_radio(page, pos, umaban)
             page.wait_for_timeout(200)
     else:
-        # 単勝/複勝/馬連/ワイド/3連複: 選んだ馬の checkbox #no{N} を check
+        # 単勝/複勝/馬連/ワイド/3連複: 選んだ馬の checkbox #no{N} を check。
+        # 【残骸ガード 2026-06-10 bughunt】①脚開始時に前 leg の残骸 checkbox を全解除
+        # ②セット直前に「checked 集合 == key 集合」を検証し、不一致なら誤組番防止で
+        # 当該脚を中止する (ordered の _ordered_columns_dirty / oddspark の
+        # _reset_umaban + a.on 数検証 に相当する単一列版)。
+        _clear_horse_boxes(page)
         for umaban in leg.key:
             _check_horse_box(page, umaban)
+        checked = set(_checked_horse_boxes(page))
+        want = {int(k) for k in leg.key}
+        if checked != want:
+            raise IpatBetError(
+                f"馬番選択の不一致 (選択={sorted(checked)} 要求={sorted(want)}) — "
+                "誤った組番を防ぐため当該脚を中止")
     # 金額 (100円単位 = stake/100 を入力)
     amt = page.locator(SELECTORS["amount_input"])
     amt.first.fill(str(leg.stake // 100))

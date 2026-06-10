@@ -124,13 +124,15 @@ def _loglinear(f: np.ndarray, g: np.ndarray, w: float) -> np.ndarray:
 
 
 def _devig(odds: np.ndarray) -> np.ndarray:
-    """1/odds を power-method de-overround (本番 estimate_probs と同一)。"""
+    """1/odds を power-method de-overround (本番 estimate_probs と同一)。
+
+    未正規化 1/odds のまま渡す (正規化すると k=1 の恒等写像に縮退し de-vig が
+    no-op 化する, 2026-06-10 修正)。"""
     raw = 1.0 / odds
-    raw = raw / raw.sum()
     d = power_method_overround({i: float(raw[i]) for i in range(len(raw))})
     v = np.array([d[i] for i in range(len(raw))], dtype=float)
     s = v.sum()
-    return v / s if s > 0 else raw
+    return v / s if s > 0 else raw / raw.sum()
 
 
 def _bootstrap_roi_ci(profit: np.ndarray, stake: np.ndarray, n=BOOT_N, seed=BOOT_SEED):

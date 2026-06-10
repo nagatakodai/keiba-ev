@@ -658,19 +658,24 @@ def market_anchor_probs(rd: RaceData) -> Probabilities | None:
 
     単勝オッズが 3 頭未満なら None (3連単 marginalize へは fallback しない —
     3連単 pool 自身をアンカーにすると自己参照でクロスプール歪みが消えるため)。
+
+    **オッズ源の優先順 (2026-06-10 bughunt 修正)**: rd.other_bets["win"] (fresh,
+    bet 段で取得した最新オッズ) を第一ソースにする。h.win_odds は cached 出馬表
+    (netkeiba cache 利用時は朝オッズ等の stale 値) のことがあり、stale 単勝アンカー ×
+    fresh 他券種で「時刻差ドリフト」をクロスプール歪みとして誤記録していた。
     """
     raw: dict[int, float] = {}
-    for h in rd.race.horses:
-        if getattr(h, "absent", False):
+    for b in (rd.other_bets or {}).get("win", []):
+        if getattr(b, "absent", False) or getattr(b, "odds", 0) <= 0:
             continue
-        wo = getattr(h, "win_odds", 0)
-        if wo and float(wo) > 0:
-            raw[h.number] = 1.0 / float(wo)
+        raw[b.key[0]] = 1.0 / float(b.odds)
     if len(raw) < 3:
-        for b in (rd.other_bets or {}).get("win", []):
-            if getattr(b, "absent", False) or getattr(b, "odds", 0) <= 0:
+        for h in rd.race.horses:
+            if getattr(h, "absent", False):
                 continue
-            raw[b.key[0]] = 1.0 / float(b.odds)
+            wo = getattr(h, "win_odds", 0)
+            if wo and float(wo) > 0:
+                raw[h.number] = 1.0 / float(wo)
     if len(raw) < 3:
         return None
     try:
@@ -754,13 +759,27 @@ def place_prob(key: tuple[int, ...], probs: Probabilities) -> float:
 
     Plackett-Luce 連鎖を 1-2-3 着の全順序組み合わせで marginalize:
       P(i in top3) = Σ_{(a,b,c) where i ∈ {a,b,c}} P(a=1, b=2, c=3)
+
+    **出走頭数ルール (2026-06-10 bughunt 修正)**: JRA/NAR とも複勝の払戻は
+    出走 7 頭以下で **2 着まで**、4 頭以下は **発売なし**。従来は常に top-3 で
+    marginalize しており、少頭数レースで P(3着) ぶん EV が過大 → EV束が偽 +EV の
+    複勝脚を実弾購入し、計測も幻の的中を計上していた。
+      n ≤ 4 : 0.0 (発売なし)
+      n ≤ 7 : P(top2) = P(i=1着) + Σ_a P(a=1着, i=2着)
+      n ≥ 8 : 従来通り top-3
     """
     if len(key) != 1:
         return 0.0
     i = key[0]
     if probs.win.get(i, 0.0) <= 0:
         return 0.0
-    horse_set = list(probs.win.keys())
+    horse_set = [h for h, p in probs.win.items() if p > 0]
+    n = len(horse_set)
+    if n <= 4:
+        return 0.0
+    if n <= 7:
+        return probs.win.get(i, 0.0) + sum(
+            _exacta_prob_pair(a, i, probs) for a in horse_set if a != i)
     total = 0.0
     for a in horse_set:
         for b in horse_set:

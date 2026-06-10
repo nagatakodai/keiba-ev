@@ -103,11 +103,11 @@ def _seg_mask(rid_str: pd.Series, surface: pd.Series, seg: str) -> pd.Series:
 
 def _devig(odds):
     raw = 1.0 / np.asarray(odds, float)
-    raw = raw / raw.sum()
+    # 未正規化 1/odds のまま de-vig へ (正規化すると k=1 no-op, 2026-06-10 修正)
     d = power_method_overround({i: float(raw[i]) for i in range(len(raw))})
     v = np.array([d[i] for i in range(len(raw))], float)
     s = v.sum()
-    return v / s if s > 0 else raw
+    return v / s if s > 0 else raw / raw.sum()
 
 
 # ---------------------------------------------------------------------------

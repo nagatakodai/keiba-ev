@@ -261,6 +261,16 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         # ワイド/馬連/馬単/3連複/単複 も含めた全 bet type を考慮 (portfolio._bet_hits)。
         from src.portfolio import _bet_hits
         a3, b3, c3 = (list(finish_tuple) + [0, 0, 0])[:3]
+        # 出走頭数 (複勝の頭数ルール: 7頭以下=2着まで・4頭以下=発売なし を hit 判定に適用)。
+        # win_probs_model → bet_tables.win → horse_aptitude の順で頭数を推定 (≤18 なので
+        # bet_tables.win の top-30 cap には掛からない = 実頭数)。不明なら None (従来 top-3)。
+        n_runners = None
+        for src_field in (pred.get("win_probs_model"),
+                          (pred.get("bet_tables") or {}).get("win"),
+                          pred.get("horse_aptitude")):
+            if src_field:
+                n_runners = len(src_field)
+                break
 
         # **最終オッズ** (2026-05-29~): result["final_odds"] = `{leg_id: final_odds}` (`leg_id`
         # は `"<bet_type>:<key-with-->"` 形式, llm.leg_id と一致)。result fetch 時に保存される。
@@ -283,7 +293,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             legs = (bundle or {}).get("legs") or []
             hit_legs = [
                 leg for leg in legs
-                if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])), a3, b3, c3)
+                if _bet_hits(leg.get("bet_type", ""), tuple(leg.get("key", [])),
+                             a3, b3, c3, n_runners)
             ]
             payout_snapshot = sum(int(leg.get("payout_if_hit", 0)) for leg in hit_legs)
             # 実払戻 (最終オッズ × stake) を計算。final_odds 不在脚は snapshot odds で補完。
