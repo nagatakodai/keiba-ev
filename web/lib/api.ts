@@ -477,7 +477,7 @@ export type CalibrationRaceItem = {
   finish: number[];
   winning_tier: string | null;
   payout: number;
-  // EV束 (モデル参考, 2026-06-06〜投票しない) の的中。bet_type 横断 (3連単 + ワイド/馬連/etc)。
+  // EV束 (2026-06-10〜 実弾既定束) の的中。bet_type 横断 (3連単 + ワイド/馬連/etc)。
   bundle_hit?: boolean;
   bundle_hit_bet_types?: string[];
   bundle_participated?: boolean;
@@ -494,6 +494,8 @@ export type CalibrationRaceItem = {
   trifecta_bundle_payout_final?: number;        // 最終オッズ基準
   // 3連単的中モードの計測対象か (saved_at >= trifecta_cutoff)。false は集計/チャート除外。
   trifecta_measured?: boolean;
+  // EV束 (実弾既定束) の計測対象か (saved_at >= ev_cutoff = 修正版 EV束の稼働開始 2026-06-10)。
+  ev_measured?: boolean;
   // 最終オッズ取得済 race か (frontend で「予想/最終」両表示の discriminator)
   has_final_odds?: boolean;
   // snapshot 保存時刻 (ISO8601 JST naive)。チャートでの時系列ソート / 表示用。
@@ -510,13 +512,16 @@ export type CalibrationReport = {
   tiers: CalibrationTier[];
   // 新スキーマでは plans は常に空配列 (旧 Plan A/B/C/F/G/H1/H2 廃止)。frontend は無視で OK。
   plans: CalibrationPlan[];
-  // EV束 (recommended_bundle, モデル参考・投票しない) の集計
+  // EV束の全期間参考集計 (β=0 事故時代込み。実弾系列には ev_bundle を使う)
   claude_bundle?: ClaudeBundleAggregate;
-  // 3連単的中モード bundle (recommended_bundle_t, **実弾投票束**) の集計。
+  // EV束 (**実弾既定束**, 2026-06-10〜) の集計。ev_cutoff 以降の race のみが分母。
+  ev_bundle?: ClaudeBundleAggregate;
+  // 3連単束 (recommended_bundle_t, KEIBA_BET_BUNDLE=trifecta 選択時の実弾束) の集計。
   // claude_bundle と同形。trifecta_cutoff 以降の race のみが分母に入る。
   trifecta_bundle?: ClaudeBundleAggregate;
-  // 3連単的中モードの計測開始日 (ISO8601 JST naive)。注記表示用。
+  // 各系列の計測開始日 (ISO8601 JST naive)。注記表示用。
   trifecta_cutoff?: string;
+  ev_cutoff?: string;
   races: CalibrationRaceItem[];
 };
 

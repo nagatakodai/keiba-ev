@@ -118,3 +118,57 @@ def test_trifecta_bundle_model_fallback_counts_as_skip(tmp_path, monkeypatch):
     assert tb["skipped_races"] == 1
     assert tb["hits"] == 1
     assert tb["stake"] == 1000
+
+
+def test_ev_bundle_measured_from_cutoff(tmp_path, monkeypatch):
+    """EV束 (実弾既定束, 2026-06-10〜) の系列: ev_cutoff 以降のみ ev_bundle に入る。
+
+    旧 EV束 (β=0 事故時代) は ev_measured=False で系列から除外され、全期間参考の
+    claude_bundle にだけ入る。
+    """
+    import json
+
+    from api import store
+
+    pred_dir = tmp_path / "preds"
+    res_dir = tmp_path / "results"
+    pred_dir.mkdir()
+    res_dir.mkdir()
+
+    def _write_race(rid: str, saved_at: str, legs):
+        pred = {
+            "saved_at": saved_at,
+            "venue_name": "テスト",
+            "rows": [],
+            "recommended_bundle": {"legs": legs},
+        }
+        result = {"finish_order": [1, 2, 3], "trifecta_payout": 0,
+                  "final_odds": {"win:1": 3.0}}
+        (pred_dir / f"{rid}.json").write_text(json.dumps(pred), encoding="utf-8")
+        (res_dir / f"{rid}.json").write_text(json.dumps(result), encoding="utf-8")
+
+    win_leg = [{"bet_type": "win", "key": [1], "stake": 500,
+                "payout_if_hit": 1600, "odds": 3.2}]
+    _write_race("202606100101", "2026-06-10T19:00:00", win_leg)   # 新レジーム → 計測対象
+    _write_race("202606100102", "2026-06-10T19:30:00", [])        # 新レジーム・見送り
+    _write_race("202606050101", "2026-06-05T10:00:00", win_leg)   # 旧 EV束 → 系列除外
+
+    monkeypatch.setattr(store, "PRED_DIR", pred_dir)
+    monkeypatch.setattr(store, "RESULT_DIR", res_dir)
+
+    c = store.compute_calibration()
+    races = {r["race_id"]: r for r in c["races"]}
+    assert races["202606100101"]["ev_measured"] is True
+    assert races["202606050101"]["ev_measured"] is False
+
+    ev = c["ev_bundle"]
+    assert ev["races"] == 2                  # 旧レジーム race は分母にも入らない
+    assert ev["participated_races"] == 1
+    assert ev["skipped_races"] == 1
+    assert ev["hits"] == 1
+    assert ev["stake"] == 500
+    assert ev["payout_final"] == 1500        # 最終オッズ 3.0 × ¥500
+
+    # 全期間参考 (claude_bundle) には旧レジームも入る
+    assert c["claude_bundle"]["participated_races"] == 2
+    assert c["ev_cutoff"].startswith("2026-06-10")

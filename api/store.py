@@ -199,6 +199,11 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
     # 試行なので trifecta_bundle 集計 (ダッシュボードの的中率/回収率/収支/チャート) には
     # 入れない。per-race の表示 (履歴ページの badge 等) は従来通り残す。
     TRIFECTA_CUTOFF_ISO_JST = "2026-06-05T00:00:00"
+    # **EV束 (実弾既定束) の計測開始時刻** (2026-06-10 d2afa47: 投票束の既定が EV束になった時点)。
+    # それ以前の EV束は β=0 事故 (de-vig no-op / 一様確率で最長オッズ購入 / full Kelly) 込みの
+    # 別物の戦略なので、ev_bundle 系列 (ダッシュボード) には混ぜない。全期間の参考集計は
+    # claude_bundle (旧名のまま互換維持) に残る。
+    EV_CUTOFF_ISO_JST = "2026-06-10T18:21:00"
     if PRED_DIR.exists():
         for pred_path in sorted(PRED_DIR.glob("*.json")):
             race_id = pred_path.stem
@@ -321,7 +326,7 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "finish": list(finish_tuple),
                 "winning_tier": winning_tier,
                 "payout": payout,
-                # EV束 (recommended_bundle, モデルのみの参考値。2026-06-06 以降は投票しない)。
+                # EV束 (recommended_bundle)。2026-06-10〜 実弾既定束 (KEIBA_BET_BUNDLE=ev)。
                 # bundle_payout = 予想オッズ基準 (snapshot)、bundle_payout_final = 最終オッズ基準。
                 "bundle_hit": b_yield["hit"],
                 "bundle_hit_bet_types": sorted({leg["bet_type"] for leg in b_yield["hit_legs"]}),
@@ -339,6 +344,9 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 # 3連単的中モードの計測対象か (saved_at >= TRIFECTA_CUTOFF)。
                 # False の race は trifecta_bundle 集計とダッシュボードのチャートから除外。
                 "trifecta_measured": (pred.get("saved_at") or "") >= TRIFECTA_CUTOFF_ISO_JST,
+                # EV束 (実弾既定束) の計測対象か (saved_at >= EV_CUTOFF = 修正版 EV束の稼働開始)。
+                # False の race は ev_bundle 集計とダッシュボードの EV束系列から除外。
+                "ev_measured": (pred.get("saved_at") or "") >= EV_CUTOFF_ISO_JST,
                 # 最終オッズが取れたかの discriminator (frontend で「予想/最終 切替表示」用)
                 "has_final_odds": bool(final_odds),
                 # LLM 評価有無の discriminator
@@ -415,13 +423,21 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
             "roi_final_ci_high": roi_final_high,
         }
 
-    # EV束 (recommended_bundle, モデルのみの参考値。2026-06-06 以降は投票しない)。
+    # EV束の全期間参考集計 (旧名 claude_bundle のまま互換維持。β=0 事故時代を含むので
+    # ダッシュボードの実弾系列には使わない — そちらは ev_bundle)。
     claude_bundle = _bundle_agg(
         races, "bundle_participated", "bundle_hit",
         "bundle_stake", "bundle_payout", "bundle_payout_final",
     )
-    # 3連単的中モードの集計 (**実弾投票束**, 2026-06-06〜固定)。EV束と同形。
-    # 計測対象は TRIFECTA_CUTOFF 以降のみ (それ以前は races/skipped の分母からも除外)。
+    # EV束 (**実弾既定束**, 2026-06-10〜 KEIBA_BET_BUNDLE=ev)。計測対象は EV_CUTOFF 以降のみ
+    # (= 修正版 EV束: de-vig 修正 / β=0.78 / ドリフトシェード / px_o≤2.0 / ½Kelly)。
+    ev_bundle = _bundle_agg(
+        [r for r in races if r.get("ev_measured")],
+        "bundle_participated", "bundle_hit",
+        "bundle_stake", "bundle_payout", "bundle_payout_final",
+    )
+    # 3連単的中モードの集計 (2026-06-06〜10 は実弾固定束、以降は KEIBA_BET_BUNDLE=trifecta
+    # 選択時の実弾束)。EV束と同形。計測対象は TRIFECTA_CUTOFF 以降のみ。
     trifecta_bundle = _bundle_agg(
         [r for r in races if r.get("trifecta_measured")],
         "trifecta_bundle_participated", "trifecta_bundle_hit",
@@ -438,9 +454,11 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "tiers": tiers_out,
         "plans": [],
         "claude_bundle": claude_bundle,
+        "ev_bundle": ev_bundle,
         "trifecta_bundle": trifecta_bundle,
-        # 3連単的中モードの計測開始日 (frontend の注記表示用)
+        # 各系列の計測開始日 (frontend の注記表示用)
         "trifecta_cutoff": TRIFECTA_CUTOFF_ISO_JST,
+        "ev_cutoff": EV_CUTOFF_ISO_JST,
         "races": races,
     }
 

@@ -59,42 +59,61 @@ function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
 }
 
-// 累積収支推移 (3連単的中モード = 実弾投票束) + 結果分布の簡易 SVG チャート群。
+// 累積収支推移 (EV束 = 実弾既定束 + 3連単束) + 結果分布の簡易 SVG チャート群。
 // recharts 等の重い依存を増やさず Tailwind + inline SVG で軽量描画する。
-// EV束 (モデル参考) の系列はダッシュボードから削除 (2026-06-06 ユーザ指示: EV束は不要)。
+// EV束系列は 2026-06-10 (修正版 EV束 = 実弾既定束) に復活 — ev_measured のみ累積。
 function DashboardCharts({ races }: { races: RaceHit[] }) {
-  // 3連単的中モードの計測対象 (trifecta_measured, 計測開始日以降) のみ。
+  // どちらかの系列の計測対象になっている race のみ (両 cutoff の和集合)。
   // field 欠落 (旧 API) は従来通り含める。
-  const measured = races.filter((r) => r.trifecta_measured !== false);
+  const measured = races.filter(
+    (r) => r.trifecta_measured !== false || r.ev_measured === true,
+  );
   // saved_at 昇順 (古い順) で並べて累積 stake / payout を計算
   const sorted = [...measured].sort((a, b) =>
     (a.saved_at ?? "").localeCompare(b.saved_at ?? ""),
   );
 
   // 累積収支: 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
-  // 3連単的中モード (実弾投票束, 2026-06-06〜固定) のみ。
+  // A = EV束 (実弾既定, ev_measured のみ) / B = 3連単束 (trifecta_measured のみ)。
+  let evStakeAcc = 0;
+  let evPayoutAcc = 0;
   let tStakeAcc = 0;
   let tPayoutAcc = 0;
   const series = sorted.map((r) => {
-    if (r.trifecta_bundle_participated) {
-      tStakeAcc += r.trifecta_bundle_stake ?? 0;
+    if (r.ev_measured && r.bundle_participated) {
+      evStakeAcc += r.bundle_stake ?? 0;
       // 最終オッズ基準 (実払戻に近い)。最終が無い旧 result は予想 payout に fallback。
+      evPayoutAcc += r.bundle_payout_final ?? r.bundle_payout ?? 0;
+    }
+    if (r.trifecta_measured !== false && r.trifecta_bundle_participated) {
+      tStakeAcc += r.trifecta_bundle_stake ?? 0;
       tPayoutAcc += r.trifecta_bundle_payout_final ?? r.trifecta_bundle_payout ?? 0;
     }
     return {
+      evNet: evPayoutAcc - evStakeAcc,
+      evRoi: evStakeAcc > 0 ? evPayoutAcc / evStakeAcc : 0,
       tNet: tPayoutAcc - tStakeAcc,
       tRoi: tStakeAcc > 0 ? tPayoutAcc / tStakeAcc : 0,
     };
   });
+  const evNetSeries = series.map((s) => s.evNet);
+  const evRoiSeries = series.map((s) => s.evRoi);
   const tNetSeries = series.map((s) => s.tNet);
   const tRoiSeries = series.map((s) => s.tRoi);
 
-  // 3連単的中モードの結果分布: 的中 / 不的中 / 見送り レース数 (計測対象のみ)
-  const tHits = measured.filter((r) => r.trifecta_bundle_hit).length;
-  const tMisses = measured.filter(
+  // 結果分布: 的中 / 不的中 / 見送り レース数 (各系列の計測対象のみ)
+  const evMeasured = measured.filter((r) => r.ev_measured);
+  const evHits = evMeasured.filter((r) => r.bundle_hit).length;
+  const evMisses = evMeasured.filter(
+    (r) => r.bundle_participated && !r.bundle_hit,
+  ).length;
+  const evSkips = evMeasured.filter((r) => r.bundle_participated === false).length;
+  const tMeasured = measured.filter((r) => r.trifecta_measured !== false);
+  const tHits = tMeasured.filter((r) => r.trifecta_bundle_hit).length;
+  const tMisses = tMeasured.filter(
     (r) => r.trifecta_bundle_participated && !r.trifecta_bundle_hit,
   ).length;
-  const tSkips = measured.filter((r) => r.trifecta_bundle_participated === false).length;
+  const tSkips = tMeasured.filter((r) => r.trifecta_bundle_participated === false).length;
 
   return (
     <section className="space-y-3">
@@ -108,28 +127,42 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <Card title="累積収支">
           <LineChart
-            seriesA={tNetSeries}
-            labelA="3連単的中 (実弾)"
-            colorA="#d946ef"
+            seriesA={evNetSeries}
+            labelA="EV束 (実弾既定)"
+            colorA="#0ea5e9"
+            seriesB={tNetSeries}
+            labelB="3連単束"
+            colorB="#d946ef"
             yFmt={(v) => `${v >= 0 ? "+" : ""}${(v / 1000).toFixed(1)}k`}
           />
         </Card>
         <Card title="累積回収率 推移">
           <LineChart
-            seriesA={tRoiSeries.map((v) => v * 100)}
-            labelA="3連単的中 (実弾)"
-            colorA="#d946ef"
+            seriesA={evRoiSeries.map((v) => v * 100)}
+            labelA="EV束 (実弾既定)"
+            colorA="#0ea5e9"
+            seriesB={tRoiSeries.map((v) => v * 100)}
+            labelB="3連単束"
+            colorB="#d946ef"
             yFmt={(v) => `${v.toFixed(0)}%`}
             referenceY={100}
           />
         </Card>
         <Card title="結果分布">
-          <DistroBar
-            label="3連単的中モード (実弾)"
-            hits={tHits}
-            misses={tMisses}
-            skips={tSkips}
-          />
+          <div className="space-y-3">
+            <DistroBar
+              label="EV束 (実弾既定, 2026-06-10〜)"
+              hits={evHits}
+              misses={evMisses}
+              skips={evSkips}
+            />
+            <DistroBar
+              label="3連単束"
+              hits={tHits}
+              misses={tMisses}
+              skips={tSkips}
+            />
+          </div>
         </Card>
       </div>
     </section>
@@ -137,22 +170,30 @@ function DashboardCharts({ races }: { races: RaceHit[] }) {
 }
 
 function LineChart({
-  seriesA, labelA, colorA, yFmt, referenceY,
+  seriesA, seriesB, labelA, labelB, colorA, colorB, yFmt, referenceY,
 }: {
   seriesA: number[];
+  // seriesB は任意 (省略時は系列 A のみ描画)。A=EV束 実弾既定 / B=3連単束 が既定の使い方。
+  seriesB?: number[];
   labelA: string;
+  labelB?: string;
   colorA: string;
+  colorB?: string;
   yFmt: (v: number) => string;
   referenceY?: number;
 }) {
   const w = 600;
   const h = 180;
   const pad = { l: 48, r: 12, t: 8, b: 18 };
-  const allValues = [...seriesA, ...(referenceY !== undefined ? [referenceY] : [])];
+  const allValues = [
+    ...seriesA,
+    ...(seriesB ?? []),
+    ...(referenceY !== undefined ? [referenceY] : []),
+  ];
   const minY = Math.min(0, ...allValues);
   const maxY = Math.max(0, ...allValues);
   const rangeY = maxY - minY || 1;
-  const n = seriesA.length;
+  const n = Math.max(seriesA.length, seriesB?.length ?? 0);
   const innerW = w - pad.l - pad.r;
   const innerH = h - pad.t - pad.b;
   const xAt = (i: number) =>
@@ -178,6 +219,10 @@ function LineChart({
           <line x1={pad.l} x2={w - pad.r} y1={yAt(referenceY)} y2={yAt(referenceY)}
                 stroke="#94a3b8" strokeWidth={1} strokeDasharray="4 2" />
         )}
+        {seriesB && seriesB.length > 0 && colorB && (
+          <path d={lineFor(seriesB)} fill="none" stroke={colorB} strokeWidth={2}
+                strokeOpacity={0.85} />
+        )}
         {seriesA.length > 0 && (
           <path d={lineFor(seriesA)} fill="none" stroke={colorA} strokeWidth={2} />
         )}
@@ -185,6 +230,12 @@ function LineChart({
         <g transform={`translate(${pad.l + 4}, ${pad.t + 12})`}>
           <rect width={9} height={9} fill={colorA} />
           <text x={14} y={9} fontSize={10} fill="#374151">{labelA}</text>
+          {labelB && colorB && (
+            <>
+              <rect x={110} width={9} height={9} fill={colorB} />
+              <text x={124} y={9} fontSize={10} fill="#374151">{labelB}</text>
+            </>
+          )}
         </g>
       </svg>
     </div>
@@ -259,12 +310,21 @@ function PredictionRowItem({
   const closeAt = p.close_at ?? closeAtMap?.get(p.race_id) ?? null;
   const startAt = p.start_at ?? startAtMap?.get(p.race_id) ?? null;
   const timing = raceTimingStatus(closeAt, startAt, p.has_result, nowMs);
-  // 「的中」ラベルは **3連単的中モード (実弾投票束) のみ**で判定 (2026-06-06 特化)。
-  // 3連単束が無い旧 snapshot は旧実弾だった EV束 (bundle_hit) に fallback して表示を保つ。
+  // 「的中」ラベルは**実弾投票束**で判定: EV束計測対象 (ev_measured, 2026-06-10〜 実弾既定束)
+  // は EV束 (bundle_*)、それ以前は 3連単束 (無ければ旧実弾だった EV束に fallback)。
   // **skipped は anyHit より優先**: 賭けていない race は理論値が立っていても「的中」ではない。
-  const useTrifecta = !!(hit && hit.trifecta_bundle_participated);
-  const bundleSkipped = !!(hit && !useTrifecta && hit.bundle_participated === false);
-  const anyHit = !bundleSkipped && !!(hit && (useTrifecta ? hit.trifecta_bundle_hit : hit.bundle_hit));
+  const useEv = !!(hit && hit.ev_measured);
+  const useTrifecta = !useEv && !!(hit && hit.trifecta_bundle_participated);
+  const bundleSkipped = !!(
+    hit &&
+    (useEv
+      ? hit.bundle_participated === false
+      : !useTrifecta && hit.bundle_participated === false)
+  );
+  const anyHit =
+    !bundleSkipped &&
+    !!(hit &&
+      (useEv ? hit.bundle_hit : useTrifecta ? hit.trifecta_bundle_hit : hit.bundle_hit));
   const rowBg = hit
     ? raceTimingRowBg(anyHit ? "good" : bundleSkipped ? "muted" : "bad")
     : raceTimingRowBg(timing.tone);
@@ -306,8 +366,12 @@ function PredictionRowItem({
               <span className="font-bold mono">{hit.finish.join("-")}</span>
             </span>
             <span className="text-(--color-muted)">·</span>
-            {hit.trifecta_bundle_hit && <Badge tone="good">3連単束 的中</Badge>}
-            {hit.bundle_hit && <Badge tone="muted">EV束(参考) 的中</Badge>}
+            {hit.bundle_hit && (
+              <Badge tone={hit.ev_measured ? "good" : "muted"}>EV束 的中</Badge>
+            )}
+            {hit.trifecta_bundle_hit && (
+              <Badge tone={hit.ev_measured ? "muted" : "good"}>3連単束 的中</Badge>
+            )}
             {hit.payout > 0 && (
               <>
                 <span className="text-(--color-muted)">·</span>
@@ -348,6 +412,13 @@ export default async function DashboardPage() {
   ]);
 
   const trifectaBundle = cal?.trifecta_bundle;
+  const evBundle = cal?.ev_bundle;
+  // 実弾既定束: watch-auto の現在設定 (bet_bundle) に追従。bet_bundle キーが無い旧 config で
+  // 稼働中なら旧挙動 = 3連単束、それ以外 (未稼働/新 config) は新既定の EV束。
+  const activeBundleKind: "ev" | "trifecta" =
+    watch?.config?.bet_bundle ?? (watch?.running ? "trifecta" : "ev");
+  const activeBundle = activeBundleKind === "ev" ? evBundle : trifectaBundle;
+  const activeBundleLabel = activeBundleKind === "ev" ? "EV束" : "3連単束";
 
   const raceHitMap = new Map<string, RaceHit>();
   for (const r of cal?.races ?? []) raceHitMap.set(r.race_id, r);
@@ -360,13 +431,15 @@ export default async function DashboardPage() {
 
   const nowMs = Date.now();
   // 予測履歴セクションを削除したので related な集計は不要。
-  // confidence / 集計対象 は 3連単的中モードの計測窓 (trifecta_cutoff 以降) 基準。
-  const confidence = trifectaBundle
-    ? calibrationConfidence(trifectaBundle.races)
+  // confidence / 集計対象 は実弾既定束の計測窓 (ev_cutoff / trifecta_cutoff 以降) 基準。
+  const confidence = activeBundle
+    ? calibrationConfidence(activeBundle.races)
     : null;
   const lastUpdated = cal ? fmtRelativeFromNow(cal.last_updated_at, nowMs) : "—";
   // "2026-06-05T00:00:00" → "2026-06-05" (注記表示用)
   const trifectaCutoffDate = cal?.trifecta_cutoff?.slice(0, 10);
+  const evCutoffDate = cal?.ev_cutoff?.slice(0, 10);
+  const activeCutoffDate = activeBundleKind === "ev" ? evCutoffDate : trifectaCutoffDate;
 
   return (
     <Page>
@@ -380,35 +453,35 @@ export default async function DashboardPage() {
           状態は header の WatchPill で確認可能。 */}
 
       {/* 一番上の段: 参加レース数 / 見送りレース数 / 的中レース数 / 収支
-          (全て 3連単的中モード = 実弾投票束 基準, 2026-06-06〜固定) */}
+          (実弾投票束 = watch-auto の bet_bundle 設定に追従。既定 EV束 2026-06-10〜) */}
       <div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat
             label="参加レース数"
-            value={trifectaBundle?.participated_races ?? 0}
+            value={activeBundle?.participated_races ?? 0}
             hint={
-              trifectaBundle
-                ? `総合 ${trifectaBundle.races} / 見送り ${trifectaBundle.skipped_races}`
+              activeBundle
+                ? `総合 ${activeBundle.races} / 見送り ${activeBundle.skipped_races}`
                 : "—"
             }
             accentTone="muted"
           />
           <Stat
             label="見送りレース数"
-            value={trifectaBundle?.skipped_races ?? 0}
+            value={activeBundle?.skipped_races ?? 0}
             hint={
-              trifectaBundle && trifectaBundle.races > 0
-                ? `見送り率 ${Math.round((trifectaBundle.skipped_races / trifectaBundle.races) * 100)}%`
+              activeBundle && activeBundle.races > 0
+                ? `見送り率 ${Math.round((activeBundle.skipped_races / activeBundle.races) * 100)}%`
                 : "—"
             }
             accentTone="muted"
           />
           <Stat
             label="的中レース数"
-            value={trifectaBundle?.hits ?? 0}
+            value={activeBundle?.hits ?? 0}
             hint={
-              trifectaBundle
-                ? `参加 ${trifectaBundle.participated_races} / 集計 ${trifectaBundle.races}`
+              activeBundle
+                ? `参加 ${activeBundle.participated_races} / 集計 ${activeBundle.races}`
                 : "—"
             }
             // 値は黒文字 (default)。左 border のみ緑で AI 種別を示す (2026-05-29 ユーザ指示)
@@ -420,38 +493,38 @@ export default async function DashboardPage() {
             // 収支は **最終オッズ基準** (実払戻に近い)。最終オッズが無い旧 result は
             // backend が予想オッズに fallback 済 (payout_final = payout) (2026-05-30 ユーザ指示)。
             value={
-              !trifectaBundle
+              !activeBundle
                 ? "—"
                 : (() => {
-                    const pay = trifectaBundle.payout_final ?? trifectaBundle.payout;
-                    const pl = pay - trifectaBundle.stake;
+                    const pay = activeBundle.payout_final ?? activeBundle.payout;
+                    const pl = pay - activeBundle.stake;
                     return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
                   })()
             }
             hint={
-              trifectaBundle
-                ? `賭金 ${fmtYen(trifectaBundle.stake)} → 払戻(最終) ${fmtYen(trifectaBundle.payout_final ?? trifectaBundle.payout)}`
+              activeBundle
+                ? `賭金 ${fmtYen(activeBundle.stake)} → 払戻(最終) ${fmtYen(activeBundle.payout_final ?? activeBundle.payout)}`
                 : "—"
             }
             tone={
               // 収支: マイナスなら赤、プラスは黒 (default) (2026-05-29 ユーザ指示)
-              !trifectaBundle
+              !activeBundle
                 ? "default"
-                : (trifectaBundle.payout_final ?? trifectaBundle.payout) - trifectaBundle.stake < 0
+                : (activeBundle.payout_final ?? activeBundle.payout) - activeBundle.stake < 0
                 ? "bad"
                 : "default"
             }
             accentTone={
-              !trifectaBundle ||
-              (trifectaBundle.payout_final ?? trifectaBundle.payout) - trifectaBundle.stake >= 0
+              !activeBundle ||
+              (activeBundle.payout_final ?? activeBundle.payout) - activeBundle.stake >= 0
                 ? "magenta"
                 : "bad"
             }
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right mt-1 px-1">
-          ※ 全て 3連単的中モード (実弾投票束) 基準 ／ 集計対象 {trifectaBundle?.races ?? 0} レース
-          {trifectaCutoffDate ? ` (${trifectaCutoffDate}〜)` : ""} ／
+          ※ 全て {activeBundleLabel} (実弾投票束) 基準 ／ 集計対象 {activeBundle?.races ?? 0} レース
+          {activeCutoffDate ? ` (${activeCutoffDate}〜)` : ""} ／
           {confidence && (
             <span className="ml-1">
               <Badge tone={confidence.tone}>{confidence.label}</Badge>
@@ -461,14 +534,104 @@ export default async function DashboardPage() {
         </div>
       </div>
 
+      {/* EV束 セクション — **実弾既定束 (2026-06-10〜, KEIBA_BET_BUNDLE=ev)**。
+          全脚がシェード込み P×O≥1.02 + px_o≤2.0 + ½Kelly + トリガミ防止を通過した時のみ
+          legs が立つ = 大半のレースは見送り (正常)。系列色=スカイブルー。 */}
+      <section className="space-y-2">
+        <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
+          <span className="inline-block w-1 h-4 bg-sky-500 translate-y-0.5" />
+          <span className="text-base">EV束</span>
+          <span className="text-xs font-normal text-(--color-muted)">
+            joint ½Kelly・シェード込み P×O ゲート / 実弾既定束 ({evCutoffDate ?? "2026-06-10"}〜)
+          </span>
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Stat
+            label="的中率"
+            value={
+              !evBundle || evBundle.participated_races === 0
+                ? "—"
+                : fmtPct(evBundle.hit_rate, 1)
+            }
+            hint={
+              evBundle && evBundle.participated_races > 0
+                ? `${evBundle.hits} 的中 / ${evBundle.participated_races} 参加`
+                : "賭けたレースなし"
+            }
+            tone="default"
+            accentTone="info"
+          />
+          <Stat
+            label="回収率"
+            value={
+              !evBundle || evBundle.participated_races === 0
+                ? "—"
+                : fmtRoiPct(evBundle.roi_final ?? evBundle.roi)
+            }
+            hint={
+              evBundle && evBundle.participated_races > 0
+                ? `賭金 ${fmtYen(evBundle.stake)} → 払戻(最終) ${fmtYen(evBundle.payout_final ?? evBundle.payout)}`
+                : "—"
+            }
+            tone={
+              !evBundle || evBundle.participated_races === 0
+                ? "default"
+                : (evBundle.roi_final ?? evBundle.roi) > 1
+                ? "default"
+                : "bad"
+            }
+            accentTone="info"
+          />
+          <Stat
+            label="収支"
+            value={
+              !evBundle || evBundle.participated_races === 0
+                ? "—"
+                : (() => {
+                    const pay = evBundle.payout_final ?? evBundle.payout;
+                    const pl = pay - evBundle.stake;
+                    return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
+                  })()
+            }
+            hint={
+              evBundle
+                ? `参加 ${evBundle.participated_races} / 集計 ${evBundle.races}`
+                : "—"
+            }
+            tone={
+              !evBundle || evBundle.participated_races === 0
+                ? "default"
+                : (evBundle.payout_final ?? evBundle.payout) - evBundle.stake < 0
+                ? "bad"
+                : "default"
+            }
+            accentTone="info"
+          />
+          <Stat
+            label="見送りレース数"
+            value={evBundle?.skipped_races ?? 0}
+            hint={
+              evBundle && evBundle.races > 0
+                ? `見送り率 ${Math.round((evBundle.skipped_races / evBundle.races) * 100)}%`
+                : "—"
+            }
+            accentTone="muted"
+          />
+        </div>
+        <div className="text-[10px] text-(--color-muted) text-right px-1">
+          ※ EV束 (実弾既定束)。計測対象は {evCutoffDate ?? "2026-06-10"}〜 のレースのみ
+          (それ以前の旧 EV束は β=0 事故込みの別物のため除外)。見送り多数は正常動作
+        </div>
+      </section>
+
       {/* 3連単的中モード セクション — **実弾投票束 (2026-06-06〜固定)**。
           市場無視・Claude 指数フォーメーション。的中率系=フクシア。 */}
       <section className="space-y-2">
         <h2 className="flex items-baseline gap-2 text-sm font-bold tracking-tight px-1">
           <span className="inline-block w-1 h-4 bg-fuchsia-500 translate-y-0.5" />
-          <span className="text-base">3連単的中モード</span>
+          <span className="text-base">3連単束</span>
           <span className="text-xs font-normal text-(--color-muted)">
-            市場無視・Claude 指数フォーメーション / 実弾投票束 (固定)
+            市場無視・Claude 指数フォーメーション / KEIBA_BET_BUNDLE=trifecta 選択時の実弾束
           </span>
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -545,15 +708,12 @@ export default async function DashboardPage() {
           />
         </div>
         <div className="text-[10px] text-(--color-muted) text-right px-1">
-          ※ 実弾投票束 (3連単的中モード固定)。計測対象は{" "}
-          {trifectaCutoffDate ?? "計測開始日"}〜 のレースのみ。Claude 指数なしのレースは自動見送り
+          ※ 計測対象は {trifectaCutoffDate ?? "計測開始日"}〜 のレースのみ。
+          Claude 指数なしのレースは自動見送り。2026-06-10〜の実弾既定は EV束 (上段)
         </div>
       </section>
 
-      {/* EV束 (モデル参考) セクションはダッシュボードから削除 (2026-06-06 ユーザ指示)。
-          EV束の集計は /calibrate (確率較正) と履歴詳細ページで引き続き参照可能。 */}
-
-      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — 3連単的中 (実弾) のみ */}
+      {/* チャート: 累積収支 + 結果分布 (簡易 SVG 描画) — EV束 (実弾既定) + 3連単束 */}
       {cal && cal.races.length > 0 && (
         <DashboardCharts races={cal.races} />
       )}
