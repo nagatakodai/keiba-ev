@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { ChevronRight, History } from "lucide-react";
 import {
   api,
   type CalibrationReport,
@@ -9,7 +10,7 @@ import {
 
 export const metadata: Metadata = { title: "予測分析履歴" };
 import { Page, PageHeader, savedAtDate, todayJST } from "@/components/ui";
-import { PredictionsList } from "@/components/PredictionsList";
+import { HitsToggle, PredictionsList } from "@/components/PredictionsList";
 import { AutoRefresh } from "@/components/AutoRefresh";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,8 @@ export default async function PredictionsPage({
       .catch(() => ({ items: [] as WatchAutoHistoryItem[] })),
   ]);
 
+  // RSC はリクエスト毎に 1 回だけ描画されるので、リクエスト時刻の取得は安全。
+  // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
   const today = todayJST(nowMs);
   const todays = data.items.filter((p) => savedAtDate(p.saved_at) === today);
@@ -53,26 +56,21 @@ export default async function PredictionsPage({
     <Page>
       <AutoRefresh seconds={60} />
       <PageHeader
+        eyebrow="Predictions"
         title="予測分析履歴"
         subtitle={`本日 ${today} 分のみ表示 (会場ごと / R 番号順)。`}
         right={
-          <div className="flex items-center gap-3 text-xs">
-            <Link
-              href={`/predictions${showHits ? "?hits=off" : ""}`}
-              className={`px-2 py-1 border ${
-                showHits
-                  ? "bg-(--color-accent) text-white border-(--color-accent)"
-                  : "bg-white border-(--color-line) text-(--color-foreground) hover:border-(--color-accent)"
-              } font-bold`}
-            >
-              的中 {showHits ? "ON" : "OFF"}
-            </Link>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <HitsToggle basePath="/predictions" showHits={showHits} />
             {pastCount > 0 && (
               <Link
                 href="/predictions/archive"
-                className="text-(--color-accent) hover:underline"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-(--color-line) bg-(--color-surface-2) text-xs font-bold text-(--color-foreground) hover:border-(--color-accent)/60 hover:text-(--color-accent) transition-colors"
               >
-                過去の予測分析履歴 ({pastCount}) →
+                <History className="size-3.5" />
+                過去の予測分析履歴
+                <span className="tnum text-(--color-muted)">({pastCount})</span>
+                <ChevronRight className="size-3.5" />
               </Link>
             )}
           </div>

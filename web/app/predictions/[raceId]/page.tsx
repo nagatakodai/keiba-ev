@@ -1,7 +1,23 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import Link from "next/link";
+import {
+  ArrowLeft,
+  CircleCheck,
+  Coins,
+  Crosshair,
+  ExternalLink,
+  Gauge,
+  Layers,
+  ListOrdered,
+  Scale,
+  Sparkles,
+  Target,
+  Timer,
+  Trophy,
+} from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
+import { OddsTimelineCard, type LateMoneySnapshot } from "./OddsTimelineCard";
 import { isEvMeasured,
   api,
   type BetEvRow,
@@ -74,6 +90,19 @@ import {
 
 export const dynamic = "force-dynamic";
 
+// 的中マーク (旧 unicode "●" の置換)。place を渡すと "N着" を併記する。
+function HitMark({ place }: { place?: number }) {
+  return (
+    <span className="ml-2 inline-flex items-center gap-0.5 align-middle text-emerald-300 text-xs font-bold whitespace-nowrap">
+      <CircleCheck className="w-3.5 h-3.5 shrink-0" aria-hidden />
+      {place != null && <span className="tnum">{place}着</span>}
+    </span>
+  );
+}
+
+// テーブルの的中行 tint (style guide: emerald-500/10 bg)。
+const HIT_ROW_BG = "bg-emerald-500/10";
+
 export default async function PredictionDetailPage({
   params,
   searchParams,
@@ -98,6 +127,16 @@ export default async function PredictionDetailPage({
 
   const finish = d.result?.finish_order;
   const nRunners = nRunnersOf(d);
+
+  // オッズタイムライン用: 馬番 → 馬名 (horse_aptitude 優先、index_compare で補完)。
+  const horseNames: Record<string, string> = {};
+  for (const a of d.horse_aptitude ?? []) horseNames[String(a.number)] = a.name;
+  for (const r of d.index_compare ?? []) {
+    if (horseNames[String(r.number)] == null) horseNames[String(r.number)] = r.name;
+  }
+  // late_money は snapshot に保存されるが api.ts の型には未定義 (cast で取り出す)。
+  const lateMoney =
+    (d as PredictionDetail & { late_money?: LateMoneySnapshot | null }).late_money ?? null;
 
   return (
     <Page>
@@ -142,16 +181,18 @@ export default async function PredictionDetailPage({
                 href={winticketUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="text-xs font-bold text-(--color-highlight) hover:underline"
+                className="inline-flex items-center gap-1 text-xs font-bold text-(--color-highlight) hover:underline"
               >
-                netkeiba で開く ↗
+                netkeiba で開く
+                <ExternalLink className="w-3 h-3 shrink-0" aria-hidden />
               </a>
             )}
             <Link
               href="/predictions"
-              className="text-xs text-(--color-accent) hover:underline"
+              className="inline-flex items-center gap-1 text-xs text-(--color-accent) hover:underline"
             >
-              ← 一覧
+              <ArrowLeft className="w-3 h-3 shrink-0" aria-hidden />
+              一覧
             </Link>
           </div>
         }
@@ -201,7 +242,12 @@ export default async function PredictionDetailPage({
           <Card
             tone={anyHit ? "active" : "default"}
             // タイトルは「結果」だけ。バッジは right prop に出して title 内の右ズレを回避。
-            title="結果"
+            title={
+              <span className="flex items-center gap-2">
+                <Trophy className="w-4 h-4 text-(--color-highlight) shrink-0" aria-hidden />
+                <span>結果</span>
+              </span>
+            }
             right={headlineBadge}
           >
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -253,6 +299,14 @@ export default async function PredictionDetailPage({
         <MarketSignalCard items={d.market_signals} finish={finish} />
       )}
 
+      {/* オッズ変動タイムライン (client island): /api/timeline を fetch。未取得は控えめ表示。 */}
+      <OddsTimelineCard
+        raceId={d.race_id}
+        horseNames={horseNames}
+        finish={finish}
+        lateMoney={lateMoney}
+      />
+
       {d.horse_best_times && d.horse_best_times.length > 0 && (
         <BestTimesCard items={d.horse_best_times} finish={finish} />
       )}
@@ -282,7 +336,8 @@ export default async function PredictionDetailPage({
             tone="alert"
             title={
               <span className="flex items-center gap-2">
-                <span className="text-(--color-highlight) font-black">Claude オススメ</span>
+                <Sparkles className="w-4 h-4 text-violet-300 shrink-0" aria-hidden />
+                <span className="text-violet-300 font-black">Claude オススメ</span>
                 <span className="text-xs text-(--color-muted) font-normal">検索補強を反映した最終調整</span>
               </span>
             }
@@ -306,10 +361,24 @@ export default async function PredictionDetailPage({
           他券種と並ぶ。bundle 表示は TrifectaCard (実弾) + TopRecommendationCard (EV束参考) で代替。 */}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card title="P×O ランキング 上位 30">
+        <Card
+          title={
+            <span className="flex items-center gap-2">
+              <ListOrdered className="w-4 h-4 text-(--color-accent) shrink-0" aria-hidden />
+              <span>P×O ランキング 上位 30</span>
+            </span>
+          }
+        >
           <RowsTable rows={topByPxo} finish={finish} />
         </Card>
-        <Card title="推定当選率ランキング 上位 20">
+        <Card
+          title={
+            <span className="flex items-center gap-2">
+              <Crosshair className="w-4 h-4 text-(--color-info) shrink-0" aria-hidden />
+              <span>推定当選率ランキング 上位 20</span>
+            </span>
+          }
+        >
           <ProbRankingTable rows={topByProb} finish={finish} />
         </Card>
       </div>
@@ -450,7 +519,7 @@ function collectEfficientCandidates(d: PredictionDetail, finish?: number[]): Eff
 function TopRecTable({ cands }: { cands: EffCandidate[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm tabnum table-zebra">
+      <table className="w-full text-sm tnum table-zebra">
         <thead className="text-left text-(--color-muted) text-xs">
           <tr className="border-b border-(--color-line)">
             <th className="py-2 pr-3 text-right">#</th>
@@ -471,7 +540,7 @@ function TopRecTable({ cands }: { cands: EffCandidate[] }) {
             return (
               <tr
                 key={`${c.betType}:${k}`}
-                className={`border-b border-(--color-line)/60 ${c.hit ? "bg-emerald-500/5" : ""}`}
+                className={`border-b border-(--color-line)/60 ${c.hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
               >
                 <td className="py-1.5 pr-3 text-right text-(--color-muted)">{i + 1}</td>
                 <td className="py-1.5 pr-3">
@@ -479,7 +548,7 @@ function TopRecTable({ cands }: { cands: EffCandidate[] }) {
                 </td>
                 <td className="py-1.5 pr-3 font-medium mono">
                   {k}
-                  {c.hit && <span className="ml-2 text-(--color-good)">●</span>}
+                  {c.hit && <HitMark />}
                 </td>
                 <td className="py-1.5 pr-3 text-right">{fmtPct(c.prob, 2)}</td>
                 <td className="py-1.5 pr-3 text-right">{c.odds.toFixed(1)}</td>
@@ -532,6 +601,7 @@ function TopRecommendationCard({
       tone={best ? "alert" : "default"}
       title={
         <span className="flex items-center gap-2">
+          <Coins className="w-4 h-4 text-(--color-highlight) shrink-0" aria-hidden />
           <span className="text-(--color-highlight) font-black">EV束 (モデル参考)</span>
           <span className="text-xs text-(--color-muted) font-normal">
             旧 snapshot 近似表示 · 全 bet type 横断 · Kelly 効率順 f*=(P×O−1)/(O−1) · P×O≥
@@ -613,6 +683,7 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
       tone={settled && hit ? "active" : "default"}
       title={
         <span className="flex items-center gap-2 flex-wrap">
+          <Target className="w-4 h-4 text-(--color-magenta) shrink-0" aria-hidden />
           <span>{modeTitle}</span>
           <Badge tone="warn">市場無視</Badge>
           {recovery && b.excluded_head != null && (
@@ -664,7 +735,7 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
         )}
         {claudeSelected && (
           <>
-            {" "}<b className="text-(--color-magenta)">締切直前に Claude が買い目を選定</b>
+            {" "}<b className="text-(--color-llm)">締切直前に Claude が買い目を選定</b>
             (指数上位から自由構築・検索なし高速)。配分・トリガミ防止はモデル側。
             {b.llm_select?.summary && <> 選定根拠: {b.llm_select.summary}</>}
           </>
@@ -688,10 +759,11 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
         {osum && <Stat label="加重平均オッズ" value={`×${osum.weighted_avg_odds.toFixed(0)}`} />}
       </div>
       {(b.head_horses?.length || b.mid_horses?.length || b.tail_horses?.length) && (
-        <div className="mt-3 text-xs text-(--color-muted) space-y-0.5">
-          <div>1着 (絞): <span className="mono text-(--color-fg)">{(b.head_horses ?? []).join(", ")}</span></div>
-          <div>2着 (中): <span className="mono text-(--color-fg)">{(b.mid_horses ?? []).join(", ")}</span></div>
-          <div>3着 (広): <span className="mono text-(--color-fg)">{(b.tail_horses ?? []).join(", ")}</span></div>
+        <div className="mt-3 rounded-lg bg-(--color-surface-2) border border-(--color-line) px-3 py-2 text-xs text-(--color-muted) space-y-0.5">
+          <div className="text-[10px] font-bold tracking-widest uppercase mb-1">フォーメーション</div>
+          <div>1着 (絞): <span className="mono tnum text-(--color-foreground)">{(b.head_horses ?? []).join(", ")}</span></div>
+          <div>2着 (中): <span className="mono tnum text-(--color-foreground)">{(b.mid_horses ?? []).join(", ")}</span></div>
+          <div>3着 (広): <span className="mono tnum text-(--color-foreground)">{(b.tail_horses ?? []).join(", ")}</span></div>
         </div>
       )}
       <div className="mt-4">
@@ -739,7 +811,7 @@ function BundleLegsTable({
   const dropped = droppedLegs ?? [];
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm tabnum table-zebra">
+      <table className="w-full text-sm tnum table-zebra">
         <thead className="text-left text-(--color-muted) text-xs">
           <tr className="border-b border-(--color-line)">
             <th className="py-2 pr-3">種別</th>
@@ -773,14 +845,14 @@ function BundleLegsTable({
             return (
               <tr
                 key={`${l.bet_type}:${k}`}
-                className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
               >
                 <td className="py-1.5 pr-3">
                   <Badge tone={BET_TYPE_TONE[l.bet_type] ?? "muted"}>{betLabel(l.bet_type)}</Badge>
                 </td>
                 <td className="py-1.5 pr-3 font-medium mono">
                   {k}
-                  {hit && <span className="ml-2 text-(--color-good)">●</span>}
+                  {hit && <HitMark />}
                 </td>
                 <td className="py-1.5 pr-3 text-right">{l.odds.toFixed(1)}</td>
                 {hasFinal && (
@@ -897,6 +969,10 @@ function BundleCard({
   // トリガミ防止マージン (保存オッズからの下振れ緩衝)。古い snapshot は未保存 → 1 扱い。
   const margin = bundle.torigami_margin ?? 1;
   const driftPct = margin > 1 ? Math.round((1 - 1 / margin) * 100) : 0;
+  // scripts/backfill_bundle.py が後付けした paper 束 (実弾ではない)。api.ts の型には
+  // 未定義のため cast で読む (api/store.py は bundle_backfilled として計測から除外済)。
+  const backfilled =
+    (bundle as RecommendedBundle & { backfilled?: boolean }).backfilled === true;
   // タイトル/色は dashboard 規約に統一: EV束=highlight / 的中優先=緑(good)。
   // EV束はモデルのみの参考値 (実弾投票束は 3連単束 = recommended_bundle_t)。
   const titleLabel = isHit
@@ -911,10 +987,11 @@ function BundleCard({
       tone={!isHit && legs.length ? "alert" : "default"}
       // タイトルは純テキストだけ。右ズレを避けるためバッジ類は right prop / body に移す。
       title={
-        <span className={`${titleColor} font-black`}>
-          {titleLabel}
+        <span className={`flex items-center gap-2 ${titleColor} font-black`}>
+          <Coins className="w-4 h-4 shrink-0" aria-hidden />
+          <span>{titleLabel}</span>
           {isHit && (
-            <span className="ml-2 text-xs font-normal text-(--color-muted)">
+            <span className="text-xs font-normal text-(--color-muted)">
               prob 降順 pool / おまけ計測・買わない
             </span>
           )}
@@ -922,6 +999,11 @@ function BundleCard({
       }
       right={
         <span className="flex items-center gap-2">
+          {backfilled && (
+            <span title="scripts/backfill_bundle.py が後付けした paper 束 — 実弾投票ではない (計測からも除外)">
+              <Badge tone="muted">backfill (paper)</Badge>
+            </span>
+          )}
           {!isHit && (validated ? (
             <Badge tone="magenta">claude -p 検証済 (旧記録){bundle.llm_review?.confidence ? ` (${bundle.llm_review.confidence})` : ""}</Badge>
           ) : (
@@ -989,11 +1071,14 @@ function BundleCard({
           </div>
           <BundleLegsTable legs={legs} finish={finish} finalOdds={finalOdds} nRunners={nRunners} payoutTable={payoutTable} />
           {bundle.llm_review?.validated && (bundle.llm_review.summary || (bundle.llm_review.cuts?.length ?? 0) > 0) && (
-            <div className="mt-3 rounded-md border border-(--color-magenta)/30 bg-(--color-magenta)/5 p-3 text-xs">
-              <span className="font-bold text-(--color-magenta)">claude -p 調査:</span>{" "}
+            <div className="mt-3 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3 text-xs">
+              <span className="inline-flex items-center gap-1 font-bold text-violet-300">
+                <Sparkles className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                claude -p 調査:
+              </span>{" "}
               {bundle.llm_review.summary || "—"}
               {(bundle.llm_review.cuts?.length ?? 0) > 0 && (
-                <span className="ml-1 text-(--color-bad)">
+                <span className="ml-1 text-rose-300">
                   / cut {bundle.llm_review.cuts!.length} 脚: {bundle.llm_review.cuts!.join(", ")}
                 </span>
               )}
@@ -1048,7 +1133,7 @@ function ProbRankingTable({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm tabnum table-zebra">
+      <table className="w-full text-sm tnum table-zebra">
         <thead className="text-left text-(--color-muted) text-xs">
           <tr className="border-b border-(--color-line)">
             <th className="py-2 pr-3 text-right">#</th>
@@ -1072,7 +1157,7 @@ function ProbRankingTable({
             return (
               <tr
                 key={`${r.betType}:${k}`}
-                className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
               >
                 <td className="py-1.5 pr-3 text-right text-(--color-muted)">{i + 1}</td>
                 <td className="py-1.5 pr-3">
@@ -1080,7 +1165,7 @@ function ProbRankingTable({
                 </td>
                 <td className="py-1.5 pr-3 font-medium mono">
                   {k}
-                  {hit && <span className="ml-2 text-(--color-good)">●</span>}
+                  {hit && <HitMark />}
                 </td>
                 <td className="py-1.5 pr-3 text-right">{fmtPct(r.prob, 2)}</td>
                 <td className="py-1.5 pr-3 text-right text-(--color-muted)">
@@ -1155,7 +1240,8 @@ function IndexCompareCard({
     <Card
       title={
         <span className="flex items-center gap-2">
-          <span>Claude 指数 vs 市場指数 (参考)</span>
+          <Sparkles className="w-4 h-4 text-violet-300 shrink-0" aria-hidden />
+          <span className="text-violet-300">Claude 指数 vs 市場指数 (参考)</span>
           <span className="text-xs text-(--color-muted) font-normal">
             {hasClaude
               ? "Claude 強さ指数と市場指数の乖離を見る参考表 · 確率 P は Claude 指数 ⊗ モデル指数(GBM⊗速度図表) で合成し市場指数は P に未合成 (市場無視) · 市場は P×O の O として効く · 差 = Claude − 市場 (正 = Claude 強気 = contrarian 狙い) · 根=補強根拠件数 · 直前/軟情報=取消/馬体重/前走不利/勝負気配 等のフラグ"
@@ -1165,12 +1251,12 @@ function IndexCompareCard({
       }
     >
       <div className="overflow-x-auto">
-        <table className="w-full text-sm tabnum table-zebra">
+        <table className="w-full text-sm tnum table-zebra">
           <thead className="text-left text-(--color-muted) text-xs">
             <tr className="border-b border-(--color-line)">
               <th className="py-2 pr-3 text-right">馬</th>
               <th className="py-2 pr-3">馬名</th>
-              <th className="py-2 pr-3 text-right" title="Claude 強さ指数 0-100 (市場独立の相対評価、検索補強で上下)">Claude 指数</th>
+              <th className="py-2 pr-3 text-right text-violet-300/90" title="Claude 強さ指数 0-100 (市場独立の相対評価、検索補強で上下)">Claude 指数</th>
               <th className="py-2 pr-3 text-right" title="市場指数 = 100·(1/オッズ)^(1/1.5) (1.0倍で100、温度T=1.5で0-100に分布)。参考: 確率 P には未合成 (市場無視)、P×O の O として効く">市場指数<span className="text-(--color-muted)"> (参考)</span></th>
               <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
               <th className="py-2 pr-3 text-right" title="補強根拠件数。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)">根</th>
@@ -1183,16 +1269,12 @@ function IndexCompareCard({
               return (
                 <tr
                   key={r.number}
-                  className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                  className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
                 >
                   <td className="py-1.5 pr-3 text-right font-bold">{r.number}</td>
                   <td className="py-1.5 pr-3">
                     {r.name}
-                    {hit && finish && (
-                      <span className="ml-2 text-(--color-good) text-xs">
-                        ●{finish.indexOf(r.number) + 1}着
-                      </span>
-                    )}
+                    {hit && finish && <HitMark place={finish.indexOf(r.number) + 1} />}
                   </td>
                   <td className="py-1.5 pr-3 text-right">
                     {r.claude_index != null ? r.claude_index.toFixed(1) : "—"}
@@ -1258,6 +1340,7 @@ function AptitudeCard({
     <Card
       title={
         <span className="flex items-center gap-2">
+          <Gauge className="w-4 h-4 text-(--color-accent) shrink-0" aria-hidden />
           <span>適性指数</span>
           <span className="text-xs text-(--color-muted) font-normal">
             各馬の相対適性 0-100 (同レース内 max=100) · 総合 = 9 因子重み付け平均
@@ -1266,7 +1349,7 @@ function AptitudeCard({
       }
     >
       <div className="overflow-x-auto">
-        <table className="w-full text-sm tabnum table-zebra">
+        <table className="w-full text-sm tnum table-zebra">
           <thead className="text-left text-(--color-muted) text-xs">
             <tr className="border-b border-(--color-line)">
               <th className="py-2 pr-3 text-right">馬</th>
@@ -1290,16 +1373,12 @@ function AptitudeCard({
               return (
                 <tr
                   key={a.number}
-                  className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                  className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
                 >
                   <td className="py-1.5 pr-3 text-right font-bold">{a.number}</td>
                   <td className="py-1.5 pr-3">
                     {a.name}
-                    {hit && finish && (
-                      <span className="ml-2 text-(--color-good) text-xs">
-                        ●{finish.indexOf(a.number) + 1}着
-                      </span>
-                    )}
+                    {hit && finish && <HitMark place={finish.indexOf(a.number) + 1} />}
                   </td>
                   <td className="py-1.5 pr-3 text-right">
                     <Badge tone={totalTone(a.total)}>{a.total.toFixed(1)}</Badge>
@@ -1442,7 +1521,7 @@ function BetTable({
         )}
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full text-sm tabnum table-zebra">
+        <table className="w-full text-sm tnum table-zebra">
           <thead className="text-left text-(--color-muted) text-xs">
             <tr className="border-b border-(--color-line)">
               <th className="py-2 pr-3 text-right">#</th>
@@ -1468,14 +1547,14 @@ function BetTable({
               return (
                 <tr
                   key={k}
-                  className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                  className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
                 >
                   <td className="py-1.5 pr-3 text-right text-(--color-muted)">
                     {i + 1}
                   </td>
                   <td className="py-1.5 pr-3 font-medium mono">
                     {k}
-                    {hit && <span className="ml-2 text-(--color-good)">●</span>}
+                    {hit && <HitMark />}
                   </td>
                   <td className="py-1.5 pr-3 text-right">
                     {r.popularity ? r.popularity : "—"}
@@ -1524,6 +1603,7 @@ function BetTablesCard({
     <Card
       title={
         <span className="flex items-center gap-2">
+          <Layers className="w-4 h-4 text-(--color-info) shrink-0" aria-hidden />
           <span>他の bet type 比較</span>
           <span className="text-xs text-(--color-muted) font-normal">
             3 連単以外 (単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3 連複) の P×O 上位 10 · 同じ確率モデル
@@ -1578,6 +1658,7 @@ function MarketSignalCard({
     <Card
       title={
         <span className="flex items-center gap-2">
+          <Scale className="w-4 h-4 text-(--color-info) shrink-0" aria-hidden />
           <span>市場乖離 (1着型 / 3着型)</span>
           <span className="text-xs text-(--color-muted) font-normal">
             単勝 vs 複勝 implied prob 比率で構造的ミスプライスを検出
@@ -1586,7 +1667,7 @@ function MarketSignalCard({
       }
     >
       <div className="overflow-x-auto">
-        <table className="w-full text-sm tabnum table-zebra">
+        <table className="w-full text-sm tnum table-zebra">
           <thead className="text-left text-(--color-muted) text-xs">
             <tr className="border-b border-(--color-line)">
               <th className="py-2 pr-3 text-right">馬</th>
@@ -1603,15 +1684,11 @@ function MarketSignalCard({
             {sorted.map((s) => {
               const hit = finishSet.has(s.number);
               return (
-                <tr key={s.number} className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}>
+                <tr key={s.number} className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}>
                   <td className="py-1.5 pr-3 text-right font-bold">{s.number}</td>
                   <td className="py-1.5 pr-3">
                     {s.name}
-                    {hit && finish && (
-                      <span className="ml-2 text-(--color-good) text-xs">
-                        ●{finish.indexOf(s.number) + 1}着
-                      </span>
-                    )}
+                    {hit && finish && <HitMark place={finish.indexOf(s.number) + 1} />}
                   </td>
                   <td className="py-1.5 pr-3">
                     <Badge tone={toneFor(s.interpretation)}>{s.interpretation}</Badge>
@@ -1651,6 +1728,7 @@ function BestTimesCard({
     <Card
       title={
         <span className="flex items-center gap-2">
+          <Timer className="w-4 h-4 text-(--color-accent) shrink-0" aria-hidden />
           <span>持ち時計</span>
           <span className="text-xs text-(--color-muted) font-normal">
             同 venue × 同距離 ±100m × 同 surface での past best own_time_sec (速い順)
@@ -1659,7 +1737,7 @@ function BestTimesCard({
       }
     >
       <div className="overflow-x-auto">
-        <table className="w-full text-sm tabnum table-zebra">
+        <table className="w-full text-sm tnum table-zebra">
           <thead className="text-left text-(--color-muted) text-xs">
             <tr className="border-b border-(--color-line)">
               <th className="py-2 pr-3 text-right">馬</th>
@@ -1674,15 +1752,11 @@ function BestTimesCard({
               const hit = finishSet.has(t.number);
               const diff = t.best_time_sec - fastest;
               return (
-                <tr key={t.number} className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}>
+                <tr key={t.number} className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}>
                   <td className="py-1.5 pr-3 text-right font-bold">{t.number}</td>
                   <td className="py-1.5 pr-3">
                     {t.name}
-                    {hit && finish && (
-                      <span className="ml-2 text-(--color-good) text-xs">
-                        ●{finish.indexOf(t.number) + 1}着
-                      </span>
-                    )}
+                    {hit && finish && <HitMark place={finish.indexOf(t.number) + 1} />}
                   </td>
                   <td className="py-1.5 pr-3 text-right font-medium">{t.best_time_sec.toFixed(1)}s</td>
                   <td className="py-1.5 pr-3 text-right text-(--color-muted)">
@@ -1714,7 +1788,7 @@ function RowsTable({
   const finishKey = highlight ?? (finish ? finish.join("-") : null);
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm tabnum table-zebra">
+      <table className="w-full text-sm tnum table-zebra">
         <thead className="text-left text-(--color-muted) text-xs">
           <tr className="border-b border-(--color-line)">
             <th className="py-2 pr-3">買い目</th>
@@ -1732,11 +1806,11 @@ function RowsTable({
             return (
               <tr
                 key={k}
-                className={`border-b border-(--color-line)/60 ${hit ? "bg-emerald-500/5" : ""}`}
+                className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
               >
                 <td className="py-1.5 pr-3 font-medium mono">
                   {k}
-                  {hit && <span className="ml-2 text-(--color-good)">●</span>}
+                  {hit && <HitMark />}
                 </td>
                 <td className="py-1.5 pr-3 text-right">{r.popularity}</td>
                 <td className="py-1.5 pr-3 text-right">{r.odds.toFixed(1)}</td>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { CircleCheck, CircleX, Clock, RefreshCw, Trash2 } from "lucide-react";
 import { api, type PendingItem, type PendingSummary } from "@/lib/api";
 import { Badge, Button, fmtTs } from "@/components/ui";
 
@@ -11,11 +12,32 @@ function looksLikeInternalRaceId(s: string): boolean {
   return /^\d+-\d+-\d+$/.test(s);
 }
 
-function statusTone(s: PendingItem["status"]): "good" | "pending" | "bad" | "muted" {
+// 状態の色: success = emerald / failed = rose系 (bad) / pending = amber (warn)。
+function statusTone(s: PendingItem["status"]): "good" | "warn" | "bad" | "muted" {
   if (s === "success") return "good";
   if (s === "failed") return "bad";
-  if (s === "pending") return "pending";
+  if (s === "pending") return "warn";
   return "muted";
+}
+
+function StatusBadge({ s }: { s: PendingItem["status"] }) {
+  const Icon = s === "success" ? CircleCheck : s === "failed" ? CircleX : Clock;
+  return (
+    <Badge tone={statusTone(s)}>
+      <span className="inline-flex items-center gap-1">
+        <Icon size={11} aria-hidden />
+        {s}
+      </span>
+    </Badge>
+  );
+}
+
+// 行全体にも状態色のごく薄い tint を敷く (zebra より優先される)。
+function statusRowBg(s: PendingItem["status"]): string {
+  if (s === "success") return "bg-emerald-500/[0.06]";
+  if (s === "failed") return "bg-rose-500/[0.06]";
+  if (s === "pending") return "bg-amber-500/[0.05]";
+  return "";
 }
 
 function fmtCountdown(s: number): string {
@@ -86,12 +108,14 @@ function RecorderRow({
   };
 
   const inputCls =
-    "w-14 text-center bg-white border border-(--color-line) px-1 py-1 text-sm focus:outline-none focus:border-(--color-accent) tabnum";
+    "w-14 text-center bg-(--color-surface-2) border border-(--color-line) rounded-lg px-1 py-1 text-sm placeholder:text-(--color-muted)/70 transition-colors focus:outline-none focus:border-(--color-accent) focus:ring-2 focus:ring-(--color-ring)/40 tnum";
+  const wideInputCls =
+    "bg-(--color-surface-2) border border-(--color-line) rounded-lg px-2 py-1 text-sm placeholder:text-(--color-muted)/70 transition-colors focus:outline-none focus:border-(--color-accent) focus:ring-2 focus:ring-(--color-ring)/40";
 
   const internalId = looksLikeInternalRaceId(item.race_id);
 
   return (
-    <tr className="border-b border-(--color-line)/60 align-top">
+    <tr className={`border-b border-(--color-line)/60 align-top ${statusRowBg(item.status)}`}>
       <td className="py-2 pr-3 mono text-xs">
         {internalId ? (
           <Link
@@ -105,14 +129,17 @@ function RecorderRow({
         )}
       </td>
       <td className="py-2 pr-3">
-        <Badge tone={statusTone(item.status)}>{item.status}</Badge>
+        <StatusBadge s={item.status} />
       </td>
-      <td className="py-2 pr-3 text-xs tabnum">
+      <td className="py-2 pr-3 text-xs tnum">
         {item.attempts}/{item.max_attempts}
       </td>
-      <td className="py-2 pr-3 text-xs tabnum">
+      <td className="py-2 pr-3 text-xs tnum">
         {item.status === "pending" ? (
-          <span className="text-(--color-warn)">{fmtCountdown(item.seconds_until_next)}</span>
+          <span className="inline-flex items-center gap-1 text-amber-300">
+            <Clock size={11} aria-hidden />
+            {fmtCountdown(item.seconds_until_next)}
+          </span>
         ) : item.status === "failed" ? (
           <span className="text-(--color-muted)">— (再試行終了)</span>
         ) : (
@@ -162,14 +189,14 @@ function RecorderRow({
             />
           </div>
           <input
-            className="w-24 bg-white border border-(--color-line) px-2 py-1 text-sm focus:outline-none focus:border-(--color-accent) tabnum"
+            className={`w-24 ${wideInputCls} tnum`}
             placeholder="払戻¥"
             value={payout}
             onChange={(e) => setPayout(e.target.value)}
             inputMode="numeric"
           />
           <input
-            className="w-32 bg-white border border-(--color-line) px-2 py-1 text-sm focus:outline-none focus:border-(--color-accent)"
+            className={`w-32 ${wideInputCls}`}
             placeholder="note (任意)"
             value={note}
             onChange={(e) => setNote(e.target.value)}
@@ -185,12 +212,29 @@ function RecorderRow({
               disabled={deleting}
               title="pending queue から除外 (calibration からは元々除外済)"
             >
-              {deleting ? "..." : "× 除外"}
+              {deleting ? (
+                "..."
+              ) : (
+                <>
+                  <Trash2 size={12} aria-hidden />
+                  除外
+                </>
+              )}
             </Button>
           )}
         </div>
-        {err && <div className="text-xs text-(--color-bad) mt-1">{err}</div>}
-        {ok && <div className="text-xs text-(--color-good) mt-1">{ok}</div>}
+        {err && (
+          <div className="text-xs text-(--color-bad) mt-1 inline-flex items-center gap-1">
+            <CircleX size={11} aria-hidden />
+            {err}
+          </div>
+        )}
+        {ok && (
+          <div className="text-xs text-(--color-good) mt-1 inline-flex items-center gap-1">
+            <CircleCheck size={11} aria-hidden />
+            {ok}
+          </div>
+        )}
       </td>
     </tr>
   );
@@ -266,10 +310,25 @@ export function PendingRecorder() {
       <div className="flex items-center gap-2 mb-3 text-xs flex-wrap">
         {summary && (
           <>
-            <Badge tone="bad">失敗 {summary.failed}</Badge>
-            <Badge tone="pending">取得待ち {summary.pending}</Badge>
-            <Badge tone="good">完了 {summary.success}</Badge>
-            <span className="text-(--color-muted)">/ 全 {summary.total}</span>
+            <Badge tone="bad">
+              <span className="inline-flex items-center gap-1 tnum">
+                <CircleX size={11} aria-hidden />
+                失敗 {summary.failed}
+              </span>
+            </Badge>
+            <Badge tone="warn">
+              <span className="inline-flex items-center gap-1 tnum">
+                <Clock size={11} aria-hidden />
+                取得待ち {summary.pending}
+              </span>
+            </Badge>
+            <Badge tone="good">
+              <span className="inline-flex items-center gap-1 tnum">
+                <CircleCheck size={11} aria-hidden />
+                完了 {summary.success}
+              </span>
+            </Badge>
+            <span className="text-(--color-muted) tnum">/ 全 {summary.total}</span>
           </>
         )}
         <button
@@ -280,17 +339,19 @@ export function PendingRecorder() {
         </button>
         {failed.length > 0 && (
           <button
-            className="text-(--color-bad) hover:underline"
+            className="inline-flex items-center gap-1 text-(--color-bad) hover:underline disabled:opacity-50"
             onClick={handleBulkDelete}
             disabled={bulkBusy}
           >
+            <Trash2 size={11} aria-hidden />
             {bulkBusy ? "除外中..." : `failed をまとめて除外 (${failed.length})`}
           </button>
         )}
         <button
-          className="text-(--color-accent) hover:underline ml-auto"
+          className="inline-flex items-center gap-1 text-(--color-accent) hover:underline ml-auto"
           onClick={refresh}
         >
+          <RefreshCw size={11} aria-hidden />
           再読込
         </button>
       </div>
@@ -301,14 +362,14 @@ export function PendingRecorder() {
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm table-zebra">
-            <thead className="text-left text-(--color-muted) text-xs">
+            <thead className="text-left text-(--color-muted) text-[11px] uppercase tracking-wider">
               <tr className="border-b border-(--color-line)">
-                <th className="py-2 pr-3">race_id</th>
-                <th className="py-2 pr-3">状態</th>
-                <th className="py-2 pr-3">試行</th>
-                <th className="py-2 pr-3">次の試行</th>
-                <th className="py-2 pr-3">last_error</th>
-                <th className="py-2 pr-3">手動 record / 除外</th>
+                <th className="py-2 pr-3 font-bold">race_id</th>
+                <th className="py-2 pr-3 font-bold">状態</th>
+                <th className="py-2 pr-3 font-bold">試行</th>
+                <th className="py-2 pr-3 font-bold">次の試行</th>
+                <th className="py-2 pr-3 font-bold">last_error</th>
+                <th className="py-2 pr-3 font-bold">手動 record / 除外</th>
               </tr>
             </thead>
             <tbody>

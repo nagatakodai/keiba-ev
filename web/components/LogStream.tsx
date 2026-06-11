@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Terminal } from "lucide-react";
 import { fmtTime } from "@/components/ui";
 
 type LogEntry = { seq: number; ts: number; stream: string; text: string };
@@ -83,26 +84,56 @@ export function LogStream({
     }
   }, [lines]);
 
+  // stream 種別ごとの行色: system = magenta (runner からの制御メッセージ),
+  // stderr = amber。stdout は標準色。
+  const streamCls = (stream: string): string => {
+    if (stream === "system") return "text-fuchsia-300/90";
+    if (stream === "stderr") return "text-amber-200/90";
+    return "";
+  };
+
   return (
-    <div
-      ref={boxRef}
-      className={`mono text-[12px] leading-5 bg-[#1a1d24] text-[#e6e8ee] border border-(--color-line) p-3 overflow-auto ${height}`}
-    >
-      {lines.length === 0 && (
-        <div className="text-[#8b93a7]">{emptyHint}</div>
-      )}
-      {lines.map((l) => (
-        <div key={l.seq} className="whitespace-pre-wrap break-words">
-          <span className="text-[#8b93a7]">{fmtTime(l.ts)}</span>{" "}
-          <span className={l.stream === "system" ? "text-[#e0a0d8]" : ""}>{l.text}</span>
-        </div>
-      ))}
-      <div className="text-[#8b93a7] mt-2">
-        {status === "open" && "[stream: open]"}
-        {status === "ended" && "[stream: ended]"}
-        {status === "error" && "[stream: error / disconnected]"}
+    <div className="rounded-xl border border-(--color-line) bg-(--color-bg) overflow-hidden">
+      {/* terminal ヘッダ: stream 状態インジケータ */}
+      <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-(--color-line-soft) bg-white/[0.02]">
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-(--color-muted)">
+          <Terminal size={11} aria-hidden />
+          live stream
+        </span>
+        <span className="inline-flex items-center gap-1.5 text-[10px] mono">
+          {status === "open" && (
+            <>
+              <span className="relative flex h-1.5 w-1.5" aria-hidden>
+                <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-70 animate-ping" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              </span>
+              <span className="text-emerald-300">open</span>
+            </>
+          )}
+          {status === "ended" && <span className="text-(--color-muted)">ended</span>}
+          {status === "error" && (
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-rose-400" aria-hidden />
+              <span className="text-rose-300">disconnected / 再接続中</span>
+            </>
+          )}
+          {status === "idle" && <span className="text-(--color-muted)">idle</span>}
+        </span>
+      </div>
+      <div
+        ref={boxRef}
+        className={`mono text-[12px] leading-5 text-(--color-foreground)/90 p-3 overflow-auto ${height}`}
+      >
+        {lines.length === 0 && (
+          <div className="text-(--color-muted)">{emptyHint}</div>
+        )}
+        {lines.map((l) => (
+          <div key={l.seq} className="whitespace-pre-wrap break-words">
+            <span className="text-(--color-muted)/80 select-none tnum">{fmtTime(l.ts)}</span>{" "}
+            <span className={streamCls(l.stream)}>{l.text}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
-

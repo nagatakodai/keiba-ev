@@ -5,6 +5,7 @@
 // ×N して ¥100 単位で切り捨て (floor) し、投資総額・的中時払戻・最小払戻比を再計算して表示する
 // 見積り計算機。実投票も同じ floor (src/oddspark_bet.py / ipat_bet.py の _apply_stake_multiplier)。
 import { useState } from "react";
+import { Calculator, TriangleAlert } from "lucide-react";
 import { Stat } from "@/components/ui";
 import type { TrifectaHitmaxBundle } from "@/lib/api";
 
@@ -44,9 +45,10 @@ export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle 
   const ratioOk = ratio >= margin;
 
   return (
-    <div className="mt-4 rounded-lg border border-(--color-line) p-3">
+    <div className="mt-4 rounded-xl border border-(--color-line) bg-(--color-surface-2) p-3">
       <div className="flex items-center gap-2 flex-wrap mb-3">
-        <span className="text-[10px] font-bold text-(--color-muted) tracking-wider uppercase">
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-(--color-muted) tracking-widest uppercase">
+          <Calculator className="w-3.5 h-3.5 shrink-0" aria-hidden />
           掛金倍率プレビュー
         </span>
         {PRESETS.map((p) => (
@@ -54,10 +56,10 @@ export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle 
             key={p}
             type="button"
             onClick={() => setRaw(String(p))}
-            className={`px-2 py-0.5 rounded text-sm border transition-colors ${
+            className={`px-2 py-0.5 rounded-md text-sm border transition-colors tnum ${
               mult === p
-                ? "border-(--color-warn) text-(--color-warn) font-bold"
-                : "border-(--color-line) text-(--color-muted) hover:text-(--color-fg)"
+                ? "bg-amber-500/15 border-amber-500/40 text-amber-300 font-bold"
+                : "border-(--color-line) text-(--color-muted) hover:text-(--color-foreground) hover:border-white/25"
             }`}
           >
             ×{p}
@@ -69,7 +71,7 @@ export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle 
           step={0.1}
           value={raw}
           onChange={(e) => setRaw(e.target.value)}
-          className="w-16 px-2 py-0.5 rounded border border-(--color-line) bg-transparent text-sm tabnum"
+          className="w-16 px-2 py-0.5 rounded-md border border-(--color-line) bg-(--color-card) text-sm tnum focus:outline-none focus:border-(--color-accent)"
           aria-label="掛金倍率"
         />
         <span className="text-xs text-(--color-muted)">
@@ -77,9 +79,12 @@ export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle 
         </span>
       </div>
       {dropped > 0 && (
-        <p className="mb-3 text-xs text-(--color-warn)">
-          ⚠ 倍率 ×{mult} で ¥100 未満になる {dropped} 脚は実投票どおり除去して計算
-          {scaled.length === 0 && " — 全脚除去のためこのレースは投入されません"}
+        <p className="mb-3 text-xs text-amber-300 flex items-center gap-1.5">
+          <TriangleAlert className="w-3.5 h-3.5 shrink-0" aria-hidden />
+          <span>
+            倍率 ×{mult} で ¥100 未満になる {dropped} 脚は実投票どおり除去して計算
+            {scaled.length === 0 && " — 全脚除去のためこのレースは投入されません"}
+          </span>
         </p>
       )}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -99,7 +104,7 @@ export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle 
       </div>
       {scaled.length > 0 && (
         <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-sm tabnum table-zebra">
+          <table className="w-full text-sm tnum table-zebra">
             <thead className="text-left text-(--color-muted) text-xs">
               <tr className="border-b border-(--color-line)">
                 <th className="py-1.5 pr-3">買い目</th>

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 import {
   api,
   type CalibrationReport,
@@ -9,7 +10,7 @@ import {
 
 export const metadata: Metadata = { title: "過去の予測分析履歴" };
 import { Page, PageHeader, savedAtDate, todayJST } from "@/components/ui";
-import { PredictionsList } from "@/components/PredictionsList";
+import { HitsToggle, PredictionsList } from "@/components/PredictionsList";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,8 @@ export default async function PredictionsArchivePage({
       .catch(() => ({ items: [] as WatchAutoHistoryItem[] })),
   ]);
 
+  // RSC はリクエスト毎に 1 回だけ描画されるので、リクエスト時刻の取得は安全。
+  // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
   const today = todayJST(nowMs);
   const past = data.items.filter((p) => {
@@ -52,25 +55,18 @@ export default async function PredictionsArchivePage({
   return (
     <Page>
       <PageHeader
+        eyebrow="Predictions / Archive"
         title="過去の予測分析履歴"
-        subtitle={`本日 (${today}) より前の予測 ${past.length} 件。`}
+        subtitle={`本日 (${today}) より前の予測 ${past.length} 件 (日付ごと / 会場ごと)。`}
         right={
-          <div className="flex items-center gap-3 text-xs">
-            <Link
-              href={`/predictions/archive${showHits ? "?hits=off" : ""}`}
-              className={`px-2 py-1 border ${
-                showHits
-                  ? "bg-(--color-accent) text-white border-(--color-accent)"
-                  : "bg-white border-(--color-line) text-(--color-foreground) hover:border-(--color-accent)"
-              } font-bold`}
-            >
-              的中 {showHits ? "ON" : "OFF"}
-            </Link>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <HitsToggle basePath="/predictions/archive" showHits={showHits} />
             <Link
               href="/predictions"
-              className="text-(--color-accent) hover:underline"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-(--color-line) bg-(--color-surface-2) text-xs font-bold text-(--color-foreground) hover:border-(--color-accent)/60 hover:text-(--color-accent) transition-colors"
             >
-              ← 本日へ戻る
+              <ArrowLeft className="size-3.5" />
+              本日へ戻る
             </Link>
           </div>
         }
@@ -82,6 +78,7 @@ export default async function PredictionsArchivePage({
         closeAtMap={closeAtMap}
         startAtMap={startAtMap}
         showHits={showHits}
+        groupByDate
         emptyMessage="過去の予測はありません。"
       />
     </Page>

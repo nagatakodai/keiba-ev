@@ -159,6 +159,8 @@ export type RecommendedBundle = {
   // 買わなかった脚 (= トリガミ防止 or 予算で除外)。frontend で取り消し線表示。古い snapshot は欠落。
   dropped_legs?: DroppedLeg[];
   torigami_margin?: number;     // 払戻/投資 の下限 (1.10 = 9% 下振れ緩衝)。古い snapshot は欠落
+  // scripts/backfill_bundle.py が後付けした paper 束 (実弾でない)。集計除外・UI はグレー表示。
+  backfilled?: boolean;
 
   // claude -p による web 調査検証 (取消/不安材料を裏取りして cut)。未検証なら欠落。
   llm_review?: {
@@ -250,6 +252,14 @@ export type PredictionDetail = {
   }>;
   // 各馬の直前/軟情報フラグ (score ステージ由来)。記録/表示用 (確率には未使用)。
   llm_alerts?: Record<string, string[]> | null;
+  // score→bet の単勝オッズ変化 (late-money momentum, paper 計測のみ・確率/束には未使用)。
+  late_money?: {
+    score_stage?: string;
+    score_captured_at?: string;
+    gap_min?: number;
+    ratio?: Record<string, number>;   // 馬番 → bet時オッズ / score時オッズ (<1 = 直前に売れた)
+    source_mix?: boolean;             // score と bet で取得元が異なる (微小変動はノイズ扱い)
+  } | null;
   // 市場乖離 (単勝 vs 複勝 implied prob 比率)。fetch されていなければ空配列。
   market_signals?: MarketSignal[];
   // 持ち時計 (同 venue × 同距離 × 同 surface での best own_time_sec)。速い順。
@@ -329,7 +339,7 @@ export type WatchAutoStatus = {
     score_tolerance?: number;
     // Claude 指数と model fundamental の合成重み (0=モデルのみ, 1=指数のみ, null=既定0.5)。
     llm_blend?: number | null;
-    // 締切の何秒前に投票を発火するか (score 完了で予約 → この秒数で発火)。既定 60。
+    // 締切の何秒前に投票を発火するか (score 完了で予約 → この秒数で発火)。既定 150。
     bet_lead_sec?: number;
     interval_sec?: number;
     ev_max?: number | null;
@@ -425,6 +435,8 @@ export type WatchAutoHistoryItem = {
   // 発走 unix 秒。古い履歴には欠落する可能性あり。
   start_at: number | null;
   rc: number;
+  // dispatch 段階 (score=指数取得 / bet=締切直前の束生成)。古い履歴には欠落。
+  phase?: "score" | "bet";
 };
 
 export type CalibrationTier = {
@@ -509,6 +521,28 @@ export type CalibrationRaceItem = {
   has_final_odds?: boolean;
   // snapshot 保存時刻 (ISO8601 JST naive)。チャートでの時系列ソート / 表示用。
   saved_at?: string;
+  // EV束が backfill (paper 後付け) で実弾でない race。集計から除外済・UI はグレーアウト表示。
+  bundle_backfilled?: boolean;
+};
+
+// --- オッズタイムライン (GET /api/timeline/{race_id}) ---
+
+export type TimelineRow = {
+  stage: "score" | "bet" | "poll";
+  captured_at: string;            // ISO8601 JST naive
+  close_at: number;               // unix (0=不明)
+  start_at: number;               // unix
+  // win/place のみ (フルグリッドは depth 参照)。label = 馬番文字列。
+  odds: { win?: Record<string, number>; place?: Record<string, number> };
+  // 券種ごとの組合せ数 (どの券種がどの深さで取れていたか)
+  depth?: Record<string, number>;
+  source?: string;
+};
+
+export type TimelineResponse = {
+  race_id: string;
+  rows: TimelineRow[];
+  result: { finish_order: number[]; final_odds: Record<string, number> } | null;
 };
 
 export type CalibrationReport = {
@@ -550,6 +584,9 @@ export const api = {
     jsonFetch<PredictionDetail>(`/api/predictions/${encodeURIComponent(raceId)}`),
   calibrate: (pointCost = 100) =>
     jsonFetch<CalibrationReport>(`/api/calibrate?point_cost=${pointCost}`),
+  // タイムライン未取得 race は 404 → 呼び元で握って「データなし」表示にする。
+  getTimeline: (raceId: string) =>
+    jsonFetch<TimelineResponse>(`/api/timeline/${encodeURIComponent(raceId)}`),
 
   analyze: (body: {
     url: string;

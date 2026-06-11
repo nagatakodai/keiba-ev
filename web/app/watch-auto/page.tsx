@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Badge,
   Button,
@@ -12,11 +12,19 @@ import {
   Stat,
   fmtTime,
   fmtTs,
-  planAccentClass,
   raceTimingRowBg,
   raceTimingStatus,
 } from "@/components/ui";
 import Link from "next/link";
+import {
+  ChevronRight,
+  CircleCheck,
+  CircleX,
+  Play,
+  Settings2,
+  Square,
+  TriangleAlert,
+} from "lucide-react";
 import { LogStream } from "@/components/LogStream";
 import { PendingRecorder } from "@/components/PendingRecorder";
 import { useWatchStatus } from "@/components/WatchStatusContext";
@@ -29,6 +37,80 @@ import { isEvMeasured,
 function fmtPicks(keys: number[][] | undefined): string {
   if (!keys || keys.length === 0) return "—";
   return keys.map((k) => k.join("-")).join("  ");
+}
+
+// 履歴 jsonl には phase ("score" | "bet") が含まれる (新しい dispatch のみ)。
+// lib/api.ts の型には未宣言なのでローカルで拡張して読む。
+type HistoryItemWithPhase = WatchAutoHistoryItem & { phase?: string };
+
+function PhaseBadge({ phase }: { phase?: string }) {
+  if (phase === "score") return <Badge tone="info">score</Badge>;
+  if (phase === "bet") return <Badge tone="good">bet</Badge>;
+  return <span className="text-(--color-muted) text-xs">—</span>;
+}
+
+// CSS のみのトグルスイッチ (checkbox restyle)。danger=true で実弾系の rose accent。
+function Toggle({
+  checked,
+  onChange,
+  disabled,
+  danger = false,
+  children,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  danger?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <label
+      className={`inline-flex items-center gap-2.5 text-sm select-none ${
+        disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+      }`}
+    >
+      <span className="relative inline-flex h-5 w-9 shrink-0">
+        <input
+          type="checkbox"
+          className="peer sr-only"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          disabled={disabled}
+        />
+        <span
+          className={`absolute inset-0 rounded-full border transition-colors bg-(--color-surface-3) border-(--color-line) ${
+            danger
+              ? "peer-checked:bg-rose-500/90 peer-checked:border-rose-400/70"
+              : "peer-checked:bg-emerald-500/90 peer-checked:border-emerald-400/70"
+          } peer-focus-visible:outline-2 peer-focus-visible:outline-(--color-ring) peer-focus-visible:outline-offset-2`}
+        />
+        <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-slate-400 shadow transition-transform duration-150 peer-checked:translate-x-4 peer-checked:bg-(--color-foreground)" />
+      </span>
+      <span>{children}</span>
+    </label>
+  );
+}
+
+// 設定フォームのグループ枠 (バンド設定 / LLM / 投票)。
+function FieldGroup({
+  legend,
+  children,
+  className = "",
+}: {
+  legend: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <fieldset
+      className={`rounded-xl border border-(--color-line) bg-(--color-surface-2)/30 px-4 pb-4 pt-2 ${className}`}
+    >
+      <legend className="px-1.5 text-[10px] font-bold uppercase tracking-widest text-(--color-muted)">
+        {legend}
+      </legend>
+      {children}
+    </fieldset>
+  );
 }
 
 export default function WatchAutoPage() {
@@ -296,408 +378,458 @@ export default function WatchAutoPage() {
           label="状態"
           value={running ? "稼働中" : "停止"}
           tone={running ? "good" : "default"}
+          accentTone={running ? "good" : "muted"}
         />
         <Stat
           label="考察→投票 (締切まで)"
+          accentTone="info"
           value={
             status?.config?.score_window != null
-              ? `考察 ${status.config.score_window}〜${(status.config.score_window ?? 0) + (status.config.score_tolerance ?? 0)}分前 → 投票 締切${status.config.bet_lead_sec ?? 60}秒前`
+              ? `考察 ${status.config.score_window}〜${(status.config.score_window ?? 0) + (status.config.score_tolerance ?? 0)}分前 → 投票 締切${status.config.bet_lead_sec ?? 150}秒前`
               : "—"
           }
         />
         <Stat
           label="polling 間隔"
+          accentTone="info"
           value={status?.config?.interval_sec ? `${status.config.interval_sec}s` : "—"}
         />
         <Stat label="自動予測分析 件数" value={history.length} />
       </div>
 
-      <Card
-        title={
-          <button
-            type="button"
-            onClick={() => setShowSettings((v) => !v)}
-            className="flex items-center gap-1.5 -my-1 text-left"
-            aria-expanded={showSettings}
-          >
-            <span
-              className={`inline-block transition-transform text-(--color-muted) text-xs ${
-                showSettings ? "rotate-90" : ""
-              }`}
-            >
-              ▶
+      {/* ===== コントロールデッキ (開始/停止 + 設定) ===== */}
+      <section
+        className={`rounded-xl border overflow-hidden bg-(--color-card) transition-shadow ${
+          running
+            ? "border-emerald-500/40 shadow-[0_0_36px_rgba(52,211,153,0.14)]"
+            : "border-(--color-line) shadow-[0_2px_12px_rgba(0,0,0,0.35)]"
+        }`}
+      >
+        <header
+          className={`flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b ${
+            running
+              ? "border-emerald-500/25 bg-emerald-500/[0.07]"
+              : "border-(--color-line) bg-(--color-section-head)"
+          }`}
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden>
+              {running && (
+                <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60 animate-ping" />
+              )}
+              <span
+                className={`relative inline-flex h-2.5 w-2.5 rounded-full ${
+                  running ? "bg-emerald-400" : "bg-slate-600"
+                }`}
+              />
             </span>
-            <span>設定 / 制御</span>
-          </button>
-        }
-        right={
+            <div className="min-w-0">
+              <h2 className="text-sm font-bold tracking-tight flex items-center gap-2">
+                設定 / 制御
+                {running ? <Badge tone="good">RUNNING</Badge> : <Badge tone="muted">STOPPED</Badge>}
+              </h2>
+              <p className="text-[11px] text-(--color-muted)">
+                {running
+                  ? "watch-auto ループ稼働中 — 当日レースを自動 dispatch しています"
+                  : "停止中 — 設定を確認して開始"}
+              </p>
+            </div>
+          </div>
           <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => setShowSettings((v) => !v)}
+              aria-expanded={showSettings}
+            >
+              <Settings2 size={15} aria-hidden />
+              設定
+              <ChevronRight
+                size={14}
+                className={`transition-transform ${showSettings ? "rotate-90" : ""}`}
+                aria-hidden
+              />
+            </Button>
             {running ? (
               <Button variant="danger" size="lg" disabled={busy} onClick={stop}>
-                <span aria-hidden>■</span>
+                <Square size={16} fill="currentColor" aria-hidden />
                 {busy ? "停止中..." : "停止"}
               </Button>
             ) : (
               <Button size="lg" disabled={busy} onClick={start}>
-                <span aria-hidden>▶</span>
+                <Play size={16} fill="currentColor" aria-hidden />
                 {busy ? "起動中..." : "開始"}
               </Button>
             )}
           </div>
-        }
-      >
+        </header>
+        <div className="p-4">
         {showSettings ? (
-          <>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              <Input
-                label="BET LEAD (締切の何秒前に投票発火 / 既定 60=締切1分前)"
-                type="number"
-                step="10"
-                min="0"
-                value={betLeadSec}
-                onChange={(e) => setBetLeadSec(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="SCORE WINDOW (締切までの目標分 / Claude 考察→指数。BET より手前に)"
-                type="number"
-                step="0.5"
-                min="0"
-                value={scoreWindow}
-                onChange={(e) => setScoreWindow(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="SCORE TOLERANCE (+分 / 締切 score_window〜+tol 分前で考察)"
-                type="number"
-                step="0.5"
-                min="0"
-                value={scoreTolerance}
-                onChange={(e) => setScoreTolerance(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="LLM 合成重み (空=既定0.5 / 0=モデルのみ 1=指数のみ)"
-                placeholder="0.0–1.0"
-                value={llmBlend}
-                onChange={(e) => setLlmBlend(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="INTERVAL_SEC (polling 間隔)"
-                value={intervalSec}
-                onChange={(e) => setIntervalSec(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="期待値上限"
-                placeholder="例: 3"
-                value={evMax}
-                onChange={(e) => setEvMax(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="最低当選率 (%)"
-                placeholder="例: 2.0"
-                value={minProb}
-                onChange={(e) => setMinProb(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="市場確率ブレンド"
-                placeholder="0.0–1.0"
-                value={marketBlend}
-                onChange={(e) => setMarketBlend(e.target.value)}
-                disabled={running}
-              />
-              <Input
-                label="Plan G 適性 top N 頭"
-                placeholder="6 (default)"
-                value={aptitudeTop}
-                onChange={(e) => setAptitudeTop(e.target.value)}
-                disabled={running}
-              />
-              <Select
-                label="投票束"
-                value={betBundle}
-                onChange={(e) => setBetBundle(e.target.value as "ev" | "trifecta")}
-                disabled={running}
-                hint={
-                  betBundle === "ev"
-                    ? "全脚がシェード込み P×O≥1.02 + ½Kelly + トリガミ防止を通過した時のみ買う。大半のレースは見送り (正常)"
-                    : "Claude 指数フォーメーション・市場無視。実測 ROI 14-83% (-EV) のため計測モード予算を推奨"
-                }
-              >
-                <option value="ev">EV束 (推奨・修正後)</option>
-                <option value="trifecta">3連単束 (Claude 指数)</option>
-              </Select>
-              {betBundle === "ev" && (
+          <div className="space-y-4">
+            <FieldGroup legend="バンド設定">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <Input
-                  label="EV束 1レース予算 (¥)"
-                  placeholder="5000 (計測モード推奨)"
-                  value={evBankroll}
-                  onChange={(e) => setEvBankroll(e.target.value)}
+                  label="BET LEAD (締切の何秒前に投票発火 / 既定 150=締切2.5分前)"
+                  type="number"
+                  step="10"
+                  min="0"
+                  value={betLeadSec}
+                  onChange={(e) => setBetLeadSec(e.target.value)}
                   disabled={running}
                 />
-              )}
-              {betBundle === "trifecta" && (
                 <Input
-                  label="3連単 1レース購入予算 (¥)"
-                  placeholder="2000 (計測モード推奨)"
-                  value={trifectaBankroll}
-                  onChange={(e) => setTrifectaBankroll(e.target.value)}
+                  label="SCORE WINDOW (締切までの目標分 / Claude 考察→指数。BET より手前に)"
+                  type="number"
+                  step="0.5"
+                  min="0"
+                  value={scoreWindow}
+                  onChange={(e) => setScoreWindow(e.target.value)}
                   disabled={running}
                 />
-              )}
-              {betBundle === "trifecta" && (
+                <Input
+                  label="SCORE TOLERANCE (+分 / 締切 score_window〜+tol 分前で考察)"
+                  type="number"
+                  step="0.5"
+                  min="0"
+                  value={scoreTolerance}
+                  onChange={(e) => setScoreTolerance(e.target.value)}
+                  disabled={running}
+                />
+                <Input
+                  label="INTERVAL_SEC (polling 間隔)"
+                  value={intervalSec}
+                  onChange={(e) => setIntervalSec(e.target.value)}
+                  disabled={running}
+                />
+                <Input
+                  label="稼働時間帯 (JST HH:MM-HH:MM)"
+                  placeholder="09:00-23:45"
+                  value={activeHours}
+                  onChange={(e) => setActiveHours(e.target.value)}
+                  disabled={running}
+                />
+              </div>
+              <div className="mt-3 flex items-center gap-5 flex-wrap">
+                <Toggle checked={withExacta} onChange={setWithExacta} disabled={running}>
+                  馬単も取得 (jiku iter / fetch +40s)
+                </Toggle>
+                <Toggle checked={withTrio} onChange={setWithTrio} disabled={running}>
+                  3 連複も取得 (jiku iter / fetch +40s)
+                </Toggle>
+              </div>
+            </FieldGroup>
+
+            <FieldGroup legend="LLM / モデル">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <Input
+                  label="LLM 合成重み (空=既定0.5 / 0=モデルのみ 1=指数のみ)"
+                  placeholder="0.0–1.0"
+                  value={llmBlend}
+                  onChange={(e) => setLlmBlend(e.target.value)}
+                  disabled={running}
+                />
+                <Input
+                  label="市場確率ブレンド"
+                  placeholder="0.0–1.0"
+                  value={marketBlend}
+                  onChange={(e) => setMarketBlend(e.target.value)}
+                  disabled={running}
+                />
+                <Input
+                  label="期待値上限"
+                  placeholder="例: 3"
+                  value={evMax}
+                  onChange={(e) => setEvMax(e.target.value)}
+                  disabled={running}
+                />
+                <Input
+                  label="最低当選率 (%)"
+                  placeholder="例: 2.0"
+                  value={minProb}
+                  onChange={(e) => setMinProb(e.target.value)}
+                  disabled={running}
+                />
+                <Input
+                  label="Plan G 適性 top N 頭"
+                  placeholder="6 (default)"
+                  value={aptitudeTop}
+                  onChange={(e) => setAptitudeTop(e.target.value)}
+                  disabled={running}
+                />
+              </div>
+              <div className="mt-3">
+                <Toggle checked={noLlm} onChange={setNoLlm} disabled={running}>
+                  LLM を使わない (確率モデルのみ / claude -p 省略)
+                </Toggle>
+              </div>
+            </FieldGroup>
+
+            <FieldGroup legend="投票">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <Select
-                  label="3連単束モード"
-                  value={trifectaMode}
-                  onChange={(e) => setTrifectaMode(e.target.value as "recovery" | "hit")}
+                  label="投票束"
+                  value={betBundle}
+                  onChange={(e) => setBetBundle(e.target.value as "ev" | "trifecta")}
                   disabled={running}
                   hint={
-                    trifectaMode === "recovery"
-                      ? "市場1番人気は単勝1.5倍未満の鉄板か Claude 指数 > 90 でない限り1着に置かない"
-                      : "旧 全力的中: 1着除外なし (Claude 指数上位をそのまま1着候補に)"
+                    betBundle === "ev"
+                      ? "全脚がシェード込み P×O≥1.02 + ½Kelly + トリガミ防止を通過した時のみ買う。大半のレースは見送り (正常)"
+                      : "Claude 指数フォーメーション・市場無視。実測 ROI 14-83% (-EV) のため計測モード予算を推奨"
                   }
                 >
-                  <option value="recovery">回収 (穴狙い) — 既定</option>
-                  <option value="hit">的中 (旧 全力的中)</option>
+                  <option value="ev">EV束 (推奨・修正後)</option>
+                  <option value="trifecta">3連単束 (Claude 指数)</option>
                 </Select>
-              )}
-              <Input
-                label="稼働時間帯 (JST HH:MM-HH:MM)"
-                placeholder="09:00-23:45"
-                value={activeHours}
-                onChange={(e) => setActiveHours(e.target.value)}
-                disabled={running}
-              />
-            </div>
-            <div className="mt-3 flex items-center gap-4 text-sm flex-wrap">
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={withExacta}
-                  onChange={(e) => setWithExacta(e.target.checked)}
-                  disabled={running}
-                  className="accent-(--color-accent)"
-                />
-                <span>馬単も取得 (jiku iter / fetch +40s)</span>
-              </label>
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={withTrio}
-                  onChange={(e) => setWithTrio(e.target.checked)}
-                  disabled={running}
-                  className="accent-(--color-accent)"
-                />
-                <span>3 連複も取得 (jiku iter / fetch +40s)</span>
-              </label>
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={noLlm}
-                  onChange={(e) => setNoLlm(e.target.checked)}
-                  disabled={running}
-                  className="accent-(--color-accent)"
-                />
-                <span>LLM を使わない (確率モデルのみ / claude -p 省略)</span>
-              </label>
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={betOddspark}
-                  onChange={(e) => setBetOddspark(e.target.checked)}
-                  disabled={running}
-                  className="accent-(--color-accent)"
-                />
-                <span>オッズパーク自動投票 (カート投入・要ログイン)</span>
-              </label>
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={betIpat}
-                  onChange={(e) => setBetIpat(e.target.checked)}
-                  disabled={running}
-                  className="accent-(--color-accent)"
-                />
-                <span>JRA 即PAT 自動投票 (カート投入・要ログイン / 土日 JRA 開催日)</span>
-              </label>
-              {(betOddspark || betIpat) && (
-                <p className="basis-full text-xs text-(--color-muted)">
-                  {betBundle === "ev" ? (
-                    <>
-                      投票束は <b>EV束 (recommended_bundle)</b>。シェード込み P×O≥1.02 を通過した
-                      脚のみ投票し、大半のレースは見送り。
-                      <b className="text-(--color-warn)">Claude 指数ゲートは適用されません</b>
-                      (指数なしのレースでも +EV があれば投票されます)。
-                    </>
-                  ) : (
-                    <>
-                      投票束は <b>3連単束 (市場無視・既定 回収モード)</b>。
-                      <b>Claude 指数が無いレースは自動 skip</b> します (rank_source≠claude は投票しない)。
-                    </>
-                  )}
-                </p>
-              )}
-            </div>
-            {(betOddspark || betIpat) && (
-              <>
-                <p className="mt-2 text-xs text-(--color-muted)">
-                  ⚠ ON で開始すると <b>headful ブラウザが開きます</b>。発走前の束を
-                  カート/購入予定リストに投入し続けます。ブラウザを表示するには <code>make api</code> を
-                  DISPLAY のある端末 (WSLg 等) で起動しておくこと。
-                </p>
-                <div className="mt-3">
-                  <label className="inline-flex items-center gap-2 cursor-pointer text-sm">
-                    <input
-                      type="checkbox"
-                      checked={betAutoLogin}
-                      onChange={(e) => setBetAutoLogin(e.target.checked)}
-                      disabled={running}
-                      className="accent-(--color-accent)"
-                    />
-                    <span>自動ログイン — env 認証で自動ログイン (OFF は人が手でログイン)</span>
-                  </label>
-                  {betAutoLogin && (
-                    <p className="mt-1 text-xs text-(--color-muted)">
-                      <code>make api</code> を起動する端末の env に
-                      {betOddspark && (
-                        <>
-                          {" "}<code>ODDSPARK_ID</code> / <code>ODDSPARK_PASSWORD</code>
-                          {" "}(+ 必要なら <code>ODDSPARK_PIN</code>)
-                        </>
-                      )}
-                      {betOddspark && betIpat && "、"}
-                      {betIpat && (
-                        <>
-                          {" "}<code>IPAT_INETID</code> / <code>IPAT_SUBSCRIBER</code> /{" "}
-                          <code>IPAT_PARS</code> / <code>IPAT_PIN</code>
-                        </>
-                      )}
-                      {" "}を設定しておくこと。
-                      未設定だと daemon が起動直後に失敗します (ライブログ参照)。認証情報はコミット禁止。
-                    </p>
-                  )}
-                </div>
-                <div className="mt-3 flex items-end gap-4 flex-wrap">
-                  <label className="inline-flex items-center gap-2 cursor-pointer text-sm">
-                    <input
-                      type="checkbox"
-                      checked={betAutoPurchase}
-                      onChange={(e) => setBetAutoPurchase(e.target.checked)}
-                      disabled={running}
-                      className="accent-(--color-bad)"
-                    />
-                    <span><b className="text-(--color-bad)">⚠ 自動購入 (実弾)</b> — #gotobuy まで自動でクリック (人の介入なし)</span>
-                  </label>
+                {betBundle === "ev" && (
                   <Input
-                    label="日次上限 (円)"
-                    value={betDailyCap}
-                    onChange={(e) => setBetDailyCap(e.target.value)}
-                    disabled={running || !betAutoPurchase}
-                    className="w-32"
-                  />
-                  <Input
-                    label="掛金倍率 — 3連単束 (×N)"
-                    value={betStakeMultiplier}
-                    onChange={(e) => setBetStakeMultiplier(e.target.value)}
+                    label="EV束 1レース予算 (¥)"
+                    placeholder="5000 (計測モード推奨)"
+                    value={evBankroll}
+                    onChange={(e) => setEvBankroll(e.target.value)}
                     disabled={running}
-                    className="w-24"
                   />
-                  <div className="flex items-end gap-2">
-                    <Input
-                      label="per-race 上限倍率 (×N)"
-                      placeholder="掛金倍率に連動"
-                      value={betMaxStakeMultiplier}
-                      onChange={(e) => setBetMaxStakeMultiplier(e.target.value)}
-                      disabled={running}
-                      className="w-32"
-                    />
-                    <span className="text-xs text-(--color-muted) pb-1.5">
-                      1レース上限 = 基準¥10,000×N。空欄なら掛金倍率に連動。
-                    </span>
-                  </div>
-                  {betOddspark && (
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
-                        支払方法 (オッズパーク)
-                      </span>
-                      <div className="flex gap-3 text-sm">
-                        <label className="inline-flex items-center gap-1 cursor-pointer">
-                          <input
-                            type="radio"
-                            name="bet_payment_method"
-                            checked={betPaymentMethod === "opcoin"}
-                            onChange={() => setBetPaymentMethod("opcoin")}
-                            disabled={running}
-                          />
-                          OPコイン
-                        </label>
-                        <label className="inline-flex items-center gap-1 cursor-pointer">
-                          <input
-                            type="radio"
-                            name="bet_payment_method"
-                            checked={betPaymentMethod === "buylimit"}
-                            onChange={() => setBetPaymentMethod("buylimit")}
-                            disabled={running}
-                          />
-                          投票資金
-                        </label>
-                      </div>
-                    </div>
-                  )}
-                </div>
-                {betAutoPurchase && (
-                  <p className="mt-2 text-xs text-(--color-bad)">
-                    🚨 <b>実弾モード</b>: 確定ボタンを自動でクリックし、実際に賭けます。per-race
-                    ¥{(() => {
-                      const cap = parseFloat(betMaxStakeMultiplier);
-                      const stk = parseFloat(betStakeMultiplier);
-                      const mult = Number.isFinite(cap) && cap > 0
-                        ? cap
-                        : Math.max(1, Number.isFinite(stk) && stk > 0 ? stk : 1);
-                      return (Math.round((10000 * mult) / 100) * 100).toLocaleString();
-                    })()} +
-                    日次 ¥{(parseInt(betDailyCap, 10) || 50000).toLocaleString()} を上限としますが、
-                    各サービスの利用規約および誤発注の責任は使用者にあります。
-                    確認画面の最終ボタン DOM が未検証の間は <code>AUTO_PURCHASE_VERIFIED=False</code> により
-                    src 側で fail-safe (実弾は撃たれない)。実機で 1 回検証後に flag を True に。
+                )}
+                {betBundle === "trifecta" && (
+                  <Input
+                    label="3連単 1レース購入予算 (¥)"
+                    placeholder="2000 (計測モード推奨)"
+                    value={trifectaBankroll}
+                    onChange={(e) => setTrifectaBankroll(e.target.value)}
+                    disabled={running}
+                  />
+                )}
+                {betBundle === "trifecta" && (
+                  <Select
+                    label="3連単束モード"
+                    value={trifectaMode}
+                    onChange={(e) => setTrifectaMode(e.target.value as "recovery" | "hit")}
+                    disabled={running}
+                    hint={
+                      trifectaMode === "recovery"
+                        ? "市場1番人気は単勝1.5倍未満の鉄板か Claude 指数 > 90 でない限り1着に置かない"
+                        : "旧 全力的中: 1着除外なし (Claude 指数上位をそのまま1着候補に)"
+                    }
+                  >
+                    <option value="recovery">回収 (穴狙い) — 既定</option>
+                    <option value="hit">的中 (旧 全力的中)</option>
+                  </Select>
+                )}
+              </div>
+              <div className="mt-3 flex items-center gap-5 text-sm flex-wrap">
+                <Toggle checked={betOddspark} onChange={setBetOddspark} disabled={running}>
+                  オッズパーク自動投票 (カート投入・要ログイン)
+                </Toggle>
+                <Toggle checked={betIpat} onChange={setBetIpat} disabled={running}>
+                  JRA 即PAT 自動投票 (カート投入・要ログイン / 土日 JRA 開催日)
+                </Toggle>
+                {(betOddspark || betIpat) && (
+                  <p className="basis-full text-xs text-(--color-muted)">
+                    {betBundle === "ev" ? (
+                      <>
+                        投票束は <b>EV束 (recommended_bundle)</b>。シェード込み P×O≥1.02 を通過した
+                        脚のみ投票し、大半のレースは見送り。
+                        <b className="text-(--color-warn)">Claude 指数ゲートは適用されません</b>
+                        (指数なしのレースでも +EV があれば投票されます)。
+                      </>
+                    ) : (
+                      <>
+                        投票束は <b>3連単束 (市場無視・既定 回収モード)</b>。
+                        <b>Claude 指数が無いレースは自動 skip</b> します (rank_source≠claude は投票しない)。
+                      </>
+                    )}
                   </p>
                 )}
-              </>
-            )}
-            {error && <div className="mt-3 text-sm text-(--color-bad)">{error}</div>}
+              </div>
+              {(betOddspark || betIpat) && (
+                <>
+                  <p className="mt-2 text-xs text-(--color-warn) flex items-start gap-1.5">
+                    <TriangleAlert size={13} className="shrink-0 mt-0.5" aria-hidden />
+                    <span>
+                      ON で開始すると <b>headful ブラウザが開きます</b>。発走前の束を
+                      カート/購入予定リストに投入し続けます。ブラウザを表示するには <code>make api</code> を
+                      DISPLAY のある端末 (WSLg 等) で起動しておくこと。
+                    </span>
+                  </p>
+                  <div className="mt-3">
+                    <Toggle checked={betAutoLogin} onChange={setBetAutoLogin} disabled={running}>
+                      自動ログイン — env 認証で自動ログイン (OFF は人が手でログイン)
+                    </Toggle>
+                    {betAutoLogin && (
+                      <p className="mt-1 text-xs text-(--color-muted)">
+                        <code>make api</code> を起動する端末の env に
+                        {betOddspark && (
+                          <>
+                            {" "}<code>ODDSPARK_ID</code> / <code>ODDSPARK_PASSWORD</code>
+                            {" "}(+ 必要なら <code>ODDSPARK_PIN</code>)
+                          </>
+                        )}
+                        {betOddspark && betIpat && "、"}
+                        {betIpat && (
+                          <>
+                            {" "}<code>IPAT_INETID</code> / <code>IPAT_SUBSCRIBER</code> /{" "}
+                            <code>IPAT_PARS</code> / <code>IPAT_PIN</code>
+                          </>
+                        )}
+                        {" "}を設定しておくこと。
+                        未設定だと daemon が起動直後に失敗します (ライブログ参照)。認証情報はコミット禁止。
+                      </p>
+                    )}
+                  </div>
+                  {/* 実弾 (自動購入) — 危険ゾーン。rose accent で隔離 */}
+                  <div
+                    className={`mt-4 rounded-lg border p-3 transition-colors ${
+                      betAutoPurchase
+                        ? "border-rose-500/50 bg-rose-500/10"
+                        : "border-(--color-line) bg-(--color-surface-2)/40"
+                    }`}
+                  >
+                    <div className="flex items-end gap-4 flex-wrap">
+                      <Toggle
+                        danger
+                        checked={betAutoPurchase}
+                        onChange={setBetAutoPurchase}
+                        disabled={running}
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <b className="inline-flex items-center gap-1 text-rose-300">
+                            <TriangleAlert size={14} aria-hidden />
+                            自動購入 (実弾)
+                          </b>
+                          <span>— #gotobuy まで自動でクリック (人の介入なし)</span>
+                        </span>
+                      </Toggle>
+                      <Input
+                        label="日次上限 (円)"
+                        value={betDailyCap}
+                        onChange={(e) => setBetDailyCap(e.target.value)}
+                        disabled={running || !betAutoPurchase}
+                        className="w-32 tnum"
+                      />
+                      <Input
+                        label="掛金倍率 — 3連単束 (×N)"
+                        value={betStakeMultiplier}
+                        onChange={(e) => setBetStakeMultiplier(e.target.value)}
+                        disabled={running}
+                        className="w-24 tnum"
+                      />
+                      <div className="flex items-end gap-2">
+                        <Input
+                          label="per-race 上限倍率 (×N)"
+                          placeholder="掛金倍率に連動"
+                          value={betMaxStakeMultiplier}
+                          onChange={(e) => setBetMaxStakeMultiplier(e.target.value)}
+                          disabled={running}
+                          className="w-32 tnum"
+                        />
+                        <span className="text-xs text-(--color-muted) pb-1.5">
+                          1レース上限 = 基準¥10,000×N。空欄なら掛金倍率に連動。
+                        </span>
+                      </div>
+                      {betOddspark && (
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[10px] text-(--color-muted) font-bold tracking-wider uppercase">
+                            支払方法 (オッズパーク)
+                          </span>
+                          <div className="flex gap-3 text-sm">
+                            <label className="inline-flex items-center gap-1 cursor-pointer">
+                              <input
+                                type="radio"
+                                name="bet_payment_method"
+                                checked={betPaymentMethod === "opcoin"}
+                                onChange={() => setBetPaymentMethod("opcoin")}
+                                disabled={running}
+                                className="accent-(--color-accent)"
+                              />
+                              OPコイン
+                            </label>
+                            <label className="inline-flex items-center gap-1 cursor-pointer">
+                              <input
+                                type="radio"
+                                name="bet_payment_method"
+                                checked={betPaymentMethod === "buylimit"}
+                                onChange={() => setBetPaymentMethod("buylimit")}
+                                disabled={running}
+                                className="accent-(--color-accent)"
+                              />
+                              投票資金
+                            </label>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {betAutoPurchase && (
+                      <p className="mt-2 text-xs text-rose-300 flex items-start gap-1.5">
+                        <TriangleAlert size={13} className="shrink-0 mt-0.5" aria-hidden />
+                        <span>
+                          <b>実弾モード</b>: 確定ボタンを自動でクリックし、実際に賭けます。per-race
+                          <span className="tnum">
+                            {" "}¥{(() => {
+                              const cap = parseFloat(betMaxStakeMultiplier);
+                              const stk = parseFloat(betStakeMultiplier);
+                              const mult = Number.isFinite(cap) && cap > 0
+                                ? cap
+                                : Math.max(1, Number.isFinite(stk) && stk > 0 ? stk : 1);
+                              return (Math.round((10000 * mult) / 100) * 100).toLocaleString();
+                            })()}
+                          </span> +
+                          日次 <span className="tnum">¥{(parseInt(betDailyCap, 10) || 50000).toLocaleString()}</span> を上限としますが、
+                          各サービスの利用規約および誤発注の責任は使用者にあります。
+                          確認画面の最終ボタン DOM が未検証の間は <code>AUTO_PURCHASE_VERIFIED=False</code> により
+                          src 側で fail-safe (実弾は撃たれない)。実機で 1 回検証後に flag を True に。
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+            </FieldGroup>
+
+            {error && <div className="text-sm text-(--color-bad)">{error}</div>}
             {running && status?.config?.bet_oddspark && (
-              <p className="mt-2 text-xs">
-                投票ブラウザ (オッズパーク):{" "}
-                {status?.bet_running
-                  ? <span className="text-(--color-accent)">稼働中 — ブラウザでログイン後、束がカートに積まれます (確定は人)</span>
-                  : <span className="text-(--color-bad)">未起動 — DISPLAY 不在等で daemon が落ちた可能性 (ライブログ参照)</span>}
+              <p className="text-xs flex items-center gap-1.5">
+                <span className="text-(--color-muted)">投票ブラウザ (オッズパーク):</span>
+                {status?.bet_running ? (
+                  <span className="inline-flex items-center gap-1.5 text-(--color-accent)">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" aria-hidden />
+                    稼働中 — ブラウザでログイン後、束がカートに積まれます (確定は人)
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-(--color-bad)">
+                    <CircleX size={13} aria-hidden />
+                    未起動 — DISPLAY 不在等で daemon が落ちた可能性 (ライブログ参照)
+                  </span>
+                )}
               </p>
             )}
             {running && status?.config?.bet_ipat && (
-              <p className="mt-2 text-xs">
-                投票ブラウザ (JRA 即PAT):{" "}
-                {status?.ipat_bet_running
-                  ? <span className="text-(--color-accent)">稼働中 — ブラウザでログイン後、JRA の束がカートに積まれます (確定は人)</span>
-                  : <span className="text-(--color-bad)">未起動 — DISPLAY 不在等で daemon が落ちた可能性 (ライブログ参照)</span>}
+              <p className="text-xs flex items-center gap-1.5">
+                <span className="text-(--color-muted)">投票ブラウザ (JRA 即PAT):</span>
+                {status?.ipat_bet_running ? (
+                  <span className="inline-flex items-center gap-1.5 text-(--color-accent)">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" aria-hidden />
+                    稼働中 — ブラウザでログイン後、JRA の束がカートに積まれます (確定は人)
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-(--color-bad)">
+                    <CircleX size={13} aria-hidden />
+                    未起動 — DISPLAY 不在等で daemon が落ちた可能性 (ライブログ参照)
+                  </span>
+                )}
               </p>
             )}
-            <p className="mt-3 text-xs text-(--color-muted)">
+            <p className="text-xs text-(--color-muted)">
               稼働中はパラメータ変更不可。停止 → 設定変更 → 開始の順で適用。
             </p>
-          </>
+          </div>
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 60}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"} / 束=${status?.config?.bet_bundle === "ev" ? "EV束" : `3連単/${status?.config?.trifecta_mode === "hit" ? "的中" : "回収(穴狙い)"}`}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
-              : "停止中。タイトルをクリックして設定を展開。"}
+              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 150}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"} / 束=${status?.config?.bet_bundle === "ev" ? "EV束" : `3連単/${status?.config?.trifecta_mode === "hit" ? "的中" : "回収(穴狙い)"}`}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
+              : "停止中。「設定」ボタンでパラメータを展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>
         )}
-      </Card>
+        </div>
+      </section>
 
       <Card
         title={
@@ -772,9 +904,10 @@ export default function WatchAutoPage() {
         right={
           <Link
             href="/predictions"
-            className="text-xs text-(--color-accent) hover:underline"
+            className="inline-flex items-center gap-0.5 text-xs text-(--color-accent) hover:underline"
           >
-            もっと見る →
+            もっと見る
+            <ChevronRight size={13} aria-hidden />
           </Link>
         }
       >
@@ -783,16 +916,17 @@ export default function WatchAutoPage() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm tabnum table-zebra">
-              <thead className="text-left text-(--color-muted) text-xs">
+              <thead className="text-left text-(--color-muted) text-[11px] uppercase tracking-wider">
                 <tr className="border-b border-(--color-line)">
-                  <th className="py-2 pr-3">予測分析時刻</th>
-                  <th className="py-2 pr-3">会場</th>
-                  <th className="py-2 pr-3">R</th>
-                  <th className="py-2 pr-3">締切</th>
-                  <th className="py-2 pr-3">発走</th>
-                  <th className="py-2 pr-3">状態</th>
-                  <th className="py-2 pr-3">投票束</th>
-                  <th className="py-2 pr-3">詳細</th>
+                  <th className="py-2 pr-3 font-bold">予測分析時刻</th>
+                  <th className="py-2 pr-3 font-bold">段階</th>
+                  <th className="py-2 pr-3 font-bold">会場</th>
+                  <th className="py-2 pr-3 font-bold">R</th>
+                  <th className="py-2 pr-3 font-bold">締切</th>
+                  <th className="py-2 pr-3 font-bold">発走</th>
+                  <th className="py-2 pr-3 font-bold">状態</th>
+                  <th className="py-2 pr-3 font-bold">投票束</th>
+                  <th className="py-2 pr-3 font-bold">詳細</th>
                 </tr>
               </thead>
               <tbody>
@@ -803,10 +937,31 @@ export default function WatchAutoPage() {
                     ? raceTimingStatus(h.close_at, h.start_at, !!p?.result, nowMs)
                     : null;
                   const rowBg = timing ? raceTimingRowBg(timing.tone) : "";
+                  const phase = (h as HistoryItemWithPhase).phase;
                   return (
                   <tr key={`${h.race_id}-${h.started_at}`} className={`border-b border-(--color-line)/60 ${rowBg}`}>
-                    <td className="py-1.5 pr-3">
+                    <td className="py-1.5 pr-3 tnum">
                       {fmtTs(h.started_at)}
+                    </td>
+                    <td className="py-1.5 pr-3">
+                      <span className="inline-flex items-center gap-1.5">
+                        <PhaseBadge phase={phase} />
+                        {h.rc === 0 ? (
+                          <CircleCheck
+                            size={14}
+                            className="text-emerald-400"
+                            aria-label="dispatch 成功"
+                          />
+                        ) : (
+                          <span
+                            className="inline-flex items-center gap-0.5 text-rose-300 text-xs tnum"
+                            title={`dispatch 失敗 (rc=${h.rc})`}
+                          >
+                            <CircleX size={14} aria-hidden />
+                            rc={h.rc}
+                          </span>
+                        )}
+                      </span>
                     </td>
                     <td className="py-1.5 pr-3">{h.venue}</td>
                     <td className="py-1.5 pr-3">
@@ -817,16 +972,16 @@ export default function WatchAutoPage() {
                         {h.race_no}R
                       </Link>
                     </td>
-                    <td className="py-1.5 pr-3">
+                    <td className="py-1.5 pr-3 tnum">
                       {fmtTime(h.close_at)}
                     </td>
-                    <td className="py-1.5 pr-3">
+                    <td className="py-1.5 pr-3 tnum">
                       {fmtTime(h.start_at)}
                     </td>
                     <td className="py-1.5 pr-3">
                       {timing && <Badge tone={timing.tone}>{timing.label}</Badge>}
                     </td>
-                    <td className="py-1.5 pr-3 mono text-xs font-semibold text-(--color-good)">
+                    <td className="py-1.5 pr-3 mono text-xs font-semibold text-(--color-good) tnum">
                       {pickStatus === "loading" ? (
                         <span className="text-(--color-muted)">…</span>
                       ) : isEvMeasured(p?.saved_at) ? (
@@ -843,9 +998,10 @@ export default function WatchAutoPage() {
                     <td className="py-1.5 pr-3">
                       <Link
                         href={`/predictions/${h.race_id}?url=${encodeURIComponent(h.url)}`}
-                        className="text-(--color-accent) hover:underline"
+                        className="inline-flex items-center gap-0.5 text-(--color-accent) hover:underline"
                       >
-                        詳細 →
+                        詳細
+                        <ChevronRight size={13} aria-hidden />
                       </Link>
                     </td>
                   </tr>
