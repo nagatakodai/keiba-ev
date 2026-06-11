@@ -180,9 +180,8 @@ def main() -> None:
                         s["ret"] += tri_payout * stake / 100.0
                     else:
                         s["ret"] += (f_odds or l["odds"]) * stake
-                    s["hits"] += 0  # per-leg ではなく per-race で数える (下)
             if race_hit:
-                s["hits"] += 1
+                s["hits"] += 1  # hits は per-leg ではなく per-race で数える
             bc = bundle_cal[label]
             bc["n"] += 1
             bc["pred"] += b.get("bundle_hit_prob") or b.get("covered_prob") or 0.0

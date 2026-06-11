@@ -7,6 +7,7 @@
 - GET  /api/predictions             予測スナップショット一覧
 - GET  /api/predictions/{race_id}   詳細
 - GET  /api/calibrate               calibrate.py 相当の JSON
+- GET  /api/timeline/{race_id}      オッズ変動時系列 (win/place + depth) + 確定結果
 - POST /api/analyze                 analyze ジョブ起動
 - GET  /api/jobs                    ジョブ一覧
 - GET  /api/jobs/{id}               ジョブ詳細
@@ -125,6 +126,23 @@ def api_prediction(race_id: str) -> dict[str, Any]:
 @app.get("/api/calibrate")
 def api_calibrate(point_cost: int = 100) -> dict[str, Any]:
     return compute_calibration(point_cost=point_cost)
+
+
+# --- odds timeline ---
+
+@app.get("/api/timeline/{race_id}")
+def api_timeline(race_id: str) -> dict[str, Any]:
+    """オッズ変動の時系列 (`data/cache/odds_timeline/<race_id>.jsonl`) + 確定結果。
+
+    各行の odds は UI チャート用に win/place のみ (3連単グリッドは数千組で巨大)。
+    券種別の組数は depth に載る。結果があれば finish_order / final_odds も返す。
+    """
+    from .store import get_timeline  # 遅延 import (/api/pending と同パターン)
+
+    d = get_timeline(race_id)
+    if d is None:
+        raise HTTPException(404, f"timeline not found: {race_id}")
+    return d
 
 
 # --- record (Web UI PendingRecorder からの手動着順入力) ---

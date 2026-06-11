@@ -14,6 +14,7 @@ PRED_DIR = ROOT / "data" / "predictions"
 RESULT_DIR = ROOT / "data" / "results"
 AUTO_WATCH_CACHE = ROOT / "data" / "cache" / "auto_watch_analyzed.txt"
 AUTO_WATCH_HISTORY = ROOT / "data" / "cache" / "auto_watch_history.jsonl"
+TIMELINE_DIR = ROOT / "data" / "cache" / "odds_timeline"
 
 
 def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
@@ -101,6 +102,61 @@ def get_prediction(race_id: str) -> dict[str, Any] | None:
         except (json.JSONDecodeError, OSError):
             pass
     return d
+
+
+def get_timeline(race_id: str) -> dict[str, Any] | None:
+    """`data/cache/odds_timeline/<race_id>.jsonl` のオッズ時系列 + 確定結果。
+
+    UI チャート用の軽量レスポンス: 各行の odds は **win/place のみ** に絞る
+    (3連単グリッドは最大 N(N-1)(N-2)=数千組で payload が巨大になるため)。
+    券種ごとの組数は `depth` メタデータとして残す (poll の捕捉カバレッジ確認用)。
+    結果 (`data/results/<race_id>.json`) があれば finish_order + final_odds を埋め込む
+    (final_odds は束の脚 or 払戻組のみで小さい)。timeline ファイルが無ければ None。
+    """
+    safe = _safe_race_id(race_id)
+    if safe is None:
+        return None
+    path = TIMELINE_DIR / f"{safe}.jsonl"
+    if not path.exists():
+        return None
+    rows: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue   # 壊れた行は skip (append 中のクラッシュ等)
+        odds = d.get("odds") or {}
+        rows.append(
+            {
+                "stage": d.get("stage"),
+                "captured_at": d.get("captured_at"),
+                "close_at": d.get("close_at") or 0,
+                "start_at": d.get("start_at") or 0,
+                "n_horses": d.get("n_horses") or 0,
+                "odds": {bt: odds[bt] for bt in ("win", "place") if odds.get(bt)},
+                "depth": {bt: len(v) for bt, v in odds.items()},
+                "source": d.get("source"),
+            }
+        )
+    result_out: dict[str, Any] | None = None
+    result_path = RESULT_DIR / f"{safe}.json"
+    if result_path.exists():
+        try:
+            r = json.loads(result_path.read_text(encoding="utf-8"))
+            result_out = {
+                "finish_order": r.get("finish_order") or [],
+                "final_odds": r.get("final_odds") or {},
+            }
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"race_id": safe, "rows": rows, "result": result_out}
 
 
 def list_auto_watch_history(limit: int = 200) -> list[dict[str, Any]]:
@@ -286,6 +342,12 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         def _leg_id_for(leg: dict) -> str:
             bt = leg.get("bet_type", "")
             key = leg.get("key") or []
+            # 順不同券種 (馬連/ワイド/3連複) は昇順正規化してから join (2026-06-12)。
+            # result["final_odds"] の leg_id は parse._parse_payout_table 等が昇順で
+            # 保存する規約 (bundle_calibration_report._final_odds_key と同じ)。現データの
+            # leg key は全件昇順だが、unsorted な key が将来入っても lookup が崩れない。
+            if bt in ("quinella", "wide", "trio"):
+                key = sorted(key)
             return f"{bt}:{'-'.join(str(k) for k in key)}"
 
         # 同着 (dead heat) 対応 (2026-06-11 bughunt 第4R): netkeiba-html result の
@@ -331,7 +393,14 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "hit": bool(hit_legs),
             }
 
-        b_yield = _bundle_stats(pred.get("recommended_bundle"))
+        # **backfill 束の除外** (2026-06-12, bundle_calibration_report と同 semantics):
+        # scripts/backfill_bundle.py が後付けした束 (backfilled=true) は実際には賭けて
+        # いない paper なので、EV束系列 (ev_bundle / claude_bundle) では「見送り」として
+        # 扱う (participated=False / stake=0)。race 行自体は残し、bundle_backfilled
+        # フラグで UI 側がグレーアウトできるようにする。
+        bundle_ev = pred.get("recommended_bundle") or {}
+        bundle_backfilled = bool(bundle_ev.get("backfilled"))
+        b_yield = _bundle_stats({} if bundle_backfilled else bundle_ev)
         # 3連単的中モード(market 無視・Claude 指数フォーメーション)。
         # 回収優先 bundle と完全分離して集計し、ダッシュボードで並べて見せる。
         # 古い snapshot は recommended_bundle_t 欠落 → participated=False で分母外。
@@ -360,6 +429,9 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "bundle_stake": b_yield["stake"],
                 "bundle_payout": b_yield["payout"],
                 "bundle_payout_final": b_yield["payout_final"],
+                # backfill された paper 束 (実際には賭けていない)。集計からは除外済、
+                # UI のグレーアウト表示用フラグ。
+                "bundle_backfilled": bundle_backfilled,
                 # 3連単的中モード bundle (**実弾投票束**。2026-06-06 以降 3連単的中モード固定)。
                 "trifecta_bundle_hit": b_t["hit"],
                 "trifecta_bundle_hit_bet_types": sorted({leg["bet_type"] for leg in b_t["hit_legs"]}),
