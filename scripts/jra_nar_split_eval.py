@@ -47,7 +47,7 @@ except Exception:
 
 # train.py / sliding_window_eval.py と同一の non-feature 列。
 NON_FEATURE_COLS = {
-    "race_id", "venue", "race_no", "distance", "surface", "going",
+    "race_id", "race_date", "venue", "race_no", "distance", "surface", "going",
     "horse_number", "n_horses",
     "finish_pos", "target_top1", "target_top3", "target_rank",
     "win_odds", "absent",

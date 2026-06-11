@@ -2,8 +2,10 @@
 
 Yurelu / R-bloggers 2026 / PC-KEIBA / Reddit lambdarank の合流地点設計:
   - **lambdarank**: pointwise ではなく race-relative ranking として学習 → ndcg@3 最大化
-  - **時系列 split**: TimeSeriesSplit。race_id を datetime に変換して並び替え、
-    過去 → 未来 を train / valid に
+  - **時系列 split**: race_date (YYYYMMDD, dataset.py が付与) で並び替え、
+    過去 → 未来 を train / valid に。旧 int(race_id) ソートは会場 split だった
+    (2026-06-10 レビュー) ので race_date 列を必須にした
+  - **ばんえい分離**: 帯広 (venue 65) は別競技なので既定で除外 (--include-banei で戻せる)
   - **race_id を group**: LightGBM の `group` パラメータに各レースの行数を渡す
   - **時間リーク防止**: 当該レースの単勝オッズ / 人気 は学習特徴量に **入れない**
     (umaro_ai 警告: pred が払戻率に収束する)
@@ -39,7 +41,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=False)
 
 # 学習に使わない列 (リーク or 識別子)
 NON_FEATURE_COLS = {
-    "race_id", "venue", "race_no", "distance", "surface", "going",
+    "race_id", "race_date", "venue", "race_no", "distance", "surface", "going",
     "horse_number", "n_horses",
     "finish_pos", "target_top1", "target_top3", "target_rank",
     # 当日のオッズ / 不要 (リーク回避)
@@ -48,25 +50,35 @@ NON_FEATURE_COLS = {
     "absent",
 }
 
+# 帯広ばんえい (venue 65)。別競技なので global / nar モデルから分離する
+BANEI_VENUE_CODE = "65"
 
-def _race_id_to_unix(rid: str) -> int:
-    """race_id を時系列 split 用に整数化。
-    JRA: YYYY+PP+回+日+RR → 開催回/日が時系列順なので yyyy+rr1+rr2+rr3+rr 順に並べる。
-    NAR: YYYY+PP+MMDD+RR → yyyy+mm+dd+rr で並べられる。
-    どちらも 12 桁を そのまま int 化すれば、近似的に時系列順になる。
-    厳密ではないがレース日付の前後関係はおおむね保たれる。
-    """
+
+def _race_int(rid: str) -> int:
     try:
         return int(rid)
-    except ValueError:
+    except (ValueError, TypeError):
         return 0
 
 
 def _make_splits(df: pd.DataFrame, valid_frac: float = 0.2):
-    """時系列順に sort → 後ろ valid_frac を validation に。"""
-    # race_id 単位で並べる
-    unique_rids = df["race_id"].unique().tolist()
-    unique_rids.sort(key=_race_id_to_unix)
+    """(race_date, race_id) 順に sort → 後ろ valid_frac を validation に。
+
+    旧実装は int(race_id) ソートだったが、race_id の桁順は 年→場コード→日付 なので
+    年内は「会場コード split」になっていた (valid = 帯広+佐賀+高知のみ・期間は train と
+    完全重複, 2026-06-10 レビュー)。race_date 列 (YYYYMMDD, dataset.py が付与) を必須とし、
+    int ソートへの silent fallback はしない。
+    """
+    if "race_date" not in df.columns:
+        raise ValueError(
+            "race_date 列がありません — 旧形式の parquet です。"
+            "`make dataset` で data/datasets/all.parquet を再生成してください"
+        )
+    dates = df.groupby("race_id")["race_date"].first().astype(str).to_dict()
+    unique_rids = sorted(
+        df["race_id"].unique().tolist(),
+        key=lambda r: (dates.get(r, ""), _race_int(r)),
+    )
     n_valid = max(int(len(unique_rids) * valid_frac), 1)
     train_rids = set(unique_rids[:-n_valid])
     valid_rids = set(unique_rids[-n_valid:])
@@ -115,6 +127,11 @@ def main(
     learning_rate: float = typer.Option(0.03, "--lr"),
     num_leaves: int = typer.Option(24, "--leaves"),
     early_stopping: int = typer.Option(100, "--early-stop"),
+    exclude_banei: bool = typer.Option(
+        True, "--exclude-banei/--include-banei",
+        help="ばんえい (帯広 venue 65, 別競技) を global モデルから除外 (既定 ON。"
+             "ばんえいは scripts/train_segment_models.py の banei segment で独立学習)",
+    ),
 ):
     """LightGBM lambdarank 学習。"""
     if not input_path.exists():
@@ -123,10 +140,20 @@ def main(
     df = pd.read_parquet(input_path)
     console.print(f"loaded {len(df):,} rows / {df['race_id'].nunique():,} races")
 
+    if exclude_banei:
+        banei_mask = df["race_id"].astype(str).str[4:6] == BANEI_VENUE_CODE
+        if bool(banei_mask.any()):
+            console.print(
+                f"ばんえい除外: {df.loc[banei_mask, 'race_id'].nunique():,} races / "
+                f"{int(banei_mask.sum()):,} rows (帯広 venue 65 → banei segment 側で学習)"
+            )
+            df = df[~banei_mask].copy()
+
     train_df, valid_df = _make_splits(df, valid_frac=valid_frac)
     console.print(
         f"split: train={train_df['race_id'].nunique()} races / "
-        f"valid={valid_df['race_id'].nunique()} races"
+        f"valid={valid_df['race_id'].nunique()} races "
+        f"(valid period {valid_df['race_date'].min()}〜{valid_df['race_date'].max()})"
     )
 
     X_train, y_train, g_train = _prep_xy(train_df)
@@ -230,6 +257,8 @@ def main(
 
     meta = {
         "trained_at": datetime.now().isoformat(timespec="seconds"),
+        "split": "race_date",  # 旧 int(race_id) ソート (会場 split) からの区別
+        "exclude_banei": exclude_banei,
         "n_train_races": int(train_df["race_id"].nunique()),
         "n_valid_races": int(valid_df["race_id"].nunique()),
         "n_train_rows": int(len(X_train)),

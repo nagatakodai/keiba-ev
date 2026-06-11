@@ -21,6 +21,7 @@ from __future__ import annotations
 import gzip
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -30,7 +31,8 @@ from rich.console import Console
 
 from .features import build_features
 from .models import RaceData
-from .parse import parse_past_runs, parse_result, parse_shutuba
+from .parse import parse_past_runs, parse_result, parse_shutuba, race_date_from_html
+from .scrape import is_nar_race_id
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = ROOT / "data" / "raw"
@@ -79,11 +81,29 @@ def load_race(race_id: str) -> tuple[RaceData, dict | None] | None:
     return rd, res
 
 
+def _race_date(rid: str, rd: RaceData) -> str:
+    """開催日 "YYYYMMDD" (時系列 split 用)。取れなければ "" (build がmiss 数を報告)。
+
+    旧 train.py は int(race_id) ソートで時系列 split していたが、race_id の桁順は
+    年→場コード→日付 なので年内は「会場 split」になっていた (2026-06-10 レビュー)。
+    NAR rid は日付を内包 (YYYY+PP+MMDD+RR)。JRA rid は開催回+日で日付が無いので
+    start_at (タイトルの「YYYY年M月D日」由来) → raw HTML の日付 regex の順で取る。
+    """
+    if is_nar_race_id(rid) and len(rid) == 12 and rid[6:10].isdigit():
+        return rid[:4] + rid[6:10]
+    st = int(getattr(rd.race, "start_at", 0) or 0)
+    if st > 0:
+        return datetime.fromtimestamp(st).strftime("%Y%m%d")
+    sh = _read_gz(RAW_DIR / f"{rid}-shutuba.html.gz")
+    return race_date_from_html(sh or "")
+
+
 def build_dataframe(race_ids: list[str]) -> pd.DataFrame:
     """各レース × 各馬 1 行で DataFrame を作る。
 
     Columns:
-      race_id, horse_number, finish_pos (NaN if absent or 4着以下),
+      race_id, race_date (YYYYMMDD, 時系列 split 用),
+      horse_number, finish_pos (NaN if absent or 4着以下),
       target_top1, target_top3, target_rank,
       [feature columns from FeatureVec]
     """
@@ -93,6 +113,7 @@ def build_dataframe(race_ids: list[str]) -> pd.DataFrame:
         if loaded is None:
             continue
         rd, res = loaded
+        race_date = _race_date(rid, rd)
         # ラベル: 結果から取れたら使う。なければ全 NaN (= レースは特徴量だけ使える)
         finish_lookup: dict[int, int] = {}
         if res and len(res.get("finish_order") or []) >= 3:
@@ -108,6 +129,7 @@ def build_dataframe(race_ids: list[str]) -> pd.DataFrame:
             finish_pos = finish_lookup.get(h.number)
             row = {
                 "race_id": rid,
+                "race_date": race_date,
                 "venue": rd.race.venue_name,
                 "race_no": rd.race.race_number,
                 "distance": rd.race.distance,
@@ -171,8 +193,14 @@ def build(
     completed = df["finish_pos"].notna().sum()
     console.print(
         f"  完走確定 (1-3 着付与済) rows: {completed:,} / "
-        f"特徴量列 数: {len([c for c in df.columns if c not in ['race_id','venue','race_no','distance','surface','going','horse_number','n_horses','finish_pos','target_top1','target_top3','target_rank']]):,}"
+        f"特徴量列 数: {len([c for c in df.columns if c not in ['race_id','race_date','venue','race_no','distance','surface','going','horse_number','n_horses','finish_pos','target_top1','target_top3','target_rank']]):,}"
     )
+    # race_date 欠落チェック (時系列 split の前提。欠落レースは sort 先頭 = train 側に落ちる)
+    miss_dates = df.loc[df["race_date"] == "", "race_id"].nunique()
+    if miss_dates:
+        console.print(f"[yellow]race_date 欠落: {miss_dates:,} races — split 順序が崩れるので要調査[/yellow]")
+    else:
+        console.print(f"  race_date: 全 {df['race_id'].nunique():,} races で取得済")
 
 
 if __name__ == "__main__":

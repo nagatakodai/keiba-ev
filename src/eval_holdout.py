@@ -65,8 +65,21 @@ def _race_id_to_unix(rid: str) -> int:
 
 
 def _split_valid(df: pd.DataFrame, valid_frac: float) -> pd.DataFrame:
+    """train.py の _make_splits と同じ (race_date, race_id) 順で last-N% を valid に。
+
+    旧 int(race_id) ソートは会場 split だった (2026-06-10 レビュー)。race_date 列が
+    無い旧 parquet は警告付きで旧ソートに fallback (読み取り専用 eval のため)。
+    """
     rids = df["race_id"].unique().tolist()
-    rids.sort(key=_race_id_to_unix)
+    if "race_date" in df.columns:
+        dates = df.groupby("race_id")["race_date"].first().astype(str).to_dict()
+        rids.sort(key=lambda r: (dates.get(r, ""), _race_id_to_unix(r)))
+    else:
+        console.print(
+            "[yellow]race_date 列なし → int(race_id) ソート (= 会場 split) で評価。"
+            "結果は時系列 OOS ではない。`make dataset` で再生成を推奨[/yellow]"
+        )
+        rids.sort(key=_race_id_to_unix)
     n_valid = max(int(len(rids) * valid_frac), 1)
     valid_rids = set(rids[-n_valid:])
     return df[df["race_id"].isin(valid_rids)].copy()
@@ -87,6 +100,10 @@ def main(
             "明示すれば sweep 用に override 可能。"
         ),
     ),
+    exclude_banei: bool = typer.Option(
+        True, "--exclude-banei/--include-banei",
+        help="ばんえい (帯広 venue 65) を除外して評価 (train.py の既定と揃える)",
+    ),
 ):
     if not input_path.exists():
         console.print(f"[red]not found: {input_path}[/red]")
@@ -99,6 +116,14 @@ def main(
     feature_cols: list[str] = list(meta["feature_cols"])
 
     df = pd.read_parquet(input_path)
+    if exclude_banei:
+        banei_mask = df["race_id"].astype(str).str[4:6] == "65"
+        if bool(banei_mask.any()):
+            console.print(
+                f"[dim]ばんえい除外: {df.loc[banei_mask, 'race_id'].nunique():,} races "
+                f"(train.py --exclude-banei と同条件)[/dim]"
+            )
+            df = df[~banei_mask].copy()
     valid = _split_valid(df, valid_frac=valid_frac)
     n_total_races = valid["race_id"].nunique()
     valid = valid[valid["race_id"].isin(

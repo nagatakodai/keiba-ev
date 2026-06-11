@@ -536,7 +536,7 @@ def lgbm_status() -> dict:
     return out
 
 
-# セグメント別モデル (JRA / NAR)。scripts/train_segment_models.py が
+# セグメント別モデル (JRA / NAR / ばんえい)。scripts/train_segment_models.py が
 # data/models/lgbm_<seg>.txt + lgbm_<seg>_metadata.json を作る。metadata に
 # softmax_temperature / lambda_2_mle / lambda_3_mle / market_blend_mle (別 partition で MLE 凍結) を持つ。
 # 無い segment は global モデルにフォールバック。
@@ -544,12 +544,21 @@ _SEG_CACHE: dict[str, tuple] = {}   # segment -> (booster, meta) | (None, None)
 
 
 def segment_of_rd(rd) -> str:
-    """race の venue から JRA(中央, venue 01-10) / NAR(地方) を判定。"""
+    """race の venue から JRA(中央, venue 01-10) / banei(帯広ばんえい 65) / NAR(平地地方) を判定。
+
+    venue_id は全経路 (netkeiba/keibago/oddspark/JRA) で int(rid[4:6]) 由来。ばんえいは
+    別競技なので平地 NAR モデルから分離 — lgbm_banei.txt 不在の間は _segment_booster_meta
+    が global にフォールバックする (live 安全)。
+    """
     try:
         vid = int(getattr(rd.race, "venue_id", 0) or 0)
     except (TypeError, ValueError):
         return "nar"
-    return "jra" if 1 <= vid <= 10 else "nar"
+    if 1 <= vid <= 10:
+        return "jra"
+    if vid == 65:
+        return "banei"
+    return "nar"
 
 
 def _segment_booster_meta(segment: str | None):

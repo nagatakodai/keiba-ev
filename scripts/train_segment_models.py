@@ -9,12 +9,15 @@
     2-3着条件付き確率を自前データで校正。3連単 overlay の前提条件)。
   - T (softmax 温度): 勝者 log loss 最小化。
 
-segment ∈ {jra, nar}。race_id[4:6] が 01-10 = JRA、それ以外 = NAR。
+segment ∈ {jra, nar, banei}。race_id[4:6] が 01-10 = JRA、65 = 帯広ばんえい (別競技)、
+それ以外 = 平地 NAR。3-fold は race_date (YYYYMMDD) 順 — 旧 int(race_id) ソートは
+会場 split だった (2026-06-10 レビュー)。
 出力: data/models/lgbm_<seg>.txt + lgbm_<seg>_metadata.json
   (feature_cols, softmax_temperature, market_blend_mle, lambda_2_mle, lambda_3_mle,
    segment, n_*_races, holdout_eval{...})。ev.py がこれを読んで segment 別にルーティング。
 
-使い方: python scripts/train_segment_models.py [--segment jra|nar|all|both]
+使い方: python scripts/train_segment_models.py [--segment jra|nar|banei|all|both|all3]
+  (既定 all3 = jra+nar+banei。both = 旧来の jra+nar のみ)
 """
 from __future__ import annotations
 
@@ -40,6 +43,7 @@ META0 = json.loads((MODELS / "lgbm_metadata.json").read_text())
 FEATS = META0["feature_cols"]
 PARAMS = dict(META0["params"])
 JRA_CODES = {f"{i:02d}" for i in range(1, 11)}
+BANEI_CODE = "65"  # 帯広ばんえい (別競技なので平地 NAR から分離)
 
 
 def _race_int(rid: str) -> int:
@@ -49,12 +53,32 @@ def _race_int(rid: str) -> int:
         return 0
 
 
+def _date_sorted_rids(df: pd.DataFrame) -> list[str]:
+    """race_id を (race_date, int(race_id)) 順に並べる。
+
+    旧 int(race_id) ソートは年内が会場コード順 = 会場 split だった (2026-06-10 レビュー)。
+    race_date 列 (dataset.py が付与) を必須とし、silent fallback はしない。
+    """
+    if "race_date" not in df.columns:
+        raise SystemExit(
+            "race_date 列がありません — 旧形式の parquet です。"
+            "`make dataset` で data/datasets/all.parquet を再生成してください"
+        )
+    dates = df.groupby("race_id")["race_date"].first().astype(str).to_dict()
+    return sorted(df["race_id"].unique().tolist(),
+                  key=lambda r: (dates.get(r, ""), _race_int(r)))
+
+
 def _seg_mask(df: pd.DataFrame, segment: str) -> pd.Series:
-    is_jra = df["race_id"].astype(str).str[4:6].isin(JRA_CODES)
+    codes = df["race_id"].astype(str).str[4:6]
+    is_jra = codes.isin(JRA_CODES)
+    is_banei = codes == BANEI_CODE
     if segment == "jra":
         return is_jra
     if segment == "nar":
-        return ~is_jra
+        return ~is_jra & ~is_banei  # 平地 NAR のみ (ばんえいは別 segment)
+    if segment == "banei":
+        return is_banei
     return pd.Series(True, index=df.index)
 
 
@@ -204,7 +228,7 @@ def train_segment(df_all: pd.DataFrame, segment: str) -> dict:
     df = df_all[_seg_mask(df_all, segment)].copy()
     df = df[df["race_id"].isin(
         df.groupby("race_id")["target_top1"].sum().pipe(lambda s: s[s > 0]).index)]
-    rids = sorted(df["race_id"].unique().tolist(), key=_race_int)
+    rids = _date_sorted_rids(df)  # 日付順 3-fold (旧 int ソートは会場 split)
     n = len(rids)
     A = set(rids[: int(n * 0.60)])
     B = set(rids[int(n * 0.60): int(n * 0.80)])
@@ -257,10 +281,17 @@ def train_segment(df_all: pd.DataFrame, segment: str) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--segment", default="both", choices=["jra", "nar", "all", "both"])
+    ap.add_argument("--segment", default="all3",
+                    choices=["jra", "nar", "banei", "all", "both", "all3"],
+                    help="all3=jra+nar+banei (既定) / both=jra+nar (旧来) / all=全混合 1 モデル")
     args = ap.parse_args()
     df = pd.read_parquet(ALL)
-    segs = ["jra", "nar"] if args.segment == "both" else [args.segment]
+    if args.segment == "all3":
+        segs = ["jra", "nar", "banei"]
+    elif args.segment == "both":
+        segs = ["jra", "nar"]
+    else:
+        segs = [args.segment]
     results = {}
     for seg in segs:
         results[seg] = train_segment(df, seg)

@@ -58,7 +58,7 @@ APT_DIR = ROOT / "data" / "cache" / "aptitudes"
 
 
 NON_FEATURE_COLS = {
-    "race_id", "venue", "race_no", "distance", "surface", "going",
+    "race_id", "race_date", "venue", "race_no", "distance", "surface", "going",
     "horse_number", "n_horses",
     "finish_pos", "target_top1", "target_top3", "target_rank",
     "win_odds",
@@ -71,6 +71,22 @@ def _race_id_to_int(rid: str) -> int:
         return int(rid)
     except (ValueError, TypeError):
         return 0
+
+
+def _race_order_key(df: pd.DataFrame):
+    """(race_date, int(race_id)) の sort key を返す。
+
+    旧 int(race_id) ソートは年内が会場コード順 = 会場 split だった (2026-06-10 レビュー)。
+    race_date 列が無い旧 parquet は **大声で警告して** 旧ソートに fallback (読み取り専用
+    eval なので train.py と違い hard fail にはしない)。
+    """
+    if "race_date" in df.columns:
+        dates = df.groupby("race_id")["race_date"].first().astype(str).to_dict()
+        return lambda rid: (dates.get(rid, ""), _race_id_to_int(rid))
+    print("[WARN] race_date 列なし → int(race_id) ソート (= 会場 split) に fallback。"
+          "結果は時系列 OOS ではない。`make dataset` で all.parquet を再生成してください",
+          file=sys.stderr, flush=True)
+    return lambda rid: ("", _race_id_to_int(rid))
 
 
 def _tier(pxo: float) -> str:
@@ -91,9 +107,9 @@ def _train_lgbm(train_df: pd.DataFrame, *, internal_valid_frac: float = 0.15):
     keep = races_with_result[races_with_result["ones"] > 0]["race_id"].tolist()
     df = df[df["race_id"].isin(keep)].copy()
 
-    # 内部 train/valid split (時系列順、後ろを valid に)
+    # 内部 train/valid split (race_date 時系列順、後ろを valid に)
     inner_rids = df["race_id"].unique().tolist()
-    inner_rids.sort(key=_race_id_to_int)
+    inner_rids.sort(key=_race_order_key(df))
     n_inner_valid = max(int(len(inner_rids) * internal_valid_frac), 1)
     inner_train_rids = set(inner_rids[:-n_inner_valid])
     inner_valid_rids = set(inner_rids[-n_inner_valid:])
@@ -136,7 +152,7 @@ def main() -> int:
     args = ap.parse_args()
 
     df = pd.read_parquet(DATASETS)
-    rids = sorted(df["race_id"].unique().tolist(), key=_race_id_to_int)
+    rids = sorted(df["race_id"].unique().tolist(), key=_race_order_key(df))
     n_valid = max(int(len(rids) * args.valid_frac), 1)
     train_rids = set(rids[:-n_valid])
     valid_rids = rids[-n_valid:]

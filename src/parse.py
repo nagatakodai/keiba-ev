@@ -1083,6 +1083,18 @@ _START_RE_ALT = re.compile(r"発走\s*[:：]?\s*(\d{1,2}):(\d{2})")
 _DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 
 
+def race_date_from_html(html: str) -> str:
+    """HTML 中の「YYYY年M月D日」表記から開催日 "YYYYMMDD" を返す (見つからなければ "")。
+
+    JRA の rid には日付が無い (開催回+日) ので、shutuba のタイトル/ヘッダの日付表記から
+    取る。dataset の race_date 列 (時系列 split 用) のフォールバック抽出に使う。
+    """
+    m = _DATE_RE.search(html or "")
+    if not m:
+        return ""
+    return f"{int(m.group(1)):04d}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+
+
 def _parse_distance_surface(text: str) -> tuple[int, str, str]:
     m = _DISTANCE_RE.search(text)
     if not m:

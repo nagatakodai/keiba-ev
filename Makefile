@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train holdout api web web-install test watch-auto-bet watch-auto-ipat-bet bet odds-capture
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train par segments retrain holdout api web web-install test watch-auto-bet watch-auto-ipat-bet bet odds-capture
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -130,9 +130,11 @@ bulk-fetch:
 		$(if $(RIDS_FILE),--rids-file $(RIDS_FILE),)
 
 # --- 学習データセット構築 (data/datasets/all.parquet) ---
+# 注: src.dataset は単一コマンド typer app なので `build` サブコマンドは付けない
+# (旧 `-m src.dataset build` は "Got unexpected extra argument" で常に失敗していた)。
 LIMIT ?=
 dataset:
-	$(PY) -m src.dataset build $(if $(LIMIT),--limit $(LIMIT),)
+	$(PY) -m src.dataset $(if $(LIMIT),--limit $(LIMIT),)
 
 # --- LightGBM lambdarank 学習 (data/models/) ---
 # tuned defaults (Phase 17): lr=0.03 / rounds=800 / leaves=24 / early_stop=100
@@ -149,6 +151,30 @@ train:
 # `estimate_probs(market_blend=β)` の正味効果が分かる。
 HOLDOUT_VALID_FRAC ?= 0.2
 holdout:
+	$(PY) -m src.eval_holdout --valid-frac $(HOLDOUT_VALID_FRAC)
+
+# --- 距離帯別 par タイム表 (data/cache/par_times.json) ---
+# 全 raw HTML の past_runs から per-condition 勝ち時計/上3F の中央値を集計。
+# build_features (speed_chart) が読むので dataset 再生成の **前** に走らせる。
+PAR_WORKERS ?= 8
+par:
+	$(PY) scripts/build_par_table.py --workers $(PAR_WORKERS)
+
+# --- セグメント別モデル学習 (jra / nar / banei) + β/λ/T MLE ---
+# ばんえい (帯広 65) は別競技なので平地 NAR から分離して独立学習 (lgbm_banei.txt)。
+# SEGMENT=all3 (既定) / both (jra+nar のみ) / jra|nar|banei 単体。
+SEGMENT ?= all3
+segments:
+	$(PY) scripts/train_segment_models.py --segment $(SEGMENT)
+
+# --- 全再生成: par → dataset → train → segments → holdout ---
+# Data05/surface 修正 + race_date 日付 split + ばんえい分離の宿題を一括反映する。
+# par が dataset の speed 特徴量 (speed_chart) の入力なので par を先に再集計する。
+retrain:
+	$(PY) scripts/build_par_table.py --workers $(PAR_WORKERS)
+	$(PY) -m src.dataset $(if $(LIMIT),--limit $(LIMIT),)
+	$(PY) -m src.train --lr $(LR) --rounds $(ROUNDS) --leaves $(LEAVES) --early-stop $(EARLY_STOP)
+	$(PY) scripts/train_segment_models.py --segment $(SEGMENT)
 	$(PY) -m src.eval_holdout --valid-frac $(HOLDOUT_VALID_FRAC)
 
 # --- 大量パイプライン: 列挙 → fetch → dataset → train → backtest 一気通貫 ---
