@@ -533,6 +533,19 @@ class BettingSession:
                 ok += 1
                 staked += leg.stake
             except Exception as ex:  # noqa: BLE001
+                if _is_session_dead_error(ex):
+                    if staked == 0:
+                        # 1脚も置いていない → 上に伝播 (req 残置 + daemon fail-fast。
+                        # 再起動後に丸ごと再投入できる) (2026-06-11 第5R: 旧実装は
+                        # per-leg except が吸収し req を .done 消費 = 回復不能な賭け逃し)
+                        raise
+                    # 一部脚投入済みでセッション喪失 — 再投入は二重積みになるので
+                    # req は消費 (req_terminal) しつつ daemon は fail-fast。目視確認必須。
+                    err = SessionDeadError(
+                        f"脚{i} 投入中にセッション喪失 (¥{staked:,} 分 {ok} 脚は投入済みの"
+                        f"可能性 — 購入予定リストを目視確認): {ex}")
+                    err.req_terminal = True
+                    raise err from ex
                 _shot(self.page, f"bet_{netkeiba_rid}_{i}_FAILED")
                 print(f"  ! [{label or netkeiba_rid}] 脚{i} "
                       f"({leg.bet_type} {leg.key}) スキップ: {ex}")
@@ -630,20 +643,27 @@ class BettingSession:
         if not clicked:
             _shot(p, "purchase_review_no_button")
             return ("failed", "確定ボタンが見つからない (DOM 未検証 — purchase_review screenshot 参照)")
-        p.wait_for_timeout(3000)
-        _shot(p, "purchase_after_click")
-        # 4) success marker 検出
+        # ── ここから先は「不可逆ゾーン」(2026-06-11 第5R): 確認ダイアログ OK は click 済み
+        # = 投票はサーバ送信済みの可能性がある。以降の page 例外を上に投げると
+        # _SESSION_DEAD_MARKERS 経由で SessionDeadError → req 残置 → daemon 再起動で
+        # **同一レースを再投入・再購入 (二重賭け)** する。例外は握って failed
+        # (結果不明・目視確認必須) に変換する — 二重賭け防止 > 賭け逃し/cap 精度。
         success = False
-        deadline = time.time() + 6.0
-        while time.time() < deadline:
-            try:
+        try:
+            p.wait_for_timeout(3000)
+            _shot(p, "purchase_after_click")
+            # 4) success marker 検出
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
                 body = p.evaluate("() => document.body ? document.body.innerText || '' : ''")
                 if any(m in body for m in SELECTORS["purchase_success_markers"]):
                     success = True
                     break
-            except Exception:  # noqa: BLE001
-                pass
-            p.wait_for_timeout(500)
+                p.wait_for_timeout(500)
+        except Exception as ex:  # noqa: BLE001
+            return ("failed",
+                    f"確定送信済みだが結果確認中に page 例外 — **購入された可能性あり、"
+                    f"目視確認必須** (daily_stake 未加算): {ex}")
         if not success:
             return ("failed", "success marker 未検出 — ブラウザで購入状況を目視確認推奨")
         new_total = record_daily_stake(race_stake)
@@ -748,9 +768,14 @@ def _select_course_race(page, venue: str | None, race_no: int) -> None:
     if venue:
         vb = page.locator('.ipat-select-course-race .places button',
                           has_text=venue)
-        if vb.count() > 0:
-            vb.first.click()
-            page.wait_for_timeout(600)
+        if vb.count() == 0:
+            # 黙って続行すると「直前に選択されていた別場」の同番レースへ束を投入する
+            # (誤レース投票, 2026-06-11 bughunt 第5R)。レースボタン側 (下) と同様に raise。
+            raise IpatBetError(
+                f"場ボタン不検出 ({venue}) — 発売終了/未発売 or DOM 変化。"
+                "誤レース投票防止のため当該レースを中止")
+        vb.first.click()
+        page.wait_for_timeout(600)
     _dismiss_deposit_dialog(page)
     # レース番号 (完全一致)
     rb = page.locator('.ipat-select-course-race .races button').filter(
@@ -1111,6 +1136,17 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
             status, _ok = sess.add_race(rid, legs, label=label)
             if status == "dup":
                 print(f"[ipat_bet] {rid} は投入済 (skip)")
+        except SessionDeadError as ex:
+            # add_race 内で「一部脚投入済み」と判定されたセッション喪失は req を消費する
+            # (再起動 → 再投入の二重積み防止, 2026-06-11 第5R)。それ以外は req 残置。
+            if getattr(ex, "req_terminal", False):
+                try:
+                    req.rename(req.with_suffix(".done"))
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"[ipat_bet] {rid}: 一部脚投入済みでセッション喪失 — req は消費 "
+                      f"(二重投入防止)。**購入予定リストを目視確認**: {ex}")
+            raise
         except IpatBetError as ex:
             if _is_session_dead_error(ex):
                 print(f"[ipat_bet] {rid}: セッション/ブラウザ喪失 — req 残置で daemon 終了 "

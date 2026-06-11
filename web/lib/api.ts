@@ -291,6 +291,10 @@ export type PredictionDetail = {
     finish_order: number[];
     trifecta_payout?: number;
     note?: string;
+    // 結果ソース ("netkeiba-html" / "keibago" / "jra" / "auto" / 手動)。
+    // netkeiba-html のとき final_odds は**払戻があった組のみ**の payout テーブル
+    // (同着の的中判定フォールバックに使える — api/store.py _leg_hit と同規則)。
+    source?: string;
     // 最終確定オッズ: `"<bet_type>:<key-with-->"` → odds。result fetch 時に保存。
     final_odds?: Record<string, number>;
   };

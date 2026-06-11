@@ -179,6 +179,15 @@ class OddsparkBetError(RuntimeError):
     pass
 
 
+class CartDirtyError(OddsparkBetError):
+    """セット (commit) 後の検証失敗 — **誤組数の買い目が #buylist に残っている可能性**。
+
+    通常の脚スキップ (カート未投入) と違い、このままレースを続行して購入確定すると
+    誤組番を実弾購入する (2026-06-11 bughunt 第5R)。捕捉側は当該レースを中止して
+    カートを全削除すること。
+    """
+
+
 @dataclass
 class CartLeg:
     bet_type: str
@@ -511,6 +520,24 @@ def _detect_purchase_reject(body_txt: str) -> str | None:
     return None
 
 
+def _parse_settled_amount(body_txt: str) -> int | None:
+    """完了画面の「成立合計金額 N円」を読む (読めなければ None)。
+
+    部分不成立 (一部脚のみ✕) では reject marker が出ても成立分は購入済みなので、
+    daily_stake への計上はこの実成立額を使う (2026-06-11 bughunt 第5R)。
+    """
+    if not body_txt:
+        return None
+    import re
+    m = re.search(r"成立合計金額[^0-9]*([0-9,]+)\s*円", body_txt)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def record_daily_stake(amount: int) -> int:
     """today's stake に amount を加算して新規累計を返す。**購入 success 検出時のみ呼ぶ**。"""
     d = _load_daily_stake_map()
@@ -689,13 +716,13 @@ def _assert_combo_delta(page, before: int | None, leg: CartLeg) -> None:
         after = _combo_count(page)
     if before is None or after is None:
         if leg.bet_type in ("exacta", "trifecta"):
-            raise OddsparkBetError(
+            raise CartDirtyError(
                 "組数を読めず 裏目/マルチ の全順列化を検知できない — 安全側で中止 "
                 f"({leg.bet_type} {leg.key})")
         return
     added = after - before
     if added != 1:
-        raise OddsparkBetError(
+        raise CartDirtyError(
             f"組数が想定外: +{added}通り (期待 +1) — 裏目/マルチ/馬番累積を疑い中止 "
             f"({leg.bet_type} {leg.key})")
 
@@ -940,6 +967,7 @@ class BettingSession:
             _select_only_race(self.page, race_val)   # 再失敗なら締切/未発売 → 上に伝播
         ok = 0
         staked = 0   # 実際に セット まで通った脚の合計 (累計露出の正確な加算用)
+        cart_dirty = False
         for i, leg in enumerate(legs, 1):
             try:
                 _add_leg_to_cart(self.page, leg, race_val)
@@ -947,13 +975,44 @@ class BettingSession:
                       f"{'-'.join(map(str, leg.key))} ¥{leg.stake:,}")
                 ok += 1
                 staked += leg.stake
+            except CartDirtyError as ex:
+                # セット (commit) 後の検証失敗 = 誤組数の買い目が #buylist に残っている
+                # 可能性。脚スキップで続行すると後段の一括購入が誤組番ごと買う
+                # (2026-06-11 第5R)。当該レースを中止してカートを全削除する。
+                _shot(self.page, f"bet_{netkeiba_rid}_{i}_CART_DIRTY")
+                print(f"  ! [{label or netkeiba_rid}] 脚{i} ({leg.bet_type} {leg.key}) "
+                      f"でカート汚染の可能性 — レース中止: {ex}")
+                cart_dirty = True
+                break
             except Exception as ex:  # noqa: BLE001
+                if _is_session_dead_error(ex):
+                    if staked == 0:
+                        # 1脚も commit していない → 上に伝播 (req 残置 + daemon fail-fast。
+                        # 再起動後にこのレースを丸ごと再投入できる) (2026-06-11 第5R:
+                        # 旧実装は per-leg except が吸収し req を .done 消費 = 回復不能な
+                        # 賭け逃しだった)
+                        raise
+                    # 一部脚 commit 済でセッション喪失 — 再投入は二重積みになるので
+                    # req は消費 (req_terminal) しつつ daemon は fail-fast。目視確認必須。
+                    err = SessionDeadError(
+                        f"脚{i} 投入中にセッション喪失 (¥{staked:,} 分 {ok} 脚は投入済みの"
+                        f"可能性 — カートを目視確認): {ex}")
+                    err.req_terminal = True
+                    raise err from ex
                 _shot(self.page, f"bet_{netkeiba_rid}_{i}_FAILED")
                 print(f"  ! [{label or netkeiba_rid}] 脚{i} "
                       f"({leg.bet_type} {leg.key}) スキップ: {ex}")
         _shot(self.page, f"bet_{netkeiba_rid}_filled")
         self._added.add(netkeiba_rid)
         self._session_staked += staked
+        if cart_dirty:
+            # 誤組番より見送り: 自動購入せずカートを全削除して終了 (半自動でも、人が
+            # 誤組番に気づかず確定する危険があるので削除する)。
+            self._clear_cart_all(reason="カート汚染 (組数検証失敗)")
+            print(f"[oddspark_bet] {label or netkeiba_rid}: カート汚染のため当該レースの"
+                  f"投入を中止・カート全削除 (誤組番の実弾購入防止, 投入済みだった "
+                  f"{ok} 脚 ¥{staked:,} も破棄)")
+            return ("aborted", 0)
         # auto_purchase=True: ここで実際に購入確定 (実弾)。 false なら従来通り人が確定。
         if self.auto_purchase and staked > 0:
             p_status, p_msg = self._confirm_purchase(staked)
@@ -964,22 +1023,18 @@ class BettingSession:
                 # 完了画面 → 続けて投票 → まとめ画面 で次レース受入準備に戻す
                 self._continue_to_matome_after_purchase()
             else:
-                # ok 以外 (failed / skipped): cart に当該 race の脚が残っている可能性。
+                # ok 以外 (failed / partial / skipped): cart に当該 race の脚が残っている可能性。
                 # 残ったまま次レースが add_race に来て #gotobuy を押すと、leftover legs +
                 # 次レース legs が一括購入されるが daily_stake には次レース分しか加算されず
                 # **cap 突破リスク**。まずまとめ画面に戻し (確認画面に居る場合は離脱で
                 # 未確定 bet 破棄)、その後 #all a で cart 全削除して次レースへの漏れを防ぐ。
                 self._continue_to_matome_after_purchase()
-                try:
-                    da = self.page.locator(SELECTORS["delete_all"])
-                    if da.count() > 0:
-                        da.first.click()
-                        self.page.wait_for_timeout(500)
-                        print(f"  [yellow]→ {p_status} のためカート全削除 (#all a) "
-                              "で次レースへの漏れ防止[/]")
-                except Exception as ex:  # noqa: BLE001
-                    print(f"  [red]⚠ カート削除に失敗 — 次レースで leftover が一括購入される"
-                          f"危険 (手動で全買い目削除推奨): {ex}[/]")
+                self._clear_cart_all(reason=p_status)
+        elif self.auto_purchase and staked == 0:
+            # 全脚スキップ (commit 0) でも leftover が残っている可能性はゼロでないので
+            # 念のためカートを掃除してから次レースへ (2026-06-11 第5R)。
+            mode_note = "自動購入 (投入 0 脚 — skip)"
+            self._clear_cart_all(reason="投入 0 脚")
         else:
             mode_note = "**購入確定は人が押す**"
         print(f"[oddspark_bet] {label or netkeiba_rid}: {ok}/{len(legs)} 点 カート投入。"
@@ -989,6 +1044,19 @@ class BettingSession:
                   f"¥{self.max_total_stake:,} 超。**購入確定は #buylist 全体を一括購入する**ので、"
                   "レースごとに確定/クリアして溜め過ぎに注意。")
         return ("ok", ok)
+
+    def _clear_cart_all(self, reason: str = "") -> None:
+        """#all a でカートを全削除する (leftover の次レース一括購入を防ぐ)。"""
+        try:
+            da = self.page.locator(SELECTORS["delete_all"])
+            if da.count() > 0:
+                da.first.click()
+                self.page.wait_for_timeout(500)
+                print(f"  [yellow]→ {reason or '安全のため'} カート全削除 (#all a) "
+                      "で次レースへの漏れ防止[/]")
+        except Exception as ex:  # noqa: BLE001
+            print(f"  [red]⚠ カート削除に失敗 — 次レースで leftover が一括購入される"
+                  f"危険 (手動で全買い目削除推奨): {ex}[/]")
 
     def _confirm_purchase(self, race_stake: int) -> tuple[str, str]:
         """カートを #gotobuy → 確認画面 → 確定 で **実際に購入** する。**実弾**。
@@ -1035,7 +1103,17 @@ class BettingSession:
             _shot(self.page, "purchase_review_no_button")
             return ("failed",
                     "確認画面で確定ボタンが見つからない (DOM 未検証 — purchase_review screenshot 参照)")
-        self.page.wait_for_timeout(3000)
+        # ── ここから先は「不可逆ゾーン」(2026-06-11 第5R): 確定ボタンは click 済み =
+        # 確定 POST はサーバ送信済みの可能性がある。以降の page 例外を上に投げると
+        # _SESSION_DEAD_MARKERS 経由で SessionDeadError → req 残置 → daemon 再起動で
+        # **同一レースを再投入・再購入 (二重賭け)** する。例外は握って failed
+        # (結果不明・目視確認必須) に変換する — 二重賭け防止 > 賭け逃し/cap 精度。
+        try:
+            self.page.wait_for_timeout(3000)
+        except Exception as ex:  # noqa: BLE001
+            return ("failed",
+                    f"確定クリック送信済みだが直後に page 例外 — **購入された可能性あり、"
+                    f"目視確認必須** (daily_stake 未加算): {ex}")
         _shot(self.page, "purchase_after_click")
         # 3) 成功検知 — 「偽陰性」(成功なのに failed → daily_stake 未加算 → cap 緩む) と
         #    「偽陽性」(未遷移なのに success → 未購入で daily_stake 加算) を両側で防ぐ:
@@ -1053,6 +1131,7 @@ class BettingSession:
         #      daily_stake を加算しない (偽陽性 = 未購入なのに cap を消費するのを防ぐ)。
         success = False
         reject_reason = None
+        settled_amount: int | None = None   # 完了画面の「成立合計金額」(部分成立の実支出)
         import time as _t
         deadline = _t.time() + 6.0
         while _t.time() < deadline:
@@ -1069,12 +1148,32 @@ class BettingSession:
                 if has_h2 or has_marker:
                     # 完了画面には来た。ここで 不成立 を判定 (成立合計金額==0 / "不成立")。
                     reject_reason = _detect_purchase_reject(body_txt)
+                    settled_amount = _parse_settled_amount(body_txt)
                     success = reject_reason is None
                     break
-            except Exception:  # noqa: BLE001
-                pass
-            self.page.wait_for_timeout(500)
+                self.page.wait_for_timeout(500)
+            except Exception as ex:  # noqa: BLE001 — 不可逆ゾーン: page 例外を上に投げない
+                return ("failed",
+                        f"確定クリック送信済みだが結果確認中に page 例外 — **購入された"
+                        f"可能性あり、目視確認必須** (daily_stake 未加算): {ex}")
         if reject_reason is not None:
+            # 部分不成立 (2026-06-11 第5R): まとめ投票は脚ごとに ○/✕ なので、
+            # 「不成立商品があります」marker が出ても **一部の脚は成立 = 購入済み** の
+            # ことがある。成立合計金額>0 なら実支出として daily_stake に計上する
+            # (旧実装は marker 即 reject で実支出が一切計上されず cap が緩んだ)。
+            if settled_amount is not None and settled_amount > 0:
+                new_total = record_daily_stake(settled_amount)
+                return ("partial",
+                        f"部分成立 ¥{settled_amount:,} / 申込 ¥{race_stake:,} ({reject_reason})"
+                        f" — 成立分を本日累計に計上 (¥{new_total:,} / 上限¥{self.daily_cap:,})")
+            if settled_amount is None:
+                # marker のみで成立金額が読めない — cap ゲートは過大計上が安全側なので
+                # 申込全額を計上して人の目視確認を促す。
+                new_total = record_daily_stake(race_stake)
+                return ("failed",
+                        f"投票不成立 marker 検出だが成立金額を読めず — 安全側で申込額 "
+                        f"¥{race_stake:,} を本日累計に計上 (¥{new_total:,})。"
+                        f"**目視確認推奨** ({reject_reason})")
             return ("failed",
                     f"投票不成立 — 購入されていません ({reject_reason})。締切後/オッズ無効/資金不足等。"
                     " daily_stake は加算しない (purchase_after_click screenshot 参照)")
@@ -1222,6 +1321,17 @@ def _process_bet_queue_once(sess, attempts: dict, max_attempts: int = 3) -> None
             status, _ok = sess.add_race(rid, legs, label=label)
             if status == "dup":
                 print(f"[oddspark_bet] {rid} は投入済 (skip)")
+        except SessionDeadError as ex:
+            # add_race 内で「一部脚 commit 済」と判定されたセッション喪失は req を消費する
+            # (再起動 → 再投入の二重積み防止, 2026-06-11 第5R)。それ以外は req 残置。
+            if getattr(ex, "req_terminal", False):
+                try:
+                    req.rename(req.with_suffix(".done"))
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"[oddspark_bet] {rid}: 一部脚投入済みでセッション喪失 — req は消費 "
+                      f"(二重投入防止)。**カートを目視確認**: {ex}")
+            raise
         except OddsparkBetError as ex:
             if _is_session_dead_error(ex):
                 print(f"[oddspark_bet] {rid}: セッション/ブラウザ喪失 — req 残置で daemon 終了 "

@@ -314,9 +314,14 @@ def _enqueue_ipat_bet(race_id: str, netkeiba_rid: str) -> bool:
 FAILED_RETRY_COOLDOWN_SEC = 300
 
 
-def _recently_failed(race_id: str, now_ts: int, cooldown_sec: int = FAILED_RETRY_COOLDOWN_SEC) -> bool:
+def _recently_failed(race_id: str, now_ts: int, cooldown_sec: int = FAILED_RETRY_COOLDOWN_SEC,
+                     phase: str | None = None) -> bool:
     """history を遡って race_id が直近 cooldown_sec 秒以内に rc != 0 で
-    失敗していたかを返す。True なら skip 推奨。"""
+    失敗していたかを返す。True なら skip 推奨。
+
+    phase を渡すと当該 phase の失敗のみを数える。bet 発火の cooldown 判定が
+    score 段の失敗 (LLM timeout 等) まで拾うと、予約プリパスの「score 失敗でも
+    モデルのみで bet 発火」が丸ごとブロックされる (2026-06-11 bughunt 第5R)。"""
     if not HISTORY_FILE.exists():
         return False
     cutoff = now_ts - cooldown_sec
@@ -328,6 +333,8 @@ def _recently_failed(race_id: str, now_ts: int, cooldown_sec: int = FAILED_RETRY
             except json.JSONDecodeError:
                 continue
             if rec.get("race_id") != race_id:
+                continue
+            if phase is not None and rec.get("phase") != phase:
                 continue
             if rec.get("rc", 0) == 0:
                 continue  # success は cooldown 対象外 (analyzed cache が別途扱う)
@@ -745,7 +752,7 @@ def _run_phase(
         if rid in analyzed:
             console.print(f"[dim]skip ({phase} 済): {tag} {rid}[/dim]")
             continue
-        if _recently_failed(rid, int(time.time())):
+        if _recently_failed(rid, int(time.time()), phase=phase):
             console.print(
                 f"[dim]skip (recently failed, cooldown {FAILED_RETRY_COOLDOWN_SEC}s): {tag} {rid}[/dim]"
             )
@@ -852,9 +859,18 @@ MIN_FIRE_RUNWAY_SEC = int(os.environ.get("KEIBA_MIN_FIRE_RUNWAY") or 40)
 # 並列化は安全。直列だと同時締切ペアの2件目が dispatch 1件分 (31-95s) 遅れて締切超過
 # する (2026-06-11 bughunt — 実データに gap=0s の同時締切ペアが日常的に存在)。
 FIRE_MAX_PARALLEL = int(os.environ.get("KEIBA_FIRE_MAX_PARALLEL") or 3)
-# bet 発火の失敗再試行 cooldown (秒)。恒常失敗レース (取消等) が close_at 最小のため
-# 毎 pass 先頭で再 dispatch されて後続をブロックするのを防ぐ。
+# bet 発火の失敗再試行 cooldown (秒) の上限。恒常失敗レース (取消等) が close_at 最小の
+# ため毎 pass 先頭で再 dispatch されて後続をブロックするのを防ぐ。実際の cooldown は
+# 発火窓幅 (bet_lead − MIN_FIRE_RUNWAY) から導出する — 固定 120s は既定窓幅 110s 以上で、
+# unclaim 後の再試行スロットが数学的に存在せず一過性失敗が全て賭け逃しになっていた
+# (2026-06-11 bughunt 第5R)。
 FIRE_FAILED_COOLDOWN_SEC = 120
+
+
+def _fire_cooldown_sec(bet_lead_sec: int) -> int:
+    """発火窓幅の 1/3 (最低 15s) — 窓内に最低 2 回の再試行スロットを保証する。"""
+    return min(FIRE_FAILED_COOLDOWN_SEC,
+               max(15, (bet_lead_sec - MIN_FIRE_RUNWAY_SEC) // 3))
 
 
 def _fire_due_bets(
@@ -903,8 +919,10 @@ def _fire_due_bets(
             _remove_bet_schedule(rid)
             continue
         # 直近で dispatch 失敗したレースは cooldown (恒常失敗レースが毎 pass 先頭で
-        # 後続をブロックするのを防ぐ。締切が来れば上の破棄ガードが掃除する)
-        if _recently_failed(rid, now, cooldown_sec=FIRE_FAILED_COOLDOWN_SEC):
+        # 後続をブロックするのを防ぐ。締切が来れば上の破棄ガードが掃除する)。
+        # phase="bet" 限定 — score 失敗で bet 発火をブロックしない (2026-06-11 第5R)。
+        if _recently_failed(rid, now, cooldown_sec=_fire_cooldown_sec(bet_lead_sec),
+                            phase="bet"):
             console.print(f"[dim]bet 発火 skip (failed cooldown): {rid}[/dim]")
             continue
         tag = f"{race.get('venue')} {race.get('race_no')}R 締切まで {secs}s"
@@ -937,23 +955,11 @@ def _fire_due_bets(
                                         no_llm=no_llm, phase="bet", llm_blend=llm_blend)
         return race, rc, started, int(time.time())
 
-    results: list[tuple[dict, int, int, int]] = []
-    if len(to_fire) == 1:
-        results.append(_dispatch_one(to_fire[0]))
-    else:
-        import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=FIRE_MAX_PARALLEL) as ex:
-            futs = {ex.submit(_dispatch_one, r): r for r in to_fire}
-            for f in _cf.as_completed(futs):
-                try:
-                    results.append(f.result())
-                except Exception as e:  # noqa: BLE001
-                    r = futs[f]
-                    console.print(f"[red]bet 発火 dispatch 例外 race={r['race_id']}: {e}[/red]")
-                    _unclaim_bet_schedule(r["race_id"])
-
-    # ── phase 3: 逐次後処理 (mark/enqueue/result fetch) ──
-    for race, rc, started, finished in results:
+    # ── phase 3: per-race 後処理 (mark/enqueue/result fetch) — dispatch 完了の都度実行 ──
+    # 全 future のバリア後に一括処理すると、先に終わったレースの enqueue が最遅 dispatch
+    # (31-95s) 分遅延し、daemon の poll+カート投入が締切を跨いで不成立になる
+    # (2026-06-11 bughunt 第5R)。軽い file I/O のみなのでメインスレッドで即時実行する。
+    def _post_one(race: dict, rc: int, started: int, finished: int) -> None:
         rid = race["race_id"]
         close_at = int(race.get("close_at") or 0)
         nkrid = race.get("netkeiba_race_id", rid)
@@ -967,32 +973,60 @@ def _fire_due_bets(
         if rc != 0:
             console.print(f"[red]bet 発火 analyze 失敗 rc={rc} race={rid} (cooldown 後再試行)[/red]")
             _unclaim_bet_schedule(rid)   # 予約に戻す (締切前なら cooldown 後に再試行)
-            continue
+            return
         _mark_analyzed(rid, "bet")
         _release_bet_claim(rid)
         # 締切再チェック: dispatch 完了が締切を跨いだら enqueue しない
         # (daemon 投入は不成立確定 — 計測と実投票の乖離を防ぐ, 2026-06-11 bughunt)
         if close_at and int(time.time()) >= close_at:
             console.print(f"[yellow]enqueue skip (dispatch 完了が締切後): {rid}[/yellow]")
-            continue
-        if bet_oddspark:
-            try:
-                if _enqueue_oddspark_bet(rid, nkrid):
-                    console.print(f"  [magenta]→ oddspark betting queue に投入:[/magenta] {rid}")
-            except Exception as e:  # noqa: BLE001
-                console.print(f"[red]oddspark enqueue 失敗: {e}[/red]")
-        if bet_ipat:
-            try:
-                if _enqueue_ipat_bet(rid, nkrid):
-                    console.print(f"  [magenta]→ 即PAT betting queue に投入:[/magenta] {rid}")
-            except Exception as e:  # noqa: BLE001
-                console.print(f"[red]ipat enqueue 失敗: {e}[/red]")
+        else:
+            if bet_oddspark:
+                try:
+                    if _enqueue_oddspark_bet(rid, nkrid):
+                        console.print(f"  [magenta]→ oddspark betting queue に投入:[/magenta] {rid}")
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[red]oddspark enqueue 失敗: {e}[/red]")
+            if bet_ipat:
+                try:
+                    if _enqueue_ipat_bet(rid, nkrid):
+                        console.print(f"  [magenta]→ 即PAT betting queue に投入:[/magenta] {rid}")
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[red]ipat enqueue 失敗: {e}[/red]")
+        # result fetch は enqueue と独立に予約する — snapshot は保存済みなので、
+        # 結果を取らないと計測 (較正レポート) から系統的に欠落する孤児になる
+        # (2026-06-11 bughunt 第5R: 旧実装は締切跨ぎの continue で道連れ skip)。
         try:
             p = schedule_result_fetch(rid, race.get("url", ""), race.get("start_at", 0))
             if p.status == "pending":
                 console.print(f"  [cyan]→ result fetch scheduled:[/cyan] {rid}")
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]schedule_result_fetch 失敗: {e}[/red]")
+
+    if len(to_fire) == 1:
+        race = to_fire[0]
+        try:
+            _post_one(*_dispatch_one(race))
+        except Exception as e:  # noqa: BLE001
+            # 例外でも claim を予約に戻す (旧実装はリークして恒久的賭け逃し, 第5R)
+            console.print(f"[red]bet 発火 dispatch 例外 race={race['race_id']}: {e}[/red]")
+            _unclaim_bet_schedule(race["race_id"])
+    else:
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=FIRE_MAX_PARALLEL) as ex:
+            futs = {ex.submit(_dispatch_one, r): r for r in to_fire}
+            for f in _cf.as_completed(futs):
+                r = futs[f]
+                try:
+                    race, rc, started, finished = f.result()
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[red]bet 発火 dispatch 例外 race={r['race_id']}: {e}[/red]")
+                    _unclaim_bet_schedule(r["race_id"])
+                    continue
+                try:
+                    _post_one(race, rc, started, finished)
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[red]bet 発火 後処理 例外 race={r['race_id']}: {e}[/red]")
     _drain_pending(label="post-bet")
 
 

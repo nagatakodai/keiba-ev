@@ -179,12 +179,15 @@ export default async function PredictionDetailPage({
         // api/store.py の計測規則と揃える (乖離すると dashboard と headline が矛盾する)。
         const tParticipated = d.recommended_bundle_t?.rank_source === "claude" &&
           Array.isArray(tLegs) && tLegs.length > 0;
+        // 同着フォールバック (payoutTableOf): backend の _leg_hit と同規則で判定
+        // (乖離すると headline が dashboard/一覧と矛盾する, 2026-06-11 第5R)。
+        const pt = payoutTableOf(d.result);
         const tHit = !!(finish && tParticipated &&
-          tLegs!.some((l) => betHits(l.bet_type, l.key, finish, nRunners)));
+          tLegs!.some((l) => betHits(l.bet_type, l.key, finish, nRunners, pt)));
         const bundleLegs = d.recommended_bundle?.legs;
         const bundleEmpty = !Array.isArray(bundleLegs) || bundleLegs.length === 0;
         const bundleHit = !!(finish && bundleLegs && bundleLegs.length > 0 &&
-          bundleLegs.some((l) => betHits(l.bet_type, l.key, finish, nRunners)));
+          bundleLegs.some((l) => betHits(l.bet_type, l.key, finish, nRunners, pt)));
         const useEv = isEvMeasured(d.saved_at);
         const useTrifecta = !useEv && tParticipated;
         const skipped = useEv ? bundleEmpty : useTrifecta ? false : bundleEmpty;
@@ -372,13 +375,29 @@ function nRunnersOf(d: PredictionDetail): number | null {
   return null;
 }
 
+// 同着 (dead heat) フォールバック用の払戻テーブル (api/store.py _leg_hit と同規則,
+// 2026-06-11 第5R): netkeiba-html result の final_odds は**払戻があった組のみ**載る
+// payout テーブルなので、finish_order (同着の片側しか持てない) と不一致でも
+// テーブルに載っていれば実払戻あり = 的中。keibago/jra/auto の final_odds は
+// 束の全脚の odds snapshot (的中と無関係に載る) なので使わない。
+function payoutTableOf(
+  result?: PredictionDetail["result"],
+): Record<string, number> | null {
+  if (!result || result.source !== "netkeiba-html") return null;
+  const fo = result.final_odds;
+  return fo && Object.keys(fo).length > 0 ? fo : null;
+}
+
 // bet type ごとの finish 的中判定 (既存の placeHits/wideHits/finishKeyForBetType を流用)。
+// payoutTable (payoutTableOf の戻り値) を渡すと同着フォールバックも判定する。
 function betHits(
   betType: string,
   key: number[],
   finish?: number[],
   nRunners?: number | null,
+  payoutTable?: Record<string, number> | null,
 ): boolean {
+  if (payoutTable && payoutTable[`${betType}:${key.join("-")}`] != null) return true;
   if (!finish) return false;
   if (betType === "place") return placeHits(key, finish, nRunners);
   if (betType === "wide") return wideHits(key, finish);
@@ -398,6 +417,7 @@ function quarterKelly(kelly: number): number {
 function collectEfficientCandidates(d: PredictionDetail, finish?: number[]): EffCandidate[] {
   const out: EffCandidate[] = [];
   const nR = nRunnersOf(d);
+  const pt = payoutTableOf(d.result);
   const seen = new Set<string>();
   const push = (
     betType: string,
@@ -413,7 +433,7 @@ function collectEfficientCandidates(d: PredictionDetail, finish?: number[]): Eff
     const id = `${betType}:${key.join("-")}`;
     if (seen.has(id)) return;
     seen.add(id);
-    out.push({ betType, key, prob, odds, pxo, tier, kelly, hit: betHits(betType, key, finish, nR) });
+    out.push({ betType, key, prob, odds, pxo, tier, kelly, hit: betHits(betType, key, finish, nR, pt) });
   };
   // 3 連単: LLM 補強後があれば優先
   const triRows = d.evidence_rows ?? d.rows;
@@ -498,6 +518,7 @@ function TopRecommendationCard({
         finalOdds={d.result?.final_odds}
         evRegime={isEvMeasured(d.saved_at)}
         nRunners={nRunnersOf(d)}
+        payoutTable={payoutTableOf(d.result)}
       />
     );
   }
@@ -574,7 +595,8 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
   if (!b || !b.legs || b.legs.length === 0) return null;
   const settled = !!finish && finish.length >= 3;
   const nR = nRunnersOf(d);
-  const hit = !!(finish && b.legs.some((l) => betHits(l.bet_type, l.key, finish, nR)));
+  const pt = payoutTableOf(d.result);
+  const hit = !!(finish && b.legs.some((l) => betHits(l.bet_type, l.key, finish, nR, pt)));
   const osum = b.odds_summary;
   const torigamiOn = (b.dropped_torigami ?? 0) >= 0 && b.min_payout_ratio != null;
   // Claude 指数なし (model 縮退) の3連単束は自動投票されない (auto_watch/daemon が enqueue を skip)。
@@ -595,9 +617,24 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
           {recovery && b.excluded_head != null && (
             <Badge tone="info">1着除外: 馬{b.excluded_head} (市場1番人気)</Badge>
           )}
-          {recovery && b.excluded_head == null && b.market_favorite != null && (
-            <Badge tone="magenta">1番人気 馬{b.market_favorite} 指数{Math.round(b.favorite_claude_index ?? 0)}{">"}90 で1着解禁</Badge>
-          )}
+          {recovery && b.excluded_head == null && b.market_favorite != null && (() => {
+            // 解禁理由は2系統 (src/analyze.py _recovery_exclude_head): ①鉄板帯
+            // (単勝<1.5 — 指数と無関係) ②Claude 指数>90。snapshot に理由が無いので
+            // 指数で判別する (旧表示は常に「指数X>90」で、鉄板帯解禁に虚偽の理由が
+            // 付いていた, 2026-06-11 第5R)。
+            const idx = b.favorite_claude_index;
+            const byIndex = idx != null && idx > 90;
+            const favOdds = d.bet_tables?.win?.find(
+              (r) => r.key[0] === b.market_favorite)?.odds;
+            return (
+              <Badge tone="magenta">
+                1番人気 馬{b.market_favorite}{" "}
+                {byIndex
+                  ? `指数${Math.round(idx!)}>90 で1着解禁`
+                  : `鉄板帯 (単勝${favOdds != null ? ` ${favOdds.toFixed(1)}` : ""}<1.5) で1着解禁`}
+              </Badge>
+            );
+          })()}
           {claudeSelected && <Badge tone="magenta">Claude 買い目選定</Badge>}
           {b.formation && <Badge tone="info">{b.formation} フォーメーション</Badge>}
           {claudeMissing && <Badge tone="bad">Claude指数なし→自動投票対象外</Badge>}
@@ -609,8 +646,9 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
         市場(オッズ)をランキングに一切使わず、<b>{rankLabel}</b>の上位を本命に3連単フォーメーションを組む。
         {recovery && (
           <>
-            <b>回収モード (穴狙い)</b>: 市場1番人気は Claude 指数が 90 を超えない限り
-            <b>1着に置かない</b> (2着・3着は可)。市場情報はこの除外判定のみに使用。{" "}
+            <b>回収モード (穴狙い)</b>: 市場1番人気は <b>鉄板帯 (単勝1.5倍未満)</b> か
+            Claude 指数が 90 を超えない限り<b>1着に置かない</b> (2着・3着は可)。
+            市場情報はこの除外判定のみに使用。{" "}
           </>
         )}
         1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
@@ -656,7 +694,7 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
         </div>
       )}
       <div className="mt-4">
-        <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} droppedLegs={b.dropped_legs} nRunners={nR} />
+        <BundleLegsTable legs={b.legs} finish={finish} finalOdds={d.result?.final_odds} droppedLegs={b.dropped_legs} nRunners={nR} payoutTable={pt} />
       </div>
       <TrifectaStakePreview bundle={b} />
       <p className="mt-3 text-xs text-(--color-muted)">
@@ -683,6 +721,7 @@ function BundleLegsTable({
   finalOdds,
   droppedLegs,
   nRunners,
+  payoutTable,
 }: {
   legs: BundleLeg[];
   finish?: number[];
@@ -692,6 +731,8 @@ function BundleLegsTable({
   droppedLegs?: DroppedLeg[];
   // 出走頭数 (複勝の頭数ルール用)。null/未指定なら従来 top-3 判定。
   nRunners?: number | null;
+  // 同着フォールバック用 payout テーブル (payoutTableOf の戻り値)。
+  payoutTable?: Record<string, number> | null;
 }) {
   const hasFinal = !!finalOdds && Object.keys(finalOdds).length > 0;
   const dropped = droppedLegs ?? [];
@@ -717,7 +758,7 @@ function BundleLegsTable({
         <tbody>
           {legs.map((l) => {
             const k = l.key.join("-");
-            const hit = betHits(l.bet_type, l.key, finish, nRunners);
+            const hit = betHits(l.bet_type, l.key, finish, nRunners, payoutTable);
             const fo = finalOdds?.[`${l.bet_type}:${k}`];
             // 予想→最終で乖離した方向に色付け (上昇=緑/下落=赤)。
             const foTone =
@@ -824,6 +865,7 @@ function BundleCard({
   finalOdds,
   evRegime = false,
   nRunners,
+  payoutTable,
 }: {
   bundle: RecommendedBundle;
   finish?: number[];
@@ -835,6 +877,8 @@ function BundleCard({
   evRegime?: boolean;
   // 出走頭数 (複勝の頭数ルール用)。null/未指定なら従来 top-3 判定。
   nRunners?: number | null;
+  // 同着フォールバック用 payout テーブル (payoutTableOf の戻り値)。
+  payoutTable?: Record<string, number> | null;
 }) {
   const isHit = variant === "hit";
   const legs = bundle.legs ?? [];
@@ -843,7 +887,9 @@ function BundleCard({
   const halfApplied = (bundle.kelly_fraction ?? 1) <= 0.75;
   const half = Math.round(bundle.total_stake / 2 / 100) * 100;
   const nTypes = new Set(legs.map((l) => l.bet_type)).size;
-  const bundleHit = finish ? legs.some((l) => betHits(l.bet_type, l.key, finish, nRunners)) : false;
+  const bundleHit = finish || payoutTable
+    ? legs.some((l) => betHits(l.bet_type, l.key, finish, nRunners, payoutTable))
+    : false;
   // EV束は 2026-06-06 以降モデルのみの参考値 (claude -p 検証=回収優先AI は撤去、投票しない)。
   // validated バッジは旧 snapshot の記録としてのみ表示される。
   const validated = !isHit && bundle.llm_review?.validated === true;
@@ -940,7 +986,7 @@ function BundleCard({
               }
             />
           </div>
-          <BundleLegsTable legs={legs} finish={finish} finalOdds={finalOdds} nRunners={nRunners} />
+          <BundleLegsTable legs={legs} finish={finish} finalOdds={finalOdds} nRunners={nRunners} payoutTable={payoutTable} />
           {bundle.llm_review?.validated && (bundle.llm_review.summary || (bundle.llm_review.cuts?.length ?? 0) > 0) && (
             <div className="mt-3 rounded-md border border-(--color-magenta)/30 bg-(--color-magenta)/5 p-3 text-xs">
               <span className="font-bold text-(--color-magenta)">claude -p 調査:</span>{" "}
