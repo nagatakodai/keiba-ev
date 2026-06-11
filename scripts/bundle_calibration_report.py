@@ -132,12 +132,14 @@ def main() -> None:
         fo = r["finish_order"]
         final = r.get("final_odds") or {}
         tri_payout = r.get("trifecta_payout")
-        # 出走頭数 (複勝の頭数ルール用)。win_probs_model → bet_tables.win で推定。
-        n_runners = None
-        for src_field in (d.get("win_probs_model"), (d.get("bet_tables") or {}).get("win")):
-            if src_field:
-                n_runners = len(src_field)
-                break
+        # 出走頭数 (複勝の頭数ルール用)。snapshot の n_runners (権威値, 2026-06-11〜) を
+        # 最優先、無ければ win_probs_model → bet_tables.win で推定。
+        n_runners = d.get("n_runners") or None
+        if not n_runners:
+            for src_field in (d.get("win_probs_model"), (d.get("bet_tables") or {}).get("win")):
+                if src_field:
+                    n_runners = len(src_field)
+                    break
 
         for kind, b in (("ev", d.get("recommended_bundle")),
                         ("t", d.get("recommended_bundle_t"))):
@@ -147,7 +149,9 @@ def main() -> None:
                 mode = b.get("mode") or "hit(旧)"
                 label = f"3連単束/{mode}/{b.get('rank_source') or '?'}"
             else:
-                label = "EV束"
+                # backfill された束 (実際には賭けていない paper) は実弾系列と分離する
+                # (2026-06-11 第5R: 混ぜると EV束 ROI が paper 込みの数字になる)。
+                label = "EV束(backfill)" if b.get("backfilled") else "EV束"
             s = series[label]
             s["n"] += 1
             race_hit = False

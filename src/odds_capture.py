@@ -95,7 +95,10 @@ def main(
     )
     while True:
         now = time.time()
-        if not races or now - last_discovery >= discovery_interval:
+        # discovery 0 件 (開催なし/全ソース不調) でも interval を尊重する — `not races`
+        # を条件に入れると毎 poll tick (60s) で公式ソースへ discovery を打ち続ける
+        # (2026-06-11 bughunt 第5R)。初回は last_discovery=0 なので必ず走る。
+        if now - last_discovery >= discovery_interval:
             today = datetime.fromtimestamp(now).strftime("%Y%m%d")
             races = discover_today_races(today)
             last_discovery = now

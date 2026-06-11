@@ -401,12 +401,26 @@ def parse_jra_past_runs(html: str, *, limit: int = 12) -> list[PastRun]:
             jockey=cells[8],
             weight_kg=float(cells[9]) if re.fullmatch(r"[\d.]+", cells[9]) else 0.0,
             body_weight=int(cells[10]) if cells[10].isdigit() else 0,
-            winner_time_sec=_parse_time_to_sec(cells[11]),
+            winner_time_sec=_parse_jra_time(cells[11]),
             time_diff_sec=0.0,
         ))
         if len(out) >= limit:
             break
     return out
+
+
+# accessU の走破タイムは 60 秒未満 (JRA 1000m 戦等) だと "57.8" (コロン無し)。
+# parse._parse_time_to_sec は M:SS.D 形式しか受けず 0.0 に落ちていた (2026-06-11 第5R:
+# cache 実測で 1000m 走 14/14 が time==0 = スプリント馬の持ち時計が系統的に欠落)。
+_PLAIN_SEC_RE = re.compile(r"^\s*(\d{1,2}\.\d)\s*$")
+
+
+def _parse_jra_time(text: str) -> float:
+    sec = _parse_time_to_sec(text)
+    if sec > 0:
+        return sec
+    m = _PLAIN_SEC_RE.match(text or "")
+    return float(m.group(1)) if m else 0.0
 
 
 def fetch_jra_past_runs(horse_id: str, *, limit: int = 12) -> list[PastRun]:
@@ -614,7 +628,21 @@ def _load_jra_pastruns(netkeiba_rid: str) -> dict[int, list[PastRun]] | None:
         return None
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-        return {int(k): [PastRun(**r) for r in runs] for k, runs in raw.items()}
+        out: dict[int, list[PastRun]] = {}
+        for k, runs in raw.items():
+            prs = []
+            for r in runs:
+                # 旧語彙キャッシュの正規化 (2026-06-11 第5R): surface 修正 (「ダ」→
+                # 「ダート」) 以前に保存された cache をそのまま読むと修正済バグ
+                # (ダート走が芝基準で指数化) が再発する。
+                s = r.get("surface")
+                if s == "ダ":
+                    r["surface"] = "ダート"
+                elif s == "障":
+                    r["surface"] = "障害"
+                prs.append(PastRun(**r))
+            out[int(k)] = prs
+        return out
     except Exception:  # noqa: BLE001
         return None
 
@@ -673,7 +701,9 @@ def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
             hid = info.get(h.number, {}).get("horse_id", "")
             if hid:
                 by_num[h.number] = fetch_jra_past_runs(hid)
-        if by_num:
+        # 全馬 0 走 (網羅的 fetch 失敗 / DOM 変化) は恒久キャッシュしない — 空 dict を
+        # 保存すると bet 帯以降この race の馬柱が二度と再試行されない (2026-06-11 第5R)。
+        if any(by_num.values()):
             _save_jra_pastruns(netkeiba_rid, by_num)
     if by_num:
         for h in horses:
@@ -791,11 +821,11 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
     best_times = az_mod._serialize_best_times(rd, feats) if feats else []
 
     # 2段パイプライン score ステージ: Claude 指数をキャッシュし即 return。
+    # no_llm でも呼ぶ (オッズ時系列キャプチャは LLM と独立, 2026-06-11 第5R)。
     if phase == "score":
-        if with_llm:
-            az_mod._run_score_stage(
-                race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
-                horse_best_times=best_times, model="opus")
+        az_mod._run_score_stage(
+            race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
+            horse_best_times=best_times, model="opus", no_llm=not with_llm)
         return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
@@ -830,7 +860,9 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
              for tbl in tables.values() for r in tbl]
     cands += [{"bet_type": "trifecta", "key": list(r.key), "odds": r.odds,
                "prob": r.prob, "px_o": r.px_o, "tier": r.tier} for r in tri_table]
-    bundle = pf.build_bundle(cands, probs)
+    # CLI 表示束も production と同じ ½Kelly + env bankroll (2026-06-11 第5R)。
+    bundle = pf.build_bundle(cands, probs, kelly_fraction=0.5,
+                             bankroll=az_mod._ev_bankroll())
     bundle["source"] = "jra"
     tables["trifecta"] = tri_table
 
@@ -847,7 +879,8 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
                 # bet 段のみ到達 (score 段は上で early return)。3連単買い目選定を Claude に任せる。
-                claude_trifecta_select=True)
+                # --no-llm (with_llm=False) ではキルスイッチとして選定も止める (2026-06-11 第5R)。
+                claude_trifecta_select=with_llm)
             _tag_snapshot_source(race_id, "jra")
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_jra] snapshot 保存失敗: {ex}")

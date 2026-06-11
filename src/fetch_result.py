@@ -96,6 +96,26 @@ def _log(msg: str, url: str) -> None:
 def save_result(race_id: str, payload: dict, *, note: str = "") -> Path:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out = RESULTS_DIR / f"{race_id}.json"
+    # 既存 result の保護 (2026-06-11 bughunt 第5R): 手動 record (source キー無し) は
+    # 権威として上書きしない (record CLI 側は --overwrite 必須なのに auto 側が無条件
+    # 上書きで非対称だった)。finish 一致時のみ final_odds/payout を補完する。
+    # auto 由来の既存は従来通り上書きするが、手動付与の note は保持する。
+    if out.exists():
+        try:
+            existing = json.loads(out.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            existing = {}
+        if existing.get("finish_order") and "source" not in existing:
+            if (payload.get("final_odds") and not existing.get("final_odds")
+                    and list(existing["finish_order"][:3]) == list(payload["finish_order"][:3])):
+                existing["final_odds"] = payload["final_odds"]
+                if not existing.get("trifecta_payout") and payload.get("payout"):
+                    existing["trifecta_payout"] = payload["payout"]
+                out.write_text(json.dumps(existing, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+            return out
+        if existing.get("note") and not note:
+            note = existing["note"]
     data = {
         "race_id": race_id,
         "finish_order": payload["finish_order"],

@@ -363,10 +363,11 @@ type EffCandidate = {
   hit: boolean;
 };
 
-// 出走頭数の推定 (複勝の頭数ルール用): win_probs_model → bet_tables.win →
-// horse_aptitude の順 (api/store.py の n_runners 推定と同じ規則)。≤18 頭なので
-// bet_tables.win の top-30 cap には掛からない = 実頭数。不明なら null (従来 top-3)。
+// 出走頭数 (複勝の頭数ルール用): snapshot の n_runners (権威値, 2026-06-11〜) を最優先。
+// 旧 snapshot は win_probs_model → bet_tables.win → horse_aptitude の順で推定
+// (api/store.py と同じ規則)。不明なら null (従来 top-3)。
 function nRunnersOf(d: PredictionDetail): number | null {
+  if (d.n_runners && d.n_runners > 0) return d.n_runners;
   const wpm = d.win_probs_model;
   if (wpm && Object.keys(wpm).length > 0) return Object.keys(wpm).length;
   const win = d.bet_tables?.win;

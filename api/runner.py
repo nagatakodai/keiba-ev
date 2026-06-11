@@ -605,6 +605,11 @@ class WatchAutoManager:
                     llm_blend=self._config.get("llm_blend"))
             return self.job
 
+        # フル開始経路でも legacy 60 を migrate する (2026-06-11 第5R): UI は表示中の
+        # config 値をそのまま送り返すので、ここで migrate しないと「旧 state を一度
+        # UI から再開始 → 60 が watch loop コマンドと persist に再生産」される
+        # (scheduler 側だけ migrate されて発火タイミングが二重化する)。
+        bet_lead_sec = _migrate_lead(bet_lead_sec)
         # ── フル開始経路: ここで初めて env をリクエスト値で確定する ──
         # 投票束の切替 (2026-06-10 復活): env KEIBA_BET_BUNDLE で auto_watch (enqueue 判定) と
         # 投票 daemon (oddspark/ipat, 同 env を継承) に伝播。ev=EV束 (既定) / trifecta=3連単束。

@@ -767,11 +767,11 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
     best_times = az_mod._serialize_best_times(rd, feats) if feats else []
 
     # 2段パイプライン score ステージ: Claude 指数をキャッシュし即 return (keibago/jra と同形)。
+    # no_llm でも呼ぶ (オッズ時系列キャプチャは LLM と独立, 2026-06-11 第5R)。
     if phase == "score":
-        if with_llm:
-            az_mod._run_score_stage(
-                race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
-                horse_best_times=best_times, model="opus")
+        az_mod._run_score_stage(
+            race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
+            horse_best_times=best_times, model="opus", no_llm=not with_llm)
         return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
@@ -802,7 +802,9 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
          "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
         for r in tri_table
     ]
-    bundle = pf.build_bundle(cands, probs)
+    # CLI 表示束も production と同じ ½Kelly + env bankroll (2026-06-11 第5R)。
+    bundle = pf.build_bundle(cands, probs, kelly_fraction=0.5,
+                             bankroll=az_mod._ev_bankroll())
     bundle["source"] = "oddspark"
     tables["trifecta"] = tri_table
 

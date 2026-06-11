@@ -45,6 +45,13 @@ OUT_PATH = ROOT / "data" / "models" / "blend_mle.json"
 sys.path.insert(0, str(ROOT))
 from src.ev import power_method_overround  # noqa: E402
 
+# bet_tables.win の prob が市場フリー fundamental だった era (live β=0 実験):
+# 1cfd81e (2026-06-01 19:58) 〜 ce8cb64 (2026-06-10 17:16)。**それ以前 (〜06-01) は
+# live β=0.78 でブレンド済み** — 旧実装はこれを「旧 snapshot = 市場フリー」と誤って
+# f に投入しており、α の推定が市場込みデータで汚染されていた (2026-06-11 bughunt 第5R)。
+_BETA0_ERA_START = "2026-06-01T20:00"
+_BETA0_ERA_END = "2026-06-10T17:16"
+
 
 def load_races(since: str | None):
     """(log f, log π, winner_idx) の配列リストを返す。"""
@@ -66,16 +73,17 @@ def load_races(since: str | None):
         odds = {row["key"][0]: row["odds"] for row in win_rows if row.get("odds", 0) > 0}
         if len(odds) < 3:
             continue
-        # f: 新フィールド優先、無ければ旧 β=0 時代の bet_tables.win prob。
-        # 新レジーム (model_no_info キーあり = MARKET_BLEND_LIVE=0.78 以降) なのに
-        # win_probs_model が無い snapshot は bet_tables.win が市場ブレンド済みで
-        # fundamental 不明 → fit から除外 (混ぜると α が市場へ偽膨張する)。
+        # f: 新フィールド (win_probs_model, 2026-06-10 17:16〜) 優先。無ければ
+        # **β=0 era (06-01 20:00〜06-10 17:16) の snapshot のみ** bet_tables.win prob を
+        # 市場フリーとして使える。それ以外 (〜06-01 の β=0.78 era / 新レジームで
+        # フィールド欠落) はブレンド済みで fundamental 不明 → fit から除外。
         wpm = d.get("win_probs_model")
         if wpm:
             f = {int(k): float(v) for k, v in wpm.items()}
-        elif "model_no_info" in d:
-            continue
         else:
+            sa = d.get("saved_at") or ""
+            if not (_BETA0_ERA_START <= sa <= _BETA0_ERA_END):
+                continue
             f = {row["key"][0]: row.get("prob") or 0.0 for row in win_rows}
         horses = [n for n in odds if f.get(n, 0.0) > 0]
         if len(horses) < 3 or fo[0] not in horses:

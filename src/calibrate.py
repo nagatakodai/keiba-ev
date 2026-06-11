@@ -76,10 +76,13 @@ def main(
             return pred.get(f"plan_{plan_short}_keys", raw_default)
 
         race_plan_results = {}
+        # A/B/C も「キー不在 = 集計対象外」(None) にする (2026-06-11 第5R: 既定 [] だと
+        # plan キーを持たない現行 snapshot (2026-05-29 以降は束ベース) が全レース
+        # 「Plan A 0点参加」として races に計上され、表が幻の Plan で埋まる)。
         plan_specs = (
-            ("Plan A", _picks("a", [])),
-            ("Plan B", _picks("b", [])),
-            ("Plan C", _picks("c", [])),
+            ("Plan A", _picks("a")),
+            ("Plan B", _picks("b")),
+            ("Plan C", _picks("c")),
             ("Plan G", _picks("g")),
             ("Plan H1", _picks("h1")),
             ("Plan H2", _picks("h2")),
@@ -164,6 +167,11 @@ def _print_tier_table(tier_stats: dict[str, dict]) -> None:
 
 
 def _print_plan_table(plan_stats: dict[str, dict], point_cost: int) -> None:
+    if all(s["races"] == 0 for s in plan_stats.values()):
+        console.print(
+            "[yellow]Plan キーを持つ snapshot がありません (2026-05-29 以降は束ベース)。"
+            "実弾束の計測は scripts/bundle_calibration_report.py を使ってください。[/yellow]")
+        return
     tbl = Table(title=f"Plan 別 ROI (1点 ¥{point_cost})", show_lines=False)
     tbl.add_column("Plan", style="bold")
     tbl.add_column("races", justify="right")
@@ -183,7 +191,9 @@ def _print_plan_table(plan_stats: dict[str, dict], point_cost: int) -> None:
         participated = s["participated_races"]
         rate = s["hits"] / participated if participated else 0.0
         stake = s["total_points"] * point_cost
-        payout = s["payouts"]
+        # trifecta_payout は 1点 ¥100 基準なので point_cost に合わせてスケールする
+        # (2026-06-11 第5R: 旧実装は賭金だけスケールされ ROI が point_cost/100 分の1に歪む)
+        payout = s["payouts"] * (point_cost / 100.0)
         roi = (payout / stake) if stake > 0 else 0.0
         if roi >= 1.0:
             roi_style = "[bold green]"
@@ -199,7 +209,7 @@ def _print_plan_table(plan_stats: dict[str, dict], point_cost: int) -> None:
             f"{rate*100:.1f}%",
             str(s["total_points"]),
             f"¥{stake:,}",
-            f"¥{payout:,}",
+            f"¥{payout:,.0f}",
             f"{roi_style}{roi:.2f}×[/]",
         )
     console.print(tbl)

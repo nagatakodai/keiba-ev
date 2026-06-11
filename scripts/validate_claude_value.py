@@ -141,7 +141,14 @@ def _recover_fundamental(
         return {}
     scored = set(claude_index.keys()) & set(keys)
     L = _strength_softmax(claude_index, keys, floor)
-    logf: dict[int, float] = {}
+    # 逆算: log f_k = (log s_k − w_k·log L_k)/(1−w_k) + logZ/(1−w_k)。
+    # **w_k が馬ごとに違うと共有定数 logZ は正規化で消えない** (2026-06-11 bughunt 第5R:
+    # 旧実装は logZ を無視して renormalize しており、support 可変/未スコア馬の混在で
+    # 「Claude 剥がし後」の基準 (b) に support 相関の歪みが残っていた)。
+    # f_k = exp(base_k + logZ·inv_k) は logZ に単調なので Σf=1 を bisection で解く。
+    base: dict[int, float] = {}
+    inv: dict[int, float] = {}
+    fixed: dict[int, float] = {}   # w≈1 (情報消失) の馬は stored を近似採用
     for k in keys:
         s = max(stored_win.get(k, 0.0), 1e-12)
         if k not in scored:
@@ -150,15 +157,32 @@ def _recover_fundamental(
             mult = E._support_mult(None if support is None else support.get(k, 0))
             w = max(min(baked_blend * mult, 1.0), 0.0)
         if w >= 1.0 - 1e-9:
-            # 完全に Claude のみで上書きされた馬は fundamental が一意に決まらない
-            # (情報が消失)。stored を近似採用 (このケースは baked_blend≈1 のみ)。
-            logf[k] = math.log(s)
+            fixed[k] = s
             continue
         l = max(L.get(k, 0.0), 1e-12)
-        logf[k] = (math.log(s) - w * math.log(l)) / (1.0 - w)
-    mm = max(logf.values())
-    e = {k: math.exp(v - mm) for k, v in logf.items()}
-    return _normalize(e)
+        base[k] = (math.log(s) - w * math.log(l)) / (1.0 - w)
+        inv[k] = 1.0 / (1.0 - w)
+    if not base:
+        return _normalize(dict(fixed)) if fixed else {}
+    target = max(1.0 - sum(fixed.values()), 1e-9)
+
+    def _total(log_z: float) -> float:
+        t = 0.0
+        for k in base:
+            t += math.exp(min(base[k] + log_z * inv[k], 50.0))
+        return t
+
+    lo, hi = -80.0, 80.0
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if _total(mid) > target:
+            hi = mid
+        else:
+            lo = mid
+    log_z = (lo + hi) / 2.0
+    out = {k: math.exp(base[k] + log_z * inv[k]) for k in base}
+    out.update(fixed)
+    return _normalize(out)
 
 
 def _blend_market(fundamental: dict[int, float], market: dict[int, float], beta: float, floor: float) -> dict[int, float]:
@@ -247,8 +271,14 @@ def evaluate_race(
                     stored_win[int(k)] = float(v)
             except (ValueError, TypeError):
                 continue
-    elif "model_no_info" in snap and require_no_market_blend:
-        return {"rid": rid, "skip": "market-blended snapshot (win_probs_model 無し, β>0 レジーム)"}
+    elif require_no_market_blend:
+        # bet_tables.win が市場フリーなのは **β=0 era (1cfd81e 2026-06-01 19:58 〜
+        # ce8cb64 2026-06-10 17:16)** のみ。それ以前は live β=0.78 ブレンド済みで
+        # 旧実装 ("model_no_info キー有無" 判定) はこの era の snapshot を素通し →
+        # log-loss 比較が汚染されていた (2026-06-11 bughunt 第5R)。
+        sa = snap.get("saved_at") or ""
+        if not ("2026-06-01T20:00" <= sa <= "2026-06-10T17:16"):
+            return {"rid": rid, "skip": "market-blended snapshot (win_probs_model 無し, β>0 era)"}
 
     if not stored_win:
         return {"rid": rid, "skip": "no stored win probs"}

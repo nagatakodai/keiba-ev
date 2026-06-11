@@ -287,13 +287,18 @@ def parse_horse_history(html: str, *, limit: int = 12) -> list[PastRun]:
             continue
         # canonical は「ダート/障害」(netkeiba/oddspark と同語彙, 2026-06-11 修正)
         surface = {"芝": "芝", "ダ": "ダート", "障": "障害"}.get(dm.group(1) or "", "ダート")
-        # 馬場 (距離の後 / タイムの前) と頭数 (馬場の直後)
+        # 馬場 (距離の後 / タイムの前) と頭数 (馬場の直後)。ナイター開催は馬場と頭数の
+        # 間に「ナ」印セルが挟まるので 1 つだけ読み飛ばす (2026-06-11 bughunt 第5R:
+        # 旧実装は直後セル固定で、ナイター走の field_size が全て 0 に落ちていた)。
         going, field_size = "", 0
         for i in range(2, ti):
             if c[i] in _GOING_SET:
                 going = c[i]
-                if i + 1 < len(c) and c[i + 1].isdigit():
-                    field_size = int(c[i + 1])
+                j = i + 1
+                if j < ti and c[j] == "ナ":
+                    j += 1
+                if j < ti and c[j].isdigit():
+                    field_size = int(c[j])
                 break
         fin = int(c[ti - 1]) if c[ti - 1] in ("1", "2", "3") else None
         out.append(PastRun(
@@ -575,11 +580,11 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     best_times = az_mod._serialize_best_times(rd, feats) if feats else []
 
     # 2段パイプライン score ステージ: Claude 指数をキャッシュし即 return。
+    # no_llm でも呼ぶ (オッズ時系列キャプチャは LLM と独立, 2026-06-11 第5R)。
     if phase == "score":
-        if with_llm:
-            az_mod._run_score_stage(
-                race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
-                horse_best_times=best_times, model="opus")
+        az_mod._run_score_stage(
+            race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
+            horse_best_times=best_times, model="opus", no_llm=not with_llm)
         return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
@@ -621,7 +626,11 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
          "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
         for r in tri_table
     ]
-    bundle = pf.build_bundle(cands, probs)
+    # CLI 表示束も production (analyze._save_prediction_snapshot) と同じ ½Kelly +
+    # env bankroll で組む — full Kelly 既定のままだと手動投票を2倍サイズに誘導する
+    # (2026-06-11 bughunt 第5R)。
+    bundle = pf.build_bundle(cands, probs, kelly_fraction=0.5,
+                             bankroll=az_mod._ev_bankroll())
     bundle["source"] = "keibago"
     tables["trifecta"] = tri_table
 
@@ -641,7 +650,8 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
                 # この保存は bet 段のみ到達 (score 段は上で early return) なので 3連単買い目選定を
                 # Claude に任せる。指数キャッシュが無ければ内部で機械フォーメーションへフォールバック。
-                claude_trifecta_select=True,
+                # --no-llm (with_llm=False) ではキルスイッチとして選定も止める (2026-06-11 第5R)。
+                claude_trifecta_select=with_llm,
             )
             _tag_snapshot_source(race_id, "keibago")
         except Exception as ex:  # noqa: BLE001
@@ -652,20 +662,46 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
             "tables": tables, "bundle": bundle, "consistency": cons}
 
 
-def parse_keibago_result(racemark_html: str, refund_html: str = "") -> dict:
+def _refund_segment_for_race(refund_html: str, race_no: int) -> str | None:
+    """RefundMoneyList (当日全レース集約) から当該レースのセクションだけを切り出す。
+
+    各レース block の直前に `RaceMarkTable?...&k_raceNo=N&...` リンクがあるので、
+    その位置で分割する (2026-06-11 bughunt 第5R: flat 検索だと別レースが同一組番で
+    決着した場合に先勝ちで誤った配当を保存し得る)。リンクが見つからなければ None
+    (呼び出し側が従来の combo 一致 flat 検索に fallback)。
+    """
+    marks = [(m.start(), int(m.group(1)))
+             for m in re.finditer(r"RaceMarkTable\?[^\"'>]*k_raceNo=(\d+)", refund_html)]
+    if not marks:
+        return None
+    for i, (pos, rn) in enumerate(marks):
+        if rn == race_no:
+            end = marks[i + 1][0] if i + 1 < len(marks) else len(refund_html)
+            return refund_html[pos:end]
+    return None
+
+
+def parse_keibago_result(racemark_html: str, refund_html: str = "",
+                         race_no: int | None = None) -> dict:
     """結果ページ → {finish_order, payout(3連単)}。
 
     finish_order は RaceMarkTable (レース別の着順表) から (着順→馬番)。
-    3連単配当は RefundMoneyList (当日全レース集約) から **finish_order の組番に一致する
-    三連単行** を引く (combo マッチで別レースの配当を拾わない)。
+    3連単配当は RefundMoneyList (当日全レース集約) から引く: race_no があれば当該
+    レースのセクションに限定し (同一組番の別レース衝突を排除)、無ければ従来どおり
+    **finish_order の組番に一致する三連単行** を flat 検索する。
     """
     finish = _parse_finish_order(racemark_html)
     payout = 0
     if finish and len(finish) >= 3 and refund_html:
+        search_html = refund_html
+        if race_no is not None:
+            seg = _refund_segment_for_race(refund_html, race_no)
+            if seg is not None:
+                search_html = seg
         combo = "-".join(str(x) for x in finish[:3])
         cells = [c for c in (
             re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
-            for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", refund_html, re.DOTALL)
+            for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", search_html, re.DOTALL)
         ) if c]
         for i, c in enumerate(cells):
             if c in ("三連単", "３連単", "3連単") and i + 2 < len(cells) and cells[i + 1] == combo:
@@ -722,7 +758,7 @@ def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
         rf = _get(_odds_url(loc, "RefundMoneyList"))
     except Exception:  # noqa: BLE001
         return None
-    res = parse_keibago_result(rm, rf)
+    res = parse_keibago_result(rm, rf, race_no=loc.race_no)
     # 3連単として有効なのは 1-2-3 が揃う (len>=3) 確定結果のみ。同着等で着順が
     # 揃わない / 未確定は None を返し、不完全な結果を save しない (loop は pending 維持)。
     if len(res["finish_order"]) < 3:

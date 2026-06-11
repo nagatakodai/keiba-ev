@@ -92,6 +92,28 @@ def place3_prob(win: dict[int, float], n: int) -> dict[int, float]:
     return dict(out)
 
 
+def place2_prob(win: dict[int, float]) -> dict[int, float]:
+    """P(top2) — 出走 7 頭以下の複勝 (払戻 2 着まで) 用の選択確率。
+
+    第4R 修正は hit 判定側のみ頭数ルール対応で、**px_o (選択確率) 側が常に P(top3)**
+    のままだった — 少頭数レースの複勝 px_o が系統的に過大 (2026-06-11 bughunt 第5R)。
+    """
+    horses = [h for h, p in win.items() if p > 0]
+    pl2 = {h: win[h] ** _L2 for h in horses}
+    t2 = sum(pl2.values())
+    out = defaultdict(float)
+    for a in horses:
+        p1 = win[a]
+        out[a] += p1
+        db = t2 - pl2[a]
+        if db <= 0:
+            continue
+        for b in horses:
+            if b != a:
+                out[b] += p1 * pl2[b] / db
+    return dict(out)
+
+
 def trifecta_probs(win: dict[int, float]):
     horses = [h for h, p in win.items() if p > 0]
     pl2 = {h: win[h] ** _L2 for h in horses}
@@ -163,8 +185,10 @@ def main() -> None:
         else:
             paying_place = top3
         place_rows = (d.get("bet_tables") or {}).get("place") or []
-        if place_rows:
-            p3 = place3_prob(win, len(win))
+        # 4頭以下は複勝発売なし → bet 自体が存在しない (miss 計上もしない)。
+        # 7頭以下は選択確率も P(top2) で評価 (hit 判定 paying_place と整合)。
+        if place_rows and n_run > 4:
+            p3 = place2_prob(win) if n_run <= 7 else place3_prob(win, len(win))
             sh = DRIFT_SHADE.get("place", 0.9)
             for row in place_rows:
                 h = row["key"][0]

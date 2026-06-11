@@ -44,8 +44,15 @@ def _bucket(dist: int) -> int:
     return int(round(dist / 100.0) * 100)
 
 
+# par table のキーは netkeiba 馬柱由来の 1 文字語彙 (稍/不)。keibago/JRA 馬柱は
+# 「稍重/不良」(2文字) なので正規化しないと厳密キーが当たらず、稍重/不良の走が
+# 全馬場混合の venue-median par で指数化されていた (2026-06-11 bughunt 第5R)。
+_GOING_NORM = {"稍重": "稍", "不良": "不"}
+
+
 def par_lookup(table_key: str, surf: str, dist: int, ven: str, going: str):
     """par lookup: 厳密キー → 馬場落とす → 場落とす → 両方落とす → surface|bucket 集約。"""
+    going = _GOING_NORM.get(going, going)
     tab = _par_table().get(table_key, {})
     b = _bucket(dist)
     for k in (f"{surf}|{b}|{ven}|{going}", f"{surf}|{b}|{ven}|",

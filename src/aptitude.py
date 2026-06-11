@@ -24,10 +24,27 @@ from .models import Horse, PastRun, RaceData
 
 # ---------- 重賞実績 ----------
 
-# 過去走 race_class の重み (新馬 / 未勝利 は 0、平場勝ち上がり系は 0)
+# 過去走 race_class の重み (新馬 / 未勝利 は 0、平場勝ち上がり系は 0)。
+# netkeiba 馬柱の実表記は **ASCII ローマ数字** (GI/GII/GIII/JpnI〜III, 例 '東京優駿GI')、
+# NAR 地方重賞は '<レース名>重賞'。包含関係 (GIII ⊃ GII ⊃ GI) があるので長い表記を
+# 先に並べる (2026-06-11 bughunt 第5R: 旧 regex は ASCII 表記を含まず全重賞走が 0 =
+# Listed(2.0) > G1(0.0) の逆転が起きていた)。
 _GRADED_RE = re.compile(
-    r"(JpnG?1|JpnG?2|JpnG?3|G1|G2|G3|GⅠ|GⅡ|GⅢ|L\b|Listed|オープン|OP)"
+    r"(JpnG?III|JpnG?II|JpnG?I|JpnG?[123]|JpnG?[ⅠⅡⅢ]"
+    r"|GIII|GII|GI|G[123]|G[ⅠⅡⅢ]|L\b|Listed|オープン|OP|重賞)"
 )
+
+
+def _grade_rank(tag: str) -> int:
+    """マッチした表記 → 1/2/3 (G1/G2/G3 相当)。それ以外は 0。"""
+    # ASCII ローマ数字は長い順に判定 (III ⊃ II ⊃ I)
+    if "3" in tag or "Ⅲ" in tag or "III" in tag:
+        return 3
+    if "2" in tag or "Ⅱ" in tag or "II" in tag:
+        return 2
+    if "1" in tag or "Ⅰ" in tag or "I" in tag:
+        return 1
+    return 0
 
 
 def _graded_weight(race_class: str) -> float:
@@ -38,14 +55,15 @@ def _graded_weight(race_class: str) -> float:
     if not m:
         return 0.0
     tag = m.group(1)
-    # G1 / JpnG1 / GⅠ
-    if "1" in tag or "Ⅰ" in tag:
+    rank = _grade_rank(tag)
+    if rank == 1:
         return 10.0
-    if "2" in tag or "Ⅱ" in tag:
+    if rank == 2:
         return 5.0
-    if "3" in tag or "Ⅲ" in tag:
+    if rank == 3:
         return 3.0
-    if tag in ("L", "Listed"):
+    if tag in ("L", "Listed", "重賞"):
+        # NAR 地方重賞は等級が無いので Listed 相当で扱う
         return 2.0
     if tag in ("OP", "オープン"):
         return 1.0
@@ -120,13 +138,10 @@ def _normalize_grade_tag(race_class: str) -> str:
     if not m:
         return ""
     tag = m.group(1)
-    if "1" in tag or "Ⅰ" in tag:
-        return "G1"
-    if "2" in tag or "Ⅱ" in tag:
-        return "G2"
-    if "3" in tag or "Ⅲ" in tag:
-        return "G3"
-    if tag in ("L", "Listed"):
+    rank = _grade_rank(tag)
+    if rank:
+        return f"G{rank}"
+    if tag in ("L", "Listed", "重賞"):
         return "L"
     return "OP"
 

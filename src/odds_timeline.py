@@ -120,10 +120,16 @@ def capture(race_id: str, rd, stage: str) -> bool:
     例外は全て呑んで False (解析を止めない)。
     """
     try:
+        close_at = getattr(rd.race, "close_at", 0) or 0
+        # 締切後 = 事後/オフライン解析 (--html 等)。capture すると「bet 時刻に取った
+        # fresh オッズ」を偽装した stale/最終オッズがドリフト較正データに混ざる
+        # (2026-06-11 bughunt 第5R)。live フックは必ず締切前なので無影響。
+        if close_at and close_at < dt.datetime.now().timestamp():
+            return False
         payload = build_payload(rd.other_bets, rd.trifecta)
         return append_line(
             race_id, payload, stage,
-            close_at=getattr(rd.race, "close_at", 0) or 0,
+            close_at=close_at,
             start_at=getattr(rd.race, "start_at", 0) or 0,
             odds_updated_at=getattr(rd.race, "odds_updated_at", 0) or 0,
             n_horses=len([h2 for h2 in rd.race.horses if not h2.absent]),

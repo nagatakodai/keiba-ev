@@ -53,6 +53,9 @@ def _one(rid: str):
             dist = getattr(pr, "distance", 0) or 0
             ven = getattr(pr, "venue", "") or ""
             going = getattr(pr, "going", "") or ""
+            # speed_chart.par_lookup と同じ正規化 (稍重→稍 / 不良→不)。netkeiba 馬柱は
+            # 1文字だが keibago/JRA 由来の PastRun が混ざっても語彙が割れないように。
+            going = {"稍重": "稍", "不良": "不"}.get(going, going)
             if not surf or dist <= 0:
                 continue
             bucket = int(round(dist / 100.0) * 100)

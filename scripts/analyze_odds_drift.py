@@ -117,13 +117,22 @@ def fmt(x, nd=3):
     return "nan" if (x is None or (isinstance(x, float) and math.isnan(x))) else f"{x:.{nd}f}"
 
 
-def winning_keys(finish: list[int]) -> dict[str, set[str]]:
+def winning_keys(finish: list[int], n_runners: int | None = None) -> dict[str, set[str]]:
     if not finish or len(finish) < 3:
         return {}
     a, b, c = finish[0], finish[1], finish[2]
+    # 複勝の出走頭数ルール (7頭以下=2着まで・4頭以下=発売なし)。n_runners 不明は従来 top-3
+    # (2026-06-11 bughunt 第5R: 常に top-3 だと少頭数で払戻対象外の3着馬を「当たり」扱いし
+    # TORIGAMI_MARGIN 提案 §4 が歪む)。
+    if n_runners is not None and n_runners <= 4:
+        place: set[str] = set()
+    elif n_runners is not None and n_runners <= 7:
+        place = {str(a), str(b)}
+    else:
+        place = {str(a), str(b), str(c)}
     return {
         "win": {str(a)},
-        "place": {str(a), str(b), str(c)},
+        "place": place,
         "quinella": {"-".join(map(str, sorted((a, b))))},
         "wide": {"-".join(map(str, sorted(p))) for p in ((a, b), (a, c), (b, c))},
         "exacta": {f"{a}-{b}"},
@@ -183,7 +192,8 @@ def main():
         lead = (close - cap) if (close and cap) else float("nan")
         if not math.isnan(lead):
             lead_secs.append(lead)
-        wk = winning_keys(res.get("finish_order") or [])
+        n_run_tl = len((last.get("odds") or {}).get("win") or {}) or None
+        wk = winning_keys(res.get("finish_order") or [], n_run_tl)
         for key, fo in (res["final_odds"] or {}).items():
             bt, label = key.split(":", 1)
             bet_o = (last.get("odds") or {}).get(bt, {}).get(label)
@@ -228,7 +238,8 @@ def main():
         if math.isnan(lead) or not (0 <= lead <= 600):  # 締切10分前以内の snapshot のみ
             continue
         c = cls.get(rid, "?")
-        wk = winning_keys(res.get("finish_order") or [])
+        n_run_sn = len((p.get("bet_tables") or {}).get("win") or []) or None
+        wk = winning_keys(res.get("finish_order") or [], n_run_sn)
         # 単勝: bet_tables.win は全馬
         snap_odds: dict[str, dict[str, float]] = defaultdict(dict)
         for bt, tbl in (p.get("bet_tables") or {}).items():

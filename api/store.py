@@ -266,15 +266,17 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         from src.portfolio import _bet_hits
         a3, b3, c3 = (list(finish_tuple) + [0, 0, 0])[:3]
         # 出走頭数 (複勝の頭数ルール: 7頭以下=2着まで・4頭以下=発売なし を hit 判定に適用)。
-        # win_probs_model → bet_tables.win → horse_aptitude の順で頭数を推定 (≤18 なので
-        # bet_tables.win の top-30 cap には掛からない = 実頭数)。不明なら None (従来 top-3)。
-        n_runners = None
-        for src_field in (pred.get("win_probs_model"),
-                          (pred.get("bet_tables") or {}).get("win"),
-                          pred.get("horse_aptitude")):
-            if src_field:
-                n_runners = len(src_field)
-                break
+        # snapshot の n_runners (権威値, 2026-06-11〜) を最優先。無ければ
+        # win_probs_model → bet_tables.win → horse_aptitude の順で推定 (win テーブルは
+        # odds≤0 馬を除外するため最大数頭の過小があり得る — 旧 snapshot のみの妥協)。
+        n_runners = pred.get("n_runners") or None
+        if not n_runners:
+            for src_field in (pred.get("win_probs_model"),
+                              (pred.get("bet_tables") or {}).get("win"),
+                              pred.get("horse_aptitude")):
+                if src_field:
+                    n_runners = len(src_field)
+                    break
 
         # **最終オッズ** (2026-05-29~): result["final_odds"] = `{leg_id: final_odds}` (`leg_id`
         # は `"<bet_type>:<key-with-->"` 形式, llm.leg_id と一致)。result fetch 時に保存される。

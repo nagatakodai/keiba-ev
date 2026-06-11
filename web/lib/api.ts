@@ -264,6 +264,8 @@ export type PredictionDetail = {
   // 各馬の model 単勝確率 (馬番 → P)。出走頭数の推定 (複勝の頭数ルール) にも使う
   // (api/store.py と同じ優先順: win_probs_model → bet_tables.win → horse_aptitude)。
   win_probs_model?: Record<string, number> | null;
+  // 出走頭数 (取消除く, 2026-06-11〜の snapshot に保存)。複勝の頭数ルール判定の権威値。
+  n_runners?: number | null;
   // 馬連 (quinella) / ワイド (wide) / 馬単 (exacta) / 3連複 (trio) の EV table。
   // 各 bet type の top 30 行 (P×O 降順)。fetch されていない bet type はキー無し。
   bet_tables?: Record<string, BetEvRow[]>;

@@ -93,7 +93,16 @@ def main(force: bool = typer.Option(False, "--force", help="既に bundle があ
     for sp in snaps:
         race_id = sp.stem
         snap = json.loads(sp.read_text(encoding="utf-8"))
-        if snap.get("recommended_bundle") and not force:
+        existing = snap.get("recommended_bundle")
+        # live で実際に組まれた束 (backfilled フラグ無し) は --force でも上書きしない —
+        # 実弾計測の対象を「実際に賭けた束」から「再計算した別の束」にすり替えてしまう
+        # (2026-06-11 bughunt 第5R)。再計算してよいのは backfill 自身が書いた束のみ。
+        if existing and not existing.get("backfilled"):
+            if force:
+                print(f"  SKIP {sp.stem}: live 束は --force でも上書きしない (計測保護)")
+            skipped += 1
+            continue
+        if existing and not force:
             skipped += 1
             continue
         nk = rid_map.get(race_id) or _derive_netkeiba_rid(race_id)
@@ -129,6 +138,9 @@ def main(force: bool = typer.Option(False, "--force", help="既に bundle があ
             probs = ev_mod.estimate_probs(rd, market_blend=0.78)
             cands = pf_mod.candidates_from_snapshot_rows(snap.get("rows", []), snap.get("bet_tables"))
             bundle = pf_mod.build_bundle(cands, probs)
+            # backfill 印: 実弾系列の計測 (bundle_calibration_report 等) が「実際に賭けた
+            # 束」と区別できるように (2026-06-11 第5R)。
+            bundle["backfilled"] = True
             snap["recommended_bundle"] = bundle
             # 締切/発走時刻も再パースで補正 (旧 snapshot は HH:MM発走 表記を拾えず 0 → UI で "—")。
             if rd.race.start_at:

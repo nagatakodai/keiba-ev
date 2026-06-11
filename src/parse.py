@@ -425,30 +425,36 @@ def parse_trifecta_multi(htmls: list[str]) -> list[TrifectaOdds]:
     combined: dict[tuple[int, int, int], float] = {}
 
     for html in htmls:
+        # フォールバックのゲートは **この html で何か取れたか** (local) で判定する。
+        # グローバル combined でゲートすると、フォールバック形式の応答では先頭 jiku で
+        # combined が非空になった時点で 2 jiku 目以降の (b)/(c) が一切走らず、
+        # 全 N(N-1)(N-2) 点のうち先頭 jiku 分しか取れない (2026-06-11 bughunt 第5R)。
+        local: dict[tuple[int, int, int], float] = {}
+
         # (a) NAR 形式: cart-item の td 内に odds 値が直接 (例: ">8,761.7")
         for m in _CART_ITEM_B8_NAR_RE.finditer(html):
             a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
             odds = _to_float(m.group(4))
             if odds > 0 and a != b and a != c and b != c:
-                combined.setdefault((a, b, c), odds)
+                local.setdefault((a, b, c), odds)
 
         # (a') JRA 形式: cart-item の td 内に <span id="odds-8-XXXXXX"> で odds 値
         for m in _CART_ITEM_B8_JRA_RE.finditer(html):
             a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
             odds = _to_float(m.group(4))
             if odds > 0 and a != b and a != c and b != c:
-                combined.setdefault((a, b, c), odds)
+                local.setdefault((a, b, c), odds)
 
         # (b) 旧形式: script タグ内の embedded JSON ("a-b-c": "odds")
-        if not combined:
+        if not local:
             for m in _EMBED_JSON_B8_RE.finditer(html):
                 a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 odds = _to_float(m.group(4))
                 if odds > 0 and a != b and a != c and b != c:
-                    combined.setdefault((a, b, c), odds)
+                    local.setdefault((a, b, c), odds)
 
         # (c) DOM 最終フォールバック: tr.Odds_Td3 等のテーブル
-        if not combined:
+        if not local:
             soup = BeautifulSoup(html, "lxml")
             for row in soup.select("tr.Odds_Td3, tbody tr"):
                 cells = row.find_all("td")
@@ -462,7 +468,10 @@ def parse_trifecta_multi(htmls: list[str]) -> list[TrifectaOdds]:
                 a, b, c = int(mk.group(1)), int(mk.group(2)), int(mk.group(3))
                 odds = _to_float(odds_text)
                 if odds > 0:
-                    combined.setdefault((a, b, c), odds)
+                    local.setdefault((a, b, c), odds)
+
+        for k, v in local.items():
+            combined.setdefault(k, v)
 
     out = [TrifectaOdds(key=k, odds=v, popularity=0) for k, v in combined.items()]
     out.sort(key=lambda t: t.odds)
@@ -592,7 +601,10 @@ _PAST_FIELDSIZE_RE = re.compile(r"(\d+)頭")
 _PAST_UMABAN_RE = re.compile(r"(\d+)番")
 _PAST_NINKI_RE = re.compile(r"(\d+)人")
 _PAST_LAST3F_RE = re.compile(r"\(([\d\.]+)\)")
-_PAST_BODY_RE = re.compile(r"(\d{3})\s*\(([+\-]?\d+)\)")
+# 馬体重(増減) は Data06 の末尾トークン。ばんえいは 1000kg 超 (4桁) + 通過順/上3F が
+# 無く Data06 全体が "1048(+13)" のみ (2026-06-11 bughunt 第5R: 旧 3桁 regex は
+# 1048→48 に切り詰め、通過順パースが "1048" を拾って style_score を壊していた)。
+_PAST_BODY_RE = re.compile(r"(\d{3,4})\s*\(([+\-]?\d+)\)\s*$")
 _PAST_TIMEDIFF_RE = re.compile(r"\(([+\-]?[\d\.]+)\)")
 
 
@@ -736,17 +748,18 @@ def _parse_one_past_run(d_item: Tag, *, ranking_cls: list[str]) -> PastRun | Non
     body_weight = 0
     body_weight_diff = 0
     if data06:
-        # 通過順 (空白までの先頭部分): "12-14" or "3-3-1-1"
-        mp = re.match(r"\s*([\d\-]+)", data06)
-        if mp:
-            passing = mp.group(1)
-        ml = _PAST_LAST3F_RE.search(data06)
-        if ml:
-            last_3f = _to_float(ml.group(1))
         mb = _PAST_BODY_RE.search(data06)
         if mb:
             body_weight = int(mb.group(1))
             body_weight_diff = int(mb.group(2))
+        # 通過順 (空白までの先頭部分): "12-14" or "3-3-1-1"。ばんえいは通過順が無く
+        # 先頭トークン = 馬体重 ("1048(+13)") なので、body と同じ位置なら通過順なし。
+        mp = re.match(r"\s*([\d\-]+)", data06)
+        if mp and not (mb and mp.start(1) == mb.start(1)):
+            passing = mp.group(1)
+        ml = _PAST_LAST3F_RE.search(data06)
+        if ml:
+            last_3f = _to_float(ml.group(1))
 
     # 勝ち馬との時間差 (Data07 の括弧内)。勝ち馬行は「2着との差」の負値が入る。
     data07 = _text(d_item, ".Data07")
@@ -1038,13 +1051,24 @@ def _split_race_id(rid: str) -> tuple[str, int, int, str]:
 
 
 def _extract_race_id_from_dom(soup: BeautifulSoup) -> str | None:
-    for a in soup.select("a[href*='race_id=']"):
-        m = re.search(r"race_id=(\d{12})", a.get("href", ""))
-        if m:
-            return m.group(1)
+    """ページ自身の race_id を canonical → og:url → アンカー の順で抽出する。
+
+    アンカー先頭採用は誤り (2026-06-11 bughunt 第5R): shutuba ページの先頭アンカーは
+    当日ナビ等の**別レース**へのリンクで、cache 実測 40/40 ページで別 race_id を
+    返していた。canonical はページ自身を指す (同実測 40/40 一致)。
+    """
     canonical = soup.select_one("link[rel='canonical']")
     if canonical:
         m = re.search(r"race_id=(\d{12})", canonical.get("href", ""))
+        if m:
+            return m.group(1)
+    og = soup.select_one("meta[property='og:url']")
+    if og:
+        m = re.search(r"race_id=(\d{12})", og.get("content", ""))
+        if m:
+            return m.group(1)
+    for a in soup.select("a[href*='race_id=']"):
+        m = re.search(r"race_id=(\d{12})", a.get("href", ""))
         if m:
             return m.group(1)
     return None

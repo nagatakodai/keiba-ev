@@ -23,6 +23,7 @@ def _read_html_file(path: Path) -> str:
 
 import typer
 from rich.console import Console
+from rich.markup import escape as _mk_escape
 from rich.table import Table
 
 from . import ev as ev_mod
@@ -156,6 +157,7 @@ def main(
         _run_score_stage(
             race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
             horse_best_times=best_times_for_score, model=llm_model,
+            no_llm=no_llm,
         )
         # fall through → 下の共通解析 + snapshot 保存へ
 
@@ -289,6 +291,8 @@ def main(
                 aptitude_top=aptitude_top,
                 with_exacta=with_exacta,
                 with_trio=with_trio,
+                llm_blend=llm_blend,
+                probs_file=probs_file,
             )
 
 
@@ -503,16 +507,22 @@ def _score_timeout(rd, n_run: int) -> int:
 
 def _run_score_stage(
     race_id: str, rd, *, aptitudes=None, market_signals=None,
-    horse_best_times=None, model: str = "opus",
+    horse_best_times=None, model: str = "opus", no_llm: bool = False,
 ) -> dict | None:
     """score ステージ: Claude に各馬の強さ指数を出させて `<race_id>.llm.json` にキャッシュ。
 
-    3 経路 (netkeiba analyze / scrape_jra / scrape_keibago) から共通で呼ぶ。返り値は
-    parse_horse_scores の dict (scores 空なら保存しない)。Claude 不可/未完了なら None。
+    4 経路 (netkeiba analyze / scrape_jra / scrape_keibago / scrape_oddspark) から共通で
+    呼ぶ。返り値は parse_horse_scores の dict (scores 空なら保存しない)。Claude 不可/
+    未完了/no_llm なら None。no_llm でもオッズ時系列キャプチャは行う (LLM と独立) ので、
+    呼び出し側は --no-llm でもこの関数を呼んでよい (2026-06-11 第5R: 旧 netkeiba 経路は
+    no_llm を無視して Claude を起動、alt 経路は逆に capture ごと skip していた)。
     """
     # オッズ変動キャプチャ (Step 1, 追加 fetch ゼロ): score 段で取得済みの fresh odds を
     # 時系列に記録。LLM 可否に関わらず取る (is_available チェックより前)。
     odds_tl_mod.capture(race_id, rd, "score")
+    if no_llm:
+        console.print("[dim]--no-llm — score ステージ (Claude 指数) skip[/dim]")
+        return None
     if not llm_mod.is_available():
         console.print("[yellow]claude CLI 不可 — score ステージ skip[/yellow]")
         return None
@@ -533,7 +543,11 @@ def _run_score_stage(
         ):
             if etype == "text":
                 chunks.append(payload)
-                console.print(payload, end="")
+                # markup=False 必須: LLM テキストの `[/...]` は rich MarkupError を raise し、
+                # except 側の {ex} print (タグ文字列を含む) で連鎖再発して score 結果ごと
+                # 失われる。`[word](url)` 形の markdown リンクも tag 扱いで黙って欠落する
+                # (2026-06-11 bughunt 第5R)。
+                console.print(payload, end="", markup=False, highlight=False)
             elif etype == "tool_use":
                 tool_count += 1
                 name = (payload or {}).get("name", "?")
@@ -550,9 +564,9 @@ def _run_score_stage(
                 if payload:
                     chunks.append(payload)
             elif etype == "error":
-                console.print(f"[red]score エラー: {payload}[/red]")
+                console.print(f"[red]score エラー: {_mk_escape(str(payload))}[/red]")
     except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]score ステージ失敗: {ex}[/yellow]")
+        console.print(f"[yellow]score ステージ失敗: {_mk_escape(str(ex))}[/yellow]")
         return None
     if tool_count:
         console.print(f"[dim](検索/ツール呼び出し計 {tool_count} 回)[/dim]")
@@ -742,15 +756,16 @@ def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
         ):
             if etype == "text":
                 chunks.append(payload)
-                console.print(payload, end="")
+                # markup=False 必須 (score ステージと同根, 2026-06-11 第5R)
+                console.print(payload, end="", markup=False, highlight=False)
             elif etype == "result":
                 saw_result = True
                 if payload:
                     chunks.append(payload)
             elif etype == "error":
-                console.print(f"[red]3連単買い目選定エラー: {payload}[/red]")
+                console.print(f"[red]3連単買い目選定エラー: {_mk_escape(str(payload))}[/red]")
     except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]3連単 Claude 買い目選定失敗: {ex}[/yellow]")
+        console.print(f"[yellow]3連単 Claude 買い目選定失敗: {_mk_escape(str(ex))}[/yellow]")
         return None
     if not saw_result:
         console.print("[yellow]3連単 Claude 買い目選定 未完了 → 機械フォーメーションにフォールバック[/yellow]")
@@ -1022,6 +1037,9 @@ def _save_prediction_snapshot(
         "odds_updated_at": rd.race.odds_updated_at,
         "distance": rd.race.distance,
         "surface": rd.race.surface,
+        # 出走頭数 (取消除く) — 複勝の頭数ルール (7頭以下=2着まで/4頭以下=発売なし) 判定の
+        # 権威値。読む側の推定 (bet_tables.win 長 = odds≤0 馬を欠く) より正確 (2026-06-11 第5R)。
+        "n_runners": len([h for h in rd.race.horses if not h.absent]),
         "rows": [
             {
                 "key": list(r.key),
@@ -1577,6 +1595,8 @@ def _refresh_and_reevaluate(
     aptitude_top: int = 6,
     with_exacta: bool = False,
     with_trio: bool = False,
+    llm_blend: float = ev_mod.LLM_BLEND_DEFAULT,
+    probs_file: Optional[Path] = None,
 ) -> None:
     close_at = rd_old.race.close_at
     if not close_at:
@@ -1625,12 +1645,20 @@ def _refresh_and_reevaluate(
     apt_top2 = _aptitude_top_horses(aptitudes2, n=aptitude_top)
     market_signals2 = compute_market_signals(rd2)
     lgbm_info2 = ev_mod.lgbm_status()
+    # Claude 指数キャッシュ + --probs YAML を本経路と同様に合成する (2026-06-11 第5R:
+    # 旧実装はどちらも読まず、最終 (締切直前) の再評価が指数なし・rank_source=model に
+    # 退化した snapshot で上書きしていた)。
+    llm_index2, llm_support2, llm_scale2, llm_scored_at2, llm_alerts2 = _load_llm_scores(race_id)
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor,
-                                   speed_v2_blend=speed_v2_blend)
-    probs2 = ev_mod.load_probs(None, probs2)
+                                   speed_v2_blend=speed_v2_blend,
+                                   llm_win_index=llm_index2, llm_blend=llm_blend,
+                                   llm_support=llm_support2, llm_scale=llm_scale2)
+    probs2 = ev_mod.load_probs(str(probs_file) if probs_file else None, probs2)
     # 3連単束は市場無視を保証するため market-free probs を別途用意 (market_blend>0 時のみ再計算)。
     probs2_t = probs2 if market_blend == 0 else ev_mod.estimate_probs(
-        rd2, market_blend=0.0, market_floor=market_floor, speed_v2_blend=speed_v2_blend)
+        rd2, market_blend=0.0, market_floor=market_floor, speed_v2_blend=speed_v2_blend,
+        llm_win_index=llm_index2, llm_blend=llm_blend,
+        llm_support=llm_support2, llm_scale=llm_scale2)
     rows2 = ev_mod.build_table(rd2, probs2)
     bet_tables2 = ev_mod.build_all_bet_tables(rd2, probs2)
 
@@ -1646,6 +1674,8 @@ def _refresh_and_reevaluate(
         _save_prediction_snapshot(
             race_id, rd2, rows2, plan_rows2, aptitudes2, bet_tables2, apt_top2, market_signals2,
             feats=feats2, lgbm_info=lgbm_info2, hit_points=hit_points, probs=probs2,
+            llm_win_index=llm_index2, llm_blend=llm_blend, llm_scored_at=llm_scored_at2,
+            llm_support=llm_support2, llm_scale=llm_scale2, llm_alerts=llm_alerts2,
             speed_v2_blend=speed_v2_blend, probs_t=probs2_t,
         )
 

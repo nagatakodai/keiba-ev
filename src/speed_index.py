@@ -59,17 +59,23 @@ def class_index(race_class: str) -> int:
     if not race_class:
         return 0
     s = race_class
-    # JRA 重賞
-    if "G1" in s or "GⅠ" in s or "Jpn1" in s or "JpnⅠ" in s:
-        return 20
-    if "G2" in s or "GⅡ" in s or "Jpn2" in s or "JpnⅡ" in s:
-        return 17
-    if "G3" in s or "GⅢ" in s or "Jpn3" in s or "JpnⅢ" in s:
+    # JRA/交流 重賞 — 算用数字 (G1)・ローマ数字1文字 (GⅠ)・**ASCII ローマ数字 (GI/GII/GIII,
+    # netkeiba 馬柱の実表記)** をすべて受ける。ASCII は GIII ⊃ GII ⊃ GI の包含があるので
+    # 長い表記から先に判定する (2026-06-11 bughunt 第5R: 旧実装は ASCII 表記を一切見ず
+    # 東京優駿GI→0、JBC2歳JpnIII→NAR C2 (-8) に誤判定していた)。
+    if "G3" in s or "GⅢ" in s or "GIII" in s or "Jpn3" in s or "JpnⅢ" in s or "JpnIII" in s:
         return 14
+    if "G2" in s or "GⅡ" in s or "GII" in s or "Jpn2" in s or "JpnⅡ" in s or "JpnII" in s:
+        return 17
+    if "G1" in s or "GⅠ" in s or "GI" in s or "Jpn1" in s or "JpnⅠ" in s or "JpnI" in s:
+        return 20
     if "L)" in s or "(L" in s:
         return 11
     if "OP" in s or "オープン" in s or "オープン特別" in s:
         return 10
+    # NAR 地方重賞 (netkeiba 馬柱表記: "<レース名>重賞") — 地方トップ級 = Listed 相当
+    if "重賞" in s:
+        return 11
     if "3勝" in s:
         return 8
     if "2勝" in s:
