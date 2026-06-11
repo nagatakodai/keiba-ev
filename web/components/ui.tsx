@@ -16,12 +16,12 @@ export function PageHeader({
   right?: ReactNode;
 }) {
   return (
-    <div className="flex items-end justify-between gap-4 pb-2 border-b-2 border-(--color-accent)">
+    <div className="flex items-end justify-between gap-4 pb-3 border-b border-(--color-line)">
       <div className="flex items-stretch gap-3">
-        <span className="inline-block w-1.5 bg-(--color-highlight) self-stretch" />
+        <span className="inline-block w-1 rounded-full bg-gradient-to-b from-(--color-accent) to-(--color-accent)/20 self-stretch" />
         <div>
           {eyebrow && (
-            <div className="text-[10px] font-bold tracking-widest uppercase text-(--color-highlight) mb-0.5">
+            <div className="text-[10px] font-bold tracking-widest uppercase text-(--color-accent) mb-0.5">
               {eyebrow}
             </div>
           )}
@@ -48,26 +48,26 @@ export function Card({
 }>) {
   const headBg =
     tone === "active"
-      ? "bg-sky-50 border-b-sky-200"
+      ? "bg-sky-500/10 border-b-sky-500/25"
       : tone === "alert"
-      ? "bg-orange-50 border-b-orange-200"
+      ? "bg-amber-500/10 border-b-amber-500/25"
       : "bg-(--color-section-head) border-b-(--color-line)";
   const headBar =
     tone === "active"
-      ? "bg-sky-500"
+      ? "bg-sky-400"
       : tone === "alert"
       ? "bg-(--color-highlight)"
       : "bg-(--color-accent)";
   return (
     <section
-      className={`bg-(--color-panel) border border-(--color-line) shadow-[0_1px_2px_rgba(0,0,0,0.04)] ${className}`}
+      className={`bg-(--color-card) border border-(--color-line) rounded-xl overflow-hidden shadow-[0_2px_12px_rgba(0,0,0,0.35)] ${className}`}
     >
       {(title || right) && (
         <header
-          className={`flex items-center justify-between gap-2 px-4 py-2 border-b ${headBg}`}
+          className={`flex items-center justify-between gap-2 px-4 py-2.5 border-b ${headBg}`}
         >
           <div className="flex items-center gap-2 min-w-0">
-            <span className={`inline-block w-1 h-4 ${headBar} shrink-0`} />
+            <span className={`inline-block w-1 h-4 rounded-full ${headBar} shrink-0`} />
             <h2 className="text-sm font-bold tracking-tight">{title}</h2>
           </div>
           {right && <div className="shrink-0">{right}</div>}
@@ -116,11 +116,11 @@ export function Stat({
       : accentSrc === "muted"
       ? "border-l-(--color-line)"
       : accentSrc === "magenta"
-      ? "border-l-fuchsia-500"
+      ? "border-l-fuchsia-400"
       : "border-l-(--color-accent)";
   return (
     <div
-      className={`bg-white border border-(--color-line) border-l-4 ${accent} px-4 py-3 shadow-[0_1px_2px_rgba(0,0,0,0.04)]`}
+      className={`bg-(--color-card) border border-(--color-line) border-l-4 ${accent} rounded-xl px-4 py-3 shadow-[0_2px_12px_rgba(0,0,0,0.35)]`}
     >
       <div className="text-[11px] text-(--color-muted) font-bold tracking-wider uppercase">{label}</div>
       <div className={`text-2xl font-black mt-1 tabnum tracking-tight ${color}`}>{value}</div>
@@ -145,22 +145,22 @@ export function Badge({
   tone = "default",
 }: PropsWithChildren<{ tone?: BadgeTone }>) {
   const cls = {
-    default: "bg-white text-(--color-foreground) border-(--color-line)",
-    // 的中/不的中 などの結果系で「鮮やか」に視認できるよう一段濃いめに
-    // (2026-05-29 ユーザ指示)。bg 200 / border 500 / text 900。
-    good: "bg-emerald-200 text-emerald-900 border-emerald-500 font-semibold",
-    warn: "bg-amber-50 text-amber-800 border-amber-400",
-    bad: "bg-red-200 text-red-900 border-red-500 font-semibold",
-    magenta: "bg-fuchsia-50 text-fuchsia-800 border-fuchsia-300",
-    // Plan F の最終買い目を示す赤ピンク。border-400 で他より一段強調。
-    rose: "bg-rose-50 text-rose-800 border-rose-400",
-    info: "bg-sky-100 text-sky-900 border-sky-500 font-semibold",
-    // 白に近い淡いオレンジ。"結果待ち" 等の "進行中だが警告ではない" 状態用。
-    pending: "bg-orange-50 text-orange-700 border-orange-200",
-    muted: "bg-(--color-panel-2) text-(--color-muted) border-(--color-line)",
+    default: "bg-(--color-surface-2) text-(--color-foreground) border-(--color-line)",
+    // 的中/不的中 などの結果系は dark 上で「発光」して見えるよう
+    // tint bg (500/20) + 明テキスト (300) + 半透明 border (500/50)。
+    good: "bg-emerald-500/20 text-emerald-300 border-emerald-500/50 font-semibold",
+    warn: "bg-amber-500/15 text-amber-300 border-amber-500/40",
+    bad: "bg-red-500/20 text-red-300 border-red-500/50 font-semibold",
+    magenta: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40",
+    // Plan F の最終買い目を示す赤ピンク。他より一段強調。
+    rose: "bg-rose-500/15 text-rose-300 border-rose-500/45",
+    info: "bg-sky-500/20 text-sky-300 border-sky-500/50 font-semibold",
+    // "結果待ち" 等の "進行中だが警告ではない" 状態用 (薄オレンジ)。
+    pending: "bg-orange-500/10 text-orange-300/90 border-orange-500/30",
+    muted: "bg-(--color-surface-2) text-(--color-muted) border-(--color-line)",
   }[tone];
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 border text-[11px] font-bold ${cls}`}>
+    <span className={`inline-flex items-center px-1.5 py-0.5 border rounded-md text-[11px] font-bold ${cls}`}>
       {children}
     </span>
   );
@@ -185,14 +185,15 @@ export function Button({
     lg: "px-6 py-2.5 text-base min-w-[140px]",
   }[size];
   const base =
-    `inline-flex items-center justify-center gap-2 font-bold tracking-tight transition-all disabled:opacity-40 disabled:cursor-not-allowed border shadow-[0_1px_2px_rgba(0,0,0,0.06)] active:shadow-none active:translate-y-[1px] ${sizeCls}`;
+    `inline-flex items-center justify-center gap-2 font-bold tracking-tight rounded-lg transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed border focus-visible:outline-2 focus-visible:outline-(--color-ring) focus-visible:outline-offset-2 active:scale-[0.98] ${sizeCls}`;
   const styles = {
+    // primary = ソリッド emerald (terminal の利益色)。暗地に映えるよう文字は暗色。
     primary:
-      "bg-(--color-highlight) text-white border-(--color-highlight) hover:brightness-110",
+      "bg-emerald-500 text-emerald-950 border-emerald-400/60 hover:bg-emerald-400 shadow-[0_2px_10px_rgba(52,211,153,0.25)]",
     ghost:
-      "bg-white border-(--color-line) hover:bg-(--color-panel-2) text-(--color-foreground)",
+      "bg-transparent border-(--color-line) hover:bg-white/5 hover:border-white/25 text-(--color-foreground)",
     danger:
-      "bg-(--color-bad) text-white border-(--color-bad) hover:brightness-110",
+      "bg-rose-600 text-white border-rose-500/60 hover:bg-rose-500 shadow-[0_2px_10px_rgba(244,63,94,0.25)]",
   }[variant];
   return (
     <button {...rest} disabled={disabled} className={`${base} ${styles} ${className}`}>
@@ -212,7 +213,7 @@ export function Input({
       {label && <span className="block text-xs text-(--color-muted) font-medium mb-1">{label}</span>}
       <input
         {...rest}
-        className={`w-full bg-white border border-(--color-line) px-3 py-2 text-sm placeholder:text-(--color-muted) focus:outline-none focus:border-(--color-accent) ${className}`}
+        className={`w-full bg-(--color-surface-2) border border-(--color-line) rounded-lg px-3 py-2 text-sm placeholder:text-(--color-muted)/70 transition-colors focus:outline-none focus:border-(--color-accent) focus:ring-2 focus:ring-(--color-ring)/40 ${className}`}
       />
       {hint && <span className="block text-xs text-(--color-muted) mt-1">{hint}</span>}
     </label>
@@ -231,7 +232,7 @@ export function Select({
       {label && <span className="block text-xs text-(--color-muted) font-medium mb-1">{label}</span>}
       <select
         {...rest}
-        className={`w-full bg-white border border-(--color-line) px-3 py-2 text-sm focus:outline-none focus:border-(--color-accent) ${className}`}
+        className={`w-full bg-(--color-surface-2) border border-(--color-line) rounded-lg px-3 py-2 text-sm transition-colors focus:outline-none focus:border-(--color-accent) focus:ring-2 focus:ring-(--color-ring)/40 ${className}`}
       >
         {children}
       </select>
@@ -271,19 +272,19 @@ export function planTone(plan: PlanLetter): BadgeTone {
 export function planAccentClass(plan: PlanLetter): string {
   switch (plan) {
     case "A":
-      return "text-sky-700";
+      return "text-sky-300";
     case "B":
-      return "text-fuchsia-700";
+      return "text-fuchsia-300";
     case "C":
-      return "text-emerald-700";
+      return "text-emerald-300";
     case "G":
-      return "text-purple-700";
+      return "text-purple-300";
     case "H1":
-      return "text-amber-700";
+      return "text-amber-300";
     case "H2":
-      return "text-violet-700";
+      return "text-violet-300";
     case "F":
-      return "text-rose-700";
+      return "text-rose-300";
   }
 }
 
@@ -488,17 +489,17 @@ export function raceTimingRowBg(tone: BadgeTone): string {
   return (
     {
       default: "",
-      // 的中/不的中 行 bg も連動して一段濃く (badge と合わせて鮮やかに)
-      good: "bg-emerald-100/80",
-      warn: "bg-amber-50/50",
-      bad: "bg-red-100/70",
-      magenta: "bg-fuchsia-50/40",
-      rose: "bg-rose-50/60",
-      info: "bg-sky-50/50",
-      pending: "bg-orange-50/50",
+      // 的中/不的中 行 bg も badge と同色相の tint で連動 (dark 用 alpha)
+      good: "bg-emerald-500/15",
+      warn: "bg-amber-500/10",
+      bad: "bg-red-500/15",
+      magenta: "bg-fuchsia-500/10",
+      rose: "bg-rose-500/10",
+      info: "bg-sky-500/10",
+      pending: "bg-orange-500/10",
       // 見送り (投票束が空) はグレー系で「不参加」を視覚的に明示
       // (2026-05-29 ユーザ指示)。
-      muted: "bg-slate-100/70",
+      muted: "bg-slate-500/15",
     } satisfies Record<BadgeTone, string>
   )[tone];
 }

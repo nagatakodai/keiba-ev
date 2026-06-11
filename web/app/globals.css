@@ -1,31 +1,69 @@
 @import "tailwindcss";
 
+/* ============================================================
+   Dark "trading terminal" デザイントークン (2026-06 UI 刷新)
+   - ダークのみ (ライトテーマなし)。deep slate + blue-tint レイヤ。
+   - emerald = 利益/+EV、red = 損失、amber = 警告、violet = Claude/LLM。
+   - 既存トークン名 (--color-bg / --color-panel / --color-accent ...) は
+     全ページが参照しているため値だけ差し替え、名前は変えない。
+   ============================================================ */
 :root {
-  --bg: #ffffff;
-  --panel: #ffffff;
-  --panel-2: #f5f4f1;
-  --section-head: #edece6;
-  --line: #d6d3ca;
-  --line-soft: #e8e5dc;
-  --text: #333333;
-  --muted: #6f6f6f;
-  --nav: #3251bc;
-  --nav-text: #ffffff;
-  --accent: #0033aa;       /* link blue */
-  --highlight: #d04a1a;    /* CTA / active orange */
-  --good: #10b981;         /* emerald-500: ミドリっぽい鮮やかな緑 (旧 #1f9c54 から bump) */
-  --warn: #d28f0a;
-  --bad: #c93030;
-  --info: #0ea5e9;         /* sky-500: 鮮やかな青 (的中系の border 等で使用) */
-  --magenta: #b332a0;
-  --gold: #ebb838;
+  color-scheme: dark;
+
+  /* 基礎レイヤ (深い順): bg → surface-1 (card) → surface-2 → surface-3 */
+  --bg: #090d14;
+  --surface-1: #0f141f;
+  --surface-2: #141b29;
+  --surface-3: #1a2334;
+
+  /* 旧名エイリアス (panel = card 面, panel-2 = 一段上の面) */
+  --panel: var(--surface-1);
+  --panel-2: var(--surface-2);
+  --section-head: rgba(255, 255, 255, 0.03);
+
+  /* 線: white/8 相当。soft は更に薄く */
+  --line: rgba(148, 163, 184, 0.16);
+  --line-soft: rgba(148, 163, 184, 0.09);
+
+  --text: #e7ecf4;
+  --muted: #8a94a8;
+
+  /* sticky ナビ (glass)。nav-text は明色のまま */
+  --nav: rgba(10, 14, 21, 0.78);
+  --nav-text: #e7ecf4;
+
+  /* accent = プライマリ (emerald, 利益/+EV と同系)。
+     highlight = CTA / アクティブ強調 (amber)。 */
+  --accent: #34d399;
+  --highlight: #f59e0b;
+
+  /* セマンティック (dark 上で映える 400 番台) */
+  --good: #34d399;   /* emerald-400 */
+  --warn: #fbbf24;   /* amber-400 */
+  --bad: #f87171;    /* red-400 */
+  --info: #38bdf8;   /* sky-400 */
+  --magenta: #e879f9; /* fuchsia-400 */
+  --gold: #fbbf24;
+
+  /* 新トークン */
+  --positive: var(--good);
+  --negative: var(--bad);
+  --warning: var(--warn);
+  --llm: #a78bfa;    /* violet-400: Claude/LLM 由来の要素 */
+  --ring: rgba(52, 211, 153, 0.55);
 }
 
 @theme inline {
   --color-background: var(--bg);
+  --color-bg: var(--bg);
   --color-foreground: var(--text);
+  --color-fg: var(--text); /* 旧コードが text-(--color-fg) を参照 (alias) */
   --color-panel: var(--panel);
   --color-panel-2: var(--panel-2);
+  --color-card: var(--surface-1);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-section-head: var(--section-head);
   --color-line: var(--line);
   --color-line-soft: var(--line-soft);
@@ -40,6 +78,11 @@
   --color-info: var(--info);
   --color-magenta: var(--magenta);
   --color-gold: var(--gold);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-warning: var(--warning);
+  --color-llm: var(--llm);
+  --color-ring: var(--ring);
   --font-sans: var(--font-noto-jp);
   --font-mono: var(--font-geist-mono);
 }
@@ -57,35 +100,90 @@ body {
     system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   font-feature-settings: "tnum" 1, "palt" 1;
+  /* 旧 BackgroundVideo の代わり: ごく薄い radial mesh を body に常設。
+     emerald / blue / violet を端に散らし「端末画面」の奥行きを出す。 */
+  background-image:
+    radial-gradient(1100px 600px at 85% -10%, rgba(52, 211, 153, 0.06), transparent 60%),
+    radial-gradient(900px 550px at -10% 15%, rgba(59, 130, 246, 0.07), transparent 60%),
+    radial-gradient(800px 600px at 70% 110%, rgba(167, 139, 250, 0.05), transparent 60%);
+  background-attachment: fixed;
 }
 
-::selection { background: rgba(50, 81, 188, 0.25); }
+::selection {
+  background: rgba(52, 211, 153, 0.28);
+  color: #f0fdf9;
+}
 
 /* マウスクリック後にフォーカスリングが残らないようにする。
    キーボード操作 (Tab) では `:focus-visible` で出るのでアクセシビリティは保持。 */
 :focus:not(:focus-visible) {
   outline: none;
 }
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
 
-/* Custom scrollbar */
+/* Custom scrollbar (dark) */
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb {
-  background: #c8c4ba;
-  border-radius: 6px;
+  background: #28344c;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
-*::-webkit-scrollbar-thumb:hover { background: #a8a499; }
+*::-webkit-scrollbar-thumb:hover { background: #3a4a6a; background-clip: padding-box; }
+* { scrollbar-width: thin; scrollbar-color: #28344c transparent; }
 
 /* Utilities */
 .mono { font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* オッズ/金額などの数値は桁が揃う tabular numerals 必須 */
 .tabnum { font-variant-numeric: tabular-nums; }
+.tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+/* sticky 面 (ナビ等) 用の glass。背景色は呼び出し側で重ねる */
+.glass {
+  backdrop-filter: blur(12px) saturate(1.4);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+}
 
 /* テーブル行ストライプ + ホバー強調。クラスを付けた table に適用。
    :where() でセレクタ特異度をゼロにし、行の Tailwind クラス
-   (bg-emerald-500/5 の的中強調など) が常に勝つようにしている。 */
+   (bg-emerald-500/15 の的中強調など) が常に勝つようにしている。 */
 :where(.table-zebra tbody tr:nth-child(even)) {
-  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+  background: rgba(148, 163, 184, 0.045);
 }
 :where(.table-zebra tbody tr:hover) {
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  background: rgba(52, 211, 153, 0.07);
+}
+
+/* Skeleton.tsx 用 shimmer。背景はグラデを動かすだけで GPU 負荷小 */
+@keyframes skeleton-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(
+    100deg,
+    rgba(148, 163, 184, 0.08) 40%,
+    rgba(148, 163, 184, 0.18) 50%,
+    rgba(148, 163, 184, 0.08) 60%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.8s ease-in-out infinite;
+}
+
+/* BackgroundVideo (現: CSS aurora) 用。fixed 配置の薄い色斑をゆっくり漂わせる */
+@keyframes aurora-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(4%, -3%, 0) scale(1.08); }
+  100% { transform: translate3d(-3%, 2%, 0) scale(1); }
+}
+.aurora-blob {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  will-change: transform;
+  animation: aurora-drift 24s ease-in-out infinite alternate;
 }

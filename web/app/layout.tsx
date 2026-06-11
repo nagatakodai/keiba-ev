@@ -5,6 +5,7 @@ import "./globals.css";
 import { WatchPill } from "@/components/WatchPill";
 import { BackgroundVideo } from "@/components/BackgroundVideo";
 import { WatchStatusProvider } from "@/components/WatchStatusContext";
+import { NavLinks } from "@/components/NavLinks";
 
 const notoSansJP = Noto_Sans_JP({
   variable: "--font-noto-jp",
@@ -28,54 +29,39 @@ export const metadata: Metadata = {
   description: "中央 (JRA) + 地方 (NAR) 競馬を確率モデル + Claude AI で解析し、3連単的中モードに特化した買い目を提示する競馬予想オーケストレーション AI「競愛」。",
 };
 
-const NAV = [
-  { href: "/", label: "ダッシュボード" },
-  { href: "/analyze", label: "レース予測分析" },
-  { href: "/predictions", label: "予測分析履歴" },
-  { href: "/watch-auto", label: "自動予測分析・投票" },
-  { href: "/calibrate", label: "確率較正" },
-];
-
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="ja" className={`${notoSansJP.variable} ${geistMono.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col bg-(--color-panel-2)">
+      <body className="min-h-full flex flex-col bg-(--color-bg)">
         <WatchStatusProvider>
           <BackgroundVideo />
-          <header className="bg-white border-b border-(--color-line) sticky top-0 z-20">
-            <div className="max-w-7xl mx-auto px-4 h-12 flex items-center gap-4">
-              <Link href="/" className="flex items-baseline gap-1.5 font-bold tracking-tight">
-                <span className="text-lg sm:text-xl">
+          {/* sticky glass ヘッダ: 1段目 = ブランド + WatchPill, 2段目 = ナビ (mobile は横スクロール) */}
+          <header className="sticky top-0 z-20 glass bg-(--color-nav) border-b border-(--color-line)">
+            <div className="max-w-7xl mx-auto px-4 h-13 flex items-center gap-4">
+              <Link href="/" className="flex items-baseline gap-2.5 tracking-tight">
+                <span className="mono text-base sm:text-lg font-bold tracking-tight">
+                  KEIBA<span className="text-(--color-accent)">·EV</span>
+                </span>
+                <span className="text-sm font-bold">
                   <span className="text-(--color-accent)">競</span>
                   <span className="text-(--color-bad)">愛</span>
                 </span>
-                <span className="text-(--color-muted) text-xs font-normal hidden sm:inline">
-                  ｜ 競馬予想オーケストレーションAI
+                <span className="text-(--color-muted) text-xs font-normal hidden md:inline">
+                  競馬予想オーケストレーションAI
                 </span>
               </Link>
               <div className="ml-auto">
                 <WatchPill />
               </div>
             </div>
-          </header>
-
-          <nav className="bg-(--color-nav) text-(--color-nav-text) sticky top-12 z-10 shadow-sm">
-            <div className="max-w-7xl mx-auto px-2 h-10 flex items-center text-sm font-medium">
-              {NAV.map((n) => (
-                <Link
-                  key={n.href}
-                  href={n.href}
-                  className="px-4 h-10 flex items-center hover:bg-black/10 transition-colors"
-                >
-                  {n.label}
-                </Link>
-              ))}
+            <div className="max-w-7xl mx-auto px-2 border-t border-(--color-line-soft)">
+              <NavLinks />
             </div>
-          </nav>
+          </header>
 
           <main className="flex-1 relative z-[1]">{children}</main>
 
-          <footer className="bg-white border-t border-(--color-line) text-(--color-muted) text-xs px-4 py-3 text-center relative z-[1]">
+          <footer className="border-t border-(--color-line) text-(--color-muted) text-xs px-4 py-3 text-center relative z-[1]">
             長期 +EV 運用のための補助ツール。単発の勝敗で係数を変えない。
           </footer>
         </WatchStatusProvider>

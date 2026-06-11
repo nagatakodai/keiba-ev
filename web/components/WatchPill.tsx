@@ -9,10 +9,10 @@ export function WatchPill() {
   return (
     <Link
       href="/watch-auto"
-      className={`inline-flex items-center gap-2 px-3 py-1 border text-xs font-semibold transition-colors ${
+      className={`inline-flex items-center gap-2 px-3 py-1 border rounded-full text-xs font-semibold transition-colors ${
         running
-          ? "bg-(--color-good)/10 border-(--color-good) text-(--color-good)"
-          : "bg-white border-(--color-line) text-(--color-muted) hover:border-(--color-accent)"
+          ? "bg-(--color-good)/15 border-(--color-good)/60 text-(--color-good)"
+          : "bg-(--color-surface-2) border-(--color-line) text-(--color-muted) hover:border-(--color-accent)/60"
       }`}
       title="自動予測分析・投票 の稼働状態"
     >

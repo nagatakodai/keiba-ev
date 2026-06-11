@@ -1,48 +1,59 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import { useWatchStatus } from "./WatchStatusContext";
 
-// 全ページ共通の背景アニメーション。
-// watch-auto が稼働中はループ再生 + 高めの opacity、停止中は一時停止 + ほぼ非表示。
-// 画面右端に大きく配置し、コンテンツの邪魔にならない z-0 / pointer-events-none。
+// 全ページ共通の背景演出。旧実装は ~1.4MB の video (atom-animation.webm/mp4) を
+// 読み込んでいたが、純 CSS の aurora グラデーション (globals.css の .aurora-blob)
+// に置換してネットワーク/デコードコストをゼロにした。コンポーネント名と mount
+// 箇所 (layout.tsx) は互換のため維持。
+// watch-auto 稼働中は少し明るく、停止中はほぼ見えない程度に落とす。
 export function BackgroundVideo() {
   const { status } = useWatchStatus();
   const running = !!status?.running;
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (running) {
-      v.play().catch(() => {});
-    } else {
-      v.pause();
-      v.currentTime = 0;
-    }
-  }, [running]);
 
   return (
-    <video
-      ref={videoRef}
-      muted
-      loop
-      playsInline
-      autoPlay
-      preload="auto"
+    <div
       aria-hidden
-      className="fixed top-1/2 -translate-y-1/2 pointer-events-none z-0 select-none transition-opacity duration-700 w-auto max-w-none right-[-30vw] h-[55vh] sm:right-[-22vw] sm:h-[70vh] md:right-[-12vw] md:h-[95vh]"
-      // webm を先に: Chrome/Firefox は alpha チャンネル付き webm を使い黒背景が透過される。
-      // iOS Safari は webm 未対応のため mp4 にフォールバック。
-      // mp4 は alpha なし (黒背景に変換済み) → screen blend で黒を消す。
-      // webm 側では transparent な画素は screen に影響しないので無害。
-      style={{
-        opacity: running ? 0.45 : 0.1,
-        mixBlendMode: "screen",
-      }}
+      className="fixed inset-0 overflow-hidden pointer-events-none z-0 select-none transition-opacity duration-700"
+      style={{ opacity: running ? 0.5 : 0.22 }}
     >
-      <source src="/atom-animation.webm" type="video/webm" />
-      <source src="/atom-animation.mp4" type="video/mp4" />
-    </video>
+      {/* emerald: 右上 (利益/+EV のブランド色) */}
+      <div
+        className="aurora-blob"
+        style={{
+          top: "-18%",
+          right: "-12%",
+          width: "55vw",
+          height: "55vh",
+          background: "radial-gradient(closest-side, rgba(52,211,153,0.16), transparent)",
+        }}
+      />
+      {/* blue: 左中央 (slate レイヤの blue tint と同系) */}
+      <div
+        className="aurora-blob"
+        style={{
+          top: "25%",
+          left: "-15%",
+          width: "50vw",
+          height: "60vh",
+          background: "radial-gradient(closest-side, rgba(59,130,246,0.13), transparent)",
+          animationDelay: "-8s",
+          animationDuration: "30s",
+        }}
+      />
+      {/* violet: 右下 (Claude/LLM 色) */}
+      <div
+        className="aurora-blob"
+        style={{
+          bottom: "-22%",
+          right: "10%",
+          width: "45vw",
+          height: "50vh",
+          background: "radial-gradient(closest-side, rgba(167,139,250,0.11), transparent)",
+          animationDelay: "-16s",
+          animationDuration: "36s",
+        }}
+      />
+    </div>
   );
 }
