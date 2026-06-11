@@ -49,6 +49,45 @@ def _odds_hash(payload: dict) -> str:
     ).hexdigest()[:16]
 
 
+def read_rows(race_id: str) -> list[dict]:
+    """timeline の全行を captured_at 昇順で返す (公開リーダー API)。
+
+    壊れた行 (JSON parse 不能) は skip。ファイル無し/読めなければ空 list。
+    依存ゼロ (json/pathlib のみ)。
+    """
+    path = TIMELINE_DIR / f"{race_id}.jsonl"
+    rows: list[dict] = []
+    try:
+        if not path.exists():
+            return rows
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue   # 壊れた行 (書き込み中断等) は skip
+                if isinstance(row, dict):
+                    rows.append(row)
+        rows.sort(key=lambda r: r.get("captured_at", ""))
+    except Exception:  # noqa: BLE001
+        return []
+    return rows
+
+
+def latest_row(race_id: str, stage: str) -> dict | None:
+    """指定 stage ("score"|"bet"|"poll") の最新行。無ければ None。
+
+    capture("bet") は snapshot 保存の冒頭で append されるため、末尾行は
+    「書いたばかりの bet 行」であり得る — momentum 比較の基準行は必ず
+    stage 指定でこの関数から取ること (_last_line を直接使わない)。
+    """
+    rows = [r for r in read_rows(race_id) if r.get("stage") == stage]
+    return rows[-1] if rows else None
+
+
 def _last_line(path: Path) -> dict | None:
     if not path.exists():
         return None

@@ -888,6 +888,38 @@ def _save_prediction_snapshot(
     # netkeiba 経路の score phase は score 段 capture 後に同じ rd でここへ fall-through するが、
     # odds_hash dedup で重複行にはならない。
     odds_tl_mod.capture(race_id, rd, "bet")
+    # late-money momentum (paper 計測のみ — 確率/束には一切使わない。arXiv:2509.14645)。
+    # score 段 (締切5-7分前) の単勝オッズに対する現在 (bet 段) の比 r = bet/score を馬番別に
+    # snapshot へ残す。r<1 = 直前に売れた (informed money の痕跡候補)。score 行が無ければ
+    # poll 行 (odds_capture daemon) で代用。基準行は stage 指定で取る (末尾行は今書いた bet 行)。
+    late_money = None
+    try:
+        ref = (odds_tl_mod.latest_row(race_id, "score")
+               or odds_tl_mod.latest_row(race_id, "poll"))
+        cur_win = {str(b.key[0]): b.odds for b in (rd.other_bets or {}).get("win", [])
+                   if b.odds and b.odds > 0 and not b.absent}
+        ref_win = ((ref or {}).get("odds") or {}).get("win") or {}
+        if ref and cur_win:
+            ratio = {h: round(cur_win[h] / ref_win[h], 4)
+                     for h in cur_win if ref_win.get(h, 0) > 0}
+            if ratio:
+                gap_min = (dt.datetime.now()
+                           - dt.datetime.fromisoformat(ref["captured_at"])
+                           ).total_seconds() / 60.0
+                # 経路混在 (例: score=netkeiba 3券種 / bet=keibago 6券種) は単勝こそ比較可能
+                # だが <5% の変動はノイズ扱いすべき — 券種集合の不一致で検出して flag を残す。
+                cur_types = {bt for bt, bets in (rd.other_bets or {}).items() if bets}
+                if rd.trifecta:
+                    cur_types.add("trifecta")
+                late_money = {
+                    "score_stage": ref.get("stage"),                 # "score" | "poll"
+                    "score_captured_at": ref.get("captured_at"),
+                    "gap_min": round(gap_min, 1),
+                    "ratio": ratio,                                   # {馬番str: bet/score 比}
+                    "source_mix": set((ref.get("odds") or {}).keys()) != cur_types,
+                }
+    except Exception:  # noqa: BLE001
+        late_money = None   # paper 計測の失敗で live betting を止めない
     # EV束 (joint Kelly, モデルのみの参考値 — 実弾投票には使わない)。
     # 的中優先 (recommended_bundle_hit / bet_tables_hit) は廃止。
     _ = hit_points   # 旧 Plan B 用 (現スキーマでは未使用)
@@ -1070,6 +1102,9 @@ def _save_prediction_snapshot(
                             if probs_t is not None and getattr(probs_t, "win", None) else None),
         # 市場アンカー型クロスプール EV 候補 (Dr.Z 系ペーパー計測, shade込み px_o≥1.0 のみ)。
         "market_anchor_ev": market_anchor_ev,
+        # late-money momentum (paper 計測のみ): score/poll 段 → 現在の単勝オッズ比 r=bet/score。
+        # 検証は scripts/backtest_momentum.py。null = timeline に基準行なし。
+        "late_money": late_money,
         # 回収優先 bet_tables (3連単 を含む全 7 券種、各 P×O 降順 top 30)
         "bet_tables": bet_tables_serial,
         "bet_tables_g": (
