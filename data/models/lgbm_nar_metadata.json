@@ -46,21 +46,21 @@
     "bagging_freq": 5,
     "verbose": -1
   },
-  "best_iteration": 103,
+  "best_iteration": 102,
   "softmax_temperature": 0.6,
-  "market_blend_mle": 0.9999940391390134,
-  "lambda_2_mle": 0.7921773766772271,
-  "lambda_3_mle": 0.6083019701884529,
-  "n_train_races": 3453,
-  "n_fit_races": 1151,
-  "n_holdout_races": 1152,
+  "market_blend_mle": 0.901767336890129,
+  "lambda_2_mle": 0.7457798191814059,
+  "lambda_3_mle": 0.5511748517959515,
+  "n_train_races": 3066,
+  "n_fit_races": 1022,
+  "n_holdout_races": 1023,
   "holdout_eval": {
-    "n": 1152,
-    "tansho_roi": 81.42708333333334,
-    "tansho_hit": 485,
-    "market_roi": 81.2265625,
-    "market_hit": 485,
-    "tri_h1k3_hit": 140,
-    "tri_h1k3_hitrate": 12.152777777777777
+    "n": 1023,
+    "tansho_roi": 78.13587487781037,
+    "tansho_hit": 457,
+    "market_roi": 78.92668621700881,
+    "market_hit": 459,
+    "tri_h1k3_hit": 133,
+    "tri_h1k3_hitrate": 13.000977517106548
   }
 }

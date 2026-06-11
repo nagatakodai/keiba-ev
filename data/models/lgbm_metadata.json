@@ -1,8 +1,10 @@
 {
-  "trained_at": "2026-06-01T12:35:14",
-  "n_train_races": 5776,
-  "n_valid_races": 1443,
-  "n_train_rows": 65114,
+  "trained_at": "2026-06-12T03:32:22",
+  "split": "race_date",
+  "exclude_banei": true,
+  "n_train_races": 5260,
+  "n_valid_races": 1314,
+  "n_train_rows": 58945,
   "feature_cols": [
     "speed_idx_weighted",
     "speed_idx_best",
@@ -49,61 +51,61 @@
     "bagging_freq": 5,
     "verbose": -1
   },
-  "best_iteration": 69,
+  "best_iteration": 203,
   "best_scores": {
     "train": {
-      "ndcg@1": 0.47258498654172076,
-      "ndcg@3": 0.552933768034086,
-      "ndcg@5": 0.6375665822911664
+      "ndcg@1": 0.560755806038825,
+      "ndcg@3": 0.6176921103640444,
+      "ndcg@5": 0.6929799242492063
     },
     "valid": {
-      "ndcg@1": 0.3835425383542538,
-      "ndcg@3": 0.4924210711828521,
-      "ndcg@5": 0.5909199248954436
+      "ndcg@1": 0.40793899977573445,
+      "ndcg@3": 0.5125839226580927,
+      "ndcg@5": 0.6068489114339332
     }
   },
-  "softmax_temperature": 0.5,
-  "softmax_temperature_valid_log_loss": 1.955972160428079,
+  "softmax_temperature": 0.75,
+  "softmax_temperature_valid_log_loss": 1.9610416674872353,
   "top_features_by_gain": [
     {
       "name": "recent_form_score",
-      "gain": 31717.8140707016
-    },
-    {
-      "name": "shrunk_show_rate",
-      "gain": 8899.053894996643
+      "gain": 33100.282079696655
     },
     {
       "name": "last3f_idx_recent",
-      "gain": 7512.690114021301
+      "gain": 12499.812861919403
+    },
+    {
+      "name": "shrunk_show_rate",
+      "gain": 11418.311553478241
     },
     {
       "name": "popularity_outperformance",
-      "gain": 7296.80858039856
-    },
-    {
-      "name": "body_weight",
-      "gain": 5010.710688591003
+      "gain": 9079.04024887085
     },
     {
       "name": "same_venue_count",
-      "gain": 3620.7737226486206
+      "gain": 7287.3810505867
+    },
+    {
+      "name": "body_weight",
+      "gain": 7281.610511302948
     },
     {
       "name": "style_score",
-      "gain": 3382.3968048095703
-    },
-    {
-      "name": "speed_idx_last",
-      "gain": 2272.3179893493652
-    },
-    {
-      "name": "shrunk_win_rate",
-      "gain": 1731.0279064178467
+      "gain": 5408.7963490486145
     },
     {
       "name": "days_since_last_run",
-      "gain": 1358.9275903701782
+      "gain": 2997.757215976715
+    },
+    {
+      "name": "shrunk_win_rate",
+      "gain": 2862.263725757599
+    },
+    {
+      "name": "speed_idx_best",
+      "gain": 2714.0991468429565
     }
   ]
 }
