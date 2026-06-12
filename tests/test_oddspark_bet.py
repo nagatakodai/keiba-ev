@@ -39,9 +39,8 @@ def test_apply_stake_multiplier_fractional_floor():
     assert [l.stake for l in ob._apply_stake_multiplier(legs, 1.5)] == [100, 400, 1500]
     # 整数倍も同じ floor 経路で素直に倍化
     assert [l.stake for l in ob._apply_stake_multiplier(legs, 2.0)] == [200, 600, 2000]
-    # ×0.5: 50 は **除去** (¥100 floor に張り付けると縮小が無効化されるため, 2026-06-10 修正)、
-    # 150→100, 500→500
-    assert [l.stake for l in ob._apply_stake_multiplier(legs, 0.5)] == [100, 500]
+    # ×0.5: 50 は **¥100 に切り上げ** (除去しない, 2026-06-12 ユーザ指示)、150→100, 500→500
+    assert [l.stake for l in ob._apply_stake_multiplier(legs, 0.5)] == [100, 100, 500]
     # ×1.0 / 非正 は no-op (同一リストを返す)
     assert ob._apply_stake_multiplier(legs, 1.0) is legs
     assert ob._apply_stake_multiplier(legs, 0) is legs
@@ -394,17 +393,16 @@ def test_apply_stake_multiplier_identity_when_one():
     assert ob._apply_stake_multiplier(legs, 1.0) is legs
 
 
-def test_apply_stake_multiplier_drops_sub100():
-    """¥100 未満になる脚は floor せず除去 (2026-06-10 修正)。
+def test_apply_stake_multiplier_floors_sub100():
+    """¥100 未満になる脚は除去せず最低 ¥100 (発売単位の下限) に張り付ける (2026-06-12 ユーザ指示)。
 
-    旧実装の max(100, ...) は EV束のような小口多脚 (¥100-300/脚) で縮小をほぼ無効化し
-    (×0.1 のつもりが実投入は意図の数倍)、脚間 stake 比率の崩壊でトリガミ保証も壊していた。
-    全脚除去なら空リスト → add_race 側が「脚なし」として投入中止する。"""
+    2026-06-10 bughunt #4 の「除去」仕様を上書き — 脚を捨てず全買い目を維持する。
+    縮小は ¥100 で頭打ちになり脚間比率が崩れ得るが許容 (ユーザ判断)。"""
     out = ob._apply_stake_multiplier([ob.CartLeg("win", [1], 100)], 0.1)
-    assert out == []   # ¥10 相当 → 除去 (floor で ¥100 にはしない)
+    assert [(l.bet_type, l.stake) for l in out] == [("win", 100)]  # ¥10 相当 → ¥100 に切り上げ
     out2 = ob._apply_stake_multiplier(
         [ob.CartLeg("win", [1], 100), ob.CartLeg("wide", [1, 2], 2000)], 0.1)
-    assert [(l.bet_type, l.stake) for l in out2] == [("wide", 200)]
+    assert [(l.bet_type, l.stake) for l in out2] == [("win", 100), ("wide", 200)]
 
 
 def test_add_race_respects_stake_multiplier(monkeypatch):

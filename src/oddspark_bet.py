@@ -553,28 +553,25 @@ def _apply_stake_multiplier(legs: list["CartLeg"], multiplier: float) -> list["C
     **小数倍に対応** (例 ×1.5)。stake×倍率 を ¥100 単位で **切り捨て (floor)** する。切り捨ては
     実投票額を下げる方向 (賭け過ぎない) なので安全側。
 
-    【2026-06-10 bughunt #4】倍率<1 で ¥100 未満になる脚は **floor せず除去** する。
-    旧実装は max(100, ...) で ¥100 に張り付けており、EV束のような小口多脚 (¥100-300/脚)
-    では縮小がほぼ無効化 (×0.1 のつもりが実投入は意図の数倍) + 脚間 stake 比率の崩壊で
-    トリガミ保証も壊れていた。除去は S (投資総額) を下げる方向なので残脚の
-    payout/総額 比はむしろ改善する = 安全側。全脚除去なら空リスト (呼び出し側が
-    「脚なし」として中止する)。脚間比率は ¥100 floor で僅かに動くため厳密な
-    トリガミ保証は CartLeg に odds が無い以上 daemon 側で再検証できない点は従来通り。
+    【2026-06-12 ユーザ指示】倍率<1 で ¥100 未満になる脚は **除去せず最低 ¥100 (発売単位の
+    下限) に張り付ける** — 2026-06-10 bughunt #4 の除去仕様を上書き。小口多脚の束では縮小が
+    ¥100 で頭打ちになり (×0.1 でも 1脚 ¥100)、脚間 stake 比率が崩れて bet 時点のトリガミ保証が
+    弱まり得るが、脚を捨てず全買い目を維持する方を優先する (ユーザ判断)。
     multiplier<=0 / ==1.0 は no-op。
     """
     if multiplier <= 0 or multiplier == 1.0:
         return legs
     out: list[CartLeg] = []
-    dropped = 0
+    floored = 0
     for l in legs:
         scaled = int(l.stake * multiplier // 100) * 100
         if scaled < 100:
-            dropped += 1
-            continue
+            scaled = 100
+            floored += 1
         out.append(CartLeg(bet_type=l.bet_type, key=list(l.key), stake=scaled))
-    if dropped:
-        print(f"[stake_multiplier] ×{multiplier} で ¥100 未満になった {dropped} 脚を除去 "
-              f"(floor で ¥100 に張り付けると縮小が無効化されるため)")
+    if floored:
+        print(f"[stake_multiplier] ×{multiplier} で ¥100 未満になった {floored} 脚を"
+              f"最低 ¥100 に切り上げ (脚は除去しない)")
     return out
 
 
@@ -951,8 +948,7 @@ class BettingSession:
         if self.stake_multiplier != 1.0:
             legs = _apply_stake_multiplier(legs, self.stake_multiplier)
         if not legs:
-            raise OddsparkBetError(
-                f"倍率 ×{self.stake_multiplier} 適用後に脚が残らない (全脚 ¥100 未満) — 投入しない")
+            raise OddsparkBetError("投入する脚がない — 投入しない")
         total = sum(l.stake for l in legs)
         if total > self.max_total_stake:
             raise OddsparkBetError(
@@ -1413,8 +1409,6 @@ def _main() -> None:
                 except ValueError:
                     v = 0
                 # 0 以下や 100 超は誤入力扱いで既定に戻す (Pydantic と同じ gt=0/le=100 制約)。
-                # 0 だと _apply_stake_multiplier の min ¥100 floor が走り「全 leg ¥100」の
-                # 予期しない挙動になるため拒否。
                 if v <= 0 or v > 100:
                     print(f"[oddspark_bet] --stake-multiplier 値が範囲外 ({a}) → 既定 1.0x "
                           "(有効範囲: 0 < N <= 100)")

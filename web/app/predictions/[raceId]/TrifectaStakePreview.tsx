@@ -12,11 +12,10 @@ import type { TrifectaHitmaxBundle } from "@/lib/api";
 const PRESETS = [1, 1.5, 2, 3, 5];
 const TORIGAMI_DEFAULT = 1.1; // src/portfolio.py TORIGAMI_MARGIN (古い snapshot で torigami_margin 欠落時)
 
-// stake × 倍率 を ¥100 単位で切り捨て (floor)。¥100 未満は 0 (= 脚を除去)。
-// vote 時の _apply_stake_multiplier (bughunt #4 修正後) と一致 — 旧実装の max(100, ...)
-// 張り付けは倍率<1 で実投票 (脚除去) と乖離した見積りを出していた (2026-06-11 第5R)。
+// stake × 倍率 を ¥100 単位で切り捨て (floor)。¥100 未満は最低 ¥100 に切り上げ (脚は除去しない)。
+// vote 時の _apply_stake_multiplier (2026-06-12 ユーザ指示: 除去せず ¥100 張り付け) と一致。
 function floorStake(stake: number, mult: number): number {
-  return Math.floor((stake * mult) / 100) * 100;
+  return Math.max(100, Math.floor((stake * mult) / 100) * 100);
 }
 
 export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle }) {
@@ -27,14 +26,14 @@ export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle 
   const legs = bundle.legs ?? [];
 
   // 各脚を floor して再計算 (floor で脚間比率が動くので payout/total/最小比は base の単純 ×mult では出せない)。
-  // ¥100 未満になる脚は実投票どおり除去して total/minPayout/比率から外す。
-  const scaled = legs
-    .map((l) => {
-      const stake = floorStake(l.stake, mult);
-      return { ...l, stake, payout: Math.round(l.odds * stake) };
-    })
-    .filter((l) => l.stake >= 100);
-  const dropped = legs.length - scaled.length;
+  // ¥100 未満になる脚は実投票どおり最低 ¥100 に切り上げて維持する (除去しない)。
+  const scaled = legs.map((l) => {
+    const stake = floorStake(l.stake, mult);
+    return { ...l, stake, payout: Math.round(l.odds * stake) };
+  });
+  const floored = legs.filter(
+    (l) => Math.floor((l.stake * mult) / 100) * 100 < 100,
+  ).length;
   const total = scaled.reduce((a, l) => a + l.stake, 0);
   const payouts = scaled.map((l) => l.payout);
   const minPayout = payouts.length ? Math.min(...payouts) : 0;
@@ -75,15 +74,15 @@ export function TrifectaStakePreview({ bundle }: { bundle: TrifectaHitmaxBundle 
           aria-label="掛金倍率"
         />
         <span className="text-xs text-(--color-muted)">
-          ×{mult.toLocaleString()}・各脚を ¥100 単位で切り捨て (¥100 未満の脚は除去)
+          ×{mult.toLocaleString()}・各脚を ¥100 単位で切り捨て (¥100 未満は最低 ¥100 に切り上げ)
         </span>
       </div>
-      {dropped > 0 && (
+      {floored > 0 && (
         <p className="mb-3 text-xs text-amber-300 flex items-center gap-1.5">
           <TriangleAlert className="w-3.5 h-3.5 shrink-0" aria-hidden />
           <span>
-            倍率 ×{mult} で ¥100 未満になる {dropped} 脚は実投票どおり除去して計算
-            {scaled.length === 0 && " — 全脚除去のためこのレースは投入されません"}
+            倍率 ×{mult} で ¥100 未満になる {floored} 脚は実投票どおり最低 ¥100
+            に切り上げて計算 (縮小が頭打ちになり脚間比率が崩れる点に注意)
           </span>
         </p>
       )}
