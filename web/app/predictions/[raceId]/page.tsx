@@ -198,9 +198,6 @@ export default async function PredictionDetailPage({
         }
       />
 
-      {/* 3連単的中モード = 実弾投票束を最上段に (2026-06-06〜特化)。EV束は参考。 */}
-      <TrifectaCard d={d} finish={finish} />
-
       {d.index_compare && d.index_compare.length > 0 && (
         <IndexCompareCard
           items={d.index_compare}
@@ -382,6 +379,10 @@ export default async function PredictionDetailPage({
           <ProbRankingTable rows={topByProb} finish={finish} />
         </Card>
       </div>
+
+      {/* 3連単束はページ最下段 (2026-06-12 ユーザ指示)。2026-06-10 以降の実弾既定は EV束で、
+          この束が実弾になるのは trifecta 選択時のみのため参考扱いの位置に下げた。 */}
+      <TrifectaCard d={d} finish={finish} />
     </Page>
   );
 }
