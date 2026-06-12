@@ -25,6 +25,7 @@ import {
   fmtYen,
 } from "@/components/ui";
 import { AutoRefresh } from "@/components/AutoRefresh";
+import { TrifectaModeStats } from "@/components/TrifectaModeStats";
 import {
   BundleRoiBarsChart,
   NetTrendChart,
@@ -681,82 +682,15 @@ export default async function DashboardPage() {
           eyebrowClass="text-fuchsia-300"
           lineClass="from-fuchsia-500/40"
         />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat
-            label="的中率"
-            value={
-              !trifectaBundle || trifectaBundle.participated_races === 0
-                ? "—"
-                : fmtPct(trifectaBundle.hit_rate, 1)
-            }
-            hint={
-              trifectaBundle && trifectaBundle.participated_races > 0
-                ? `${trifectaBundle.hits} 的中 / ${trifectaBundle.participated_races} 参加`
-                : "賭けたレースなし"
-            }
-            tone="default"
-            accentTone="magenta"
-          />
-          <Stat
-            label="回収率"
-            value={
-              !trifectaBundle || trifectaBundle.participated_races === 0
-                ? "—"
-                : fmtRoiPct(trifectaBundle.roi_final ?? trifectaBundle.roi)
-            }
-            hint={
-              trifectaBundle && trifectaBundle.participated_races > 0
-                ? `賭金 ${fmtYen(trifectaBundle.stake)} → 払戻(最終) ${fmtYen(trifectaBundle.payout_final ?? trifectaBundle.payout)}`
-                : "—"
-            }
-            tone={
-              !trifectaBundle || trifectaBundle.participated_races === 0
-                ? "default"
-                : (trifectaBundle.roi_final ?? trifectaBundle.roi) > 1
-                ? "default"
-                : "bad"
-            }
-            accentTone="magenta"
-          />
-          <Stat
-            label="収支"
-            value={
-              !trifectaBundle || trifectaBundle.participated_races === 0
-                ? "—"
-                : (() => {
-                    const pay = trifectaBundle.payout_final ?? trifectaBundle.payout;
-                    const pl = pay - trifectaBundle.stake;
-                    return `${pl >= 0 ? "+" : ""}${fmtYen(pl)}`;
-                  })()
-            }
-            hint={
-              trifectaBundle
-                ? `参加 ${trifectaBundle.participated_races} / 集計 ${trifectaBundle.races}`
-                : "—"
-            }
-            tone={
-              !trifectaBundle || trifectaBundle.participated_races === 0
-                ? "default"
-                : (trifectaBundle.payout_final ?? trifectaBundle.payout) - trifectaBundle.stake < 0
-                ? "bad"
-                : "default"
-            }
-            accentTone="magenta"
-          />
-          <Stat
-            label="見送りレース数"
-            value={trifectaBundle?.skipped_races ?? 0}
-            hint={
-              trifectaBundle && trifectaBundle.races > 0
-                ? `見送り率 ${Math.round((trifectaBundle.skipped_races / trifectaBundle.races) * 100)}%`
-                : "—"
-            }
-            accentTone="muted"
-          />
-        </div>
+        <TrifectaModeStats
+          all={trifectaBundle}
+          hit={cal.trifecta_bundle_modes?.hit}
+          recovery={cal.trifecta_bundle_modes?.recovery}
+        />
         <div className="text-[10px] text-(--color-muted) text-right px-1">
           ※ 計測対象は {trifectaCutoffDate ?? "計測開始日"}〜 のレースのみ。
-          Claude 指数なしのレースは自動見送り。2026-06-10〜の実弾既定は EV束 (上段)
+          Claude 指数なしのレースは自動見送り。mode 別表示では束なし見送り (mode 不明) は
+          分母外。下のチャートは mode 混在の全体系列。2026-06-10〜の実弾既定は EV束 (上段)
         </div>
       </section>
 

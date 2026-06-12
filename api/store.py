@@ -410,6 +410,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         # 扱う (participated=False / stake=0 / hit=False) — 賭けていないレースを
         # 「参加・不的中」に誤計上しない。
         bundle_t = pred.get("recommended_bundle_t") or {}
+        # mode: "recovery"=回収 (市場1番人気を1着除外) / "hit"=的中。mode 導入 (2026-06-07)
+        # 前の snapshot は欠落 → 旧 hit 相当として "hit" に正規化。束自体が無い race は None。
+        # Claude ゲートで束を zero 化する前に読む (見送り扱いでも mode 別集計の分母に使う)。
+        bundle_t_mode = (bundle_t.get("mode") or "hit") if bundle_t else None
         if bundle_t.get("rank_source") != "claude":
             bundle_t = {}
         b_t = _bundle_stats(bundle_t)
@@ -439,6 +443,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 "trifecta_bundle_stake": b_t["stake"],
                 "trifecta_bundle_payout": b_t["payout"],
                 "trifecta_bundle_payout_final": b_t["payout_final"],
+                # 3連単束のモード ("hit"/"recovery"、欠落は "hit" に正規化、束なしは None)
+                "trifecta_bundle_mode": bundle_t_mode,
                 # 3連単的中モードの計測対象か (saved_at >= TRIFECTA_CUTOFF)。
                 # False の race は trifecta_bundle 集計とダッシュボードのチャートから除外。
                 "trifecta_measured": (pred.get("saved_at") or "") >= TRIFECTA_CUTOFF_ISO_JST,
@@ -536,11 +542,23 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
     )
     # 3連単的中モードの集計 (2026-06-06〜10 は実弾固定束、以降は KEIBA_BET_BUNDLE=trifecta
     # 選択時の実弾束)。EV束と同形。計測対象は TRIFECTA_CUTOFF 以降のみ。
+    trifecta_measured = [r for r in races if r.get("trifecta_measured")]
     trifecta_bundle = _bundle_agg(
-        [r for r in races if r.get("trifecta_measured")],
+        trifecta_measured,
         "trifecta_bundle_participated", "trifecta_bundle_hit",
         "trifecta_bundle_stake", "trifecta_bundle_payout", "trifecta_bundle_payout_final",
     )
+    # mode 別の分割集計 (2026-06-12 ユーザ要望: ダッシュボードを的中モードのみで見たい)。
+    # mode 欠落の旧 snapshot は "hit" に正規化済。束なし (mode=None) はどちらにも
+    # 入らない (mode を特定できない見送りは mode 別の races/skipped 分母から外れる)。
+    trifecta_bundle_modes = {
+        mode: _bundle_agg(
+            [r for r in trifecta_measured if r.get("trifecta_bundle_mode") == mode],
+            "trifecta_bundle_participated", "trifecta_bundle_hit",
+            "trifecta_bundle_stake", "trifecta_bundle_payout", "trifecta_bundle_payout_final",
+        )
+        for mode in ("hit", "recovery")
+    }
 
     return {
         "race_count": len(pairs),
@@ -554,6 +572,8 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         "claude_bundle": claude_bundle,
         "ev_bundle": ev_bundle,
         "trifecta_bundle": trifecta_bundle,
+        # 3連単束の mode 別集計 ({"hit": .., "recovery": ..}、trifecta_bundle と同形)
+        "trifecta_bundle_modes": trifecta_bundle_modes,
         # 各系列の計測開始日 (frontend の注記表示用)
         "trifecta_cutoff": TRIFECTA_CUTOFF_ISO_JST,
         "ev_cutoff": EV_CUTOFF_ISO_JST,

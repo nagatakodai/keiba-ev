@@ -513,6 +513,9 @@ export type CalibrationRaceItem = {
   trifecta_bundle_stake?: number;
   trifecta_bundle_payout?: number;              // 予想オッズ基準
   trifecta_bundle_payout_final?: number;        // 最終オッズ基準
+  // 3連単束のモード。"hit"=的中 / "recovery"=回収 (mode 欠落の旧 snapshot は "hit" に
+  // 正規化済)。束なし race は null。
+  trifecta_bundle_mode?: "hit" | "recovery" | null;
   // 3連単的中モードの計測対象か (saved_at >= trifecta_cutoff)。false は集計/チャート除外。
   trifecta_measured?: boolean;
   // EV束 (実弾既定束) の計測対象か (saved_at >= ev_cutoff = 修正版 EV束の稼働開始 2026-06-10)。
@@ -562,6 +565,11 @@ export type CalibrationReport = {
   // 3連単束 (recommended_bundle_t, KEIBA_BET_BUNDLE=trifecta 選択時の実弾束) の集計。
   // claude_bundle と同形。trifecta_cutoff 以降の race のみが分母に入る。
   trifecta_bundle?: ClaudeBundleAggregate;
+  // 3連単束の mode 別集計 (trifecta_bundle と同形)。hit=的中モード / recovery=回収モード。
+  trifecta_bundle_modes?: {
+    hit?: ClaudeBundleAggregate;
+    recovery?: ClaudeBundleAggregate;
+  };
   // 各系列の計測開始日 (ISO8601 JST naive)。注記表示用。
   trifecta_cutoff?: string;
   ev_cutoff?: string;
