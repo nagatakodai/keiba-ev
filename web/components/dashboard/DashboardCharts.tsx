@@ -8,11 +8,13 @@
 import { CHART_COLORS, ROIBars, TrendChart } from "@/components/charts";
 
 export type BundleTrendPoint = {
-  x: string;      // saved_at 由来の "MM-DD" ラベル
-  evNet: number;  // EV束 累積収支 (¥)
-  tNet: number;   // 3連単束 累積収支 (¥)
-  evRoi: number;  // EV束 累積回収率 (%)
-  tRoi: number;   // 3連単束 累積回収率 (%)
+  x: string;        // saved_at 由来の "MM-DD" ラベル
+  evNet: number;    // EV束 累積収支 (¥)
+  tHitNet: number;  // 3連単束 (的中モード) 累積収支 (¥)
+  tRecNet: number;  // 3連単束 (回収モード) 累積収支 (¥)
+  evRoi: number;    // EV束 累積回収率 (%)
+  tHitRoi: number;  // 3連単束 (的中モード) 累積回収率 (%)
+  tRecRoi: number;  // 3連単束 (回収モード) 累積回収率 (%)
 };
 
 export type BundleRoiBarDatum = {
@@ -24,14 +26,17 @@ function fmtSignedYen(v: number): string {
   return `${v < 0 ? "-" : "+"}¥${Math.abs(Math.round(v)).toLocaleString()}`;
 }
 
+// 3連単束は mode 別に分割 (2026-06-12): 的中 = 従来の fuchsia、回収 = amber。
 const NET_SERIES = [
   { key: "evNet", label: "EV束 (実弾既定)", color: CHART_COLORS.info },
-  { key: "tNet", label: "3連単束", color: CHART_COLORS.magenta },
+  { key: "tHitNet", label: "3連単束 (的中)", color: CHART_COLORS.magenta },
+  { key: "tRecNet", label: "3連単束 (回収)", color: CHART_COLORS.warning },
 ];
 
 const ROI_SERIES = [
   { key: "evRoi", label: "EV束 (実弾既定)", color: CHART_COLORS.info },
-  { key: "tRoi", label: "3連単束", color: CHART_COLORS.magenta },
+  { key: "tHitRoi", label: "3連単束 (的中)", color: CHART_COLORS.magenta },
+  { key: "tRecRoi", label: "3連単束 (回収)", color: CHART_COLORS.warning },
 ];
 
 // 累積収支 (¥) の推移。0 円を基準線に。

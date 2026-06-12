@@ -56,7 +56,8 @@ type DistroCounts = { hits: number; misses: number; skips: number };
 function buildDashboardData(races: RaceHit[]): {
   points: BundleTrendPoint[];
   evDistro: DistroCounts;
-  tDistro: DistroCounts;
+  tHitDistro: DistroCounts;
+  tRecDistro: DistroCounts;
 } {
   // どちらかの系列の計測対象になっている race のみ (両 cutoff の和集合)。
   // field 欠落 (旧 API) は従来通り含める。
@@ -69,11 +70,14 @@ function buildDashboardData(races: RaceHit[]): {
   );
 
   // 累積収支: 参加レースのみ (見送りは stake/payout 0 で実質スキップ)。
-  // ev* = EV束 (実弾既定, ev_measured のみ) / t* = 3連単束 (trifecta_measured のみ)。
+  // ev* = EV束 (実弾既定, ev_measured のみ) / tHit*/tRec* = 3連単束の mode 別
+  // (trifecta_measured のみ。mode は API 側で欠落→"hit" 正規化済、参加束は必ず mode を持つ)。
   let evStakeAcc = 0;
   let evPayoutAcc = 0;
-  let tStakeAcc = 0;
-  let tPayoutAcc = 0;
+  let tHitStakeAcc = 0;
+  let tHitPayoutAcc = 0;
+  let tRecStakeAcc = 0;
+  let tRecPayoutAcc = 0;
   const points: BundleTrendPoint[] = sorted.map((r, i) => {
     if (r.ev_measured && r.bundle_participated) {
       evStakeAcc += r.bundle_stake ?? 0;
@@ -81,15 +85,24 @@ function buildDashboardData(races: RaceHit[]): {
       evPayoutAcc += r.bundle_payout_final ?? r.bundle_payout ?? 0;
     }
     if (r.trifecta_measured !== false && r.trifecta_bundle_participated) {
-      tStakeAcc += r.trifecta_bundle_stake ?? 0;
-      tPayoutAcc += r.trifecta_bundle_payout_final ?? r.trifecta_bundle_payout ?? 0;
+      const stake = r.trifecta_bundle_stake ?? 0;
+      const payout = r.trifecta_bundle_payout_final ?? r.trifecta_bundle_payout ?? 0;
+      if (r.trifecta_bundle_mode === "recovery") {
+        tRecStakeAcc += stake;
+        tRecPayoutAcc += payout;
+      } else {
+        tHitStakeAcc += stake;
+        tHitPayoutAcc += payout;
+      }
     }
     return {
       x: r.saved_at ? r.saved_at.slice(5, 10) : `#${i + 1}`,
       evNet: evPayoutAcc - evStakeAcc,
-      tNet: tPayoutAcc - tStakeAcc,
+      tHitNet: tHitPayoutAcc - tHitStakeAcc,
+      tRecNet: tRecPayoutAcc - tRecStakeAcc,
       evRoi: evStakeAcc > 0 ? (evPayoutAcc / evStakeAcc) * 100 : 0,
-      tRoi: tStakeAcc > 0 ? (tPayoutAcc / tStakeAcc) * 100 : 0,
+      tHitRoi: tHitStakeAcc > 0 ? (tHitPayoutAcc / tHitStakeAcc) * 100 : 0,
+      tRecRoi: tRecStakeAcc > 0 ? (tRecPayoutAcc / tRecStakeAcc) * 100 : 0,
     };
   });
 
@@ -100,16 +113,21 @@ function buildDashboardData(races: RaceHit[]): {
     misses: evMeasured.filter((r) => r.bundle_participated && !r.bundle_hit).length,
     skips: evMeasured.filter((r) => r.bundle_participated === false).length,
   };
+  // 3連単束は mode 別。束なし見送り (mode=null) はどちらにも属さないため分布から外れる。
   const tMeasured = measured.filter((r) => r.trifecta_measured !== false);
-  const tDistro: DistroCounts = {
-    hits: tMeasured.filter((r) => r.trifecta_bundle_hit).length,
-    misses: tMeasured.filter(
+  const distroOf = (rs: RaceHit[]): DistroCounts => ({
+    hits: rs.filter((r) => r.trifecta_bundle_hit).length,
+    misses: rs.filter(
       (r) => r.trifecta_bundle_participated && !r.trifecta_bundle_hit,
     ).length,
-    skips: tMeasured.filter((r) => r.trifecta_bundle_participated === false).length,
-  };
+    skips: rs.filter((r) => r.trifecta_bundle_participated === false).length,
+  });
+  const tHitDistro = distroOf(tMeasured.filter((r) => r.trifecta_bundle_mode === "hit"));
+  const tRecDistro = distroOf(
+    tMeasured.filter((r) => r.trifecta_bundle_mode === "recovery"),
+  );
 
-  return { points, evDistro, tDistro };
+  return { points, evDistro, tHitDistro, tRecDistro };
 }
 
 // ============================================================
@@ -369,11 +387,11 @@ export default async function DashboardPage() {
   }
 
   // チャート / 直近レース用の累積系列 (server 側で計算して client チャートに渡す)
-  const { points, evDistro, tDistro } = buildDashboardData(cal.races);
+  const { points, evDistro, tHitDistro, tRecDistro } = buildDashboardData(cal.races);
   const heroSpark =
     activeBundleKind === "ev"
       ? points.map((p) => p.evNet)
-      : points.map((p) => p.tNet);
+      : points.map((p) => p.tHitNet + p.tRecNet); // hero は 3連単束 全体 (mode 合算)
 
   // hero KPI (実弾投票束 = activeBundle 基準)
   const heroPay = activeBundle
@@ -388,7 +406,8 @@ export default async function DashboardPage() {
   const roiBars: BundleRoiBarDatum[] = (
     [
       ["EV束 (実弾既定)", evBundle],
-      ["3連単束", trifectaBundle],
+      ["3連単束 (的中)", cal.trifecta_bundle_modes?.hit],
+      ["3連単束 (回収)", cal.trifecta_bundle_modes?.recovery],
       ["EV束 全期間参考", claudeBundle],
     ] as Array<[string, ClaudeBundleAggregate | undefined]>
   ).flatMap(([label, b]) =>
@@ -690,7 +709,7 @@ export default async function DashboardPage() {
         <div className="text-[10px] text-(--color-muted) text-right px-1">
           ※ 計測対象は {trifectaCutoffDate ?? "計測開始日"}〜 のレースのみ。
           Claude 指数なしのレースは自動見送り。mode 別表示では束なし見送り (mode 不明) は
-          分母外。下のチャートは mode 混在の全体系列。2026-06-10〜の実弾既定は EV束 (上段)
+          分母外。下のチャートも 的中/回収 の mode 別系列。2026-06-10〜の実弾既定は EV束 (上段)
         </div>
       </section>
 
@@ -726,10 +745,16 @@ export default async function DashboardPage() {
                   skips={evDistro.skips}
                 />
                 <DistroBar
-                  label="3連単束"
-                  hits={tDistro.hits}
-                  misses={tDistro.misses}
-                  skips={tDistro.skips}
+                  label="3連単束 (的中モード)"
+                  hits={tHitDistro.hits}
+                  misses={tHitDistro.misses}
+                  skips={tHitDistro.skips}
+                />
+                <DistroBar
+                  label="3連単束 (回収モード)"
+                  hits={tRecDistro.hits}
+                  misses={tRecDistro.misses}
+                  skips={tRecDistro.skips}
                 />
               </div>
             </Card>
