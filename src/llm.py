@@ -138,8 +138,6 @@ def _balanced_json(text: str, start: int) -> dict | None:
     return None
 
 ALLOWED_TOOLS = [
-    "mcp__brave-search__brave_web_search",
-    "mcp__brave-search__brave_local_search",
     "mcp__tavily__tavily_search",
     "mcp__tavily__tavily-search",
     "mcp__tavily__tavily_extract",
@@ -213,7 +211,7 @@ def build_horse_score_prompt(
         f"{r.surface}{r.distance}m {r.weather_text}",
         f"開催日: {kaisai_date}",
         "",
-        "あなたは競馬の考察家です。下の出走馬について **web 検索 (Brave/Tavily)** で "
+        "あなたは競馬の考察家です。下の出走馬について **web 検索 (Tavily)** で "
         "各馬を調べ、**各馬の「強さ指数」 (0-100, 高いほど強い = 1着に近い)** を付けてください。"
         "これは市場とは独立した相対評価で、確率モデルの fundamental に合成され、最終的に市場オッズと"
         "ブレンドされます。**買い目 (picks) は決めません** — あなたの仕事は各馬を相対評価して"
@@ -266,7 +264,7 @@ def build_horse_score_prompt(
         "**検索すべきでない**: 既に上表にある数値 (オッズ/人気/適性)、競馬の基本ルール、"
         "1か月以上前の汎用情報、市場の鏡にしかならない「単に人気だから強い」という類の確認。",
         f"**検索予算**: このレースは {len(horses)} 頭立て。**全馬を 1 頭あたり約 2 クエリ "
-        f"(合計 ~{len(horses) * 2} クエリ) まで** Brave/Tavily で補強してよい。各馬について最低 "
+        f"(合計 ~{len(horses) * 2} クエリ) まで** Tavily で補強してよい。各馬について最低 "
         "1 回は ①直前情報 (取消/馬体重) または ②軟情報 (近走の不利/勝負気配) を確認し、人気・評価が"
         "割れる馬は 2 回まで深掘りする。各クエリ前に「何が決まるか」を 1 行説明。",
         "**並列実行 (重要・速度に直結)**: 互いに依存しない検索・WebFetch は **必ず 1 ターンで同時に "
@@ -469,7 +467,6 @@ def parse_horse_scores(text: str) -> dict:
 # 締切1分前の高速 3連単選定では web 検索もファイル読みも一切させない (純粋推論で ~10-30s)。
 _TRIFECTA_SELECT_DISALLOWED = (
     DISALLOWED_TOOLS + ",Read,WebFetch,"
-    "mcp__brave-search__brave_web_search,mcp__brave-search__brave_local_search,"
     "mcp__tavily__tavily_search,mcp__tavily__tavily-search,"
     "mcp__tavily__tavily_extract,mcp__tavily__tavily-extract"
 )

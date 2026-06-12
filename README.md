@@ -45,7 +45,7 @@ keiba-ev/
 ├── Makefile
 ├── CLAUDE.md           # 運用方針 / 確率モデル / 検索 MCP ルール / 開発フロー
 ├── requirements.txt    # Python 依存
-└── package.json        # MCP サーバ (Brave Search / Tavily) 用
+└── package.json        # MCP サーバ (Tavily) 用
 ```
 
 ## セットアップ
@@ -69,12 +69,12 @@ claude login
 
 サブスクリプションでログイン済みなら `ANTHROPIC_API_KEY` は不要です。
 
-### MCP サーバ (任意 / Claude 評価で使う Brave Search + Tavily)
+### MCP サーバ (任意 / Claude 評価で使う Tavily)
 
 ```bash
-npm install       # ./node_modules/.bin/{mcp-server-brave-search,tavily-mcp} を取得
+npm install       # ./node_modules/.bin/tavily-mcp を取得
 cp .env.example .env
-# .env を編集して BRAVE_API_KEY / TAVILY_API_KEY を記入
+# .env を編集して TAVILY_API_KEY を記入
 ```
 
 `make run` 時に `.env` が `python-dotenv` で読まれ、spawn する `claude` CLI に継承されます。
@@ -122,7 +122,7 @@ python -m src.analyze 'https://race.netkeiba.com/race/shutuba.html?race_id=20260
 4. **joint Kelly 最適まとめ買い束** を 2 つ生成:
    - `recommended_bundle` (回収優先) ← 実弾で買う対象
    - `recommended_bundle_hit` (的中優先) ← おまけ計測のみ
-5. (任意) `claude -p` を spawn し、Brave / Tavily で per-leg 補強根拠を集めさせて bundle を選定 / 検証
+5. (任意) `claude -p` を spawn し、Tavily で per-leg 補強根拠を集めさせて bundle を選定 / 検証
 
 ### Plan キャップ / 適性ゲート / 多 bet type フラグ
 
