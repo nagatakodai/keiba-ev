@@ -826,7 +826,13 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
         az_mod._run_score_stage(
             race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
             horse_best_times=best_times, model="opus", no_llm=not with_llm)
-        return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
+        # Claude 指数が出た段階で予想履歴詳細 (snapshot) を作って表示する (ユーザ指示 2026-06-13)。
+        # save_snapshot 時は early return せず下の bet 段ロジックへ fall-through し、指数つき
+        # 暫定 snapshot (stage="score") を保存する。3連単買い目の Claude 選定は bet 段のみ
+        # (下の claude_trifecta_select 参照)。bet 段が締切直前に fresh odds で再計算・上書きする。
+        # 実弾 enqueue は auto_watch の bet phase のみが行うので score の snapshot で賭けは飛ばない。
+        if not save_snapshot:
+            return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
     llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(race_id)
@@ -878,9 +884,10 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
                 hit_points=3, probs=probs, probs_t=probs_t,
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
-                # bet 段のみ到達 (score 段は上で early return)。3連単買い目選定を Claude に任せる。
-                # --no-llm (with_llm=False) ではキルスイッチとして選定も止める (2026-06-11 第5R)。
-                claude_trifecta_select=with_llm)
+                # 3連単買い目の Claude 選定は **bet 段のみ** (score 段の暫定 snapshot は機械
+                # フォーメーション)。--no-llm (with_llm=False) ではキルスイッチとして選定も止める。
+                claude_trifecta_select=(with_llm and phase == "bet"),
+                stage=phase)
             _tag_snapshot_source(race_id, "jra")
         except Exception as ex:  # noqa: BLE001
             print(f"[analyze_jra] snapshot 保存失敗: {ex}")

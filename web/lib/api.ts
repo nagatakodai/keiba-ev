@@ -41,6 +41,8 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
 export type PredictionSummary = {
   race_id: string;
   saved_at: string;
+  // "score"=Claude 指数出力時の暫定プレビュー / "bet"=締切直前の確定。旧 snapshot は欠落→"bet" 相当。
+  stage?: "score" | "bet";
   venue_name: string;
   race_class: string;
   schedule_index: number;
@@ -221,6 +223,8 @@ export type TrifectaHitmaxBundle = {
 export type PredictionDetail = {
   race_id: string;
   saved_at: string;
+  // "score"=Claude 指数出力時の暫定プレビュー / "bet"=締切直前の確定。旧 snapshot は欠落→"bet" 相当。
+  stage?: "score" | "bet";
   venue_name: string;
   race_class: string;
   schedule_index: number;

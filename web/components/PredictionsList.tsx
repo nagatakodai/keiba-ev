@@ -177,6 +177,8 @@ function RaceRow({
           {p.race_class && (
             <Badge tone={raceClassTone(p.race_class)}>{p.race_class}</Badge>
           )}
+          {/* score 段の暫定プレビュー (Claude 指数出力時に早出し)。bet 段で確定版に上書きされる。 */}
+          {p.stage === "score" && <Badge tone="muted">暫定</Badge>}
         </Link>
         {/* **1 ラベル原則** (2026-05-29 ユーザ指示):
             優先順 hit (的中/見送り/不的中) > 補強済 > timing。

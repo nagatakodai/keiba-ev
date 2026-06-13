@@ -232,6 +232,7 @@ def main(
             # bet 段のみ 3連単買い目選定を Claude に任せる (score 段はキャッシュ作りなので機械)。
             claude_trifecta_select=(phase == "bet" and not no_llm),
             llm_select_model=llm_model,
+            stage=phase,
         )
     if ev_max is not None or min_prob is not None:
         kept = len(plan_rows)
@@ -905,19 +906,22 @@ def _save_prediction_snapshot(
     trifecta_mode: str | None = None,         # 3連単束モード。None で env KEIBA_TRIFECTA_MODE/既定 recovery
     claude_trifecta_select: bool = False,   # bet 段: 3連単買い目選定を Claude に任せる
     llm_select_model: str = "opus",
+    stage: str = "bet",                     # "score"=指数出力時の暫定プレビュー / "bet"=締切直前の確定
 ) -> None:
     # オッズ変動キャプチャ (Step 1): snapshot 保存時 (= bet 段の fresh odds) を時系列に記録。
     # netkeiba 経路の score phase は score 段 capture 後に同じ rd でここへ fall-through するが、
-    # odds_hash dedup で重複行にはならない。
-    odds_tl_mod.capture(race_id, rd, "bet")
+    # odds_hash dedup で重複行にはならない。stage="score" は capture 側も "score" 扱い。
+    odds_tl_mod.capture(race_id, rd, stage if stage == "score" else "bet")
     # late-money momentum (paper 計測のみ — 確率/束には一切使わない。arXiv:2509.14645)。
     # score 段 (締切5-7分前) の単勝オッズに対する現在 (bet 段) の比 r = bet/score を馬番別に
     # snapshot へ残す。r<1 = 直前に売れた (informed money の痕跡候補)。score 行が無ければ
     # poll 行 (odds_capture daemon) で代用。基準行は stage 指定で取る (末尾行は今書いた bet 行)。
+    # stage="score" (指数出力時の暫定プレビュー) では現在オッズ自体が score 時点なので
+    # score→bet 比は無意味 (≈1)。bet 段でのみ ref を取り計測する (それ以外は late_money=None)。
     late_money = None
     try:
-        ref = (odds_tl_mod.latest_row(race_id, "score")
-               or odds_tl_mod.latest_row(race_id, "poll"))
+        ref = ((odds_tl_mod.latest_row(race_id, "score")
+                or odds_tl_mod.latest_row(race_id, "poll")) if stage == "bet" else None)
         cur_win = {str(b.key[0]): b.odds for b in (rd.other_bets or {}).get("win", [])
                    if b.odds and b.odds > 0 and not b.absent}
         ref_win = ((ref or {}).get("odds") or {}).get("win") or {}
@@ -1090,6 +1094,9 @@ def _save_prediction_snapshot(
     snapshot = {
         "race_id": race_id,
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
+        # "score" = Claude 指数出力時の暫定プレビュー (締切前に履歴へ早出し)。
+        # "bet"   = 締切直前に fresh odds で再計算した確定版 (score を上書き)。
+        "stage": stage,
         "venue_name": rd.race.venue_name,
         "race_class": rd.race.race_class,
         "schedule_index": rd.race.schedule_index,

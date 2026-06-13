@@ -43,6 +43,8 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
             {
                 "race_id": d.get("race_id") or path.stem,
                 "saved_at": d.get("saved_at"),
+                # "score"=Claude 指数出力時の暫定 / "bet"=締切直前の確定。旧 snapshot は欠落→bet 相当。
+                "stage": d.get("stage") or "bet",
                 "venue_name": d.get("venue_name"),
                 "race_class": d.get("race_class"),
                 "schedule_index": d.get("schedule_index"),
@@ -398,9 +400,15 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         # いない paper なので、EV束系列 (ev_bundle / claude_bundle) では「見送り」として
         # 扱う (participated=False / stake=0)。race 行自体は残し、bundle_backfilled
         # フラグで UI 側がグレーアウトできるようにする。
+        # stage="score" の暫定プレビュー (Claude 指数出力時に履歴へ早出ししたもの) は
+        # bet 段で上書きされるはず。上書きされず score のまま残るのは **bet が発火しなかった
+        # = 賭けなかった**レースなので、backfill と同様「見送り」扱い (participated=False)。
+        # 履歴 (list_predictions/get_prediction) には出すが、ROI 計測の分母には入れない。
+        # stage 欠落の旧 snapshot は bet 相当として通す。
+        is_score_preview = (pred.get("stage") == "score")
         bundle_ev = pred.get("recommended_bundle") or {}
         bundle_backfilled = bool(bundle_ev.get("backfilled"))
-        b_yield = _bundle_stats({} if bundle_backfilled else bundle_ev)
+        b_yield = _bundle_stats({} if (bundle_backfilled or is_score_preview) else bundle_ev)
         # 3連単的中モード(market 無視・Claude 指数フォーメーション)。
         # 回収優先 bundle と完全分離して集計し、ダッシュボードで並べて見せる。
         # 古い snapshot は recommended_bundle_t 欠落 → participated=False で分母外。
@@ -413,8 +421,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
         # mode: "recovery"=回収 (市場1番人気を1着除外) / "hit"=的中。mode 導入 (2026-06-07)
         # 前の snapshot は欠落 → 旧 hit 相当として "hit" に正規化。束自体が無い race は None。
         # Claude ゲートで束を zero 化する前に読む (見送り扱いでも mode 別集計の分母に使う)。
-        bundle_t_mode = (bundle_t.get("mode") or "hit") if bundle_t else None
-        if bundle_t.get("rank_source") != "claude":
+        # score プレビューは賭けていないので mode 別分母からも外す (bundle_t_mode=None)。
+        bundle_t_mode = None if is_score_preview else (
+            (bundle_t.get("mode") or "hit") if bundle_t else None)
+        if is_score_preview or bundle_t.get("rank_source") != "claude":
             bundle_t = {}
         b_t = _bundle_stats(bundle_t)
 
@@ -436,6 +446,10 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
                 # backfill された paper 束 (実際には賭けていない)。集計からは除外済、
                 # UI のグレーアウト表示用フラグ。
                 "bundle_backfilled": bundle_backfilled,
+                # stage="score" の暫定プレビュー (bet 未発火で score 止まり = 賭けていない)。
+                # 集計は見送り扱い、UI は「暫定」表示できる。bet 段で上書きされれば False。
+                "stage": pred.get("stage") or "bet",
+                "stage_preview": is_score_preview,
                 # 3連単的中モード bundle (**実弾投票束**。2026-06-06 以降 3連単的中モード固定)。
                 "trifecta_bundle_hit": b_t["hit"],
                 "trifecta_bundle_hit_bet_types": sorted({leg["bet_type"] for leg in b_t["hit_legs"]}),

@@ -159,6 +159,13 @@ export default async function PredictionDetailPage({
             ) : null}
             {d.evidence && <Badge tone="magenta">補強済</Badge>}
             {d.result && <Badge tone="good">結果あり</Badge>}
+            {/* score 段の暫定プレビュー (Claude 指数出力時に早出し)。締切直前の bet 段で
+                fresh odds の確定版に上書きされる。実弾投票はまだ行われていない。 */}
+            {d.stage === "score" && (
+              <span title="Claude 指数出力時の暫定プレビュー。締切直前に最新オッズで確定版へ上書きされます (まだ投票していません)">
+                <Badge tone="warn">暫定 (score段階)</Badge>
+              </span>
+            )}
           </span>
         }
         subtitle={
