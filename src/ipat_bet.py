@@ -505,15 +505,24 @@ class BettingSession:
         if total > self.max_total_stake:
             raise IpatBetError(
                 f"レース合計 ¥{total:,} > 上限 ¥{self.max_total_stake:,} — 投入しない (誤入力防止)")
-        # ログイン状態プローブ (2026-06-11 bughunt, oddspark _goto_matome と対):
-        # IPAT のサーバ側セッション失効は SPA がログイン画面へ戻るだけで、従来は
+        # ログイン状態プローブ (2026-06-11 bughunt → 2026-06-13 修正):
+        # IPAT のサーバ側セッション失効は SPA がログイン画面へ戻すだけで、従来は
         # _select_course_race の「レースボタン不検出」(マーカー非該当の IpatBetError) に
-        # 化けて req が .done で静かに消費されていた。logged_in_marker (text=ログアウト)
-        # 不在ならマーカー該当文言で raise → SessionDeadError → daemon fail-fast + req 残置。
+        # 化けて req が .done で静かに消費されていた。
+        # ※ 旧実装は logged_in_marker (text=ログアウト) 不在で session-dead としていたが、
+        #   通常投票 (bet.basic) 画面には ログアウト リンクが無い (breadcrumb 投票メニュー配下)。
+        #   start()→_goto_vote_top() でログイン直後に必ず bet.basic に居るため、この画面で
+        #   **必ず誤検知**して JRA daemon が即落ちした (2026-06-13 報告)。
+        #   → 「ログイン画面マーカー (INET-ID / 加入者番号 入力欄) の存在」でログアウト済みを
+        #   **陽性検出**する方式へ反転 (bet 画面に居る限り誤検知せず、本当に失効で
+        #   ログイン画面へ戻された時のみ raise → SessionDeadError → daemon fail-fast + req 残置)。
         try:
-            if self.page.locator(SELECTORS["logged_in_marker"]).count() == 0:
+            on_login_screen = (
+                self.page.locator(SELECTORS["login_inetid"]).count() > 0
+                or self.page.locator(SELECTORS["login_subscriber"]).count() > 0)
+            if on_login_screen:
                 raise IpatBetError(
-                    "セッション切れの可能性 (ログアウトリンク不在) — ログインし直してください")
+                    "セッション切れ (ログイン画面へ戻された) — ログインし直してください")
         except IpatBetError:
             raise
         except Exception:  # noqa: BLE001 — locator 自体の失敗はブラウザ死系 (別マーカーが拾う)
