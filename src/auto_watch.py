@@ -690,6 +690,20 @@ def main(
 SCORE_MIN_RUNWAY_SEC = int(os.environ.get("KEIBA_SCORE_MIN_RUNWAY") or 240)
 
 
+def _race_type_predict_enabled(source: str | None, *, bet_oddspark: bool, bet_ipat: bool) -> bool:
+    """投票フラグに応じて、この source のレースを予想 (dispatch) 対象にするか判定する。
+
+    ユーザ指示 2026-06-13: **JRA 自動投票だけ ON なら地方 (NAR) の予想をしない / 逆も然り**。
+    片側だけ ON のときは、その券種に対応するレースのみ予想する (賭けない種別に LLM/検索/解析
+    コストを使わない)。両方 ON・両方 OFF (= 計測のみ) は両方予想する。
+    source=="keibabook" が JRA、それ以外 (oddspark/keibago) が NAR (= 投票 routing と同じ signal)。
+    """
+    if bet_ipat == bet_oddspark:          # 両 ON or 両 OFF → 両方予想 (絞り込みなし)
+        return True
+    is_jra = (source == "keibabook")
+    return is_jra if bet_ipat else (not is_jra)
+
+
 def _run_phase(
     phase: str, window_min: float, tolerance_min: float, now_ts: int,
     *, market_blend, aptitude_top, no_llm: bool,
@@ -714,6 +728,21 @@ def _run_phase(
     except Exception as e:
         console.print(f"[red]race_list 取得失敗: {e}[/red]")
         return
+
+    # 投票フラグによる予想対象の絞り込み (ユーザ指示 2026-06-13: 片側投票 ON ならその券種だけ予想)。
+    # due (帯内) と future_all (予約プリパス対象) の両方を絞り、対象外券種は score も bet 予約も
+    # しない (= 予想しない)。両 ON / 両 OFF (計測のみ) は絞らない。
+    if bet_ipat != bet_oddspark:
+        n_due0, n_fut0 = len(due), len(future_all)
+        due = [r for r in due if _race_type_predict_enabled(
+            r.get("source"), bet_oddspark=bet_oddspark, bet_ipat=bet_ipat)]
+        future_all = [r for r in future_all if _race_type_predict_enabled(
+            r.get("source"), bet_oddspark=bet_oddspark, bet_ipat=bet_ipat)]
+        only = "JRA" if bet_ipat else "NAR(地方)"
+        skipped = (n_due0 - len(due)) + (n_fut0 - len(future_all))
+        if skipped:
+            console.print(f"[dim]投票対象を {only} のみに限定 (片側投票 ON) → 対象外券種 "
+                          f"{skipped} レースの予想を skip[/dim]")
 
     # ── bet 予約のプリパス (帯検出と独立・冪等, 2026-06-11 bughunt) ──
     # 締切が未来の当日全レースに予約を書く。予約自体は ¥0 コスト (発火時に最新オッズで
@@ -895,6 +924,11 @@ def _fire_due_bets(
     to_fire: list[dict] = []
     for race in sched:
         rid = race["race_id"]
+        # 片側投票 ON のとき対象外券種の予約は発火しない (= 予想しない, ユーザ指示 2026-06-13)。
+        # 残骸予約 (フラグ変更前に書かれた等) は締切経過ガードで掃除されるのでここでは消さない。
+        if not _race_type_predict_enabled(
+                race.get("source"), bet_oddspark=bet_oddspark, bet_ipat=bet_ipat):
+            continue
         close_at = int(race.get("close_at") or 0)
         now = int(time.time())
         if rid in analyzed:
