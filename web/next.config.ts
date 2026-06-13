@@ -6,6 +6,11 @@ import type { NextConfig } from "next";
 //
 // 上流 (FastAPI) の URL は API_TARGET env で Route Handler に渡る (デフォ http://localhost:8788)。
 
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+  // repo ルートに MCP 用 package-lock.json があり workspace root が誤推定されるため明示
+  turbopack: {
+    root: __dirname,
+  },
+};
 
 export default nextConfig;
