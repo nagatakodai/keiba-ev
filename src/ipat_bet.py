@@ -505,28 +505,27 @@ class BettingSession:
         if total > self.max_total_stake:
             raise IpatBetError(
                 f"レース合計 ¥{total:,} > 上限 ¥{self.max_total_stake:,} — 投入しない (誤入力防止)")
-        # ログイン状態プローブ (2026-06-11 bughunt → 2026-06-13 修正):
+        # ログイン状態プローブ (2026-06-11 bughunt → 2026-06-13 全面見直し):
         # IPAT のサーバ側セッション失効は SPA がログイン画面へ戻すだけで、従来は
-        # _select_course_race の「レースボタン不検出」(マーカー非該当の IpatBetError) に
+        # _select_course_race の「ボタン不検出」(session-dead マーカー非該当の IpatBetError) に
         # 化けて req が .done で静かに消費されていた。
-        # ※ 旧実装は logged_in_marker (text=ログアウト) 不在で session-dead としていたが、
-        #   通常投票 (bet.basic) 画面には ログアウト リンクが無い (breadcrumb 投票メニュー配下)。
-        #   start()→_goto_vote_top() でログイン直後に必ず bet.basic に居るため、この画面で
-        #   **必ず誤検知**して JRA daemon が即落ちした (2026-06-13 報告)。
-        #   → 「ログイン画面マーカー (INET-ID / 加入者番号 入力欄) の存在」でログアウト済みを
-        #   **陽性検出**する方式へ反転 (bet 画面に居る限り誤検知せず、本当に失効で
-        #   ログイン画面へ戻された時のみ raise → SessionDeadError → daemon fail-fast + req 残置)。
+        # ※ count() ベースの判定は **両方向で誤検知** する (実機 DOM 確認 2026-06-13):
+        #   - 通常投票 (bet.basic) 画面には ログアウト リンクが無い (breadcrumb 投票メニュー配下)
+        #     → 「ログアウト不在=失効」は bet 画面で必ず誤検知 (旧実装)。
+        #   - 同画面の DOM にはログインフォーム (inetid/i) が **hidden で残存** している
+        #     → 「ログイン欄存在=失効」も bet 画面で必ず誤検知 (前修正)。
+        #   → **会場セレクタ (通常投票画面の .places button) が *可視* か** という陽性シグナルで
+        #   判定する。bet.basic が描画されていれば必ず可視 (screenshot 実証)、ログイン画面へ戻れば
+        #   不在/不可視。SPA 遷移直後の描画ラグを吸収するため最大 8s 待ってから判定。可視なら
+        #   投票可能、出なければ session-dead として raise → daemon fail-fast + req 残置
+        #   (誤って .done 消費しない)。hidden 残存の罠は state="visible" で回避できる。
         try:
-            on_login_screen = (
-                self.page.locator(SELECTORS["login_inetid"]).count() > 0
-                or self.page.locator(SELECTORS["login_subscriber"]).count() > 0)
-            if on_login_screen:
-                raise IpatBetError(
-                    "セッション切れ (ログイン画面へ戻された) — ログインし直してください")
-        except IpatBetError:
-            raise
-        except Exception:  # noqa: BLE001 — locator 自体の失敗はブラウザ死系 (別マーカーが拾う)
-            pass
+            self.page.wait_for_selector(
+                SELECTORS["venue_button"], state="visible", timeout=8_000)
+        except Exception:  # noqa: BLE001 — Timeout/ブラウザ死 とも投票不能なので session-dead 扱い
+            raise IpatBetError(
+                "セッション切れ/通常投票画面が開けない (会場セレクタ不可視) — "
+                "ログインし直してください") from None
         venue = _jra_venue_name(netkeiba_rid)
         rno = _race_no(netkeiba_rid)
         # 場・レースは1回だけ選択 (式別を変えても racecard は維持される)
