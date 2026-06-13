@@ -778,7 +778,10 @@ def _select_course_race(page, venue: str | None, race_no: int) -> None:
             raise IpatBetError(
                 f"場ボタン不検出 ({venue}) — 発売終了/未発売 or DOM 変化。"
                 "誤レース投票防止のため当該レースを中止")
-        vb.first.click()
+        if vb.first.is_disabled():
+            raise IpatBetError(
+                f"場ボタンが disabled ({venue}) — 当該開催は発売対象外。投票不可")
+        vb.first.click(timeout=10_000)
         page.wait_for_timeout(600)
     _dismiss_deposit_dialog(page)
     # レース番号 (完全一致)
@@ -786,7 +789,18 @@ def _select_course_race(page, venue: str | None, race_no: int) -> None:
         has=page.locator('.race-no .text', has_text=re.compile(rf'^{race_no}$')))
     if rb.count() == 0:
         raise IpatBetError(f"レースボタン不検出 (R{race_no}) — 締切/未発売 or DOM 変化")
-    rb.first.click()
+    target = rb.first
+    # 発売対象外 (締切済/発売前/投票可能式別なし) のレースボタンは ng-disabled で
+    # <button disabled> になる。disabled のまま click すると Playwright が「enabled に
+    # なるまで」30s 待って Timeout → retry で ~90s 浪費する (実機 2026-06-13 阪神7R は
+    # debug 中に締切を迎え disabled 化)。先に is_disabled() で検出して即 raise し当該レースを
+    # skip する (締切済は再投票不能なので当該 req は terminal=.done 消費。enqueue が締切に
+    # 間に合っていない兆候なのでメッセージで明示)。
+    if target.is_disabled():
+        raise IpatBetError(
+            f"R{race_no} は発売対象外 (締切済/発売前/投票可能式別なし) — 投票不可 "
+            "(watch-auto の dispatch が締切に間に合っていない可能性)")
+    target.click(timeout=10_000)
     page.wait_for_timeout(900)
     _dismiss_deposit_dialog(page)
 
