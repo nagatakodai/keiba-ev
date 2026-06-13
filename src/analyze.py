@@ -612,6 +612,27 @@ TRIFECTA_RECOVERY_INDEX_GATE = 90.0
 # 回収も改善しない。1番人気の過大評価が成り立つのは概ね 2 倍台以上。
 TRIFECTA_RECOVERY_EXCLUDE_MIN_ODDS = 1.5
 
+# 回収モードの均等買い額 (ユーザ指示 2026-06-13「回収モードはオプション全て100円で買える」)。
+# >0 のとき回収モードはフォーメーション/Claude選定の全候補脚を flat 円均等買い (Kelly比例配分も
+# トリガミ除去もしない = 全オプションを買う)。bankroll を超える点数は px_o 降順で打ち切り。
+# 0 にすると従来の Kelly+トリガミ除去配分に戻る。env KEIBA_TRIFECTA_RECOVERY_FLAT_STAKE で上書き可。
+TRIFECTA_RECOVERY_FLAT_STAKE = 100
+
+
+def _trifecta_recovery_flat_stake() -> int:
+    """回収モードの均等買い額を解決する (env KEIBA_TRIFECTA_RECOVERY_FLAT_STAKE → 既定 100)。
+
+    不正値・負値は既定 100。0 を明示したら 0 (= 従来の Kelly+トリガミ配分に戻す)。
+    """
+    v = (os.environ.get("KEIBA_TRIFECTA_RECOVERY_FLAT_STAKE") or "").strip()
+    if not v:
+        return TRIFECTA_RECOVERY_FLAT_STAKE
+    try:
+        n = int(float(v))
+    except ValueError:
+        return TRIFECTA_RECOVERY_FLAT_STAKE
+    return max(0, n)
+
 
 def _trifecta_mode(explicit: str | None = None) -> str:
     """3連単束のモードを解決する。明示 (CLI --t-mode) → env KEIBA_TRIFECTA_MODE → 既定 recovery。
@@ -713,7 +734,8 @@ def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
                             model: str = "opus", avoid_torigami: bool = True,
                             bankroll: int = 10_000, max_points: int = 48,
                             mode: str = "hit",
-                            exclude_head: int | None = None) -> dict | None:
+                            exclude_head: int | None = None,
+                            flat_stake: int | None = None) -> dict | None:
     """締切直前に Claude を起動し 3連単買い目を選定 → トリガミ防止つき束を返す (失敗時 None)。
 
     指示: 指数出力後、3連単の買い目選定まで Claude に任せる / 残り≈1分で起動・**検索なし高速**。
@@ -778,7 +800,7 @@ def _claude_select_trifecta(rd, probs_for_t, llm_win_index, aptitudes, *,
     bundle = pf_mod.build_trifecta_from_keys(
         probs_for_t, rd.trifecta, keys,
         bankroll=bankroll, avoid_torigami=avoid_torigami, max_points=max_points,
-        exclude_head=exclude_head)
+        exclude_head=exclude_head, flat_stake=flat_stake)
     if bundle and bundle.get("dropped_excluded_head"):
         console.print(f"[yellow]1着除外ルール違反の買い目 {bundle['dropped_excluded_head']} 点を"
                       f"ハードフィルタで除外 (馬{exclude_head})[/yellow]")
@@ -958,6 +980,11 @@ def _save_prediction_snapshot(
         console.print("[yellow]⚠ probs_t 未指定 — 3連単束の market-free 保証なし (blended probs にフォールバック)[/yellow]")
     trifecta_bankroll = _trifecta_bankroll(trifecta_bankroll)   # 明示 → env → 既定 ¥10,000
     t_mode = _trifecta_mode(trifecta_mode)                      # 明示 → env → 既定 recovery
+    # 回収モードは全オプションを flat 円均等買い (ユーザ指示 2026-06-13)。hit モードは従来の
+    # Kelly+トリガミ配分 (flat_stake=None)。flat_stake=0 (env で明示) なら回収でも Kelly に戻す。
+    t_flat_stake = _trifecta_recovery_flat_stake() if t_mode == "recovery" else None
+    if t_flat_stake == 0:
+        t_flat_stake = None
     # 回収モード (穴狙い): 市場1番人気を1着から除外 (Claude 指数 > 90 で解禁)。
     # 市場情報はこのゲート判定のみに使う — ランキング・プロンプト・probs には渡さない。
     t_exclude_head = t_favorite = t_favorite_idx = None
@@ -986,7 +1013,7 @@ def _save_prediction_snapshot(
                     rd, probs_for_t, llm_win_index, aptitudes,
                     model=llm_select_model, avoid_torigami=(not trifecta_no_torigami),
                     bankroll=trifecta_bankroll,
-                    mode=t_mode, exclude_head=t_exclude_head)
+                    mode=t_mode, exclude_head=t_exclude_head, flat_stake=t_flat_stake)
             except Exception as ex:  # noqa: BLE001
                 console.print(f"[yellow]3連単 Claude 買い目選定で例外: {ex} → 機械フォーメーション[/yellow]")
                 recommended_bundle_t = None
@@ -997,7 +1024,7 @@ def _save_prediction_snapshot(
                     head_max=trifecta_head_max, head_gap=trifecta_head_gap,
                     mid_count=trifecta_mid, tail_count=trifecta_tail,
                     avoid_torigami=(not trifecta_no_torigami), bankroll=trifecta_bankroll,
-                    exclude_head=t_exclude_head,
+                    exclude_head=t_exclude_head, flat_stake=t_flat_stake,
                 )
             except Exception as ex:  # noqa: BLE001
                 console.print(f"[yellow]3連単束 (recommended_bundle_t) 計算失敗: {ex}[/yellow]")
@@ -1010,11 +1037,14 @@ def _save_prediction_snapshot(
         rt = recommended_bundle_t
         osum = rt.get("odds_summary") or {}
         t_mode_label = "3連単回収モード(穴狙い)" if t_mode == "recovery" else "3連単的中モード"
+        is_flat = rt.get("stake_mode") == "flat"
+        flat_label = f" / 全点 均等¥{rt.get('flat_stake', 0):,}買い" if is_flat else ""
         console.print(
             f"[magenta]{t_mode_label} ({rt.get('rank_source')}指数 {rt.get('formation')}): "
             f"3連単 {rt['n_points']}点 / 理論的中率 {rt['covered_prob'] * 100:.1f}% (model基準・過信禁物) / "
             f"¥{rt['total_stake']:,} / 当たれば払戻 ¥{osum.get('min_payout', 0):,}〜¥{osum.get('max_payout', 0):,}"
-            f"{' / トリガミ防止' if not trifecta_no_torigami else ''}"
+            f"{flat_label}"
+            f"{'' if is_flat else (' / トリガミ防止' if not trifecta_no_torigami else '')}"
             f"{f' / 1着除外 馬{t_exclude_head}' if t_exclude_head is not None else ''}[/magenta]"
         )
     # 市場アンカー型クロスプール EV (Dr.Z 系, ペーパー計測のみ — 投票には使わない)。

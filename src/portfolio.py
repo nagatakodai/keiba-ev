@@ -442,6 +442,57 @@ def build_bundle(
     return base
 
 
+def _flat_alloc(
+    cands: list[dict],
+    probs: Probabilities,
+    *,
+    flat_stake: int = 100,
+    bankroll: int = 10_000,
+    torigami_margin: float = TORIGAMI_MARGIN,
+) -> dict:
+    """全候補に flat_stake 円を **均等** 配分する (回収モードの「全オプション ¥100 買い」)。
+
+    Kelly 比例配分もトリガミ除去もしない (= 候補を全部買う, ユーザ指示 2026-06-13)。
+    Σ(flat_stake × 点数) が bankroll を超える分だけ px_o 降順で上位を残して打ち切り、
+    予算超過を防ぐ (打ち切り数は dropped_budget)。返りは build_bundle / build_trifecta_* と
+    互換の最小フィールド (legs / total_stake / total_fraction / min_payout_ratio /
+    expected_return / dropped_* / stake_mode='flat')。
+    """
+    ranked = sorted(cands, key=lambda c: c.get("px_o", 0.0), reverse=True)
+    max_n = max(1, int(bankroll // flat_stake)) if flat_stake > 0 else 0
+    kept = ranked[:max_n]
+    dropped_budget = len(ranked) - len(kept)
+    legs: list[dict] = []
+    exp_return = 0.0
+    for c in kept:
+        payout = int(round(float(c["odds"]) * flat_stake))
+        pr = float(c.get("prob", 0.0))
+        exp_return += pr * payout
+        legs.append({
+            "bet_type": c["bet_type"], "key": list(c["key"]), "odds": float(c["odds"]),
+            "prob": pr, "px_o": float(c.get("px_o", 0.0)), "tier": c.get("tier"),
+            "kelly": 0.0, "stake": int(flat_stake),
+            "payout_if_hit": payout,
+        })
+    legs.sort(key=lambda l: l["payout_if_hit"])
+    total = sum(l["stake"] for l in legs)
+    out = {
+        "legs": legs,
+        "total_stake": int(total),
+        "total_fraction": (float(total) / bankroll) if bankroll else 0.0,
+        "expected_return": float(exp_return),
+        "dropped_budget": dropped_budget,
+        "dropped_torigami": 0,
+        "dropped_legs": [],
+        "torigami_margin": float(torigami_margin),
+        "stake_mode": "flat",
+        "flat_stake": int(flat_stake),
+        "drift_shade": {bt: _drift_shade(bt) for bt in sorted({c["bet_type"] for c in kept})},
+    }
+    out["min_payout_ratio"] = (min(l["payout_if_hit"] for l in legs) / total) if (legs and total) else 0.0
+    return out
+
+
 def build_trifecta_hitmax(
     probs: Probabilities,
     trifecta: Sequence,                  # rd.trifecta (BetOdds 列; odds 源)
@@ -457,6 +508,7 @@ def build_trifecta_hitmax(
     min_stake: int = 100,
     stake_unit: int = 100,
     exclude_head: int | None = None,     # 回収モード: この馬番を 1着列に置かない (2着/3着は可)
+    flat_stake: int | None = None,       # >0 で全オプションを flat_stake 円均等買い (Kelly/トリガミ除去なし)
 ) -> dict:
     """3連単的中モード (全力フォーメーション): Claude 指数ドリブンの 3連単フォーメーション。
 
@@ -566,24 +618,28 @@ def build_trifecta_hitmax(
     if not cands:
         return base
 
-    # 配分 + トリガミ防止は build_bundle の的中優先経路を再利用 (テスト済の除去ループ)。
-    # prioritize="hit": EV floor なし・想定P比例配分。avoid_torigami: 払戻 < 投資総額×margin の
-    # 脚を収束まで除去 → どの的中でも払戻 ≥ 投資総額×margin。上限を外して formation 全体を渡す。
-    bundle = build_bundle(
-        cands, probs, bankroll=bankroll, prioritize="hit",
-        avoid_torigami=avoid_torigami, torigami_margin=torigami_margin,
-        hit_max_legs=len(cands), max_legs=len(cands),
-        min_stake=min_stake, stake_unit=stake_unit,
-    )
-    # build_bundle の汎用フィールドを base にマージしつつ 3連単束固有を上書き。
-    base.update({k: bundle[k] for k in bundle if k in base or k in (
-        "min_payout_ratio", "dropped_torigami", "dropped_legs",
-        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes",
-        "drift_shade")})
+    # 配分: flat_stake 指定時 (回収モード) は **全オプションを flat_stake 円均等買い**
+    # (Kelly/トリガミ除去なし, ユーザ指示 2026-06-13)。それ以外は build_bundle の的中優先経路
+    # (prioritize="hit": 想定P比例配分 + 払戻<投資総額×margin の脚を収束まで除去) を再利用。
+    if flat_stake and flat_stake > 0:
+        base.update(_flat_alloc(cands, probs, flat_stake=flat_stake,
+                                bankroll=bankroll, torigami_margin=torigami_margin))
+    else:
+        bundle = build_bundle(
+            cands, probs, bankroll=bankroll, prioritize="hit",
+            avoid_torigami=avoid_torigami, torigami_margin=torigami_margin,
+            hit_max_legs=len(cands), max_legs=len(cands),
+            min_stake=min_stake, stake_unit=stake_unit,
+        )
+        # build_bundle の汎用フィールドを base にマージしつつ 3連単束固有を上書き。
+        base.update({k: bundle[k] for k in bundle if k in base or k in (
+            "min_payout_ratio", "dropped_torigami", "dropped_legs",
+            "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes",
+            "drift_shade")})
+        base["legs"] = bundle.get("legs", [])
+        base["total_stake"] = bundle.get("total_stake", 0)
+        base["expected_return"] = bundle.get("expected_return", 0.0)
     base["objective"] = "trifecta_hitmax"
-    base["legs"] = bundle.get("legs", [])
-    base["total_stake"] = bundle.get("total_stake", 0)
-    base["expected_return"] = bundle.get("expected_return", 0.0)
     # covered_prob = 最終 (トリガミ除去後) 脚の model 的中確率の和 (排他 ⇒ 束の理論的中率)。
     covered = float(sum(trifecta_prob(tuple(l["key"]), probs) for l in base["legs"]))
     base["covered_prob"] = covered
@@ -614,6 +670,7 @@ def build_trifecta_from_keys(
     stake_unit: int = 100,
     max_points: int = 60,
     exclude_head: int | None = None,     # 回収モード: この馬番が 1着の key を除外 (Claude 指示違反の保険)
+    flat_stake: int | None = None,       # >0 で全オプションを flat_stake 円均等買い (Kelly/トリガミ除去なし)
 ) -> dict:
     """Claude が選んだ 3連単 買い目 (keys) からトリガミ防止つき束を組む (3連単的中モードの Claude 選定版)。
 
@@ -690,22 +747,28 @@ def build_trifecta_from_keys(
     if not cands:
         return base
 
-    bundle = build_bundle(
-        cands, probs, bankroll=bankroll, prioritize="hit",
-        avoid_torigami=avoid_torigami, torigami_margin=torigami_margin,
-        hit_max_legs=len(cands), max_legs=len(cands),
-        min_stake=min_stake, stake_unit=stake_unit,
-    )
-    base.update({k: bundle[k] for k in bundle if k in base or k in (
-        "min_payout_ratio", "dropped_torigami", "dropped_legs",
-        "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes",
-        "drift_shade")})
+    # 配分: flat_stake 指定時 (回収モード) は全選定買い目を flat_stake 円均等買い
+    # (Kelly/トリガミ除去なし, ユーザ指示 2026-06-13)。それ以外は build_bundle の的中優先経路。
+    if flat_stake and flat_stake > 0:
+        base.update(_flat_alloc(cands, probs, flat_stake=flat_stake,
+                                bankroll=bankroll, torigami_margin=torigami_margin))
+    else:
+        bundle = build_bundle(
+            cands, probs, bankroll=bankroll, prioritize="hit",
+            avoid_torigami=avoid_torigami, torigami_margin=torigami_margin,
+            hit_max_legs=len(cands), max_legs=len(cands),
+            min_stake=min_stake, stake_unit=stake_unit,
+        )
+        base.update({k: bundle[k] for k in bundle if k in base or k in (
+            "min_payout_ratio", "dropped_torigami", "dropped_legs",
+            "torigami_margin", "expected_log_growth", "total_fraction", "n_outcomes",
+            "drift_shade")})
+        base["legs"] = bundle.get("legs", [])
+        base["total_stake"] = bundle.get("total_stake", 0)
+        base["expected_return"] = bundle.get("expected_return", 0.0)
     base["objective"] = "trifecta_claude_select"
     base["rank_source"] = "claude"
     base["selection_source"] = "claude"
-    base["legs"] = bundle.get("legs", [])
-    base["total_stake"] = bundle.get("total_stake", 0)
-    base["expected_return"] = bundle.get("expected_return", 0.0)
     covered = float(sum(trifecta_prob(tuple(l["key"]), probs) for l in base["legs"]))
     base["covered_prob"] = covered
     base["bundle_hit_prob"] = covered
