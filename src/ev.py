@@ -74,10 +74,16 @@ BLEND_APTITUDE_GATE = 1.0
 # holdout で T=0.4 が log loss 最小 (T=1 比 -0.089)、Plan H2 が 2 → 11 hits に安定化。
 LGBM_TEMPERATURE = 0.4
 
-# Claude 考察由来の「各馬の強さ指数」(0-100, 高い=強い) を model fundamental に合成する設定。
+# Claude 考察由来の「各馬の強さ指数」(0-100, 高い=強い) を推定Pに合成する設定。
 # 2段パイプライン: Claude が score ステージで指数を出力 → bet ステージで estimate_probs が
-# `_combine_llm_index` で model fundamental と loglinear 合成 → さらに市場とブレンドする。
-#   - LLM_BLEND_DEFAULT: 合成重み w (0=モデルのみ, 1=指数のみ)。
+# **市場ブレンドの後**に `_combine_llm_index` で loglinear 合成する (2026-06-13 変更, ユーザ指示
+# 「最終Pで Claude ~75%」)。旧実装は市場ブレンドの前 (fundamental 段) に混ぜていたため、
+# 後段の市場 (β=0.78) に希釈されて最終Pへの Claude 実効寄与が ~16% に留まっていた。市場アンカー済
+# win に後から合成すると、Claude がスコアした馬は最終Pで w_i まで効き
+# (例 w=0.75, β=0.78 → Claude 75% / 市場 19.5% / モデル 5.5%)、未スコア馬・指数キャッシュ無し
+# レースは w_i=0 で市場アンカー (β) のまま = 「市場無視 (β低) → 一様縮退 → 最長オッズ自動購入」
+# 事故ゾーンには入らない安全設計 (β を一律下げる方式との違いはここ)。
+#   - LLM_BLEND_DEFAULT: 最終Pでの Claude 合成重み w (0=合成なし, 1=Claude のみ)。
 #   - T_LLM: raw 指数 (0-100) を softmax(v / T_LLM) で 1着率分布に変換する温度。
 #            生値 (T=1) だと exp(100) で過尖鋭化し1頭に集中するため大きめの温度で平坦化する。
 #            T=25 なら 100 vs 50 の差が win 比 ~7倍 (model の spread と同程度)。
@@ -94,9 +100,10 @@ LGBM_TEMPERATURE = 0.4
 #   fundamental 側に残り「市場とズレる所」は px_o (P×O) として引き続き観測される。
 # β の再推定は scripts/fit_blend_mle.py (Benter 2-step, α+β 自由) で live 蓄積データから
 # 定期的に行うこと (N=146 時点の示唆は β≈1.0 = 市場ほぼ支配)。
-#   - LLM_BLEND_DEFAULT=0.5: fundamental 段での model×Claude 合成重み (per-horse は support で
-#     スケール = Claude が根拠を持つ馬だけ最大0.5 まで動かす)。
-LLM_BLEND_DEFAULT = 0.5
+#   - LLM_BLEND_DEFAULT=0.75: 市場ブレンド後の Claude 合成重み (per-horse は support でスケール
+#     = Claude が根拠を持つ馬だけ最大0.75 まで動かす。ユーザ指示 2026-06-13「Claude 指数を推定P
+#     の判定に 75% くらい使う」。実効: 支持馬は最終P Claude≈75% / 市場≈19.5% / モデル≈5.5%)。
+LLM_BLEND_DEFAULT = 0.75
 MARKET_BLEND_LIVE = BLEND_DEFAULT
 T_LLM = 25.0
 
@@ -174,11 +181,9 @@ def estimate_probs(
     feats = build_features(rd)
     fundamental_win = _fundamental_win_probs(horses, feats, segment, speed_v2_blend=speed_v2_blend)
 
-    # Claude 指数を model fundamental に合成 (市場ブレンドの前)。指数が無ければ no-op。
-    if llm_win_index and llm_blend > 0:
-        fundamental_win = _combine_llm_index(
-            fundamental_win, llm_win_index, llm_blend, market_floor,
-            support=llm_support, scale=llm_scale)
+    # Claude 指数の合成は **市場ブレンドの後** に行う (下記)。旧実装はここ (市場ブレンド前) に
+    # 混ぜていたが、後段の市場 (β=0.78) に希釈され最終Pへの寄与が薄まるため移設した
+    # (2026-06-13, ユーザ指示「最終Pで Claude ~75%」)。
 
     # 市場ブレンド。market_win_override があれば trifecta より優先 (oddspark 単勝
     # フォールバック等、3連単オッズが無い経路で単勝オッズから市場率を渡す用途)。
@@ -228,6 +233,19 @@ def estimate_probs(
                 bs = sum(blended.values())
                 if bs > 0:
                     win = {k: v / bs for k, v in blended.items()}
+
+    # Claude 指数を **市場ブレンドの後** に合成 (2026-06-13, ユーザ指示「最終Pで Claude ~75%」)。
+    # 市場アンカー済 win を fundamental として渡すと、最終 win の per-horse 実効重みは
+    #   Claude = w_i,  市場 = (1-w_i)·β,  モデル = (1-w_i)·(1-β)   (w_i = llm_blend·support_mult)
+    # になる (例 w=0.75, β=0.78 → Claude 75% / 市場 19.5% / モデル 5.5%)。
+    # Claude が触れていない馬 (support→w_i=0) と指数キャッシュ無しレース (llm_win_index 空) は
+    # w_i=0 で win=市場アンカー (β) のまま → 「市場無視 (β低) → 一様縮退 → 最長オッズ自動購入」
+    # 事故ゾーンに入らない。market_blend=0 の market-free probs (3連単束用) では win=fundamental
+    # なので Claude⊗モデル を w で合成する (旧挙動と順序非依存・重みだけ 0.5→0.75 に変化)。
+    if llm_win_index and llm_blend > 0:
+        win = _combine_llm_index(
+            win, llm_win_index, llm_blend, market_floor,
+            support=llm_support, scale=llm_scale)
 
     # Discounted Harville: place2/place3 = win^λ (relative なので正規化不要)
     place2: dict[int, float] = {}
