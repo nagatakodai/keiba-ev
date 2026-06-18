@@ -617,6 +617,10 @@ export const api = {
     with_trio?: boolean;
     // "score" = Claude 指数のみ (暫定 snapshot) / "bet" = 指数+市場で束まで生成 (既定)。
     phase?: "score" | "bet";
+    // score タブの検索チューニング (phase=score 時のみ): 並列化 / 1馬あたりクエリ数 / 締切秒。
+    score_parallel?: boolean;
+    score_queries_per_horse?: number;
+    score_timeout?: number;
   }) =>
     jsonFetch<JobInfo>(`/api/analyze`, { method: "POST", body: JSON.stringify(body) }),
 

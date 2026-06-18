@@ -10,7 +10,7 @@ import {
   Play,
   SquareTerminal,
 } from "lucide-react";
-import { Badge, Button, Card, Page, PageHeader, Select } from "@/components/ui";
+import { Badge, Button, Card, Input, Page, PageHeader, Select } from "@/components/ui";
 import { LogStream } from "@/components/LogStream";
 import { api, type JobInfo } from "@/lib/api";
 
@@ -18,6 +18,10 @@ export default function AnalyzePage() {
   const [url, setUrl] = useState("");
   const [refresh, setRefresh] = useState(true);
   const [llmModel, setLlmModel] = useState("opus");
+  // score 検索チューニング (このタブ専用・per-job env で analyze に渡る)。
+  const [scoreParallel, setScoreParallel] = useState(false);
+  const [scoreQueries, setScoreQueries] = useState("6"); // 1馬あたり検索クエリ数 (上限/回数, 並列時のみ)
+  const [scoreTimeout, setScoreTimeout] = useState("900"); // score 締切=タイムアウト秒
 
   const [job, setJob] = useState<JobInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -34,6 +38,17 @@ export default function AnalyzePage() {
         refresh,
         llm_model: llmModel,
         phase: "score",
+        score_parallel: scoreParallel,
+        // 検索クエリ数/馬 (上限・回数)。範囲外/NaN は既定 6。
+        score_queries_per_horse: (() => {
+          const v = parseInt(scoreQueries, 10);
+          return Number.isFinite(v) && v >= 2 && v <= 12 ? v : 6;
+        })(),
+        // score 締切 (秒)。範囲外/NaN は既定 900。
+        score_timeout: (() => {
+          const v = parseInt(scoreTimeout, 10);
+          return Number.isFinite(v) && v >= 60 && v <= 1800 ? v : 900;
+        })(),
       });
       setJob(j);
     } catch (e) {
@@ -111,6 +126,29 @@ export default function AnalyzePage() {
                 <option value="sonnet">sonnet</option>
                 <option value="haiku">haiku</option>
               </Select>
+              <Input
+                label="検索クエリ数/馬 (上限・回数)"
+                type="number"
+                min="2"
+                max="12"
+                step="1"
+                hint="並列実行 ON のときのみ有効 (既定6)"
+                value={scoreQueries}
+                onChange={(e) => setScoreQueries(e.target.value)}
+                disabled={!scoreParallel}
+                className="tnum"
+              />
+              <Input
+                label="締切 (秒)"
+                type="number"
+                min="60"
+                max="1800"
+                step="30"
+                hint="score をこの秒数で打ち切り (既定900・並列の60%が検索)"
+                value={scoreTimeout}
+                onChange={(e) => setScoreTimeout(e.target.value)}
+                className="tnum"
+              />
             </div>
           </div>
 
@@ -124,6 +162,11 @@ export default function AnalyzePage() {
                 checked={refresh}
                 onChange={setRefresh}
                 label="refresh (締切 5 分前まで待機して再取得)"
+              />
+              <FlagChip
+                checked={scoreParallel}
+                onChange={setScoreParallel}
+                label="検索を並列実行 (検索回数を増やすなら推奨)"
               />
             </div>
           </div>

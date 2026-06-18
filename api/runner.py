@@ -98,10 +98,14 @@ def _child_preexec() -> None:
 class Job:
     """analyze / refresh のワンショット実行。"""
 
-    def __init__(self, job_id: str, label: str, cmd: list[str]) -> None:
+    def __init__(self, job_id: str, label: str, cmd: list[str],
+                 env_extra: dict[str, str] | None = None) -> None:
         self.id = job_id
         self.label = label
         self.cmd = cmd
+        # この Job だけに効かせる追加 env (例: score タブの KEIBA_SCORE_* チューニング)。
+        # os.environ をいじらないので uvicorn プロセスや他 Job に漏れない (per-job 隔離)。
+        self._env_extra = dict(env_extra or {})
         self.lines: deque[dict[str, Any]] = deque(maxlen=4000)
         # `seq` は単調増加するカウンタ。deque が maxlen を超えて古い entry を
         # evict しても seq は更新し続ける (旧実装は len(self.lines) を使って
@@ -135,6 +139,8 @@ class Job:
         env["FORCE_COLOR"] = "0"
         env["NO_COLOR"] = "1"
         env["TERM"] = "dumb"
+        if self._env_extra:
+            env.update(self._env_extra)  # per-job override (score タブのチューニング等)
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *self.cmd,
@@ -325,8 +331,8 @@ class JobRegistry:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
 
-    def new(self, label: str, cmd: list[str]) -> Job:
-        job = Job(job_id=str(uuid.uuid4()), label=label, cmd=cmd)
+    def new(self, label: str, cmd: list[str], env_extra: dict[str, str] | None = None) -> Job:
+        job = Job(job_id=str(uuid.uuid4()), label=label, cmd=cmd, env_extra=env_extra)
         self._jobs[job.id] = job
         self._evict_old_terminal()
         return job

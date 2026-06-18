@@ -212,6 +212,13 @@ class AnalyzeRequest(BaseModel):
     # phase=score = Claude 指数のみ生成し暫定 snapshot を保存 (束選定・実弾なし) /
     # bet (既定) = 指数+市場で P→束→確定 snapshot。レース予測分析タブは score を送る。
     phase: Literal["score", "bet"] = "bet"
+    # score タブの検索チューニング (phase=score 時に per-job env で analyze へ渡す)。
+    # 検索並列化 (KEIBA_SCORE_PARALLEL)。queries は並列時のみ有効。
+    score_parallel: bool = False
+    # 1馬あたり検索クエリ数の上限/回数 (KEIBA_SCORE_QUERIES_PER_HORSE)。None=既定6。
+    score_queries_per_horse: int | None = Field(default=None, ge=2, le=12)
+    # score 段の締切=タイムアウト秒 (KEIBA_SCORE_TIMEOUT)。None=既定900。
+    score_timeout: int | None = Field(default=None, ge=60, le=1800)
 
 
 @app.post("/api/analyze")
@@ -230,7 +237,16 @@ async def api_analyze(req: AnalyzeRequest) -> dict[str, Any]:
         phase=req.phase,
     )
     label = f"{('score' if req.phase == 'score' else 'refresh' if req.refresh else 'analyze')}: {req.url}"
-    job = JOBS.new(label=label, cmd=cmd)
+    # score タブの検索チューニングは per-job env で渡す (os.environ を汚さない)。
+    # KEIBA_SCORE_PARALLEL は ON のとき "1"、OFF のとき "" (継承した "1" を確実に打ち消す)。
+    score_env: dict[str, str] = {}
+    if req.phase == "score":
+        score_env["KEIBA_SCORE_PARALLEL"] = "1" if req.score_parallel else ""
+        if req.score_queries_per_horse is not None:
+            score_env["KEIBA_SCORE_QUERIES_PER_HORSE"] = str(req.score_queries_per_horse)
+        if req.score_timeout is not None:
+            score_env["KEIBA_SCORE_TIMEOUT"] = str(req.score_timeout)
+    job = JOBS.new(label=label, cmd=cmd, env_extra=score_env or None)
     await job.start()
     return job.to_dict()
 
