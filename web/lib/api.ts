@@ -387,6 +387,10 @@ export type WatchAutoStatus = {
     bet_bundle?: "ev" | "trifecta";
     // EV束の1レース予算 (円)。½Kelly なので実投入は通常この10-30%。
     ev_bankroll?: number;
+    // score ステージ (Claude 指数) の検索並列化 (KEIBA_SCORE_PARALLEL)。既定 OFF。旧 config 欠落=OFF。
+    score_parallel?: boolean;
+    // score の1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。既定 6。旧 config 欠落=6。
+    score_queries_per_horse?: number;
   };
   job: JobInfo | null;
   bet_job?: JobInfo | null;
@@ -648,6 +652,8 @@ export const api = {
     trifecta_mode?: "recovery" | "hit";
     bet_bundle?: "ev" | "trifecta";
     ev_bankroll?: number;
+    score_parallel?: boolean;
+    score_queries_per_horse?: number;
   }) =>
     jsonFetch<{ running: boolean; bet_running?: boolean; ipat_bet_running?: boolean; config: WatchAutoStatus["config"]; job: JobInfo }>(
       `/api/watch-auto/start`,

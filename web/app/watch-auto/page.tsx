@@ -174,6 +174,10 @@ export default function WatchAutoPage() {
   const [betBundle, setBetBundle] = useState<"ev" | "trifecta">("ev");
   // EV束の1レース予算 (円)。½Kelly なので実投入は通常この10-30%。+EV 未実証のため計測モード初期値。
   const [evBankroll, setEvBankroll] = useState("5000");
+  // score ステージ (Claude 指数) の検索並列化 (KEIBA_SCORE_PARALLEL="1")。既定 OFF。
+  const [scoreParallel, setScoreParallel] = useState(false);
+  // score の1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE, 既定6・範囲2-12)。
+  const [scoreQueriesPerHorse, setScoreQueriesPerHorse] = useState("6");
   // 支払方法: opcoin (OPコイン残, 既定) または buylimit (投票資金残)
   const [betPaymentMethod, setBetPaymentMethod] = useState<"opcoin" | "buylimit">("opcoin");
 
@@ -220,6 +224,8 @@ export default function WatchAutoPage() {
     if (c.bet_bundle === "ev" || c.bet_bundle === "trifecta") setBetBundle(c.bet_bundle);
     else if (c.trifecta_bankroll != null || c.trifecta_mode != null) setBetBundle("trifecta");
     if (c.ev_bankroll != null) setEvBankroll(String(c.ev_bankroll));
+    if (c.score_parallel != null) setScoreParallel(!!c.score_parallel);
+    if (c.score_queries_per_horse != null) setScoreQueriesPerHorse(String(c.score_queries_per_horse));
     if (c.bet_payment_method === "buylimit" || c.bet_payment_method === "opcoin")
       setBetPaymentMethod(c.bet_payment_method);
   }
@@ -301,6 +307,12 @@ export default function WatchAutoPage() {
         ev_bankroll: (() => {
           const v = parseInt(evBankroll, 10);
           return Number.isFinite(v) && v >= 100 ? v : 5000;
+        })(),
+        score_parallel: scoreParallel,
+        // score 検索クエリ数/馬。backend は ge=2/le=12 検証なので範囲外/NaN は既定 6 に。
+        score_queries_per_horse: (() => {
+          const v = parseInt(scoreQueriesPerHorse, 10);
+          return Number.isFinite(v) && v >= 2 && v <= 12 ? v : 6;
         })(),
         bet_payment_method: betPaymentMethod,
       });
@@ -555,10 +567,23 @@ export default function WatchAutoPage() {
                   onChange={(e) => setAptitudeTop(e.target.value)}
                   disabled={running}
                 />
+                <Input
+                  label="score 検索クエリ数/馬 (既定6 / 範囲2-12)"
+                  type="number"
+                  min="2"
+                  max="12"
+                  step="1"
+                  value={scoreQueriesPerHorse}
+                  onChange={(e) => setScoreQueriesPerHorse(e.target.value)}
+                  disabled={running || !scoreParallel}
+                />
               </div>
-              <div className="mt-3">
+              <div className="mt-3 space-y-2">
                 <Toggle checked={noLlm} onChange={setNoLlm} disabled={running}>
                   LLM を使わない (確率モデルのみ / claude -p 省略)
+                </Toggle>
+                <Toggle checked={scoreParallel} onChange={setScoreParallel} disabled={running || noLlm}>
+                  Claude 指数の検索を並列実行 (検索回数を大幅増・要 score 帯を早める)
                 </Toggle>
               </div>
             </FieldGroup>
@@ -823,7 +848,7 @@ export default function WatchAutoPage() {
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 150}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"} / 束=${status?.config?.bet_bundle === "ev" ? "EV束" : `3連単/${status?.config?.trifecta_mode === "hit" ? "的中" : "回収(穴狙い)"}`}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}`
+              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 150}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"} / 束=${status?.config?.bet_bundle === "ev" ? "EV束" : `3連単/${status?.config?.trifecta_mode === "hit" ? "的中" : "回収(穴狙い)"}`}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}${status?.config?.score_parallel ? ` / score並列×q${status?.config?.score_queries_per_horse ?? 6}` : ""}`
               : "停止中。「設定」ボタンでパラメータを展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>

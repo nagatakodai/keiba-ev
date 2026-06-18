@@ -480,6 +480,8 @@ class WatchAutoManager:
         trifecta_mode: str = "hit",
         bet_bundle: str = "ev",
         ev_bankroll: int = 5_000,
+        score_parallel: bool = False,
+        score_queries_per_horse: int = 6,
     ) -> Job:
         async with self._ensure_lock():
             return await self._start_locked(
@@ -501,6 +503,8 @@ class WatchAutoManager:
                 trifecta_mode=trifecta_mode,
                 bet_bundle=bet_bundle,
                 ev_bankroll=ev_bankroll,
+                score_parallel=score_parallel,
+                score_queries_per_horse=score_queries_per_horse,
             )
 
     async def _start_locked(
@@ -533,6 +537,8 @@ class WatchAutoManager:
         trifecta_mode: str = "hit",
         bet_bundle: str = "ev",
         ev_bankroll: int = 5_000,
+        score_parallel: bool = False,
+        score_queries_per_horse: int = 6,
     ) -> Job:
         # 投票束/予算系の値検証 (env への適用は early-return 判定の**後** — 下記参照)。
         if bet_bundle not in ("ev", "trifecta"):
@@ -622,6 +628,13 @@ class WatchAutoManager:
         os.environ["KEIBA_TRIFECTA_BANKROLL"] = str(int(trifecta_bankroll))
         # 3連単束モード (recovery=回収/穴狙い 既定, hit=旧 全力的中) も env で全 dispatch に伝播。
         os.environ["KEIBA_TRIFECTA_MODE"] = trifecta_mode
+        # score ステージ (Claude 指数) の検索並列化と検索回数 (src/llm.py score_horses が尊重)。
+        # _env_truthy は未設定=False なので、ON のときだけ "1" を立てる (OFF 時は積極的に消す)。
+        if score_parallel:
+            os.environ["KEIBA_SCORE_PARALLEL"] = "1"
+        else:
+            os.environ.pop("KEIBA_SCORE_PARALLEL", None)
+        os.environ["KEIBA_SCORE_QUERIES_PER_HORSE"] = str(int(score_queries_per_horse))
 
         # Python ラッパで while ループを回す (api/_watch_loop.py)。
         # bash を挟むと SIGKILL 時に孫プロセスが孤児化するため。
@@ -688,6 +701,8 @@ class WatchAutoManager:
             "trifecta_mode": trifecta_mode,
             "bet_bundle": bet_bundle,
             "ev_bankroll": ev_bankroll,
+            "score_parallel": score_parallel,
+            "score_queries_per_horse": score_queries_per_horse,
         }
         self.job = Job(
             job_id=f"watch-auto-{int(time.time())}",
@@ -964,6 +979,10 @@ class WatchAutoManager:
                     if cfg.get("bet_bundle") else "trifecta",
                 ev_bankroll=int(cfg["ev_bankroll"])
                     if cfg.get("ev_bankroll") is not None else 5_000,
+                # 旧 state (キー無し) は score 並列 OFF / 検索 6 (= src/llm.py 既定) に倒す。
+                score_parallel=bool(cfg.get("score_parallel")),
+                score_queries_per_horse=int(cfg["score_queries_per_horse"])
+                    if cfg.get("score_queries_per_horse") is not None else 6,
             )
         except Exception as e:  # noqa: BLE001 - startup なので拾って続行
             print(f"[WatchAutoManager.resume] failed: {e}", file=sys.stderr, flush=True)

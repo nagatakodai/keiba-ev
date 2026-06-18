@@ -343,6 +343,11 @@ class WatchAutoStartRequest(BaseModel):
     # env KEIBA_TRIFECTA_MODE で全 dispatch subprocess に伝播 (_trifecta_mode が尊重)。
     # Literal で API 境界で値検証 (任意文字列が env に垂れ流されるのを防ぐ)。
     trifecta_mode: Literal["recovery", "hit"] = "hit"
+    # score ステージ (Claude 指数) の検索並列化。env KEIBA_SCORE_PARALLEL で全 dispatch に伝播。
+    # True で K プロセス並列 research + 単一 scoring (検索大幅増)、False (既定) は単一セッション。
+    score_parallel: bool = False
+    # score の1馬あたり検索クエリ数 (env KEIBA_SCORE_QUERIES_PER_HORSE)。既定 6 (旧単一は2)。
+    score_queries_per_horse: int = Field(default=6, ge=2, le=12)
 
 
 @app.post("/api/watch-auto/start")
@@ -375,6 +380,8 @@ async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
         trifecta_mode=req.trifecta_mode,
         bet_bundle=req.bet_bundle,
         ev_bankroll=req.ev_bankroll,
+        score_parallel=req.score_parallel,
+        score_queries_per_horse=req.score_queries_per_horse,
     )
     return {"running": WATCH.running, "bet_running": WATCH.bet_running,
             "ipat_bet_running": WATCH.ipat_bet_running,
