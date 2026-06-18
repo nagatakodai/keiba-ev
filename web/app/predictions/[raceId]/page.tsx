@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
 import { OddsTimelineCard, type LateMoneySnapshot } from "./OddsTimelineCard";
+import { OddsRefreshButton } from "./OddsRefreshButton";
 import { isEvMeasured,
   api,
   type BetEvRow,
@@ -183,6 +184,11 @@ export default async function PredictionDetailPage({
         }
         right={
           <div className="flex flex-col items-end gap-1">
+            <OddsRefreshButton
+              raceId={d.race_id}
+              canRefresh={d.can_refresh ?? true}
+              closeAt={d.close_at}
+            />
             {winticketUrl && (
               <a
                 href={winticketUrl}

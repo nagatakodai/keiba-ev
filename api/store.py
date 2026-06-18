@@ -86,6 +86,29 @@ def _safe_race_id(race_id: str) -> str | None:
     return race_id
 
 
+def netkeiba_rid_from_internal(race_id: str) -> str | None:
+    """内部 race_id "<cup_id>-<schedule_index>-<race_number>" → netkeiba 12桁 rid。
+
+    cup_id 長で NAR(10桁 YYYY+場+MMDD)/JRA(8桁 YYYY+場+回) を判別し parse._split_race_id の
+    逆変換を行う。netkeiba rid は snapshot に保存していない (旧 snapshot 含む) が race_id から
+    完全復元できるので、これでオッズ再取得の経路 (scrape_*/analyze) を組み直せる。
+    復元不能 (形式不正 / 12桁にならない) なら None。
+    """
+    parts = (race_id or "").split("-")
+    if len(parts) != 3:
+        return None
+    cup_id, si, rn = parts
+    if not (cup_id.isdigit() and si.isdigit() and rn.isdigit()):
+        return None
+    if len(cup_id) == 10:      # NAR: YYYY + 場(2) + MMDD
+        rid = f"{cup_id}{int(rn):02d}"
+    elif len(cup_id) == 8:     # JRA: YYYY + 場(2) + 開催回(2)
+        rid = f"{cup_id}{int(si):02d}{int(rn):02d}"
+    else:
+        return None
+    return rid if (len(rid) == 12 and rid.isdigit()) else None
+
+
 def get_prediction(race_id: str) -> dict[str, Any] | None:
     safe = _safe_race_id(race_id)
     if safe is None:
@@ -103,6 +126,9 @@ def get_prediction(race_id: str) -> dict[str, Any] | None:
             d["result"] = json.loads(result_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
+    # オッズ更新ボタン用: 経路 (netkeiba 経路は欠落=None) と再取得可否 (rid 復元可) を surface。
+    d.setdefault("odds_source", None)
+    d["can_refresh"] = netkeiba_rid_from_internal(d.get("race_id") or safe) is not None
     return d
 
 

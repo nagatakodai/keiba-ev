@@ -232,6 +232,10 @@ export type PredictionDetail = {
   odds_updated_at: number;
   close_at: number | null;
   start_at: number | null;
+  // オッズ更新ボタン用: 経路 ("jra"/"keibago"/"oddspark"、netkeiba 経路は null) と
+  // 再取得可否 (race_id から netkeiba rid を復元できるか)。
+  odds_source?: string | null;
+  can_refresh?: boolean | null;
   rows: PredictionRow[];
   horse_aptitude?: HorseAptitude[];
   // Claude 各馬指数 (score ステージ由来 0-100)。score 未実施/フォールバック時は null。
@@ -623,6 +627,12 @@ export const api = {
     score_timeout?: number;
   }) =>
     jsonFetch<JobInfo>(`/api/analyze`, { method: "POST", body: JSON.stringify(body) }),
+
+  // 履歴のレースを今すぐ最新オッズで score 再評価 (per-route 即時 fetch)。Job を返す。
+  refreshOdds: (raceId: string) =>
+    jsonFetch<JobInfo>(`/api/predictions/${encodeURIComponent(raceId)}/refresh-odds`, {
+      method: "POST",
+    }),
 
   getJob: (id: string) =>
     jsonFetch<JobInfo & { lines: Array<{ seq: number; ts: number; stream: string; text: string }> }>(

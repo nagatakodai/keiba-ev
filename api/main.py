@@ -45,7 +45,7 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from .runner import JobRegistry, WatchAutoManager, build_analyze_cmd, shutdown_all_jobs
+from .runner import PY, JobRegistry, WatchAutoManager, build_analyze_cmd, shutdown_all_jobs
 from .store import (
     PRED_DIR,
     RESULT_DIR,
@@ -54,6 +54,7 @@ from .store import (
     get_prediction,
     list_auto_watch_history,
     list_predictions,
+    netkeiba_rid_from_internal,
 )
 
 
@@ -247,6 +248,43 @@ async def api_analyze(req: AnalyzeRequest) -> dict[str, Any]:
         if req.score_timeout is not None:
             score_env["KEIBA_SCORE_TIMEOUT"] = str(req.score_timeout)
     job = JOBS.new(label=label, cmd=cmd, env_extra=score_env or None)
+    await job.start()
+    return job.to_dict()
+
+
+@app.post("/api/predictions/{race_id}/refresh-odds")
+async def api_refresh_odds(race_id: str) -> dict[str, Any]:
+    """履歴のレースを今すぐ最新オッズで再取得 → score 段を再評価し stage="score" で上書き。
+
+    経路は snapshot の odds_source (欠落=netkeiba 経路)、netkeiba rid は内部 race_id から復元
+    (旧 snapshot も可)。score 段スクレイパは即時に fresh odds を取りに行くので --refresh は付けない
+    (= 締切まで待たず今すぐ取得)。Job を返すので frontend は /api/jobs/{id}/stream で進捗を見られる。"""
+    safe = _safe_race_id(race_id)
+    if safe is None:
+        raise HTTPException(400, f"invalid race_id: {race_id}")
+    snap = get_prediction(safe)
+    if not snap:
+        raise HTTPException(404, f"prediction not found: {race_id}")
+    rid = netkeiba_rid_from_internal(snap.get("race_id") or safe)
+    if not rid:
+        raise HTTPException(422, f"netkeiba race_id を race_id から復元できません: {race_id}")
+    odds_source = (snap.get("odds_source") or "").strip().lower()
+    start_at = int(snap.get("start_at") or 0)
+    if odds_source == "keibago":
+        cmd = [PY, "-m", "src.scrape_keibago", rid, "--snapshot", f"--start-at={start_at}", "--phase=score"]
+    elif odds_source == "jra":
+        cmd = [PY, "-m", "src.scrape_jra", rid, "--snapshot", f"--start-at={start_at}", "--phase=score"]
+    elif odds_source == "oddspark":
+        cmd = [PY, "-m", "src.scrape_oddspark", rid, "--snapshot", f"--start-at={start_at}", "--phase=score"]
+    elif odds_source in ("", "netkeiba"):
+        # netkeiba 経路: rid から出馬表 URL を組む (JRA=race. / NAR=nar.)。即時 score (--refresh なし)。
+        is_jra = rid[4:6] in {f"{i:02d}" for i in range(1, 11)}
+        host = "race.netkeiba.com" if is_jra else "nar.netkeiba.com"
+        url = f"https://{host}/race/shutuba.html?race_id={rid}"
+        cmd = build_analyze_cmd(url, phase="score")
+    else:
+        raise HTTPException(422, f"unknown odds_source: {odds_source}")
+    job = JOBS.new(label=f"refresh-odds: {race_id}", cmd=cmd)
     await job.start()
     return job.to_dict()
 
