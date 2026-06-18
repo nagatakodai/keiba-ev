@@ -615,6 +615,8 @@ export const api = {
     aptitude_top?: number | null;
     with_exacta?: boolean;
     with_trio?: boolean;
+    // "score" = Claude 指数のみ (暫定 snapshot) / "bet" = 指数+市場で束まで生成 (既定)。
+    phase?: "score" | "bet";
   }) =>
     jsonFetch<JobInfo>(`/api/analyze`, { method: "POST", body: JSON.stringify(body) }),
 

@@ -10,7 +10,7 @@ import {
   Play,
   SquareTerminal,
 } from "lucide-react";
-import { Badge, Button, Card, Input, Page, PageHeader, Select } from "@/components/ui";
+import { Badge, Button, Card, Page, PageHeader, Select } from "@/components/ui";
 import { LogStream } from "@/components/LogStream";
 import { api, type JobInfo } from "@/lib/api";
 
@@ -18,14 +18,6 @@ export default function AnalyzePage() {
   const [url, setUrl] = useState("");
   const [refresh, setRefresh] = useState(true);
   const [llmModel, setLlmModel] = useState("opus");
-  const [noLlm, setNoLlm] = useState(false);
-  const [evMax, setEvMax] = useState("");
-  const [minProb, setMinProb] = useState("2.0");
-  // 空 = backend BLEND_DEFAULT (=0.78) を使う。CLAUDE.md の production 設定。
-  const [marketBlend, setMarketBlend] = useState("");
-  const [aptitudeTop, setAptitudeTop] = useState("6");
-  const [withExacta, setWithExacta] = useState(false);
-  const [withTrio, setWithTrio] = useState(false);
 
   const [job, setJob] = useState<JobInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -36,17 +28,12 @@ export default function AnalyzePage() {
     setSubmitting(true);
     setError(null);
     try {
+      // このタブは score (Claude 指数生成) のみ。束選定・実弾投票は行わない。
       const j = await api.analyze({
         url,
         refresh,
-        no_llm: noLlm,
         llm_model: llmModel,
-        ev_max: evMax === "" ? null : parseFloat(evMax),
-        min_prob: minProb === "" ? null : parseFloat(minProb),
-        market_blend: marketBlend === "" ? null : parseFloat(marketBlend),
-        aptitude_top: aptitudeTop === "" ? null : parseInt(aptitudeTop, 10),
-        with_exacta: withExacta,
-        with_trio: withTrio,
+        phase: "score",
       });
       setJob(j);
     } catch (e) {
@@ -71,16 +58,16 @@ export default function AnalyzePage() {
   return (
     <Page>
       <PageHeader
-        eyebrow="Analyze"
+        eyebrow="Score"
         title="レース予測分析"
-        subtitle="URL を渡して 3連単的中モード (実弾投票束) と EV束 (モデル参考) を生成。refresh で発走 5 分前まで待機し最新オッズで再分析。"
+        subtitle="URL を渡して各馬の Claude 強さ指数 (0-100) のみを生成し、暫定スナップショットとして履歴に保存します。束選定・実弾投票は行いません (それは自動予測分析・投票が締切直前に実施)。refresh で発走 5 分前まで待機し最新オッズで再取得。"
       />
 
       <Card
         title={
           <span className="flex items-center gap-1.5">
             <FlaskConical className="w-4 h-4 text-(--color-accent)" />
-            <span>リクエスト</span>
+            <span>リクエスト (Score のみ)</span>
           </span>
         }
       >
@@ -113,7 +100,7 @@ export default function AnalyzePage() {
             <div className="text-[10px] font-bold uppercase tracking-widest text-(--color-muted)">
               パラメータ
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Select
                 label="LLM モデル"
                 hint="score 指数生成に使う claude -p モデル"
@@ -124,42 +111,6 @@ export default function AnalyzePage() {
                 <option value="sonnet">sonnet</option>
                 <option value="haiku">haiku</option>
               </Select>
-              <Input
-                label="期待値上限"
-                placeholder="例: 3"
-                hint="空 = 上限なし"
-                value={evMax}
-                onChange={(e) => setEvMax(e.target.value)}
-                inputMode="decimal"
-                className="tnum"
-              />
-              <Input
-                label="最低当選率 (%)"
-                placeholder="例: 2.0"
-                hint="買い目の確率下限"
-                value={minProb}
-                onChange={(e) => setMinProb(e.target.value)}
-                inputMode="decimal"
-                className="tnum"
-              />
-              <Input
-                label="市場確率ブレンド"
-                placeholder="0.0–1.0 (デフォルト 0.78)"
-                hint="空 = production 既定 β=0.78"
-                value={marketBlend}
-                onChange={(e) => setMarketBlend(e.target.value)}
-                inputMode="decimal"
-                className="tnum"
-              />
-              <Input
-                label="Plan G 適性 top N 頭"
-                placeholder="6 (default)"
-                hint="適性ゲートに入れる頭数"
-                value={aptitudeTop}
-                onChange={(e) => setAptitudeTop(e.target.value)}
-                inputMode="numeric"
-                className="tnum"
-              />
             </div>
           </div>
 
@@ -173,17 +124,6 @@ export default function AnalyzePage() {
                 checked={refresh}
                 onChange={setRefresh}
                 label="refresh (締切 5 分前まで待機して再取得)"
-              />
-              <FlagChip checked={noLlm} onChange={setNoLlm} label="LLM をスキップ" />
-              <FlagChip
-                checked={withExacta}
-                onChange={setWithExacta}
-                label="馬単も取得 (fetch +40s)"
-              />
-              <FlagChip
-                checked={withTrio}
-                onChange={setWithTrio}
-                label="3 連複も取得 (fetch +40s)"
               />
             </div>
           </div>
@@ -202,7 +142,7 @@ export default function AnalyzePage() {
               ) : (
                 <Play className="w-4 h-4" />
               )}
-              {submitting ? "起動中..." : job ? "別ジョブで再実行" : "予測分析を開始"}
+              {submitting ? "起動中..." : job ? "別ジョブで再実行" : "Score (Claude 指数) を生成"}
             </Button>
             {job && (
               <Button

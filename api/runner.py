@@ -368,8 +368,13 @@ def build_analyze_cmd(
     aptitude_top: int | None = None,
     with_exacta: bool = False,
     with_trio: bool = False,
+    phase: str = "bet",
 ) -> list[str]:
     cmd = [PY, "-m", "src.analyze", url, "--llm-model", llm_model]
+    # phase=score = Claude 指数を出して暫定 snapshot を保存するだけ (束選定・実弾なし)。
+    # bet (既定) = 指数+市場で P→束→確定 snapshot。bet は src.analyze の既定なので明示不要。
+    if phase == "score":
+        cmd += ["--phase", "score"]
     if refresh:
         cmd.append("--refresh")
     if no_llm:

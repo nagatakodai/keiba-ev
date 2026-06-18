@@ -209,6 +209,9 @@ class AnalyzeRequest(BaseModel):
     # 馬単 (b5) / 3 連複 (b6) を追加 fetch するか。jiku iteration で重い。
     with_exacta: bool = False
     with_trio: bool = False
+    # phase=score = Claude 指数のみ生成し暫定 snapshot を保存 (束選定・実弾なし) /
+    # bet (既定) = 指数+市場で P→束→確定 snapshot。レース予測分析タブは score を送る。
+    phase: Literal["score", "bet"] = "bet"
 
 
 @app.post("/api/analyze")
@@ -224,8 +227,9 @@ async def api_analyze(req: AnalyzeRequest) -> dict[str, Any]:
         aptitude_top=req.aptitude_top,
         with_exacta=req.with_exacta,
         with_trio=req.with_trio,
+        phase=req.phase,
     )
-    label = f"{'refresh' if req.refresh else 'analyze'}: {req.url}"
+    label = f"{('score' if req.phase == 'score' else 'refresh' if req.refresh else 'analyze')}: {req.url}"
     job = JOBS.new(label=label, cmd=cmd)
     await job.start()
     return job.to_dict()
