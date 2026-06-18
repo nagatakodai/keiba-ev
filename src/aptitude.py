@@ -171,17 +171,23 @@ class AptitudeIndex:
     reasons: list[str] = field(default_factory=list)
 
 
-# sub-score 重み (合計が分母)
+# sub-score 重み (合計が分母)。
+# 2026-06-18 TOP-4 改訂 (paper 検証 OOS, n=309 races)。旧9因子は有害/ノイズ因子を正重みで
+# 加算しており、合計の弁別力が ability 単独とほぼ同点だった (正負が相殺)。除外した5因子と理由:
+#   surface_fit / condition  = 負シグナルを正重みで加算 (除くと SomersD 改善, bootstrap CI が0除外)
+#   distance_fit             = シグナル~0 なのに旧2位の重み 1.2 (rho の CI が0をまたぐ)
+#   pace_fit                 = 90% のレースで全頭同値 (レース内弁別ゼロ) かつ負シグナル
+#   jockey_fit               = 退化した binary (85% が最大値) でシグナルなし
+# 残す4因子: going_fit/last3f/graded_record はレース内順位シグナル、ability は最良ランカー。
+# 効果: SomersD +0.255→+0.348 / top1単勝的中 19.0%→21.9% / 適性top6に3着内3頭 35%→44% (全て CI が0除外)。
+# 注: 適性は estimate_probs/Kelly に入らず Claude 3連単プロンプト + Plan G + UI のみに効く
+#     (市場には勝てない = profit lever ではない; あくまで候補ランキングの衛生改善)。
+#     除外した5因子の sub-score は表示/診断用に compute を継続 (total に重み付けしないだけ)。
 _WEIGHTS = {
-    "ability": 1.5,
-    "distance_fit": 1.2,
+    "ability": 1.0,
+    "going_fit": 1.0,
     "last3f": 1.0,
-    "surface_fit": 0.8,
-    "going_fit": 0.6,
-    "condition": 0.6,
-    "jockey_fit": 0.4,
-    "pace_fit": 0.8,
-    "graded_record": 0.7,
+    "graded_record": 1.0,
 }
 _W_SUM = sum(_WEIGHTS.values())
 
@@ -404,18 +410,9 @@ def compute_aptitudes(
             graded_record=n_graded[n],
             graded_text=graded_texts[n],
         )
-        # 総合 = 重み付け平均
-        ai.total = (
-            _WEIGHTS["ability"] * ai.ability
-            + _WEIGHTS["distance_fit"] * ai.distance_fit
-            + _WEIGHTS["last3f"] * ai.last3f
-            + _WEIGHTS["surface_fit"] * ai.surface_fit
-            + _WEIGHTS["going_fit"] * ai.going_fit
-            + _WEIGHTS["condition"] * ai.condition
-            + _WEIGHTS["jockey_fit"] * ai.jockey_fit
-            + _WEIGHTS["pace_fit"] * ai.pace_fit
-            + _WEIGHTS["graded_record"] * ai.graded_record
-        ) / _W_SUM
+        # 総合 = 重み付け平均 (_WEIGHTS のキーのみ加算 → TOP-4 改訂で除外した因子は
+        # 自動的に total に乗らない。除外 sub-score 自体は上で compute 済 = 表示用に残る)。
+        ai.total = sum(_WEIGHTS[k] * getattr(ai, k) for k in _WEIGHTS) / _W_SUM
 
         # reasons
         reasons: list[str] = []
