@@ -216,6 +216,7 @@ def evaluate_race(
     llm_blend: float,
     market_floor: float,
     require_no_market_blend: bool,
+    since: str | None = None,
 ) -> dict | None:
     """1 race の勝者 1 着確率を (a)(b)(c) で出す。対象外なら理由付きで None 相当の skip dict。"""
     snap = _load_json(PRED_DIR / f"{rid}.json")
@@ -223,6 +224,17 @@ def evaluate_race(
     res = _load_json(RES_DIR / f"{rid}.json")
     if not (snap and llm and res):
         return {"rid": rid, "skip": "missing/corrupt file"}
+
+    # --since: レース発走日 (start_at の JST 日付) が cutoff 以降の race のみ評価。
+    # start_at は実発走時刻なので race_id 前桁 (JRA 内部 id は日付でない) より頑健。
+    if since:
+        sa = snap.get("start_at")
+        if not sa:
+            return {"rid": rid, "skip": "no start_at (--since 判定不能)"}
+        from datetime import datetime, timezone, timedelta
+        rdate = datetime.fromtimestamp(int(sa), timezone(timedelta(hours=9))).strftime("%Y%m%d")
+        if rdate < since:
+            return {"rid": rid, "skip": f"before --since {since}"}
 
     fo = res.get("finish_order") or []
     if not fo:
@@ -407,6 +419,9 @@ def main() -> int:
                     help="(c) の Claude 合成重み (task 指定 0.5)")
     ap.add_argument("--market-floor", type=float, default=0.01, help="estimate_probs と同じ市場 floor")
     ap.add_argument("--bootstrap", type=int, default=5000, help="bootstrap 反復数 (0 で無効)")
+    ap.add_argument("--since", type=str, default=None,
+                    help="YYYYMMDD。**レース発走日 (start_at の JST 日付)** がこの日以降の race のみ評価。"
+                         "未指定なら全 race (挙動変化なし)")
     ap.add_argument("--include-market-blend", action="store_true",
                     help="market_blend>0 で保存された snapshot も含める (fundamental 分離は近似)")
     ap.add_argument("--json", action="store_true", help="機械可読 JSON も出力")
@@ -424,6 +439,7 @@ def main() -> int:
             llm_blend=args.llm_blend,
             market_floor=args.market_floor,
             require_no_market_blend=require_no_mb,
+            since=args.since,
         )
         if r is None:
             continue
@@ -442,7 +458,7 @@ def main() -> int:
         for k, v in sorted(skips.items(), key=lambda x: -x[1]):
             print(f"  - {v:3d}  {k}")
     print(f"設定: market_blend(β)={args.market_blend}  llm_blend(c)={args.llm_blend}  "
-          f"market_floor={args.market_floor}")
+          f"market_floor={args.market_floor}  since={args.since or '(全期間)'}")
     src_dist: dict[str, int] = {}
     for r in rows:
         src_dist[r["odds_source"]] = src_dist.get(r["odds_source"], 0) + 1
