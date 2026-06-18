@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train par segments retrain holdout api web web-install test watch-auto-bet watch-auto-ipat-bet bet odds-capture
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train par segments retrain holdout api api-noreload web web-install test watch-auto-bet watch-auto-ipat-bet bet odds-capture
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -322,6 +322,11 @@ bet:
 API_PORT ?= 9788
 api:
 	$(PY) -m uvicorn api.main:app --reload --port $(API_PORT)
+
+# --reload なし版。code 変更で再起動しないので oddspark/ipat の常駐投票ブラウザ
+# (ログイン済) が保たれる。コード反映は手動で Ctrl-C → 再起動。
+api-noreload:
+	$(PY) -m uvicorn api.main:app --port $(API_PORT)
 
 # --- フロントエンド (Next.js) ---
 # keirin の web (デフォルト 3000) と被らないよう 3788 を既定にする
