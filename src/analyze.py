@@ -294,6 +294,7 @@ def main(
                 with_trio=with_trio,
                 llm_blend=llm_blend,
                 probs_file=probs_file,
+                phase=phase,
             )
 
 
@@ -1673,6 +1674,7 @@ def _refresh_and_reevaluate(
     with_trio: bool = False,
     llm_blend: float = ev_mod.LLM_BLEND_DEFAULT,
     probs_file: Optional[Path] = None,
+    phase: str = "bet",
 ) -> None:
     close_at = rd_old.race.close_at
     if not close_at:
@@ -1753,6 +1755,10 @@ def _refresh_and_reevaluate(
             llm_win_index=llm_index2, llm_blend=llm_blend, llm_scored_at=llm_scored_at2,
             llm_support=llm_support2, llm_scale=llm_scale2, llm_alerts=llm_alerts2,
             speed_v2_blend=speed_v2_blend, probs_t=probs2_t,
+            # phase=score の refresh は暫定 (stage="score") のまま保存 → 計測対象外を維持。
+            # phase=bet (CLI フル analyze) は従来どおり stage="bet" 確定で上書き
+            # (claude_trifecta_select は既定 False のまま = 従来の refresh 挙動を変えない)。
+            stage=phase,
         )
 
     _print_top(rows2, n=show)
