@@ -477,7 +477,7 @@ class WatchAutoManager:
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
         trifecta_bankroll: int = 10_000,
-        trifecta_mode: str = "recovery",
+        trifecta_mode: str = "hit",
         bet_bundle: str = "ev",
         ev_bankroll: int = 5_000,
     ) -> Job:
@@ -530,7 +530,7 @@ class WatchAutoManager:
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
         trifecta_bankroll: int = 10_000,
-        trifecta_mode: str = "recovery",
+        trifecta_mode: str = "hit",
         bet_bundle: str = "ev",
         ev_bankroll: int = 5_000,
     ) -> Job:
@@ -538,7 +538,7 @@ class WatchAutoManager:
         if bet_bundle not in ("ev", "trifecta"):
             bet_bundle = "ev"
         if trifecta_mode not in ("recovery", "hit"):
-            trifecta_mode = "recovery"
+            trifecta_mode = "hit"
         # daemon に渡す掛金倍率 (各脚 stake を ×N)。
         eff_stake_multiplier = bet_stake_multiplier
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
@@ -955,9 +955,9 @@ class WatchAutoManager:
                     if cfg.get("trifecta_bankroll") is not None
                     else int(cfg["plan_t_bankroll"])
                     if cfg.get("plan_t_bankroll") is not None else 10_000,
-                # 旧 state (mode キー無し) は既定 recovery。不正値は _start_locked 側でも recovery に倒す。
+                # 旧 state (mode キー無し) は既定 hit。不正値は _start_locked 側でも hit に倒す。
                 trifecta_mode=str(cfg["trifecta_mode"])
-                    if cfg.get("trifecta_mode") else "recovery",
+                    if cfg.get("trifecta_mode") else "hit",
                 # 旧 state (bet_bundle キー無し) は旧挙動 = 3連単束を維持 (resume で投票束が
                 # 黙って EV束に切り替わるのを防ぐ)。新規開始の既定は ev (main.py の Literal 既定)。
                 bet_bundle=str(cfg["bet_bundle"])

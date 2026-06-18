@@ -165,9 +165,9 @@ export default function WatchAutoPage() {
   // 初期値は計測モード ¥2,000 (2026-06-10 実測: 3連単束は全系列 ROI 14-83% — rolling ROI>100%
   // が出るまで実弾は最小限に。bundle_calibration_report.py で定点観測)。
   const [trifectaBankroll, setTrifectaBankroll] = useState("2000");
-  // 3連単束モード: recovery=回収(穴狙い, 市場1番人気はClaude指数>90でない限り1着に置かない, 既定) /
-  // hit=旧 全力的中。env KEIBA_TRIFECTA_MODE で全 dispatch subprocess に伝播。
-  const [trifectaMode, setTrifectaMode] = useState<"recovery" | "hit">("recovery");
+  // 3連単束モード: recovery=回収(穴狙い, 市場1番人気はClaude指数>90でない限り1着に置かない) /
+  // hit=旧 全力的中 (既定, 2026-06-18〜 実測 ROI で hit>recovery)。env KEIBA_TRIFECTA_MODE で全 dispatch subprocess に伝播。
+  const [trifectaMode, setTrifectaMode] = useState<"recovery" | "hit">("hit");
   // 投票束 (2026-06-10 レビュー後の推奨既定 = EV束): "ev"=EV束 — 全脚がドリフトシェード込み
   // P×O≥1.02 + px_o≤2.0 + ½Kelly + トリガミ防止を通過した時のみ買う (大半のレースは見送り =
   // 正しい挙動)。"trifecta"=3連単束 (Claude 指数・市場無視, 実測 -EV のため計測モード推奨)。
@@ -609,8 +609,8 @@ export default function WatchAutoPage() {
                         : "旧 全力的中: 1着除外なし (Claude 指数上位をそのまま1着候補に)"
                     }
                   >
-                    <option value="recovery">回収 (穴狙い) — 既定</option>
-                    <option value="hit">的中 (旧 全力的中)</option>
+                    <option value="hit">的中 (旧 全力的中) — 既定</option>
+                    <option value="recovery">回収 (穴狙い)</option>
                   </Select>
                 )}
               </div>

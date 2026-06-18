@@ -98,9 +98,9 @@ def main(
         help="3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデルとも)。"
              "env KEIBA_TRIFECTA_BANKROLL でも指定可 (watch-auto/Web UI 経由)"),
     trifecta_mode: str = typer.Option(
-        "recovery", "--t-mode", envvar="KEIBA_TRIFECTA_MODE",
+        "hit", "--t-mode", envvar="KEIBA_TRIFECTA_MODE",
         help="3連単束モード: recovery=回収(穴狙い, 市場1番人気はClaude指数>90でない限り1着に置かない・"
-             "それ以外は市場を一切見ない) / hit=旧 全力的中。既定 recovery (2026-06-07〜)"),
+             "それ以外は市場を一切見ない) / hit=旧 全力的中。既定 hit (2026-06-18〜, 実測 ROI で hit>recovery)"),
 ):
     """URL (netkeiba) を渡して P×O ランキングと Plan A/B/C を出力。"""
     if not (url or html_file):
@@ -602,7 +602,9 @@ TRIFECTA_BANKROLL_DEFAULT = 10_000
 # 3連単束のモード既定 (2026-06-07 ユーザ指示で recovery に切替):
 #   recovery = 回収モード (穴狙い): 市場1番人気を1着に置かない (Claude 指数がゲートを超えたら解禁)。
 #   hit      = 旧 全力的中モード。
-TRIFECTA_MODE_DEFAULT = "recovery"
+# 既定は hit (2026-06-18 ユーザ指示)。実測 ROI で hit 49-83% > recovery 16% (recovery の
+# 全オプション均等買いが最も出血)。どちらも <100%=-EV だが hit が最も負けが遅い。
+TRIFECTA_MODE_DEFAULT = "hit"
 
 # 回収モードで市場1番人気を1着候補に**許す** Claude 指数の閾値 (これを「超え」たら解禁)。
 TRIFECTA_RECOVERY_INDEX_GATE = 90.0
@@ -636,7 +638,7 @@ def _trifecta_recovery_flat_stake() -> int:
 
 
 def _trifecta_mode(explicit: str | None = None) -> str:
-    """3連単束のモードを解決する。明示 (CLI --t-mode) → env KEIBA_TRIFECTA_MODE → 既定 recovery。
+    """3連単束のモードを解決する。明示 (CLI --t-mode) → env KEIBA_TRIFECTA_MODE → 既定 hit。
 
     不正値は無視して次の優先度へ (typo で実弾の挙動が変わらないように既知値のみ採用)。
     """

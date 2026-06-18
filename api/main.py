@@ -338,10 +338,11 @@ class WatchAutoStartRequest(BaseModel):
     # 全 dispatch subprocess に env KEIBA_TRIFECTA_BANKROLL で伝播 (analyze/keibago/jra/oddspark が尊重)。
     # 投票時の倍率 (bet_stake_multiplier) とは別: これは束を組む時点の予算、倍率は購入時のスケール。
     trifecta_bankroll: int = Field(default=10_000, ge=100, le=10_000_000)
-    # 3連単束モード: recovery=回収(穴狙い, 市場1番人気はClaude指数>90でない限り1着に置かない, 既定) /
-    # hit=旧 全力的中。env KEIBA_TRIFECTA_MODE で全 dispatch subprocess に伝播 (_trifecta_mode が尊重)。
+    # 3連単束モード: recovery=回収(穴狙い, 市場1番人気はClaude指数>90でない限り1着に置かない) /
+    # hit=旧 全力的中 (既定, 2026-06-18〜 実測 ROI で hit>recovery)。
+    # env KEIBA_TRIFECTA_MODE で全 dispatch subprocess に伝播 (_trifecta_mode が尊重)。
     # Literal で API 境界で値検証 (任意文字列が env に垂れ流されるのを防ぐ)。
-    trifecta_mode: Literal["recovery", "hit"] = "recovery"
+    trifecta_mode: Literal["recovery", "hit"] = "hit"
 
 
 @app.post("/api/watch-auto/start")
