@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import json
+import os
+import queue as _queue
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -462,6 +465,449 @@ def parse_horse_scores(text: str) -> dict:
         "summary": str(raw.get("summary", "")),
         "confidence": str(raw.get("confidence", "")),
     }
+
+
+# ───────────────────────── 並列 score (Claude 指数) ─────────────────────────
+# KEIBA_SCORE_PARALLEL=1 で有効化する **プロセス並列** score パイプライン (既定 OFF)。
+# ARCH-A: 検索の重い部分を K 個の `claude -p` RESEARCH 子プロセスに分割 (各シャードは担当馬を
+# 高検索予算で調べ「事実」だけ返す = 0-100 は付けない) → 1 個の `claude -p` SCORING 段が
+# 全馬 + 収集事実を見て **レース内相対 0-100** を一括採点。相対性は採点が単一段に閉じることで
+# 構造的に保たれる (単一セッション版と同義)。どこかで失敗したら単一セッション score_horses_stream
+# にフォールバック (= 既定挙動)。検索バジェットは env で大幅増 (既定 6 クエリ/頭, 旧 2)。
+# env knobs: KEIBA_SCORE_PARALLEL(master,既定OFF) / KEIBA_SCORE_QUERIES_PER_HORSE(6) /
+#   KEIBA_SCORE_HORSES_PER_SHARD(4) / KEIBA_SCORE_MAX_SHARDS(4) /
+#   KEIBA_SCORE_MIN_HORSES_FOR_PARALLEL(8) / KEIBA_LLM_MAX_CONCURRENT(5)。
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw.strip())
+    except (ValueError, AttributeError):
+        return default
+    return v if v > 0 else default
+
+
+def _score_cmd(prompt: str, model: str) -> list[str]:
+    """score 系 claude -p の共通コマンド (score_horses_stream と同一フラグ)。"""
+    return [
+        "claude", "-p", prompt,
+        "--model", model,
+        "--effort", "max",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--permission-mode", "bypassPermissions",
+        "--allowedTools", ",".join(ALLOWED_TOOLS),
+        "--disallowedTools", DISALLOWED_TOOLS,
+    ]
+
+
+def _shard_numbers(numbers: list[int], per_shard: int, max_shards: int) -> list[list[int]]:
+    """馬番リストを最大 max_shards 個・1 シャード ~per_shard 頭で均等分割 (全馬を必ず被覆)。"""
+    import math
+    n = len(numbers)
+    if n == 0:
+        return []
+    k = max(1, min(max_shards, math.ceil(n / max(1, per_shard))))
+    base, rem = divmod(n, k)
+    shards: list[list[int]] = []
+    i = 0
+    for s in range(k):
+        size = base + (1 if s < rem else 0)
+        if size:
+            shards.append(numbers[i:i + size])
+        i += size
+    return [s for s in shards if s]
+
+
+# 並列 claude -p の同時実行をプロセス横断で best-effort に制限する file-slot semaphore。
+# 複数 watch-auto ループ (Web UI の JRA/NAR 同時稼働等) が同時に score を走らせると共有
+# TAVILY_API_KEY が 429 になり得る。block せず「取れた permit 数まで shard を減らす」方向で
+# degrade し、締切を守る。fail-open (lock dir が使えなければ throttle 無し)。
+_CLAUDE_SLOT_DIR = ROOT / "data" / "cache" / "llm_claude_slots"
+_CLAUDE_SLOT_STALE_SEC = 1200
+
+
+class _ClaudeGate:
+    """research 子プロセス用 best-effort 並列ゲート。acquire() は取れた permit 数 (0..want) を返す。"""
+
+    def __init__(self, want: int):
+        self.want = max(1, want)
+        self.held: list[Path] = []
+
+    def acquire(self) -> int:
+        cap = _env_int("KEIBA_LLM_MAX_CONCURRENT", 5)
+        try:
+            _CLAUDE_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            return self.want  # fail-open: throttle 無し
+        self._reclaim_stale()
+        for _ in range(self.want):
+            slot = self._claim_one(cap)
+            if slot is None:
+                break
+            self.held.append(slot)
+        return len(self.held)
+
+    def _claim_one(self, cap: int) -> Path | None:
+        for i in range(cap):
+            p = _CLAUDE_SLOT_DIR / f"slot_{i}.lock"
+            try:
+                fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                return p
+            except FileExistsError:
+                continue
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+
+    def _reclaim_stale(self) -> None:
+        now = time.time()
+        try:
+            for f in _CLAUDE_SLOT_DIR.glob("slot_*.lock"):
+                try:
+                    if now - f.stat().st_mtime > _CLAUDE_SLOT_STALE_SEC:
+                        f.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    def release(self) -> None:
+        for p in self.held:
+            try:
+                p.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+        self.held = []
+
+
+def build_horse_research_prompt(
+    rd: RaceData,
+    shard: list[int],
+    *,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+    queries_per_horse: int = 6,
+) -> str:
+    """RESEARCH 専用プロンプト (担当 shard の馬だけ高予算で調べ、事実のみ返す・採点しない)。
+
+    既存 build_horse_score_prompt の **ヘッダ + edge 説明 + 出走馬表** を流用 (文字列手術) し、
+    検索ルール以降を「担当馬のみ・大幅増の検索予算・facts JSON (0-100 なし)」に差し替える。
+    """
+    base = build_horse_score_prompt(
+        rd, aptitudes=aptitudes, market_signals=market_signals,
+        horse_best_times=horse_best_times,
+    )
+    pre = base.partition("## 検索 MCP の運用ルール")[0]  # ヘッダ + edge + 出走馬表
+    shard_set = sorted({int(x) for x in shard})
+    nq = len(shard_set) * max(1, queries_per_horse)
+    example_no = shard_set[0] if shard_set else 3
+    rules = [
+        "## ⚠ これはリサーチ専用タスク (点数・順位は付けない)",
+        f"あなたの担当馬は **馬番 {shard_set}** のみ。担当馬だけを web 検索 (Tavily) で深く調べ、"
+        "**0-100 の強さ指数や順位は一切付けない** (全馬まとめての採点は次段が行う)。担当馬について "
+        "上記 ①直前情報・②軟情報 を中心に事実を集め、構造化して出すのが仕事。担当外の馬は調べない。",
+        "",
+        "## 検索 MCP の運用ルール",
+        f"**検索予算 (大幅増)**: 担当 {len(shard_set)} 頭 × 約 {queries_per_horse} クエリ = "
+        f"**合計 ~{nq} クエリまで** Tavily で深掘りしてよい (従来の単一セッション 2/頭 より大幅増)。"
+        "各馬最低 1 回は ①直前情報 (取消/馬体重) または ②軟情報 (近走の不利/勝負気配) を確認する。",
+        "**並列実行 (重要・速度に直結)**: 互いに依存しない検索・WebFetch は **必ず 1 ターンで同時に "
+        "複数 tool_use** で呼ぶ。担当馬の近走を一度に並列発行 → 評価が割れる馬だけ次バッチで深掘り。",
+        "**時間厳守**: 締切直前処理。timeout すると担当分が失われるので、予算を超えそうなら手元の "
+        "根拠で確定し **必ず最後まで JSON を出力する**。",
+        "**検索すべきでない**: 上表の数値 (オッズ/人気/適性)、競馬の基本ルール、1 か月以上前の汎用情報。",
+        "",
+        "## 出力 (担当馬のみ・facts)",
+        "担当馬それぞれについて、調べた ①直前/②軟情報 を構造化して以下の JSON を ```json ... ``` で "
+        "出力 (担当外の馬・0-100 指数は含めない):",
+        "  - alerts: 短い日本語ラベル配列 (\"取消\"/\"馬体重-12kg\"/\"前走不利\"/\"厩舎勝負気配\"/"
+        "\"乗替り\"/\"馬場渋化\"/\"逃げ濃厚\"/\"展開不利\" 等。根拠が無ければ空配列)",
+        "  - support: 指数を動かす裏付け根拠の件数 (0-3+。プラス材料もマイナス材料も 1 件)",
+        "  - digest: その馬の調査要約 (240 字以内・市場とズレる点を中心に)",
+        "```json",
+        '{"facts": {"' + str(example_no) + '": {"alerts": ["前走不利", "厩舎勝負気配"], '
+        '"support": 2, "digest": "前走は直線で詰まる不利、本来は掲示板級。今走は叩き2走目で上昇、距離も合う。"}}}',
+        "```",
+    ]
+    return pre + "\n".join(rules)
+
+
+def build_horse_score_from_research_prompt(
+    rd: RaceData,
+    research: dict[int, dict],
+    *,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+) -> str:
+    """収集済みリサーチを使った SCORING プロンプト (全馬を一括で相対 0-100 採点・新規検索ほぼ無し)。
+
+    既存 build_horse_score_prompt の **ヘッダ + edge + 出走馬表** と **指数の付け方以降 (採点ルール
+    + JSON schema)** をそのまま流用 (文字列手術) し、検索ルールを「収集済みリサーチ + 採点指示」に
+    差し替える。0-100 の相対採点を **単一段で全馬まとめて** 行うので相対性が保たれる。
+    """
+    base = build_horse_score_prompt(
+        rd, aptitudes=aptitudes, market_signals=market_signals,
+        horse_best_times=horse_best_times,
+    )
+    head, sep, tail = base.partition("## 指数の付け方")     # tail = 採点ルール + JSON schema
+    pre = head.partition("## 検索 MCP の運用ルール")[0]      # ヘッダ + edge + 出走馬表
+    rlines = ["## 収集済みリサーチ (各馬・並列検索で取得済)"]
+    if research:
+        for num in sorted(research):
+            rec = research[num] or {}
+            al = " / ".join(rec.get("alerts") or []) or "—"
+            dg = (str(rec.get("digest") or "")).strip() or "—"
+            rlines.append(f"- 馬番 {num}: [{al}] {dg}")
+    else:
+        rlines.append("- (リサーチ無し → 出走馬表の適性/オッズと近走から採点)")
+    rlines += [
+        "",
+        "## 採点時の検索ルール (収集済みの根拠を使用)",
+        "上の **収集済みリサーチ** + 出走馬表 (適性/オッズ) を使って **全馬を相対採点** する。"
+        "新規検索は原則不要 (どうしても矛盾を確認したい時のみ最大 1 クエリ)。リサーチで取消/除外が"
+        "確認された馬は指数 0。リサーチの support 件数は下の support 出力に反映する。",
+        "",
+    ]
+    return pre + "\n".join(rlines) + sep + tail
+
+
+def _merge_research(shard_texts: list[str]) -> dict[int, dict]:
+    """各 RESEARCH シャードの出力 (facts JSON 文字列) を馬番キーの evidence dict に union。
+
+    数値の再正規化は一切しない (0-100 採点は次段が単一で行う)。壊れた/空のシャードは無視。
+    """
+    research: dict[int, dict] = {}
+    for text in shard_texts:
+        obj = parse_evidence(text or "")
+        facts = obj.get("facts") if isinstance(obj, dict) else None
+        if not isinstance(facts, dict):
+            continue
+        for k, v in facts.items():
+            try:
+                num = int(k)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(v, dict):
+                continue
+            alerts = _normalize_alerts({num: v.get("alerts")}).get(num, [])
+            try:
+                support = max(0, int(float(v.get("support", 0))))
+            except (ValueError, TypeError):
+                support = 0
+            digest = str(v.get("digest", "") or "")[:240]
+            research[num] = {"alerts": alerts, "support": support, "digest": digest}
+    return research
+
+
+def _run_research_child(
+    *, rd: RaceData, shard: list[int], shard_id: int, model: str, timeout: int,
+    queries_per_horse: int, aptitudes, market_signals, horse_best_times,
+    out_queue: "_queue.Queue",
+) -> None:
+    """1 シャードの RESEARCH を `claude -p` で実行。tool_use は live 転送、本文は最後に集約して
+    out_queue へ。例外/timeout でも必ず ('shard_done', id) を出して呼び側を進める。"""
+    text_parts: list[str] = []
+    try:
+        prompt = build_horse_research_prompt(
+            rd, shard, aptitudes=aptitudes, market_signals=market_signals,
+            horse_best_times=horse_best_times, queries_per_horse=queries_per_horse,
+        )
+        proc, err_f = _spawn_claude(_score_cmd(prompt, model))
+        timer, timed_out = _start_kill_timer(proc, timeout)
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("type")
+                if etype == "assistant":
+                    for block in ev.get("message", {}).get("content", []) or []:
+                        if block.get("type") == "tool_use":
+                            out_queue.put(("tool_use", {"name": block.get("name", ""),
+                                                        "input": block.get("input", {})}))
+                        elif block.get("type") == "text" and block.get("text"):
+                            text_parts.append(block["text"])  # 本文は join せず集約 (採点段の JSON を汚さない)
+                elif etype == "result":
+                    text_parts.append(ev.get("result", "") or "")
+        finally:
+            for _etype, msg in _finalize_claude_proc(proc, timer, timed_out, err_file=err_f):
+                out_queue.put(("shard_error", shard_id, msg))
+    except Exception as e:  # noqa: BLE001
+        out_queue.put(("shard_error", shard_id, f"shard {shard_id}: {e}"))
+    finally:
+        out_queue.put(("shard_text", shard_id, "\n".join(text_parts)))
+        out_queue.put(("shard_done", shard_id))
+
+
+def score_horses_parallel(
+    rd: RaceData,
+    *,
+    model: str = "opus",
+    timeout: int = 900,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+) -> Iterator[tuple[str, Any]]:
+    """ARCH-A 並列 score。score_horses_stream と同じ (event_type, payload) を yield する。
+
+    Phase A (並列 research, 高検索予算) → facts を merge → Phase B (単一 relative scoring)。
+    Phase B の ('result', json) のみが採点 JSON。研究子の本文は yield しない (採点 JSON を汚さない)。
+    どこかで result を出せなければ ('error',...) で終わる (呼び側 score_horses がフォールバック)。
+    """
+    if not is_available():
+        yield ("error", "claude CLI が見つかりません")
+        return
+    horses = [h for h in rd.race.horses if not h.absent]
+    if not horses:
+        yield ("result", "")
+        return
+    numbers = [h.number for h in horses]
+    per_shard = _env_int("KEIBA_SCORE_HORSES_PER_SHARD", 4)
+    max_shards = _env_int("KEIBA_SCORE_MAX_SHARDS", 4)
+    qph = _env_int("KEIBA_SCORE_QUERIES_PER_HORSE", 6)
+    shards = _shard_numbers(numbers, per_shard, max_shards)
+    research_timeout = max(60, int(timeout * 0.6))
+    scoring_timeout = max(60, timeout - research_timeout)
+
+    gate = _ClaudeGate(len(shards))
+    got = gate.acquire()
+    if got < 1:
+        gate.release()
+        yield ("error", "claude gate: permit が取れず単一セッションへ")
+        return
+    if got < len(shards):
+        shards = _shard_numbers(numbers, per_shard, got)  # 取れた permit 数まで shard を縮約 (全馬被覆維持)
+
+    out_q: "_queue.Queue" = _queue.Queue()
+    threads: list[threading.Thread] = []
+    try:
+        for sid, shard in enumerate(shards):
+            t = threading.Thread(
+                target=_run_research_child,
+                kwargs=dict(
+                    rd=rd, shard=shard, shard_id=sid, model=model, timeout=research_timeout,
+                    queries_per_horse=qph, aptitudes=aptitudes, market_signals=market_signals,
+                    horse_best_times=horse_best_times, out_queue=out_q,
+                ),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+        done = 0
+        shard_texts: dict[int, str] = {}
+        while done < len(shards):
+            item = out_q.get()
+            kind = item[0]
+            if kind == "tool_use":
+                yield ("tool_use", item[1])
+            elif kind == "shard_text":
+                shard_texts[item[1]] = item[2]
+            elif kind == "shard_done":
+                done += 1
+            # shard_error は握りつぶす (該当シャードは空 evidence として merge される)
+    finally:
+        gate.release()
+
+    research = _merge_research([shard_texts.get(i, "") for i in sorted(shard_texts)])
+    if not research:
+        yield ("error", "全 research シャードが facts を返さず → フォールバック")
+        return
+
+    # Phase B: 単一 claude で全馬の相対 0-100 を一括採点 (検索ほぼ無し)。
+    prompt = build_horse_score_from_research_prompt(
+        rd, research, aptitudes=aptitudes, market_signals=market_signals,
+        horse_best_times=horse_best_times,
+    )
+    proc, err_f = _spawn_claude(_score_cmd(prompt, model))
+    timer, timed_out = _start_kill_timer(proc, scoring_timeout)
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = ev.get("type")
+            if etype == "assistant":
+                for block in ev.get("message", {}).get("content", []) or []:
+                    if block.get("type") == "tool_use":
+                        yield ("tool_use", {"name": block.get("name", ""), "input": block.get("input", {})})
+                    elif block.get("type") == "text" and block.get("text"):
+                        yield ("text", block["text"])
+            elif etype == "result":
+                yield ("result", ev.get("result", "") or "")
+            elif etype == "error":
+                yield ("error", ev.get("message", "unknown error"))
+    except Exception as e:  # noqa: BLE001
+        yield ("error", f"stream parse error: {e}")
+    finally:
+        for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=err_f):
+            yield ev
+
+
+def score_horses(
+    rd: RaceData,
+    *,
+    model: str = "opus",
+    timeout: int = 900,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+) -> Iterator[tuple[str, Any]]:
+    """score ステージの dispatcher。KEIBA_SCORE_PARALLEL かつ十分な頭数なら並列 score を試し、
+    'result' を出せなければ単一セッション score_horses_stream にフォールバック。既定 (env 未設定)
+    は従来どおり score_horses_stream をそのまま流す (挙動変化なし)。"""
+    horses = [h for h in rd.race.horses if not h.absent]
+    min_h = _env_int("KEIBA_SCORE_MIN_HORSES_FOR_PARALLEL", 8)
+    if not (_env_truthy("KEIBA_SCORE_PARALLEL") and len(horses) >= min_h):
+        yield from score_horses_stream(
+            rd, model=model, timeout=timeout, aptitudes=aptitudes,
+            market_signals=market_signals, horse_best_times=horse_best_times,
+        )
+        return
+    # 並列パスを buffer して result の有無で fallback 判定 (二重 result を出さない)。
+    buffered: list[tuple[str, Any]] = []
+    saw_result = False
+    try:
+        for ev in score_horses_parallel(
+            rd, model=model, timeout=timeout, aptitudes=aptitudes,
+            market_signals=market_signals, horse_best_times=horse_best_times,
+        ):
+            buffered.append(ev)
+            if ev[0] == "result" and ev[1]:
+                saw_result = True
+    except Exception as e:  # noqa: BLE001
+        saw_result = False
+        buffered.append(("error", f"parallel score 例外: {e}"))
+    if saw_result:
+        yield from buffered
+        return
+    # フォールバック: 並列で result が出なかった → 単一セッションで再実行 (今日までの実績パス)。
+    yield ("text", "[並列 score が result 無し → 単一セッション score_horses_stream にフォールバック]")
+    yield from score_horses_stream(
+        rd, model=model, timeout=timeout, aptitudes=aptitudes,
+        market_signals=market_signals, horse_best_times=horse_best_times,
+    )
 
 
 # 締切1分前の高速 3連単選定では web 検索もファイル読みも一切させない (純粋推論で ~10-30s)。

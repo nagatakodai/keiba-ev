@@ -71,14 +71,14 @@ def test_recovery_gate_degrades_without_market():
 
 
 def test_trifecta_mode_resolution(monkeypatch):
-    """明示 → env → 既定 recovery。不正値は無視。"""
+    """明示 → env → 既定 hit (2026-06-18 既定を recovery→hit に変更)。不正値は無視。"""
     monkeypatch.delenv("KEIBA_TRIFECTA_MODE", raising=False)
-    assert _trifecta_mode() == "recovery"
-    assert _trifecta_mode("hit") == "hit"
-    assert _trifecta_mode("bogus") == "recovery"
-    monkeypatch.setenv("KEIBA_TRIFECTA_MODE", "hit")
-    assert _trifecta_mode() == "hit"
-    assert _trifecta_mode("recovery") == "recovery"   # 明示が env に勝つ
+    assert _trifecta_mode() == "hit"                  # 既定 hit
+    assert _trifecta_mode("recovery") == "recovery"   # 明示は尊重
+    assert _trifecta_mode("bogus") == "hit"           # 不正値は既定 hit に倒す
+    monkeypatch.setenv("KEIBA_TRIFECTA_MODE", "recovery")
+    assert _trifecta_mode() == "recovery"             # env が効く
+    assert _trifecta_mode("hit") == "hit"             # 明示が env に勝つ
 
 
 def test_recovery_prompt_has_exclusion_and_no_market():

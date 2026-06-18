@@ -537,7 +537,9 @@ def _run_score_stage(
     console.print(f"[dim]score timeout = {score_timeout}s ({n_run}頭, "
                   f"締切={_fmt_ts(rd.race.close_at) if rd.race.close_at else '不明'})[/dim]")
     try:
-        for etype, payload in llm_mod.score_horses_stream(
+        # score_horses = dispatcher: KEIBA_SCORE_PARALLEL で並列 score (検索大幅増)、
+        # それ以外/失敗時は従来の単一セッション score_horses_stream にフォールバック。
+        for etype, payload in llm_mod.score_horses(
             rd, model=model, aptitudes=aptitudes,
             market_signals=market_signals, horse_best_times=horse_best_times,
             timeout=score_timeout,

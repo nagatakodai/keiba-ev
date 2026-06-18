@@ -147,7 +147,8 @@ EV (回収率) = 的中率 × 平均オッズ ÷ 点数
    - → 信頼できるのは **単複 (b1, 単一馬明示) + 3連単 (b8, 組合せ明示)** のみ。実オッズ照合に通る解法が確立したら復活させる。
 4. **Plan G (適性ゲート → EV 足切り)**: 適性総合 top N 頭 (デフォルト 6) の集合内で生成される買い目のみ → P×O ≥ 1.02 で足切り。EV-first の Plan A/B/C と並列で提案される、競馬独自の「適性で選んで EV で確認」戦略。
 5. **Claude 考察 → 各馬指数 (2段パイプライン, 2026-05-31〜)**: LLM (`claude -p`) の役割を「最終買い目の picks/cuts 選定」から **「各馬の強さ指数 (0-100, 高い=1位) を出す」** へ変更し、その指数を確率モデルの fundamental に合成する。
-   - **score ステージ** (締切5-7分前): `llm.score_horses_stream` が Tavily/WebFetch で各馬の適性・状態・取消を調べ `data/predictions/<race_id>.llm.json` に指数キャッシュ。`analyze._run_score_stage` が4経路 (netkeiba/JRA/keibago/oddspark) 共通で呼ぶ。
+   - **score ステージ** (締切5-7分前): `llm.score_horses` (dispatcher) が Tavily/WebFetch で各馬の適性・状態・取消を調べ `data/predictions/<race_id>.llm.json` に指数キャッシュ。`analyze._run_score_stage` が4経路 (netkeiba/JRA/keibago/oddspark) 共通で呼ぶ。
+     - **検索並列化 (`KEIBA_SCORE_PARALLEL`, 既定 OFF, 2026-06-18)**: 既定は従来の単一 `claude -p` (`score_horses_stream`, 頭数×2 クエリ)。`KEIBA_SCORE_PARALLEL=1` で **ARCH-A プロセス並列** に切替: 検索の重い部分を K 個の `claude -p` RESEARCH 子プロセスに分割 (各シャードは担当馬を高検索予算で調べ **事実(facts)だけ返す = 0-100 は付けない**) → 1 個の `claude -p` SCORING 段が全馬+収集事実を見て **レース内相対 0-100 を一括採点**。相対性は採点が単一段に閉じることで構造的に保たれる (相対性を壊さずに検索を大幅増やせる)。どこかで result を出せなければ単一セッションにフォールバック (= 既定挙動)。env: `KEIBA_SCORE_QUERIES_PER_HORSE` (既定 6, 旧 2) / `KEIBA_SCORE_HORSES_PER_SHARD` (4) / `KEIBA_SCORE_MAX_SHARDS` (4) / `KEIBA_SCORE_MIN_HORSES_FOR_PARALLEL` (8) / `KEIBA_LLM_MAX_CONCURRENT` (5, プロセス横断の claude -p 同時数上限=file-slot semaphore, fail-open)。**注意**: 検索バジェットを使い切るには score 帯を早める必要 (`--score-window/-tolerance` 例 9/5)。timeout (`KEIBA_SCORE_TIMEOUT` 既定900s) の 60% が research・残りが scoring。`tests/test_score_parallel.py` で prompt 形/merge/gate/fallback を検証。
      - **指数出力時に予想履歴詳細を早出し (ユーザ指示 2026-06-13)**: 指数キャッシュ後、4経路すべてが **early return せず**そのまま fall-through して `data/predictions/<race_id>.json` の **暫定 snapshot (`stage="score"`)** を保存する (3連単買い目の Claude 選定は bet 段のみ = score 段は機械フォーメーション)。これで Claude 指数が出た段階で Web UI の履歴一覧・詳細に「暫定」バッジ付きで出る。bet 段が締切直前に fresh odds で再計算し `stage="bet"` の確定版で上書きする。**実弾 enqueue は auto_watch の bet phase のみ**が行うので score の暫定 snapshot で賭けは飛ばない。`api/store.py` は `stage="score"` のまま残った snapshot (= bet 未発火で賭けていない) を `backfilled` と同様 **ROI 計測の見送り扱い** (participated=False・mode 別分母からも除外) にする。`scrape_*` の CLI で `--snapshot` 無し (save_snapshot=False) のときは従来どおり score で early return。
    - **bet ステージ** (締切1-2.5分前): `_load_llm_scores` で指数を読み `estimate_probs(llm_win_index=..., llm_blend=0.75)` に渡す → **まず model fundamental を市場とブレンド (β=0.78) し、その市場アンカー済 win に対し後段で** `ev._combine_llm_index` が `softmax(指数/T_LLM=25)` を loglinear 合成する (2026-06-13 ユーザ指示「最終Pで Claude ~75%」で**合成順を market→Claude に変更**)。最終Pの per-horse 実効重みは Claude=w / 市場=(1-w)·β / モデル=(1-w)·(1-β) (w=llm_blend·support_mult)、例 w=0.75・β=0.78 → **Claude≈75% / 市場≈19.5% / モデル≈5.5%**。Claude が触れていない馬・指数キャッシュ無しレースは w=0 で市場アンカー (β=0.78) のまま = 「市場無視 (β低) → 一様縮退 → 最長オッズ自動購入」事故ゾーンに入らない (β を一律下げる方式との違い)。最新オッズで束→enqueue→自動購入。
    - **picks/cuts 選定は撤去** (`_validate_and_update_bundle`/`_spawn_hit_bundle_claude` は bet 経路で呼ばない)。買い目は合成済 probs から `build_bundle` (joint Kelly + トリガミ防止) が決める。
@@ -420,7 +421,7 @@ CLI / Makefile の `--ev-max` / `--min-prob` を尊重。
 
 ### 検索予算
 
-- 1 レースあたり **頭数 × 2 クエリ** が上限 (Tavily 合計、`llm.py` の score プロンプトと同基準)
+- 1 レースあたり **頭数 × 2 クエリ** が上限 (Tavily 合計、`llm.py` の score プロンプトと同基準)。**`KEIBA_SCORE_PARALLEL=1` 時は大幅増** = `KEIBA_SCORE_QUERIES_PER_HORSE` (既定 6) × 頭数 をシャード並列で実行 (上記 score ステージ参照)
 - 検索の優先対象は **P×O ≥ 2.0 の上位 8 候補**にのみ
 
 ### 検索結果に基づく加点・減点ルール
