@@ -322,9 +322,11 @@ class ShobuScanRequest(BaseModel):
     upcoming_only: bool = True
     # snapshot に市場データが無いレースの最新オッズ (単勝) を取得するか。
     fetch_odds: bool = True
-    # Claude 指数なしの強弱上位 N 件に score ステージを spawn して指数を新規生成 (既定 0=しない)。
-    # コスト/時間がかかるので上限を設ける。
-    claude_eval: int = Field(default=0, ge=0, le=20)
+    # ボタン押下で **全レースの Claude 指数を一括生成** するか (claude -p を一斉実行)。
+    # 既定 True (ユーザ指示 2026-06-20: ボタンで一気に取得)。Claude 指数が無い発走前レースが対象。
+    claude_all: bool = True
+    # claude_all=False のとき、強弱上位 N 件だけ score ステージで指数を新規生成 (0=しない)。
+    claude_eval: int = Field(default=0, ge=0, le=50)
     # 評価レース数の上限 (デバッグ/負荷制御)。None=全件。
     max_races: int | None = Field(default=None, ge=1, le=300)
 
@@ -351,6 +353,7 @@ async def api_shobu_scan(req: ShobuScanRequest) -> dict[str, Any]:
         edge_min_count=req.edge_min_count,
         upcoming_only=req.upcoming_only,
         fetch_odds=req.fetch_odds,
+        claude_all=req.claude_all,
         claude_eval=req.claude_eval,
         max_races=req.max_races,
     )

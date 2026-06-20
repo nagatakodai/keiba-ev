@@ -243,34 +243,64 @@ def _score_stage_cmd(rid: str, rtype: str, start_at: int) -> list[str]:
     return [PY, "-m", mod, rid, "--snapshot", "--phase=score", f"--start-at={start_at}"]
 
 
+def _select_claude_targets(results: list[dict[str, Any]], *, claude_all: bool,
+                           claude_eval: int, upcoming_only: bool,
+                           now: int) -> list[dict[str, Any]]:
+    """Claude 指数を生成すべきレースを選ぶ。
+
+    対象は「Claude 指数がまだ無い (= snapshot に未スコア) + (発走前のみなら) 締切前」のレース。
+    claude_all=True なら **全件** (ボタンで一気に取得)、False かつ claude_eval>0 なら強弱スコア上位
+    claude_eval 件だけ。既にスコア済 (snapshot に Claude 指数あり) のレースは二重生成しない。
+    """
+    if not (claude_all or claude_eval > 0):
+        return []
+    cand = [
+        r for r in results
+        if r["claude"] is None
+        and (not upcoming_only or (r["close_at"] and r["close_at"] > now))
+    ]
+    # 強弱スコア降順 (上位 N モードで優先順位を付ける。全件モードでも処理順がこの順になる)。
+    cand.sort(key=lambda r: (r["separation"]["score"] if r["separation"] else -1.0),
+              reverse=True)
+    return cand if claude_all else cand[:claude_eval]
+
+
 def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                      parallel: int, log: Callable[[str], None]) -> int:
-    """上位候補 (Claude 指数なし) に score ステージを spawn して指数を新規生成。生成成功数を返す。"""
+    """対象レースに score ステージ (claude -p) を spawn して Claude 指数を生成。生成成功数を返す。
+
+    並列は ThreadPoolExecutor で回すが、実際の claude -p 同時数は src 側の file-slot semaphore
+    (KEIBA_LLM_MAX_CONCURRENT, 既定5) で頭打ちになる (fail-open)。各 race の subprocess 出力は
+    capture して捨て、進捗だけ 1 行ずつ log に流す (scan のログを汚さない)。
+    """
     if not targets:
         return 0
-    log(f"[claude-eval] {len(targets)} 件に Claude 指数を新規生成 (並列 {parallel} / 各 timeout {timeout}s)")
+    total = len(targets)
+    log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 "
+        f"(並列 {parallel} / 各 timeout {timeout}s)…")
 
-    def _one(t: dict[str, Any]) -> bool:
+    def _one(t: dict[str, Any]) -> tuple[dict[str, Any], bool, str]:
         rid = t["netkeiba_race_id"]
         cmd = _score_stage_cmd(rid, t["race_type"], int(t.get("start_at") or 0))
         try:
             r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True,
                                text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            log(f"[claude-eval] {t['venue']}{t['race_no']}R timeout ({timeout}s)")
-            return False
+            return (t, False, f"timeout ({timeout}s)")
         except Exception as e:  # noqa: BLE001
-            log(f"[claude-eval] {t['venue']}{t['race_no']}R 失敗: {e}")
-            return False
-        ok = r.returncode == 0
-        log(f"[claude-eval] {t['venue']}{t['race_no']}R {'OK' if ok else f'rc={r.returncode}'}")
-        return ok
+            return (t, False, str(e))
+        return (t, r.returncode == 0, "OK" if r.returncode == 0 else f"rc={r.returncode}")
 
     done = 0
+    completed = 0
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as ex:
         for fut in as_completed([ex.submit(_one, t) for t in targets]):
-            if fut.result():
+            t, ok, note = fut.result()
+            completed += 1
+            if ok:
                 done += 1
+            log(f"[claude-eval] ({completed}/{total}) {t['venue']}{t['race_no']}R {note}")
+    log(f"[claude-eval] 完了: {done}/{total} 生成成功")
     return done
 
 
@@ -288,9 +318,10 @@ def scan(
     edge_min_count: int = 2,
     upcoming_only: bool = True,
     fetch_odds: bool = True,
+    claude_all: bool = False,
     claude_eval: int = 0,
     claude_eval_timeout: int = 900,
-    claude_eval_parallel: int = 2,
+    claude_eval_parallel: int = 6,
     max_races: int | None = None,
     fetch_parallel: int = 6,
     log: Callable[[str], None] | None = None,
@@ -461,26 +492,27 @@ def scan(
 
     results = [_evaluate(r) for r in races]
 
-    # --- claude-eval (opt-in): 強弱上位の「Claude 指数なし & 発走前」に score を spawn ---
-    if claude_eval > 0 and use_claude_edge:
-        cand = [
-            r for r in results
-            if (r["claude"] is None) and (r["separation"] is not None)
-            and (not upcoming_only or (r["close_at"] and r["close_at"] > now))
-        ]
-        cand.sort(key=lambda r: r["separation"]["score"], reverse=True)
-        targets = cand[:claude_eval]
+    # --- Claude 指数の生成 (ボタンで一括取得 / 上位N件) ---
+    # claude_all=True: Claude 指数が無い発走前レースを **全件** 生成 (ボタン押下で一気に取得)。
+    # claude_all=False & claude_eval>0: 強弱上位 claude_eval 件のみ。既にスコア済は二重生成しない。
+    if use_claude_edge and (claude_all or claude_eval > 0):
+        targets = _select_claude_targets(
+            results, claude_all=claude_all, claude_eval=claude_eval,
+            upcoming_only=upcoming_only, now=now)
         if targets:
             _run_claude_eval(targets, timeout=claude_eval_timeout,
                              parallel=claude_eval_parallel, log=_log)
-            # 生成後に対象だけ再評価 (snapshot 再読込)。
+            # 生成後に対象を再評価 (snapshot 再読込)。
             by_id = {r["race_id"]: r for r in races}
+            pos = {r["race_id"]: i for i, r in enumerate(results)}
             for t in targets:
                 base = by_id.get(t["race_id"])
                 if base is None:
                     continue
                 base["_snap"] = _load_snapshot(t["race_id"])
-                results[results.index(t)] = _evaluate(base)
+                results[pos[t["race_id"]]] = _evaluate(base)
+        else:
+            _log("[claude-eval] 生成対象なし (全レース既に Claude 指数あり/締切済)")
 
     # 並べ替え: 推奨を上に、その中で shobu_score 降順。
     results.sort(key=lambda r: (r["recommended"], r["shobu_score"]), reverse=True)
@@ -502,7 +534,7 @@ def scan(
         "combine": combine, "sep_threshold": sep_threshold,
         "edge_margin": edge_margin, "edge_min_count": edge_min_count,
         "upcoming_only": upcoming_only, "fetch_odds": fetch_odds,
-        "claude_eval": claude_eval,
+        "claude_all": claude_all, "claude_eval": claude_eval,
     }
     _log(f"[done] 推奨 {summary['recommended']} / 評価 {summary['evaluated']} "
          f"(snapshot {summary['with_snapshot']} / Claude {summary['with_claude']})")
@@ -528,9 +560,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--edge-min-count", type=int, default=2)
     ap.add_argument("--include-finished", action="store_true", help="締切済も含める")
     ap.add_argument("--no-fetch-odds", action="store_true", help="最新オッズ取得をしない (snapshot のみ)")
-    ap.add_argument("--claude-eval", type=int, default=0, help="上位N件に Claude 指数を新規生成")
+    ap.add_argument("--claude-all", action="store_true",
+                    help="Claude 指数が無い発走前レースを全件 claude -p で一括生成")
+    ap.add_argument("--claude-eval", type=int, default=0, help="上位N件に Claude 指数を新規生成 (--claude-all なしの時)")
     ap.add_argument("--claude-eval-timeout", type=int, default=900)
-    ap.add_argument("--claude-eval-parallel", type=int, default=2)
+    ap.add_argument("--claude-eval-parallel", type=int, default=6)
     ap.add_argument("--max-races", type=int, default=None)
     args = ap.parse_args(argv)
 
@@ -545,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
         edge_min_count=args.edge_min_count,
         upcoming_only=not args.include_finished,
         fetch_odds=not args.no_fetch_odds,
+        claude_all=args.claude_all,
         claude_eval=args.claude_eval,
         claude_eval_timeout=args.claude_eval_timeout,
         claude_eval_parallel=args.claude_eval_parallel,

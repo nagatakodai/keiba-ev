@@ -155,6 +155,76 @@ def test_scan_race_type_filter(monkeypatch):
     assert res["races"][0]["race_type"] == "nar"
 
 
+def test_select_claude_targets():
+    now = 1000
+
+    def race(rid, claude, sep, future):
+        return {
+            "race_id": rid, "netkeiba_race_id": "x", "venue": "V", "race_no": 1,
+            "race_type": "nar", "start_at": 0,
+            "close_at": now + 100 if future else now - 100,
+            "claude": ({"available": True} if claude else None),
+            "separation": ({"score": sep} if sep is not None else None),
+        }
+
+    results = [
+        race("a", False, 50, True),    # 未スコア・発走前・sep 50
+        race("b", False, 80, True),    # 未スコア・発走前・sep 80
+        race("c", True, 90, True),     # スコア済 → 対象外
+        race("d", False, 10, False),   # 締切済 → upcoming_only で対象外
+    ]
+    # 全件モード: 未スコア発走前を sep 降順で全部。
+    t_all = shobu._select_claude_targets(results, claude_all=True, claude_eval=0,
+                                         upcoming_only=True, now=now)
+    assert [r["race_id"] for r in t_all] == ["b", "a"]
+    # 上位 N モード。
+    t_top = shobu._select_claude_targets(results, claude_all=False, claude_eval=1,
+                                         upcoming_only=True, now=now)
+    assert [r["race_id"] for r in t_top] == ["b"]
+    # 締切済も含める。
+    t_past = shobu._select_claude_targets(results, claude_all=True, claude_eval=0,
+                                          upcoming_only=False, now=now)
+    assert {r["race_id"] for r in t_past} == {"a", "b", "d"}
+    # どちらも無効 → 空。
+    assert shobu._select_claude_targets(results, claude_all=False, claude_eval=0,
+                                        upcoming_only=True, now=now) == []
+
+
+def test_scan_claude_all_generates_for_all(monkeypatch):
+    """claude_all: Claude 指数なしの全レースに生成 → 全レースが Claude 乖離を持つ。"""
+    now = int(time.time())
+    monkeypatch.setattr("src.auto_watch.discover_today_races", lambda d: [
+        {"race_id": "202632060101", "url": "u", "start_at": now + 3600,
+         "venue": "佐賀", "race_no": 1, "source": "oddspark"},
+        {"race_id": "202632060102", "url": "u", "start_at": now + 3600,
+         "venue": "佐賀", "race_no": 2, "source": "oddspark"},
+    ])
+    snaps: dict = {}
+    monkeypatch.setattr(shobu, "_load_snapshot", lambda i: snaps.get(i))
+    monkeypatch.setattr(shobu, "_fetch_fresh_win",
+                        lambda r, t: {"odds": {1: 5.0, 2: 5.1, 3: 4.9}, "names": {}})
+
+    # 生成 stub: 対象 race の snapshot に Claude 乖離を「インストール」して件数を返す。
+    def fake_gen(targets, **kw):
+        for t in targets:
+            snaps[t["race_id"]] = {
+                "index_compare": [
+                    {"number": 1, "claude_index": 80, "market_index": 55, "diff": 25},
+                    {"number": 2, "claude_index": 70, "market_index": 58, "diff": 12},
+                ],
+                "market_win_index": {"1": 55, "2": 58, "3": 40},
+            }
+        return len(targets)
+
+    monkeypatch.setattr(shobu, "_run_claude_eval", fake_gen)
+    res = shobu.scan(claude_all=True, use_separation=False, use_claude_edge=True,
+                     sep_threshold=101, edge_margin=8.0, edge_min_count=2,
+                     fetch_odds=True, log=lambda *_: None)
+    assert res["summary"]["with_claude"] == 2          # 2 レースとも生成された
+    assert res["summary"]["recommended"] == 2          # 2 頭乖離 → 勝負 (claude のみ)
+    assert all(r["claude"]["edge_count"] == 2 for r in res["races"])
+
+
 def test_scan_upcoming_only_excludes_past(monkeypatch):
     """発走前のみ: 締切済 (start_at が過去) は除外。"""
     now = int(time.time())

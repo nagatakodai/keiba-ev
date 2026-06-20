@@ -235,6 +235,8 @@ export default function ShobuPage() {
   const [edgeMinCount, setEdgeMinCount] = useState("2");
   const [upcomingOnly, setUpcomingOnly] = useState(true);
   const [fetchOdds, setFetchOdds] = useState(true);
+  // ボタン押下で全レースの Claude 指数を一括生成 (claude -p)。既定 ON (ユーザ指示 2026-06-20)。
+  const [claudeAll, setClaudeAll] = useState(true);
   const [claudeEval, setClaudeEval] = useState("0");
   const [showSettings, setShowSettings] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -317,9 +319,10 @@ export default function ShobuPage() {
         })(),
         upcoming_only: upcomingOnly,
         fetch_odds: fetchOdds,
+        claude_all: claudeAll,
         claude_eval: (() => {
           const v = parseInt(claudeEval, 10);
-          return Number.isFinite(v) && v >= 0 ? Math.min(20, v) : 0;
+          return Number.isFinite(v) && v >= 0 ? Math.min(50, v) : 0;
         })(),
       });
       setJob(j);
@@ -393,7 +396,11 @@ export default function ShobuPage() {
             </Button>
             <Button size="lg" disabled={scanning} onClick={startScan}>
               {scanning ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" fill="currentColor" />}
-              {scanning ? "スキャン中..." : "全レース取得して抽出"}
+              {scanning
+                ? "スキャン中..."
+                : claudeAll && useClaudeEdge
+                  ? "全レース取得 + Claude指数生成"
+                  : "全レース取得して抽出"}
             </Button>
           </div>
         </header>
@@ -434,18 +441,33 @@ export default function ShobuPage() {
                     <option value="jra">JRA のみ</option>
                     <option value="nar">地方のみ</option>
                   </Select>
-                  <Input label="Claude 指数を新規生成 (上位N件)" type="number" min="0" max="20" step="1"
-                    value={claudeEval} onChange={(e) => setClaudeEval(e.target.value)} disabled={scanning || !useClaudeEdge}
-                    hint="0=しない (既存snapshotのみ)。>0 は時間がかかる" className="tnum" />
+                  {!claudeAll && (
+                    <Input label="Claude 指数を生成 (上位N件)" type="number" min="0" max="50" step="1"
+                      value={claudeEval} onChange={(e) => setClaudeEval(e.target.value)} disabled={scanning || !useClaudeEdge}
+                      hint="0=既存スナップショットのみ" className="tnum" />
+                  )}
                 </div>
-                <div className="mt-3 flex items-center gap-5 flex-wrap">
-                  <Toggle checked={upcomingOnly} onChange={setUpcomingOnly} disabled={scanning}>
-                    発走前のみ
+                <div className="mt-3 flex flex-col gap-2.5">
+                  <Toggle checked={claudeAll} onChange={setClaudeAll} disabled={scanning || !useClaudeEdge}>
+                    <span className="font-medium">全レースの Claude 指数を一括生成</span>
+                    <span className="text-(--color-muted) ml-1">— ボタンで claude -p を一斉実行</span>
                   </Toggle>
-                  <Toggle checked={fetchOdds} onChange={setFetchOdds} disabled={scanning}>
-                    最新オッズを取得 (未解析レースの強弱判定)
-                  </Toggle>
+                  <div className="flex items-center gap-5 flex-wrap">
+                    <Toggle checked={upcomingOnly} onChange={setUpcomingOnly} disabled={scanning}>
+                      発走前のみ
+                    </Toggle>
+                    <Toggle checked={fetchOdds} onChange={setFetchOdds} disabled={scanning}>
+                      最新オッズを取得 (未解析レースの強弱判定)
+                    </Toggle>
+                  </div>
                 </div>
+                {claudeAll && useClaudeEdge && (
+                  <p className="mt-2.5 text-xs text-(--color-warn) leading-relaxed">
+                    Claude 指数の無い発走前レースを <b>全件</b> claude -p で生成します
+                    (Tavily / WebFetch で各馬を web 検索 → 0-100 指数)。レース数によっては
+                    数分〜数十分かかります (claude -p は最大 5 並列)。ライブログで進捗が出ます。
+                  </p>
+                )}
               </FieldGroup>
             </div>
           )}

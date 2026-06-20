@@ -413,6 +413,7 @@ def build_shobu_cmd(
     edge_min_count: int = 2,
     upcoming_only: bool = True,
     fetch_odds: bool = True,
+    claude_all: bool = False,
     claude_eval: int = 0,
     max_races: int | None = None,
 ) -> list[str]:
@@ -437,6 +438,8 @@ def build_shobu_cmd(
         cmd.append("--include-finished")
     if not fetch_odds:
         cmd.append("--no-fetch-odds")
+    if claude_all:
+        cmd.append("--claude-all")
     if max_races is not None:
         cmd += ["--max-races", str(max_races)]
     return cmd

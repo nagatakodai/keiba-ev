@@ -663,6 +663,7 @@ export type ShobuResult = {
     edge_min_count: number;
     upcoming_only: boolean;
     fetch_odds: boolean;
+    claude_all: boolean;
     claude_eval: number;
   };
   summary: {
@@ -688,6 +689,7 @@ export type ShobuScanRequest = {
   edge_min_count?: number;
   upcoming_only?: boolean;
   fetch_odds?: boolean;
+  claude_all?: boolean;
   claude_eval?: number;
   max_races?: number | null;
 };
