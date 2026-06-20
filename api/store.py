@@ -15,6 +15,30 @@ RESULT_DIR = ROOT / "data" / "results"
 AUTO_WATCH_CACHE = ROOT / "data" / "cache" / "auto_watch_analyzed.txt"
 AUTO_WATCH_HISTORY = ROOT / "data" / "cache" / "auto_watch_history.jsonl"
 TIMELINE_DIR = ROOT / "data" / "cache" / "odds_timeline"
+# 今日の勝負レース スキャン結果 (src/shobu.py が <date>.json を書く)。
+SHOBU_DIR = ROOT / "data" / "cache" / "shobu"
+
+
+def shobu_today_jst() -> str:
+    """当日 (JST) を YYYYMMDD で返す (shobu の out path / 既定 date 用)。"""
+    import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d")
+
+
+def get_shobu_result(date: str | None = None) -> dict[str, Any] | None:
+    """勝負レース スキャン結果 (data/cache/shobu/<date>.json) を読む。無ければ None。"""
+    import re
+    d = date or shobu_today_jst()
+    if not re.fullmatch(r"\d{8}", d or ""):
+        return None
+    p = SHOBU_DIR / f"{d}.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:

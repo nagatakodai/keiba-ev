@@ -400,6 +400,48 @@ def build_analyze_cmd(
     return cmd
 
 
+def build_shobu_cmd(
+    out_path: str,
+    *,
+    date: str | None = None,
+    race_type: str = "all",
+    use_separation: bool = True,
+    use_claude_edge: bool = True,
+    combine: str = "or",
+    sep_threshold: float = 35.0,
+    edge_margin: float = 8.0,
+    edge_min_count: int = 2,
+    upcoming_only: bool = True,
+    fetch_odds: bool = True,
+    claude_eval: int = 0,
+    max_races: int | None = None,
+) -> list[str]:
+    """`python -m src.shobu` (今日の勝負レース スキャン) コマンドを組む。結果は out_path に書かれる。"""
+    cmd = [
+        PY, "-m", "src.shobu",
+        "--out", out_path,
+        "--race-type", race_type,
+        "--combine", combine,
+        "--sep-threshold", str(sep_threshold),
+        "--edge-margin", str(edge_margin),
+        "--edge-min-count", str(edge_min_count),
+        "--claude-eval", str(claude_eval),
+    ]
+    if date:
+        cmd += ["--date", date]
+    if not use_separation:
+        cmd.append("--no-separation")
+    if not use_claude_edge:
+        cmd.append("--no-claude")
+    if not upcoming_only:
+        cmd.append("--include-finished")
+    if not fetch_odds:
+        cmd.append("--no-fetch-odds")
+    if max_races is not None:
+        cmd += ["--max-races", str(max_races)]
+    return cmd
+
+
 class WatchAutoManager:
     """make watch-auto 相当の永続プロセスを 1 つだけ保持。
 

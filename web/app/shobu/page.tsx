@@ -1,0 +1,530 @@
+"use client";
+
+import { useEffect, useState, type ReactNode } from "react";
+import Link from "next/link";
+import {
+  ChevronRight,
+  Flame,
+  Loader2,
+  Play,
+  Settings2,
+  Sparkles,
+  Swords,
+  TrendingUp,
+} from "lucide-react";
+import {
+  Badge,
+  Button,
+  Card,
+  Input,
+  Page,
+  PageHeader,
+  Select,
+  Stat,
+  fmtTime,
+  raceTimingStatus,
+} from "@/components/ui";
+import { LogStream } from "@/components/LogStream";
+import {
+  api,
+  type JobInfo,
+  type ShobuRace,
+  type ShobuResult,
+} from "@/lib/api";
+
+// CSS のみのトグル (watch-auto と同型)。
+function Toggle({
+  checked,
+  onChange,
+  disabled,
+  children,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <label
+      className={`inline-flex items-center gap-2.5 text-sm select-none ${
+        disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+      }`}
+    >
+      <span className="relative inline-flex h-5 w-9 shrink-0">
+        <input
+          type="checkbox"
+          className="peer sr-only"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          disabled={disabled}
+        />
+        <span className="absolute inset-0 rounded-full border transition-colors bg-(--color-surface-3) border-(--color-line) peer-checked:bg-emerald-500/90 peer-checked:border-emerald-400/70 peer-focus-visible:outline-2 peer-focus-visible:outline-(--color-ring) peer-focus-visible:outline-offset-2" />
+        <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-slate-400 shadow transition-transform duration-150 peer-checked:translate-x-4 peer-checked:bg-(--color-foreground)" />
+      </span>
+      <span>{children}</span>
+    </label>
+  );
+}
+
+function FieldGroup({ legend, children }: { legend: string; children: ReactNode }) {
+  return (
+    <fieldset className="rounded-xl border border-(--color-line) bg-(--color-surface-2)/30 px-4 pb-4 pt-2">
+      <legend className="px-1.5 text-[10px] font-bold uppercase tracking-widest text-(--color-muted)">
+        {legend}
+      </legend>
+      {children}
+    </fieldset>
+  );
+}
+
+// 強弱スコア / 勝負スコア のミニバー。
+function ScoreBar({ value, tone = "emerald" }: { value: number; tone?: "emerald" | "sky" | "fuchsia" }) {
+  const c =
+    tone === "sky" ? "bg-sky-500/80" : tone === "fuchsia" ? "bg-fuchsia-500/80" : "bg-emerald-500/80";
+  return (
+    <div className="h-1.5 rounded-full bg-(--color-surface-2) border border-(--color-line-soft) overflow-hidden">
+      <div className={c} style={{ width: `${Math.max(0, Math.min(100, value))}%`, height: "100%" }} />
+    </div>
+  );
+}
+
+function RaceTypeBadge({ t }: { t: "jra" | "nar" }) {
+  return t === "jra" ? <Badge tone="info">JRA</Badge> : <Badge tone="muted">地方</Badge>;
+}
+
+function RaceCard({ r, nowMs }: { r: ShobuRace; nowMs: number | null }) {
+  const sep = r.separation;
+  const claude = r.claude;
+  const timing =
+    nowMs !== null ? raceTimingStatus(r.close_at || null, r.start_at || null, false, nowMs) : null;
+  const rec = r.recommended;
+  return (
+    <div
+      className={`rounded-xl border p-3.5 transition-colors ${
+        rec
+          ? "border-emerald-500/45 bg-emerald-500/[0.06] shadow-[0_0_20px_rgba(52,211,153,0.08)]"
+          : "border-(--color-line) bg-(--color-card) hover:border-(--color-line)"
+      }`}
+    >
+      {/* ── ヘッダ行 ── */}
+      <div className="flex items-start justify-between gap-2">
+        <Link href={`/predictions/${r.race_id}`} className="flex items-center gap-2 min-w-0 hover:underline">
+          <span className="text-sm font-bold truncate">{r.venue || "(不明)"}</span>
+          <span className="mono text-xl font-black tnum leading-none shrink-0">
+            {r.race_no}
+            <span className="text-[11px] font-bold text-(--color-muted) ml-0.5">R</span>
+          </span>
+          <RaceTypeBadge t={r.race_type} />
+          {rec && (
+            <Badge tone="good">
+              <Flame className="size-3 mr-0.5" />
+              勝負
+            </Badge>
+          )}
+        </Link>
+        <div className="shrink-0 text-right">
+          <div className="text-2xl font-black tnum leading-none text-(--color-foreground)">
+            {r.shobu_score.toFixed(0)}
+          </div>
+          <div className="text-[9px] font-bold uppercase tracking-wider text-(--color-muted)">勝負スコア</div>
+        </div>
+      </div>
+
+      {/* ── 時刻 + matched chips ── */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] tnum text-(--color-muted)">
+        {(r.close_at || r.start_at) && (
+          <span>
+            締切 <span className="mono text-(--color-foreground)">{fmtTime(r.close_at)}</span>
+            <span className="mx-1">→</span>発走{" "}
+            <span className="mono text-(--color-foreground)">{fmtTime(r.start_at)}</span>
+          </span>
+        )}
+        {timing && timing.label !== "結果待ち" && <Badge tone={timing.tone}>{timing.label}</Badge>}
+        {r.matched.includes("sep") && <Badge tone="info">強弱</Badge>}
+        {r.matched.includes("claude") && <Badge tone="magenta">Claude乖離</Badge>}
+        {r.n_runners != null && <span>{r.n_runners}頭</span>}
+        {r.data_source === "none" && <Badge tone="muted">データなし</Badge>}
+        {r.data_source === "snapshot" && <Badge tone="muted">snapshot</Badge>}
+        {r.snapshot_stage === "score" && <Badge tone="muted">暫定</Badge>}
+      </div>
+
+      {/* ── 強弱 (基準A) ── */}
+      {sep && (
+        <div className="mt-2.5">
+          <div className="flex items-baseline justify-between text-[11px] mb-1">
+            <span className="font-bold text-sky-300 inline-flex items-center gap-1">
+              <TrendingUp className="size-3" />強弱
+            </span>
+            <span className="tnum text-(--color-muted)">スコア {sep.score.toFixed(0)}</span>
+          </div>
+          <ScoreBar value={sep.score} tone="sky" />
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {sep.favorites.map((f, i) => (
+              <span
+                key={f.number}
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] tnum ${
+                  i === 0
+                    ? "bg-amber-500/10 border-amber-500/30 text-amber-200 font-bold"
+                    : "bg-(--color-surface-2) border-(--color-line-soft)"
+                }`}
+              >
+                <span className="mono font-bold">{f.number}</span>
+                {f.name && <span className="max-w-[6.5em] truncate">{f.name}</span>}
+                <span className="text-(--color-muted)">{Math.round(f.prob * 100)}%</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Claude 乖離 (基準B) ── */}
+      {claude && claude.edge_horses.length > 0 && (
+        <div className="mt-2.5">
+          <div className="flex items-baseline justify-between text-[11px] mb-1">
+            <span className="font-bold text-fuchsia-300 inline-flex items-center gap-1">
+              <Sparkles className="size-3" />
+              Claude{">"}市場 {claude.edge_count}頭
+            </span>
+            {claude.max_diff != null && (
+              <span className="tnum text-(--color-muted)">最大 +{claude.max_diff.toFixed(0)}</span>
+            )}
+          </div>
+          <div className="flex flex-col gap-0.5">
+            {claude.edge_horses.slice(0, 4).map((h, i) => (
+              <div key={h.number ?? `edge-${i}`} className="flex items-center gap-2 text-[11px] tnum">
+                <span className="mono font-bold w-5 text-right">{h.number}</span>
+                {h.name && <span className="max-w-[7em] truncate text-(--color-foreground)">{h.name}</span>}
+                <span className="text-(--color-muted)">
+                  Claude {h.claude_index != null ? Math.round(h.claude_index) : "—"} / 市場{" "}
+                  {h.market_index != null ? Math.round(h.market_index) : "—"}
+                </span>
+                {h.diff != null && (
+                  <span className="font-bold text-emerald-300 ml-auto">+{h.diff.toFixed(0)}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── reasons + 詳細リンク ── */}
+      <div className="mt-2.5 flex items-end justify-between gap-2 pt-2 border-t border-(--color-line-soft)">
+        <p className="text-[11px] text-(--color-muted) leading-snug min-w-0">
+          {r.reasons.length > 0 ? r.reasons.join(" ／ ") : "—"}
+        </p>
+        <Link
+          href={`/predictions/${r.race_id}`}
+          className="shrink-0 inline-flex items-center gap-0.5 text-[11px] font-bold text-(--color-accent) hover:underline"
+        >
+          詳細
+          <ChevronRight className="size-3.5" />
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+export default function ShobuPage() {
+  // ── 抽出オプション ──
+  const [raceType, setRaceType] = useState<"all" | "jra" | "nar">("all");
+  const [useSeparation, setUseSeparation] = useState(true);
+  const [useClaudeEdge, setUseClaudeEdge] = useState(true);
+  const [combine, setCombine] = useState<"or" | "and">("or");
+  const [sepThreshold, setSepThreshold] = useState("35");
+  const [edgeMargin, setEdgeMargin] = useState("8");
+  const [edgeMinCount, setEdgeMinCount] = useState("2");
+  const [upcomingOnly, setUpcomingOnly] = useState(true);
+  const [fetchOdds, setFetchOdds] = useState(true);
+  const [claudeEval, setClaudeEval] = useState("0");
+  const [showSettings, setShowSettings] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+
+  const [job, setJob] = useState<(JobInfo & { date?: string }) | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [result, setResult] = useState<ShobuResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState<number | null>(null);
+
+  // 締切バッジ用の現在時刻 (5秒毎)。
+  useEffect(() => {
+    setNowMs(Date.now());
+    const t = setInterval(() => setNowMs(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 初回マウント時に既存のスキャン結果 (当日) があれば表示。
+  useEffect(() => {
+    api
+      .getShobuResult()
+      .then((r) => setResult(r))
+      .catch(() => {
+        /* 未スキャン (404) は無視 */
+      });
+  }, []);
+
+  // スキャン Job の完了を polling → 完了したら結果を取得。
+  useEffect(() => {
+    if (!job || !scanning) return;
+    let cancelled = false;
+    const poll = setInterval(async () => {
+      try {
+        const j = await api.getJob(job.id);
+        if (cancelled) return;
+        if (j.status === "done" || j.status === "failed" || j.status === "cancelled") {
+          clearInterval(poll);
+          setScanning(false);
+          if (j.status === "done") {
+            try {
+              const r = await api.getShobuResult(job.date);
+              if (!cancelled) setResult(r);
+            } catch (e) {
+              if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+            }
+          } else {
+            setError(`スキャンが ${j.status} で終了しました (ログ参照)`);
+          }
+        }
+      } catch {
+        /* transient */
+      }
+    }, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+    };
+  }, [job, scanning]);
+
+  const startScan = async () => {
+    setScanning(true);
+    setError(null);
+    try {
+      const j = await api.scanShobu({
+        race_type: raceType,
+        use_separation: useSeparation,
+        use_claude_edge: useClaudeEdge,
+        combine,
+        sep_threshold: (() => {
+          const v = parseFloat(sepThreshold);
+          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 35;
+        })(),
+        edge_margin: (() => {
+          const v = parseFloat(edgeMargin);
+          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 8;
+        })(),
+        edge_min_count: (() => {
+          const v = parseInt(edgeMinCount, 10);
+          return Number.isFinite(v) && v >= 1 ? v : 2;
+        })(),
+        upcoming_only: upcomingOnly,
+        fetch_odds: fetchOdds,
+        claude_eval: (() => {
+          const v = parseInt(claudeEval, 10);
+          return Number.isFinite(v) && v >= 0 ? Math.min(20, v) : 0;
+        })(),
+      });
+      setJob(j);
+    } catch (e) {
+      setScanning(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const races = result?.races ?? [];
+  const recommended = races.filter((r) => r.recommended);
+  const visible = showAll ? races : recommended;
+  const summary = result?.summary;
+
+  return (
+    <Page>
+      <PageHeader
+        eyebrow="Shobu"
+        title="今日の勝負レース"
+        subtitle="ボタンで当日の全レース (JRA+地方) を取得し、(A) 馬の強弱がはっきりしている / (B) 市場より Claude 指数が高い馬が複数いる レースを抽出します。基準・しきい値はオプションで選択できます。"
+      />
+
+      {/* ── サマリー ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Stat
+          label="勝負レース"
+          value={summary ? summary.recommended : "—"}
+          tone={summary && summary.recommended > 0 ? "good" : "default"}
+          accentTone="good"
+          hint={summary ? `評価 ${summary.evaluated} レース中` : "未スキャン"}
+        />
+        <Stat
+          label="評価レース数"
+          value={summary ? summary.evaluated : "—"}
+          accentTone="info"
+          hint={summary ? `当日開催 ${summary.total_discovered}` : "—"}
+        />
+        <Stat
+          label="Claude 指数あり"
+          value={summary ? summary.with_claude : "—"}
+          accentTone="magenta"
+          hint={summary ? `snapshot ${summary.with_snapshot}` : "—"}
+        />
+        <Stat
+          label="強弱スコア中央値"
+          value={summary?.sep_median != null ? summary.sep_median.toFixed(0) : "—"}
+          accentTone="info"
+          hint={summary ? `最新オッズ取得 ${summary.with_fresh_odds}` : "—"}
+        />
+      </div>
+
+      {/* ── コントロール (ボタン + オプション) ── */}
+      <section className="rounded-xl border border-(--color-line) bg-(--color-card) overflow-hidden shadow-[0_2px_12px_rgba(0,0,0,0.35)]">
+        <header className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-(--color-line) bg-(--color-section-head)">
+          <div className="flex items-center gap-2 min-w-0">
+            <Swords className="size-4 text-(--color-accent)" />
+            <div>
+              <h2 className="text-sm font-bold tracking-tight">勝負レース抽出</h2>
+              <p className="text-[11px] text-(--color-muted)">
+                {result
+                  ? `最終スキャン ${result.generated_at.slice(5, 16).replace("T", " ")} (${result.date})`
+                  : "未スキャン — 下のボタンで実行"}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => setShowSettings((v) => !v)} aria-expanded={showSettings}>
+              <Settings2 size={15} aria-hidden />
+              オプション
+              <ChevronRight size={14} className={`transition-transform ${showSettings ? "rotate-90" : ""}`} aria-hidden />
+            </Button>
+            <Button size="lg" disabled={scanning} onClick={startScan}>
+              {scanning ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" fill="currentColor" />}
+              {scanning ? "スキャン中..." : "全レース取得して抽出"}
+            </Button>
+          </div>
+        </header>
+
+        <div className="p-4 space-y-4">
+          {showSettings && (
+            <div className="space-y-4">
+              <FieldGroup legend="基準 (勝負レースの定義)">
+                <div className="flex flex-col gap-2.5">
+                  <Toggle checked={useSeparation} onChange={setUseSeparation} disabled={scanning}>
+                    <span className="font-medium">(A) 馬の強弱がはっきり</span>
+                    <span className="text-(--color-muted) ml-1">— 市場 implied 勝率の集中度</span>
+                  </Toggle>
+                  <Toggle checked={useClaudeEdge} onChange={setUseClaudeEdge} disabled={scanning}>
+                    <span className="font-medium">(B) 市場より Claude 指数が高い馬が複数</span>
+                    <span className="text-(--color-muted) ml-1">— 既存スナップショット由来</span>
+                  </Toggle>
+                </div>
+                <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <Select label="基準の合成" value={combine} onChange={(e) => setCombine(e.target.value as "or" | "and")} disabled={scanning}
+                    hint={combine === "or" ? "いずれか満たせば勝負" : "両方満たすと勝負"}>
+                    <option value="or">いずれか (OR)</option>
+                    <option value="and">両方 (AND)</option>
+                  </Select>
+                  <Input label="(A) 強弱しきい値 (0-100)" type="number" min="0" max="100" step="5"
+                    value={sepThreshold} onChange={(e) => setSepThreshold(e.target.value)} disabled={scanning || !useSeparation} className="tnum" />
+                  <Input label="(B) 指数差マージン" type="number" min="0" max="100" step="1"
+                    value={edgeMargin} onChange={(e) => setEdgeMargin(e.target.value)} disabled={scanning || !useClaudeEdge} className="tnum" />
+                  <Input label="(B) 必要頭数 (複数=2)" type="number" min="1" max="18" step="1"
+                    value={edgeMinCount} onChange={(e) => setEdgeMinCount(e.target.value)} disabled={scanning || !useClaudeEdge} className="tnum" />
+                </div>
+              </FieldGroup>
+
+              <FieldGroup legend="対象 / データ取得">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <Select label="対象" value={raceType} onChange={(e) => setRaceType(e.target.value as "all" | "jra" | "nar")} disabled={scanning}>
+                    <option value="all">JRA + 地方</option>
+                    <option value="jra">JRA のみ</option>
+                    <option value="nar">地方のみ</option>
+                  </Select>
+                  <Input label="Claude 指数を新規生成 (上位N件)" type="number" min="0" max="20" step="1"
+                    value={claudeEval} onChange={(e) => setClaudeEval(e.target.value)} disabled={scanning || !useClaudeEdge}
+                    hint="0=しない (既存snapshotのみ)。>0 は時間がかかる" className="tnum" />
+                </div>
+                <div className="mt-3 flex items-center gap-5 flex-wrap">
+                  <Toggle checked={upcomingOnly} onChange={setUpcomingOnly} disabled={scanning}>
+                    発走前のみ
+                  </Toggle>
+                  <Toggle checked={fetchOdds} onChange={setFetchOdds} disabled={scanning}>
+                    最新オッズを取得 (未解析レースの強弱判定)
+                  </Toggle>
+                </div>
+              </FieldGroup>
+            </div>
+          )}
+
+          {error && (
+            <div className="text-sm text-(--color-bad) bg-rose-500/10 border border-rose-500/40 rounded-lg px-3 py-2 break-all">
+              {error}
+            </div>
+          )}
+
+          {job && (
+            <div>
+              <div className="mb-1 flex items-center gap-2 text-xs">
+                <span className="text-(--color-muted)">スキャンログ</span>
+                <Badge tone={scanning ? "warn" : "muted"}>{scanning ? "running" : "done"}</Badge>
+                <span className="text-(--color-muted) mono">{job.id.slice(0, 8)}</span>
+              </div>
+              <LogStream key={job.id} url={`/api/jobs/${job.id}/stream`} height="h-[28vh]" emptyHint="(ログ待機中...)" />
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ── 結果 ── */}
+      {result && (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+            <div className="flex items-center gap-2">
+              <Flame className="size-4 text-emerald-300" />
+              <h2 className="text-base font-bold tracking-tight">
+                {showAll ? "全レース" : "勝負レース"}
+              </h2>
+              <Badge tone="muted">{visible.length}</Badge>
+            </div>
+            <div className="inline-flex items-center p-0.5 rounded-lg bg-(--color-surface-2) border border-(--color-line)">
+              <button
+                onClick={() => setShowAll(false)}
+                aria-pressed={!showAll}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                  !showAll ? "bg-emerald-500/20 text-emerald-300" : "text-(--color-muted) hover:text-(--color-foreground)"
+                }`}
+              >
+                勝負のみ ({recommended.length})
+              </button>
+              <button
+                onClick={() => setShowAll(true)}
+                aria-pressed={showAll}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                  showAll ? "bg-(--color-surface-3) text-(--color-foreground)" : "text-(--color-muted) hover:text-(--color-foreground)"
+                }`}
+              >
+                全て ({races.length})
+              </button>
+            </div>
+          </div>
+
+          {visible.length === 0 ? (
+            <Card>
+              <div className="py-8 text-center text-sm text-(--color-muted)">
+                {races.length === 0
+                  ? "評価対象のレースがありません (当日の開催が無い / 全て締切済の可能性)。"
+                  : "条件に合う勝負レースはありませんでした。しきい値を下げるか「全て」を表示してください。"}
+              </div>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {visible.map((r) => (
+                <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} />
+              ))}
+            </div>
+          )}
+
+          <p className="text-[10px] text-(--color-muted) px-1">
+            ※ 勝負スコア = 強弱スコアと Claude 乖離スコアの合成 (主signal + 0.25×副signal)。
+            強弱 = 市場の単勝 implied 勝率の集中度 (1−正規化エントロピー)。Claude 乖離 = 既存スナップショットで
+            Claude 指数 − 市場指数 ≥ マージンの馬数。長期 +EV を保証するものではなく「賭ける価値の高そうなレース」の目安です。
+          </p>
+        </section>
+      )}
+    </Page>
+  );
+}

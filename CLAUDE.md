@@ -113,6 +113,12 @@ oddspark のオッズ表構造 (採用 = 組合せが HTML に明示・実オッ
 
 **保存基準 (GCS/BigQuery 移行)** — 現状 raw HTML ~2.3GB / parquet <1MB なのでローカル維持で十分。**数百 GB を超える前に GCS bucket + BigQuery テーブルに移行**する想定 (新規スクリプトを書いて parquet を bq load → SQL で集計、raw HTML は GCS にミラー)。
 
+**今日の勝負レース (`src/shobu.py` + Web UI `/shobu`, 2026-06-20 ユーザ指示)**: 当日の全レースを取得し「勝負レース (= 通常より賭ける価値が高そうなレース)」を抽出する Web ページ。ボタン 1 つで `discover_today_races` (netkeiba 非依存) → 各レースを **2 基準** で採点する:
+- **(A) 強弱がはっきり** = 市場の単勝 implied 勝率分布の集中度 `sep_score = 100·(1 − 正規化エントロピー)`。一様フィールド ~0、1〜数頭が突出すると高い。データ源は **最新オッズの軽量 fetch** (単勝のみ・NAR=`fetch_keibago_win_list` 1 GET / JRA=`fetch_jra_win_list` 1 POST、netkeiba 不使用) か、既存 snapshot の `market_win_index` 復元 (`(idx/100)^1.5` で implied に戻す = market_win_index と同尺度で整合)。
+- **(B) 市場より Claude 指数が高い馬が複数** = 既存 snapshot の `index_compare` で `claude_index − market_index ≥ margin` の馬数 (複数=既定2)。**ユーザ指示で基準 B は既存スナップショット中心** (無料・即時)。新規 `claude -p` 生成は既定 OFF で、`--claude-eval N` のときだけ強弱上位 N 件の未解析レースに score ステージ (keibago/jra `--phase=score --snapshot`) を spawn する。
+- **option (CLI / Web UI 両対応)**: 基準 A/B の ON/OFF・合成 (OR/AND)・しきい値 (sep_threshold / edge_margin / edge_min_count)・対象 (all/jra/nar)・発走前のみ・最新オッズ取得・Claude 新規生成件数。`shobu_score = max(active) + 0.25·min(active)` でランキング。
+- **配線**: `POST /api/shobu/scan` (ShobuScanRequest) が `build_shobu_cmd` で Job を起動 (analyze と同じ subprocess+SSE log 機構) → 結果を `data/cache/shobu/<date>.json` に atomic 書き出し → `GET /api/shobu/result?date=` が配信。frontend は Job 完了を polling して result を再取得。各レース行は `/predictions/<race_id>` (内部 race_id join) へリンク。`tests/test_shobu.py`。**長期 +EV を保証する指標ではなく「賭ける価値が高そうなレース」の screen**。
+
 
 
 このリポジトリは、中央競馬 (JRA) の 3 連単について **EV (期待値) > 1** の買い目を netkeiba の実オッズから抽出するためのツール群を提供する。Claude (または人間) がこのリポジトリで作業するときは、以下の流儀を厳守すること。

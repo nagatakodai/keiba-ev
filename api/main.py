@@ -45,16 +45,26 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from .runner import PY, JobRegistry, WatchAutoManager, build_analyze_cmd, shutdown_all_jobs
+from .runner import (
+    PY,
+    JobRegistry,
+    WatchAutoManager,
+    build_analyze_cmd,
+    build_shobu_cmd,
+    shutdown_all_jobs,
+)
 from .store import (
     PRED_DIR,
     RESULT_DIR,
+    SHOBU_DIR,
     _safe_race_id,
     compute_calibration,
     get_prediction,
+    get_shobu_result,
     list_auto_watch_history,
     list_predictions,
     netkeiba_rid_from_internal,
+    shobu_today_jst,
 )
 
 
@@ -287,6 +297,77 @@ async def api_refresh_odds(race_id: str) -> dict[str, Any]:
     job = JOBS.new(label=f"refresh-odds: {race_id}", cmd=cmd)
     await job.start()
     return job.to_dict()
+
+
+# --- shobu (今日の勝負レース) ---
+
+class ShobuScanRequest(BaseModel):
+    # 評価日 (YYYYMMDD)。None なら当日 JST。
+    date: str | None = None
+    # 対象 (all=JRA+NAR / jra / nar)。Literal で値検証。
+    race_type: Literal["all", "jra", "nar"] = "all"
+    # 基準A (強弱がはっきり = 市場 implied 勝率の集中度) を使うか。
+    use_separation: bool = True
+    # 基準B (市場より Claude 指数が高い馬が複数) を使うか。
+    use_claude_edge: bool = True
+    # 基準の合成 (or=いずれか / and=両方)。
+    combine: Literal["or", "and"] = "or"
+    # 基準A しきい値 (sep_score 0-100)。これ以上で「強弱はっきり」。
+    sep_threshold: float = Field(default=35.0, ge=0, le=100)
+    # 基準B: Claude 指数 − 市場指数 がこの値以上の馬を「市場超え」とみなす。
+    edge_margin: float = Field(default=8.0, ge=0, le=100)
+    # 基準B: 「市場超え」の馬がこの頭数以上で勝負 (複数=2)。
+    edge_min_count: int = Field(default=2, ge=1, le=18)
+    # 発走前のみ (締切前) を対象にするか。False で締切済も含む。
+    upcoming_only: bool = True
+    # snapshot に市場データが無いレースの最新オッズ (単勝) を取得するか。
+    fetch_odds: bool = True
+    # Claude 指数なしの強弱上位 N 件に score ステージを spawn して指数を新規生成 (既定 0=しない)。
+    # コスト/時間がかかるので上限を設ける。
+    claude_eval: int = Field(default=0, ge=0, le=20)
+    # 評価レース数の上限 (デバッグ/負荷制御)。None=全件。
+    max_races: int | None = Field(default=None, ge=1, le=300)
+
+
+@app.post("/api/shobu/scan")
+async def api_shobu_scan(req: ShobuScanRequest) -> dict[str, Any]:
+    """今日の勝負レース スキャンを Job として起動。結果は data/cache/shobu/<date>.json に書かれ、
+    GET /api/shobu/result?date=... で取得できる。Job はバックグラウンドで進捗を stream する。"""
+    date = (req.date or shobu_today_jst()).strip()
+    import re as _re
+    if not _re.fullmatch(r"\d{8}", date):
+        raise HTTPException(400, f"invalid date (YYYYMMDD expected): {req.date}")
+    SHOBU_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = str(SHOBU_DIR / f"{date}.json")
+    cmd = build_shobu_cmd(
+        out_path,
+        date=date,
+        race_type=req.race_type,
+        use_separation=req.use_separation,
+        use_claude_edge=req.use_claude_edge,
+        combine=req.combine,
+        sep_threshold=req.sep_threshold,
+        edge_margin=req.edge_margin,
+        edge_min_count=req.edge_min_count,
+        upcoming_only=req.upcoming_only,
+        fetch_odds=req.fetch_odds,
+        claude_eval=req.claude_eval,
+        max_races=req.max_races,
+    )
+    job = JOBS.new(label=f"shobu-scan: {date}", cmd=cmd)
+    await job.start()
+    d = job.to_dict()
+    d["date"] = date
+    return d
+
+
+@app.get("/api/shobu/result")
+def api_shobu_result(date: str | None = None) -> dict[str, Any]:
+    """勝負レース スキャンの最新結果 (data/cache/shobu/<date>.json)。未スキャンは 404。"""
+    d = get_shobu_result(date)
+    if d is None:
+        raise HTTPException(404, "shobu result not found (まだスキャンしていません)")
+    return d
 
 
 @app.get("/api/jobs")

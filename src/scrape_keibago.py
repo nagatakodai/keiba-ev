@@ -409,6 +409,23 @@ def fetch_keibago_bets(loc: KeibagoLoc) -> dict:
     }
 
 
+def fetch_keibago_win_list(netkeiba_rid: str) -> list[tuple[int, str, float]] | None:
+    """NAR の **単勝のみ** を軽量取得 → [(馬番, 馬名, 単勝)]。
+
+    勝負レース screen (src/shobu.py) 用。全6券種を引く fetch_keibago_bets は重い (6 GET) ので、
+    単複ページ 1 GET だけを引いて馬番/馬名/単勝を返す。解決不能 (当日外/場名不一致) は None。
+    """
+    loc = find_keibago_race(netkeiba_rid)
+    if loc is None:
+        return None
+    try:
+        html = _get(_odds_url(loc, _EP["tanfuku"]))
+    except Exception:  # noqa: BLE001 — screen 用途なので例外は呑んで None
+        return None
+    rows = parse_horse_list(html)
+    return rows or None
+
+
 def check_consistency(other_bets: dict, trifecta: list) -> dict:
     """組合せ明示ソースの健全性チェック (誤オッズ早期検知)。
 

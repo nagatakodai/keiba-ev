@@ -7,6 +7,7 @@ import {
   FlaskConical,
   ListOrdered,
   Radio,
+  Swords,
   Target,
   type LucideIcon,
 } from "lucide-react";
@@ -15,6 +16,7 @@ import {
 // layout.tsx (server) からはこのコンポーネントを mount するだけ。
 const NAV: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/", label: "ダッシュボード", icon: LayoutDashboard },
+  { href: "/shobu", label: "今日の勝負レース", icon: Swords },
   { href: "/analyze", label: "レース予測分析", icon: FlaskConical },
   { href: "/predictions", label: "予測分析履歴", icon: ListOrdered },
   { href: "/watch-auto", label: "自動予測分析・投票", icon: Radio },

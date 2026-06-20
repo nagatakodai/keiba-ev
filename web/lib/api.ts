@@ -595,6 +595,103 @@ export const EV_CUTOFF_ISO = "2026-06-10T18:21:00";
 export const isEvMeasured = (savedAt?: string | null): boolean =>
   !!savedAt && savedAt >= EV_CUTOFF_ISO;
 
+// --- 今日の勝負レース (GET /api/shobu/result, POST /api/shobu/scan) ---
+
+// 強弱 (基準A): 市場 implied 勝率分布の集中度。score=100·(1−正規化エントロピー)。
+export type ShobuSeparation = {
+  score: number;            // 0-100 (高い=強弱がはっきり)
+  n: number;                // 出走頭数 (オッズが取れた)
+  top1: number;             // 1番手の implied 勝率
+  top2: number;
+  gap: number;              // top1 − top2
+  entropy_norm: number;
+  favorites: Array<{ number: number; name: string; prob: number }>;
+};
+
+// Claude>市場 (基準B): snapshot の index_compare 由来。
+export type ShobuEdgeHorse = {
+  number: number | null;
+  name: string;
+  claude_index: number | null;
+  market_index: number | null;
+  diff: number | null;       // claude − market
+  support: number | null;    // 補強根拠件数
+  alerts: string[];
+};
+export type ShobuClaude = {
+  available: boolean;
+  edge_count: number;        // diff ≥ margin の馬数
+  max_diff: number | null;
+  score: number;             // 0-100 (edge 馬の diff 合計)
+  edge_horses: ShobuEdgeHorse[];
+  scored_at?: string | null;
+};
+
+export type ShobuRace = {
+  netkeiba_race_id: string;
+  race_id: string;           // 内部 race_id (/predictions/<id> への join key)
+  venue: string;
+  race_no: number;
+  race_type: "jra" | "nar";
+  start_at: number;
+  close_at: number;
+  n_runners: number | null;
+  // fresh=最新オッズ取得 / snapshot=既存スナップショット / none=データなし(未解析)
+  data_source: "fresh" | "snapshot" | "none";
+  sep_source?: string | null;
+  has_snapshot: boolean;
+  snapshot_stage?: "score" | "bet" | null;
+  separation: ShobuSeparation | null;
+  claude: ShobuClaude | null;
+  recommended: boolean;          // 選択した基準を満たす = 勝負レース
+  matched: string[];             // "sep" / "claude"
+  shobu_score: number;           // ランキング用の総合スコア (0-100)
+  reasons: string[];
+};
+
+export type ShobuResult = {
+  date: string;
+  generated_at: string;
+  options: {
+    date: string;
+    race_type: "all" | "jra" | "nar";
+    use_separation: boolean;
+    use_claude_edge: boolean;
+    combine: "or" | "and";
+    sep_threshold: number;
+    edge_margin: number;
+    edge_min_count: number;
+    upcoming_only: boolean;
+    fetch_odds: boolean;
+    claude_eval: number;
+  };
+  summary: {
+    total_discovered: number;
+    evaluated: number;
+    recommended: number;
+    with_snapshot: number;
+    with_claude: number;
+    with_fresh_odds: number;
+    sep_median: number | null;
+  };
+  races: ShobuRace[];
+};
+
+export type ShobuScanRequest = {
+  date?: string | null;
+  race_type?: "all" | "jra" | "nar";
+  use_separation?: boolean;
+  use_claude_edge?: boolean;
+  combine?: "or" | "and";
+  sep_threshold?: number;
+  edge_margin?: number;
+  edge_min_count?: number;
+  upcoming_only?: boolean;
+  fetch_odds?: boolean;
+  claude_eval?: number;
+  max_races?: number | null;
+};
+
 // --- Endpoints ---
 
 export const api = {
@@ -627,6 +724,18 @@ export const api = {
     score_timeout?: number;
   }) =>
     jsonFetch<JobInfo>(`/api/analyze`, { method: "POST", body: JSON.stringify(body) }),
+
+  // 今日の勝負レース スキャンを起動 (Job)。完了後 getShobuResult で結果を取得。
+  scanShobu: (body: ShobuScanRequest) =>
+    jsonFetch<JobInfo & { date: string }>(`/api/shobu/scan`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  // 勝負レース スキャンの最新結果。未スキャンは 404 → 呼び元で握って「未スキャン」表示。
+  getShobuResult: (date?: string) =>
+    jsonFetch<ShobuResult>(
+      `/api/shobu/result${date ? `?date=${encodeURIComponent(date)}` : ""}`,
+    ),
 
   // 履歴のレースを今すぐ最新オッズで score 再評価 (per-route 即時 fetch)。Job を返す。
   refreshOdds: (raceId: string) =>

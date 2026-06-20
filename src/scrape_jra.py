@@ -500,6 +500,31 @@ def fetch_jra_bets(loc: JraLoc) -> dict:
             "horse_info": horse_info, "race_header": race_header}
 
 
+def fetch_jra_win_list(netkeiba_rid: str) -> list[tuple[int, str, float]] | None:
+    """JRA の **単勝のみ** を軽量取得 → [(馬番, 馬名, 単勝)]。
+
+    勝負レース screen (src/shobu.py) 用。全券種を walk する fetch_jra_bets は重い ので、
+    単複ページ 1 POST だけを引いて馬番/馬名/単勝を返す。解決不能 (当日外/token 無し) は None。
+    馬名は単複ページの parse_jra_horses から拾う (best-effort、取れなくても odds は返す)。
+    """
+    loc = find_jra_race(netkeiba_rid)
+    if loc is None or "tanfuku" not in loc.odds_tokens:
+        return None
+    try:
+        html = _post("accessO.html", loc.odds_tokens["tanfuku"])
+    except Exception:  # noqa: BLE001 — screen 用途なので例外は呑んで None
+        return None
+    win, _place = parse_tanfuku(html)
+    if not win:
+        return None
+    try:
+        horses = parse_jra_horses(html)
+    except Exception:  # noqa: BLE001
+        horses = {}
+    return [(b.key[0], (horses.get(b.key[0], {}) or {}).get("name", ""), b.odds)
+            for b in win if b.key]
+
+
 def check_consistency(other_bets: dict, trifecta: list) -> dict:
     """ワイド ≤ 馬連 等の健全性チェック (誤オッズ早期検知)。"""
     wide = {tuple(b.key): b.odds for b in other_bets.get("wide", [])}
