@@ -442,7 +442,17 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
     support=dict[int,int] (補強根拠件数)、alerts=dict[int,list[str]] (直前/軟情報フラグ、表示用)。
     無い / 壊れている / 古すぎる (max_age_sec 超過) なら (None, None, "strength", scored_at, None)
     を返し、bet ステージはモデルのみにフォールバックする。alerts は確率には使わず snapshot 表示用。
+
+    env `KEIBA_LLM_SCORE_MAX_AGE_SEC` があれば age gate を上書きする。予測履歴の「オッズ更新」
+    (最新オッズのみ・Claude 呼ばない) で、古いキャッシュでも既存の Claude 指数を保持したまま
+    オッズ起因フィールドだけ更新するために refresh-odds Job が大きな値を渡す。
     """
+    _env_age = (os.environ.get("KEIBA_LLM_SCORE_MAX_AGE_SEC") or "").strip()
+    if _env_age:
+        try:
+            max_age_sec = int(_env_age)
+        except ValueError:
+            pass
     p = _llm_scores_path(race_id)
     if not p.exists():
         return None, None, "strength", None, None

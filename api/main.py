@@ -391,11 +391,15 @@ async def api_analyze(req: AnalyzeRequest) -> dict[str, Any]:
 
 @app.post("/api/predictions/{race_id}/refresh-odds")
 async def api_refresh_odds(race_id: str) -> dict[str, Any]:
-    """履歴のレースを今すぐ最新オッズで再取得 → score 段を再評価し stage="score" で上書き。
+    """履歴のレースを今すぐ **最新オッズだけ** 取得して snapshot を更新する (stage="score")。
 
-    経路は snapshot の odds_source (欠落=netkeiba 経路)、netkeiba rid は内部 race_id から復元
-    (旧 snapshot も可)。score 段スクレイパは即時に fresh odds を取りに行くので --refresh は付けない
-    (= 締切まで待たず今すぐ取得)。Job を返すので frontend は /api/jobs/{id}/stream で進捗を見られる。"""
+    **Claude は呼ばない (ユーザ指示 2026-06-20)**: `--no-llm` を付けて score 段の claude -p を
+    スキップし、fresh odds の取得 + 市場指数/市場乖離の再計算 + snapshot 保存のみ行う。過去に
+    score 段で生成済みの Claude 指数キャッシュ (`<race_id>.llm.json`) は `_load_llm_scores` が
+    再読込するので、**指数を呼び直さずに保持したまま**オッズ起因のフィールドだけ最新化される。
+
+    経路は snapshot の odds_source (欠落=netkeiba 経路)、netkeiba rid は内部 race_id から復元。
+    --refresh は付けない (締切まで待たず即時取得)。Job を返すので進捗は /api/jobs/{id}/stream で見られる。"""
     safe = _safe_race_id(race_id)
     if safe is None:
         raise HTTPException(400, f"invalid race_id: {race_id}")
@@ -407,21 +411,26 @@ async def api_refresh_odds(race_id: str) -> dict[str, Any]:
         raise HTTPException(422, f"netkeiba race_id を race_id から復元できません: {race_id}")
     odds_source = (snap.get("odds_source") or "").strip().lower()
     start_at = int(snap.get("start_at") or 0)
+    # 全経路 --no-llm: 最新オッズ取得のみ (Claude 指数は呼ばずキャッシュを保持)。
     if odds_source == "keibago":
-        cmd = [PY, "-m", "src.scrape_keibago", rid, "--snapshot", f"--start-at={start_at}", "--phase=score"]
+        cmd = [PY, "-m", "src.scrape_keibago", rid, "--snapshot", f"--start-at={start_at}", "--phase=score", "--no-llm"]
     elif odds_source == "jra":
-        cmd = [PY, "-m", "src.scrape_jra", rid, "--snapshot", f"--start-at={start_at}", "--phase=score"]
+        cmd = [PY, "-m", "src.scrape_jra", rid, "--snapshot", f"--start-at={start_at}", "--phase=score", "--no-llm"]
     elif odds_source == "oddspark":
-        cmd = [PY, "-m", "src.scrape_oddspark", rid, "--snapshot", f"--start-at={start_at}", "--phase=score"]
+        cmd = [PY, "-m", "src.scrape_oddspark", rid, "--snapshot", f"--start-at={start_at}", "--phase=score", "--no-llm"]
     elif odds_source in ("", "netkeiba"):
         # netkeiba 経路: rid から出馬表 URL を組む (JRA=race. / NAR=nar.)。即時 score (--refresh なし)。
         is_jra = rid[4:6] in {f"{i:02d}" for i in range(1, 11)}
         host = "race.netkeiba.com" if is_jra else "nar.netkeiba.com"
         url = f"https://{host}/race/shutuba.html?race_id={rid}"
-        cmd = build_analyze_cmd(url, phase="score")
+        cmd = build_analyze_cmd(url, phase="score", no_llm=True)
     else:
         raise HTTPException(422, f"unknown odds_source: {odds_source}")
-    job = JOBS.new(label=f"refresh-odds: {race_id}", cmd=cmd)
+    # 既存の Claude 指数キャッシュ (.llm.json) を **古くても** 読み込ませる (age gate を実質無効化)。
+    # --no-llm で claude は呼ばないが、_load_llm_scores が 30 分超を stale 扱いで落とすと指数が
+    # 消えてしまうため、refresh-odds だけ age 上限を引き上げて指数を保持する。
+    job = JOBS.new(label=f"refresh-odds: {race_id}", cmd=cmd,
+                   env_extra={"KEIBA_LLM_SCORE_MAX_AGE_SEC": "86400"})
     await job.start()
     return job.to_dict()
 

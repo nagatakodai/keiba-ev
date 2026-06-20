@@ -7,8 +7,9 @@ import { Badge, Button } from "@/components/ui";
 import { LogStream } from "@/components/LogStream";
 import { api, type JobInfo } from "@/lib/api";
 
-// 履歴詳細ページのクライアント島。今すぐ最新オッズで score 段を再評価し、
-// 完了したら router.refresh() でサーバーコンポーネントを再描画して最新 snapshot を出す。
+// 履歴詳細ページのクライアント島。今すぐ最新オッズ **だけ** を取得して snapshot を更新する
+// (Claude は呼ばない — 既存の Claude 指数キャッシュは保持される)。完了したら router.refresh() で
+// サーバーコンポーネントを再描画して最新 snapshot を出す。
 export function OddsRefreshButton({
   raceId,
   canRefresh = true,
@@ -68,7 +69,7 @@ export function OddsRefreshButton({
     ? "締切済 — 最新オッズ取得不可"
     : canRefresh === false
       ? "このレースは再取得不可 (race_id から復元不能)"
-      : "今すぐ最新オッズで score を再取得 (暫定 snapshot を更新)";
+      : "今すぐ最新オッズのみ取得して更新 (Claude は呼ばない・指数キャッシュは保持)";
 
   return (
     <div className="flex flex-col items-end gap-1" title={title}>
