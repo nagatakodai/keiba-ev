@@ -92,7 +92,7 @@ function RaceTypeBadge({ t }: { t: "jra" | "nar" }) {
   return t === "jra" ? <Badge tone="info">JRA</Badge> : <Badge tone="muted">地方</Badge>;
 }
 
-function RaceCard({ r, nowMs }: { r: ShobuRace; nowMs: number | null }) {
+function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank?: number }) {
   const sep = r.separation;
   const claude = r.claude;
   const timing =
@@ -109,6 +109,14 @@ function RaceCard({ r, nowMs }: { r: ShobuRace; nowMs: number | null }) {
       {/* ── ヘッダ行 ── */}
       <div className="flex items-start justify-between gap-2">
         <Link href={`/predictions/${r.race_id}`} className="flex items-center gap-2 min-w-0 hover:underline">
+          {rank != null && (
+            <span
+              className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500 text-emerald-950 text-xs font-black tnum"
+              title={`勝負レース #${rank}`}
+            >
+              {rank}
+            </span>
+          )}
           <span className="text-sm font-bold truncate">{r.venue || "(不明)"}</span>
           <span className="mono text-xl font-black tnum leading-none shrink-0">
             {r.race_no}
@@ -118,7 +126,7 @@ function RaceCard({ r, nowMs }: { r: ShobuRace; nowMs: number | null }) {
           {rec && (
             <Badge tone="good">
               <Flame className="size-3 mr-0.5" />
-              勝負
+              推奨
             </Badge>
           )}
         </Link>
@@ -239,7 +247,7 @@ export default function ShobuPage() {
   const [claudeAll, setClaudeAll] = useState(true);
   const [claudeEval, setClaudeEval] = useState("0");
   const [showSettings, setShowSettings] = useState(false);
-  const [showAll, setShowAll] = useState(false);
+  const [showOthers, setShowOthers] = useState(false);
 
   const [job, setJob] = useState<(JobInfo & { date?: string }) | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -334,7 +342,7 @@ export default function ShobuPage() {
 
   const races = result?.races ?? [];
   const recommended = races.filter((r) => r.recommended);
-  const visible = showAll ? races : recommended;
+  const others = races.filter((r) => !r.recommended);
   const summary = result?.summary;
 
   return (
@@ -493,57 +501,66 @@ export default function ShobuPage() {
 
       {/* ── 結果 ── */}
       {result && (
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-            <div className="flex items-center gap-2">
+        <section className="space-y-6">
+          {/* 勝負レース (推奨) — 番号付きで明確に */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2 px-1">
               <Flame className="size-4 text-emerald-300" />
               <h2 className="text-base font-bold tracking-tight">
-                {showAll ? "全レース" : "勝負レース"}
+                勝負レース
+                <span className="ml-1.5 text-sm font-normal text-(--color-muted)">(推奨)</span>
               </h2>
-              <Badge tone="muted">{visible.length}</Badge>
+              <Badge tone={recommended.length > 0 ? "good" : "muted"}>{recommended.length} 件</Badge>
+              {recommended.length > 0 && (
+                <span className="text-[11px] text-(--color-muted)">勝負スコア順 ・ 緑カード = 推奨</span>
+              )}
             </div>
-            <div className="inline-flex items-center p-0.5 rounded-lg bg-(--color-surface-2) border border-(--color-line)">
-              <button
-                onClick={() => setShowAll(false)}
-                aria-pressed={!showAll}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
-                  !showAll ? "bg-emerald-500/20 text-emerald-300" : "text-(--color-muted) hover:text-(--color-foreground)"
-                }`}
-              >
-                勝負のみ ({recommended.length})
-              </button>
-              <button
-                onClick={() => setShowAll(true)}
-                aria-pressed={showAll}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
-                  showAll ? "bg-(--color-surface-3) text-(--color-foreground)" : "text-(--color-muted) hover:text-(--color-foreground)"
-                }`}
-              >
-                全て ({races.length})
-              </button>
-            </div>
+
+            {recommended.length === 0 ? (
+              <Card>
+                <div className="py-6 text-center text-sm text-(--color-muted)">
+                  {races.length === 0
+                    ? "評価対象のレースがありません (当日の開催が無い / 全て締切済の可能性)。"
+                    : "選択した基準を満たす勝負レースはありませんでした。下の「その他のレース」をスコア順で確認するか、しきい値 (強弱/指数差/頭数) を下げてください。"}
+                </div>
+              </Card>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {recommended.map((r, i) => (
+                  <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} rank={i + 1} />
+                ))}
+              </div>
+            )}
           </div>
 
-          {visible.length === 0 ? (
-            <Card>
-              <div className="py-8 text-center text-sm text-(--color-muted)">
-                {races.length === 0
-                  ? "評価対象のレースがありません (当日の開催が無い / 全て締切済の可能性)。"
-                  : "条件に合う勝負レースはありませんでした。しきい値を下げるか「全て」を表示してください。"}
-              </div>
-            </Card>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {visible.map((r) => (
-                <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} />
-              ))}
+          {/* その他のレース (推奨外) — 折りたたみ */}
+          {others.length > 0 && (
+            <div className="space-y-3">
+              <button
+                onClick={() => setShowOthers((v) => !v)}
+                aria-expanded={showOthers}
+                className="flex items-center gap-2 px-1 text-(--color-muted) hover:text-(--color-foreground) transition-colors"
+              >
+                <ChevronRight size={15} className={`transition-transform ${showOthers ? "rotate-90" : ""}`} aria-hidden />
+                <span className="text-sm font-bold">その他のレース (推奨外)</span>
+                <Badge tone="muted">{others.length} 件</Badge>
+                <span className="text-[11px]">{showOthers ? "隠す" : "スコア順で表示"}</span>
+              </button>
+              {showOthers && (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {others.map((r) => (
+                    <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
           <p className="text-[10px] text-(--color-muted) px-1">
-            ※ 勝負スコア = 強弱スコアと Claude 乖離スコアの合成 (主signal + 0.25×副signal)。
-            強弱 = 市場の単勝 implied 勝率の集中度 (1−正規化エントロピー)。Claude 乖離 = 既存スナップショットで
-            Claude 指数 − 市場指数 ≥ マージンの馬数。長期 +EV を保証するものではなく「賭ける価値の高そうなレース」の目安です。
+            ※ <b>推奨 (勝負レース)</b> = 選択した基準 (強弱 / Claude 乖離) を満たしたレース。緑枠+番号+「推奨」バッジで表示。
+            勝負スコア = 強弱スコアと Claude 乖離スコアの合成 (主signal + 0.25×副signal)。
+            強弱 = 市場の単勝 implied 勝率の集中度 (1−正規化エントロピー)。Claude 乖離 = Claude 指数 − 市場指数 ≥ マージンの馬数。
+            長期 +EV を保証するものではなく「賭ける価値の高そうなレース」の目安です。
           </p>
         </section>
       )}
