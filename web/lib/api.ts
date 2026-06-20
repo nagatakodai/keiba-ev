@@ -686,17 +686,21 @@ export type ShobuResult = {
   races: ShobuRace[];
 };
 
-// 自動スキャン (make api 稼働中に N 秒毎に再取得) の状態。
-export type ShobuAutoStatus = {
-  enabled: boolean;
+// 予測分析履歴の結果 (着順/払戻) 自動取得 (make api 稼働中に N 秒毎) の状態。
+export type ResultsAutoStatus = {
   interval_sec: number;
-  options: ShobuResult["options"];
-  loop_running: boolean;   // 常駐ループが生きているか
-  scanning: boolean;       // 今まさに自動スキャン中か
+  loop_running: boolean;        // 常駐ループが生きているか
   last_run_at: number | null;   // 直近実行の unix 秒
-  last_status: string | null;   // "done" / "failed" / "error: ..."
-  last_job_id: string | null;
   next_run_at: number | null;   // 次回実行予定の unix 秒
+  runs: number;
+  last_summary: {
+    enqueued?: number;          // この回 enqueue した発走済予測の数
+    checked?: number;
+    success?: number;           // 取得できた結果数
+    failed?: number;
+    not_due?: number;
+    error?: string;
+  } | null;
 };
 
 export type ShobuScanRequest = {
@@ -759,13 +763,8 @@ export const api = {
     jsonFetch<ShobuResult>(
       `/api/shobu/result${date ? `?date=${encodeURIComponent(date)}` : ""}`,
     ),
-  // 自動スキャンの状態取得 / 設定 (make api 稼働中に N 秒毎に再取得)。
-  getShobuAuto: () => jsonFetch<ShobuAutoStatus>(`/api/shobu/auto`),
-  setShobuAuto: (body: ShobuScanRequest & { enabled: boolean; interval_sec: number }) =>
-    jsonFetch<ShobuAutoStatus>(`/api/shobu/auto`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
+  getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 
   // 履歴のレースを今すぐ最新オッズで score 再評価 (per-route 即時 fetch)。Job を返す。
   refreshOdds: (raceId: string) =>

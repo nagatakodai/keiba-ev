@@ -64,9 +64,7 @@ from .store import (
     get_shobu_result,
     list_auto_watch_history,
     list_predictions,
-    load_shobu_auto,
     netkeiba_rid_from_internal,
-    save_shobu_auto,
     shobu_today_jst,
 )
 
@@ -102,12 +100,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001 - startup を絶対に止めない
         print(f"[lifespan.startup] watch resume failed: {e}")
     try:
-        SHOBU_AUTO.start()  # 勝負レース 自動スキャン (5分毎) を常駐させる
+        RESULTS_AUTO.start()  # 予測分析履歴の結果を 5 分毎に自動取得する常駐ループ
     except Exception as e:  # noqa: BLE001
-        print(f"[lifespan.startup] shobu auto start failed: {e}")
+        print(f"[lifespan.startup] results auto start failed: {e}")
     yield
     try:
-        await SHOBU_AUTO.stop()  # 自動スキャンループを止めてから残 Job を倒す
+        await RESULTS_AUTO.stop()  # 結果取得ループを止めてから残 Job を倒す
     except Exception:  # noqa: BLE001
         pass
     await shutdown_all_jobs()
@@ -128,64 +126,36 @@ JOBS = JobRegistry()
 WATCH = WatchAutoManager(registry=JOBS)
 
 
-class ShobuAutoManager:
-    """make api 稼働中に勝負レース スキャンを interval 毎に自動再実行する常駐ループ。
+class ResultAutoFetcher:
+    """make api 稼働中に **予測分析履歴の結果 (着順/払戻)** を interval 毎 (既定5分) に自動取得する常駐ループ。
 
-    結果は data/cache/shobu/<date>.json に上書きされ、frontend はそれを polling して
-    常に最新の勝負レースを表示できる。設定 (enabled / interval / options) は永続化され、
-    uvicorn 再起動後も復元される。実行は Job 経由なので /api/jobs でログを追え、shutdown でも倒れる。
-    claude_all=True (既定) のとき各 tick で Claude 指数の無い発走前レースに claude -p を spawn するが、
-    既にスコア済のレースは二重生成しないので定常状態は安い (初回 tick だけ重い)。
+    本日の予測 (data/predictions) のうち発走済で結果未取得のものを pending queue に enqueue し
+    (fetch_result.schedule = 既存結果はスキップ・race_id で dedup)、process_pending で確定結果を
+    取得 → data/results に保存 → calibrate / 予測分析履歴 / ダッシュボードに反映される。
+    process_pending は file-lock 済なので watch-auto と併走しても二重 fetch しない。watch-auto を
+    回していなくても (手動 analyze / 勝負レース由来の予測も含め) 結果が埋まり続ける。
+    interval は env KEIBA_RESULT_FETCH_INTERVAL_SEC で上書き可 (既定 300)。
     """
-    # 既定の scan options (UI 既定と一致。claude_all=True = ボタン同様 Claude 指数を一括生成)。
-    DEFAULT_OPTIONS: dict[str, Any] = {
-        "race_type": "all", "use_separation": True, "use_claude_edge": True,
-        "combine": "or", "sep_threshold": 35.0, "edge_margin": 3.0,
-        "edge_threshold": 25.0, "upcoming_only": True, "fetch_odds": True,
-        "claude_all": True, "claude_eval": 0, "max_races": None,
-    }
-    _OPTION_KEYS = tuple(DEFAULT_OPTIONS.keys())
 
-    def __init__(self, jobs: JobRegistry) -> None:
-        self._jobs = jobs
+    def __init__(self) -> None:
         self._task: asyncio.Task | None = None
-        st = load_shobu_auto()
-        self.enabled: bool = bool(st.get("enabled", True))
-        self.interval_sec: int = int(st.get("interval_sec", 300) or 300)
-        self.options: dict[str, Any] = {**self.DEFAULT_OPTIONS, **(st.get("options") or {})}
+        try:
+            self.interval_sec = max(60, int(os.environ.get("KEIBA_RESULT_FETCH_INTERVAL_SEC", "300")))
+        except (TypeError, ValueError):
+            self.interval_sec = 300
         self.last_run_at: float | None = None
-        self.last_status: str | None = None
-        self.last_job_id: str | None = None
         self.next_run_at: float | None = None
-        self._current: Any = None  # 現在走っている auto Job
-        self._wakeup: asyncio.Event | None = None  # configure() で待機を起こすため
-
-    def _persist(self) -> None:
-        save_shobu_auto({"enabled": self.enabled, "interval_sec": self.interval_sec,
-                         "options": self.options})
-
-    def configure(self, *, enabled: bool | None = None, interval_sec: int | None = None,
-                  options: dict[str, Any] | None = None) -> None:
-        if enabled is not None:
-            self.enabled = bool(enabled)
-        if interval_sec is not None:
-            self.interval_sec = max(60, min(3600, int(interval_sec)))
-        if options is not None:
-            self.options = {**self.DEFAULT_OPTIONS,
-                            **{k: options[k] for k in self._OPTION_KEYS if k in options}}
-        self._persist()
-        # 走行中の待機を起こして新しい間隔で測り直す (変更が次サイクルまで効かないのを防ぐ)。
-        if self._wakeup is not None:
-            self._wakeup.set()
+        self.last_summary: dict[str, Any] | None = None
+        self.runs: int = 0
 
     def status(self) -> dict[str, Any]:
-        running = self._task is not None and not self._task.done()
-        busy = self._current is not None and self._current.status in ("pending", "running")
         return {
-            "enabled": self.enabled, "interval_sec": self.interval_sec,
-            "options": self.options, "loop_running": running, "scanning": busy,
-            "last_run_at": self.last_run_at, "last_status": self.last_status,
-            "last_job_id": self.last_job_id, "next_run_at": self.next_run_at,
+            "interval_sec": self.interval_sec,
+            "loop_running": self._task is not None and not self._task.done(),
+            "last_run_at": self.last_run_at,
+            "next_run_at": self.next_run_at,
+            "runs": self.runs,
+            "last_summary": self.last_summary,
         }
 
     def start(self) -> None:
@@ -202,49 +172,76 @@ class ShobuAutoManager:
             except Exception:  # noqa: BLE001
                 pass
 
+    @staticmethod
+    def _enqueue_finished_today() -> int:
+        """本日の発走済・結果未取得の予測を pending queue に enqueue (件数を返す)。
+
+        schedule() は既存結果があれば no-op、同 race_id は dedup されるので毎 tick 呼んで安全。
+        netkeiba URL は内部 race_id から復元 (NAR は block→keiba.go.jp / JRA→公式 へ process_pending が fallback)。
+        """
+        import datetime
+        from zoneinfo import ZoneInfo
+        from src.fetch_result import schedule
+
+        now = int(time.time())
+        today = datetime.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
+        jra_codes = {f"{i:02d}" for i in range(1, 11)}
+        n = 0
+        for it in list_predictions(limit=2000):
+            if it.get("has_result"):
+                continue
+            sa = int(it.get("start_at") or 0)
+            if sa <= 0 or now < sa + 60:           # 未発走 (発走1分後から結果待ち)
+                continue
+            if (it.get("saved_at") or "")[:10] != today:
+                continue                            # 本日分のみ (古い日付を毎 tick enqueue しない)
+            rid = netkeiba_rid_from_internal(it.get("race_id") or "")
+            if not rid or len(rid) < 6:
+                continue
+            host = "race.netkeiba.com" if rid[4:6] in jra_codes else "nar.netkeiba.com"
+            url = f"https://{host}/race/shutuba.html?race_id={rid}"
+            try:
+                schedule(it["race_id"], url, sa)
+                n += 1
+            except Exception:  # noqa: BLE001
+                pass
+        return n
+
     async def _run_once(self) -> None:
-        date = shobu_today_jst()
-        SHOBU_DIR.mkdir(parents=True, exist_ok=True)
-        out = str(SHOBU_DIR / f"{date}.json")
-        cmd = build_shobu_cmd(out, date=date, **self.options)
-        job = self._jobs.new(label=f"shobu-auto: {date}", cmd=cmd)
-        self._current = job
-        self.last_job_id = job.id
-        await job.start()
-        while job.status in ("pending", "running"):
-            await asyncio.sleep(2)
+        from src.fetch_result import process_pending
+        # blocking (file IO + HTTP) なので別スレッドへ。
+        enq = await asyncio.to_thread(self._enqueue_finished_today)
+        summary = await asyncio.to_thread(process_pending)
         self.last_run_at = time.time()
-        self.last_status = job.status
+        self.runs += 1
+        self.last_summary = {
+            "enqueued": enq,
+            "checked": summary.get("checked", 0),
+            "success": len(summary.get("success") or []),
+            "failed": len(summary.get("failed") or []),
+            "not_due": summary.get("not_due", 0),
+        }
 
     async def _loop(self) -> None:
-        # 起動直後は走らせず interval 待ってから実行 (uvicorn --reload の度の scan 暴発を防ぐ)。
-        # configure() で interval/enabled を変えたら _wakeup で待機を起こし新間隔で測り直す。
-        if self._wakeup is None:
-            self._wakeup = asyncio.Event()
-        ev = self._wakeup
+        # 起動後しばらく待ってから初回実行 (起動直後の負荷集中 / reload 連打での暴発を避ける)。
+        first = True
         while True:
-            self.next_run_at = time.time() + self.interval_sec
-            ev.clear()
+            wait = 20 if first else self.interval_sec
+            self.next_run_at = time.time() + wait
             try:
-                await asyncio.wait_for(ev.wait(), timeout=self.interval_sec)
-                continue  # configure() に起こされた → run せず新間隔で測り直し
-            except asyncio.TimeoutError:
-                pass      # 時間到来 → 実行へ
+                await asyncio.sleep(wait)
             except asyncio.CancelledError:
                 raise
-            if not self.enabled:
-                continue
-            if self._current is not None and self._current.status in ("pending", "running"):
-                continue  # 前回 tick がまだ走っていればスキップ (二重起動防止)
+            first = False
             try:
                 await self._run_once()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - ループは止めない
-                self.last_status = f"error: {e}"
+                self.last_summary = {"error": str(e)}
 
 
-SHOBU_AUTO = ShobuAutoManager(JOBS)
+RESULTS_AUTO = ResultAutoFetcher()
 
 
 # --- predictions ---
@@ -504,25 +501,14 @@ def api_shobu_result(date: str | None = None) -> dict[str, Any]:
     return d
 
 
-class ShobuAutoRequest(ShobuScanRequest):
-    # 自動スキャン (make api 稼働中に再取得) の設定。options 部分は ShobuScanRequest を継承。
-    enabled: bool = True
-    interval_sec: int = Field(default=300, ge=60, le=3600)
+@app.get("/api/results/auto")
+def api_results_auto_status() -> dict[str, Any]:
+    """予測分析履歴の結果 自動取得ループの状態 (interval / 次回・前回実行 / 直近サマリ)。
 
-
-@app.get("/api/shobu/auto")
-def api_shobu_auto_status() -> dict[str, Any]:
-    """勝負レース 自動スキャンの状態 (enabled / interval / 次回・前回実行 / options)。"""
-    return SHOBU_AUTO.status()
-
-
-@app.post("/api/shobu/auto")
-def api_shobu_auto_config(req: ShobuAutoRequest) -> dict[str, Any]:
-    """自動スキャンの ON/OFF・間隔・スキャン options を設定 (永続化)。ループは常駐起動を保証。"""
-    opts = {k: getattr(req, k) for k in ShobuAutoManager._OPTION_KEYS}
-    SHOBU_AUTO.configure(enabled=req.enabled, interval_sec=req.interval_sec, options=opts)
-    SHOBU_AUTO.start()
-    return SHOBU_AUTO.status()
+    make api 稼働中は既定 5 分毎に発走済の予測を pending に enqueue → process_pending で
+    確定結果を取得し、calibrate / 予測分析履歴 に反映する (watch-auto 非依存)。
+    """
+    return RESULTS_AUTO.status()
 
 
 @app.get("/api/jobs")

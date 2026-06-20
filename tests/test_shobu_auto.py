@@ -1,6 +1,6 @@
-"""勝負レース 自動スキャン (ShobuAutoManager) + build_shobu_cmd の test。
+"""build_shobu_cmd フラグ + 結果自動取得ループ (ResultAutoFetcher) の test。
 
-configure() の永続化は monkeypatch で no-op にして実ファイル (ユーザ設定) を汚さない。
+副作用 (pending queue 書き込み) は monkeypatch で遮断し、実データを汚さない。
 """
 from __future__ import annotations
 
@@ -22,25 +22,50 @@ def test_build_shobu_cmd_flags():
     assert "--no-fetch-odds" in s
     assert "--claude-all" in s
     assert "--max-races 7" in s
-    # edge-min-count は廃止済 (順位乖離スコアに置換)
-    assert "--edge-min-count" not in s
+    assert "--edge-min-count" not in s   # 廃止済 (順位乖離スコアに置換)
 
 
-def test_shobu_auto_configure_clamps_and_filters(monkeypatch):
+def test_results_auto_status_shape():
     import api.main as m
-    from api.runner import JobRegistry
-    monkeypatch.setattr(m, "save_shobu_auto", lambda *_a, **_k: None)  # 実設定を汚さない
-    mgr = m.ShobuAutoManager(JobRegistry())
-    mgr.configure(enabled=False, interval_sec=10,
-                  options={"race_type": "banei", "claude_all": False, "bogus": 123})
-    st = mgr.status()
-    assert st["enabled"] is False
-    assert st["interval_sec"] == 60                # 60 未満は 60 にクランプ
-    assert st["options"]["race_type"] == "banei"
-    assert st["options"]["claude_all"] is False
-    assert "bogus" not in st["options"]            # 未知キーは除外
-    assert st["options"]["combine"] == "or"        # 既定キーは保持
-    assert st["loop_running"] is False             # start() 前なのでループ未起動
+    f = m.ResultAutoFetcher()
+    st = f.status()
+    assert set(st) >= {"interval_sec", "loop_running", "last_run_at",
+                       "next_run_at", "runs", "last_summary"}
+    assert st["loop_running"] is False     # start() 前
+    assert st["runs"] == 0
+    assert st["interval_sec"] >= 60
 
-    mgr.configure(interval_sec=5000)
-    assert mgr.status()["interval_sec"] == 3600    # 上限クランプ
+
+def test_results_auto_enqueue_filters(monkeypatch):
+    """発走済・本日・結果未取得 の予測だけを schedule する (それ以外は skip)。"""
+    import datetime
+    import time as _t
+    from zoneinfo import ZoneInfo
+    import api.main as m
+
+    today = datetime.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
+    now = int(_t.time())
+    items = [
+        # 対象: JRA 発走済・本日・結果なし
+        {"race_id": "20260501-1-2", "start_at": now - 3600, "has_result": False,
+         "saved_at": f"{today}T10:00:00"},
+        # skip: 結果あり
+        {"race_id": "2026320601-601-1", "start_at": now - 3600, "has_result": True,
+         "saved_at": f"{today}T10:00:00"},
+        # skip: 未発走
+        {"race_id": "20260501-1-3", "start_at": now + 3600, "has_result": False,
+         "saved_at": f"{today}T10:00:00"},
+        # skip: 別日
+        {"race_id": "20260501-1-4", "start_at": now - 3600, "has_result": False,
+         "saved_at": "2020-01-01T10:00:00"},
+    ]
+    monkeypatch.setattr(m, "list_predictions", lambda limit=2000: items)
+    scheduled: list = []
+    monkeypatch.setattr("src.fetch_result.schedule",
+                        lambda rid, url, sa, **k: scheduled.append((rid, url, sa)))
+
+    n = m.ResultAutoFetcher._enqueue_finished_today()
+    assert n == 1
+    assert scheduled[0][0] == "20260501-1-2"
+    assert "race_id=202605010102" in scheduled[0][1]   # 内部id→netkeiba rid 復元
+    assert "race.netkeiba.com" in scheduled[0][1]       # JRA host (場 01-10)

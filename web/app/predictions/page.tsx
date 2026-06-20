@@ -9,7 +9,7 @@ import {
 } from "@/lib/api";
 
 export const metadata: Metadata = { title: "予測分析履歴" };
-import { Page, PageHeader, savedAtDate, todayJST } from "@/components/ui";
+import { Page, PageHeader, fmtTime, savedAtDate, todayJST } from "@/components/ui";
 import { HitsToggle, PredictionsList } from "@/components/PredictionsList";
 import { AutoRefresh } from "@/components/AutoRefresh";
 
@@ -25,7 +25,7 @@ export default async function PredictionsPage({
   const sp = await searchParams;
   const showHits = sp.hits !== "off"; // デフォルト表示
 
-  const [data, cal, watchHist] = await Promise.all([
+  const [data, cal, watchHist, resultsAuto] = await Promise.all([
     api
       .listPredictions(500)
       .catch(() => ({ items: [] as PredictionSummary[] })),
@@ -33,6 +33,7 @@ export default async function PredictionsPage({
     api
       .watchHistory(500)
       .catch(() => ({ items: [] as WatchAutoHistoryItem[] })),
+    api.getResultsAuto().catch(() => null),
   ]);
 
   // RSC はリクエスト毎に 1 回だけ描画されるので、リクエスト時刻の取得は安全。
@@ -58,7 +59,26 @@ export default async function PredictionsPage({
       <PageHeader
         eyebrow="Predictions"
         title="予測分析履歴"
-        subtitle={`本日 ${today} 分のみ表示 (会場ごと / R 番号順)。`}
+        subtitle={
+          <>
+            本日 {today} 分のみ表示 (会場ごと / R 番号順)。
+            {resultsAuto && (
+              <span className="ml-1.5 text-(--color-muted)">
+                · 結果自動取得{" "}
+                {resultsAuto.loop_running ? (
+                  <span className="text-(--color-accent)">
+                    {Math.round(resultsAuto.interval_sec / 60)}分毎
+                  </span>
+                ) : (
+                  <span className="text-(--color-bad)">停止 (make api 未起動?)</span>
+                )}
+                {resultsAuto.last_run_at
+                  ? ` · 前回 ${fmtTime(resultsAuto.last_run_at)}`
+                  : " · 未実行"}
+              </span>
+            )}
+          </>
+        }
         right={
           <div className="flex flex-wrap items-center justify-end gap-3">
             <HitsToggle basePath="/predictions" showHits={showHits} />
