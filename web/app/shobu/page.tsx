@@ -4,9 +4,11 @@ import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   ChevronRight,
+  Clock,
   Flame,
   Loader2,
   Play,
+  RefreshCw,
   Settings2,
   Sparkles,
   Swords,
@@ -28,8 +30,10 @@ import { LogStream } from "@/components/LogStream";
 import {
   api,
   type JobInfo,
+  type ShobuAutoStatus,
   type ShobuRace,
   type ShobuResult,
+  type ShobuScanRequest,
 } from "@/lib/api";
 
 // CSS のみのトグル (watch-auto と同型)。
@@ -262,6 +266,45 @@ export default function ShobuPage() {
   const [result, setResult] = useState<ShobuResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
+  // 自動スキャン (make api 稼働中に N 秒毎に再取得)。
+  const [autoStatus, setAutoStatus] = useState<ShobuAutoStatus | null>(null);
+  const [autoEnabled, setAutoEnabled] = useState(true);
+  const [autoInterval, setAutoInterval] = useState("300");
+  const [autoPrefilled, setAutoPrefilled] = useState(false);
+
+  // 現在のフォーム設定を scan options に変換 (手動スキャンと自動スキャンで共有)。
+  const buildOptions = (): ShobuScanRequest => ({
+    race_type: raceType,
+    use_separation: useSeparation,
+    use_claude_edge: useClaudeEdge,
+    combine,
+    sep_threshold: (() => {
+      const v = parseFloat(sepThreshold);
+      return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 35;
+    })(),
+    edge_margin: (() => {
+      const v = parseFloat(edgeMargin);
+      return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 3;
+    })(),
+    edge_threshold: (() => {
+      const v = parseFloat(edgeThreshold);
+      return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 25;
+    })(),
+    upcoming_only: upcomingOnly,
+    fetch_odds: fetchOdds,
+    claude_all: claudeAll,
+    claude_eval: (() => {
+      const v = parseInt(claudeEval, 10);
+      return Number.isFinite(v) && v >= 0 ? Math.min(50, v) : 0;
+    })(),
+  });
+
+  // 自動スキャン状態が来たら 1 度だけフォーム (トグル/間隔) を前回値で埋める。
+  if (!autoPrefilled && autoStatus) {
+    setAutoPrefilled(true);
+    setAutoEnabled(autoStatus.enabled);
+    setAutoInterval(String(autoStatus.interval_sec));
+  }
 
   // 締切バッジ用の現在時刻 (5秒毎)。
   useEffect(() => {
@@ -270,14 +313,29 @@ export default function ShobuPage() {
     return () => clearInterval(t);
   }, []);
 
-  // 初回マウント時に既存のスキャン結果 (当日) があれば表示。
+  // make api 稼働中の自動スキャンに追従: 状態 + 結果を 30 秒毎に再取得して表示を最新化。
   useEffect(() => {
-    api
-      .getShobuResult()
-      .then((r) => setResult(r))
-      .catch(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await api.getShobuAuto();
+        if (!cancelled) setAutoStatus(s);
+      } catch {
+        /* API 未接続は無視 */
+      }
+      try {
+        const r = await api.getShobuResult();
+        if (!cancelled) setResult(r);
+      } catch {
         /* 未スキャン (404) は無視 */
-      });
+      }
+    };
+    tick();
+    const t = setInterval(tick, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, []);
 
   // スキャン Job の完了を polling → 完了したら結果を取得。
@@ -316,34 +374,31 @@ export default function ShobuPage() {
     setScanning(true);
     setError(null);
     try {
-      const j = await api.scanShobu({
-        race_type: raceType,
-        use_separation: useSeparation,
-        use_claude_edge: useClaudeEdge,
-        combine,
-        sep_threshold: (() => {
-          const v = parseFloat(sepThreshold);
-          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 35;
-        })(),
-        edge_margin: (() => {
-          const v = parseFloat(edgeMargin);
-          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 3;
-        })(),
-        edge_threshold: (() => {
-          const v = parseFloat(edgeThreshold);
-          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 25;
-        })(),
-        upcoming_only: upcomingOnly,
-        fetch_odds: fetchOdds,
-        claude_all: claudeAll,
-        claude_eval: (() => {
-          const v = parseInt(claudeEval, 10);
-          return Number.isFinite(v) && v >= 0 ? Math.min(50, v) : 0;
-        })(),
-      });
+      const j = await api.scanShobu(buildOptions());
       setJob(j);
     } catch (e) {
       setScanning(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // 自動スキャンの ON/OFF・間隔・options を現在のフォーム値で push。
+  const pushAuto = async (enabled: boolean) => {
+    setAutoEnabled(enabled);
+    setError(null);
+    try {
+      const s = await api.setShobuAuto({
+        ...buildOptions(),
+        enabled,
+        interval_sec: (() => {
+          const v = parseInt(autoInterval, 10);
+          return Number.isFinite(v) && v >= 60 ? Math.min(3600, v) : 300;
+        })(),
+      });
+      setAutoStatus(s);
+      setAutoEnabled(s.enabled);
+      setAutoInterval(String(s.interval_sec));
+    } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -428,6 +483,47 @@ export default function ShobuPage() {
         </header>
 
         <div className="p-4 space-y-4">
+          {/* 自動取得 (make api 稼働中に N 秒毎に再取得) */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-(--color-line) bg-(--color-surface-2)/40 px-3 py-2.5">
+            <Toggle checked={autoEnabled} onChange={pushAuto}>
+              <span className="inline-flex items-center gap-1.5">
+                <RefreshCw className="size-3.5" />
+                <span className="font-medium">自動取得</span>
+                <span className="text-(--color-muted)">(make api 稼働中に定期再取得)</span>
+              </span>
+            </Toggle>
+            <label className="inline-flex items-center gap-1.5 text-xs text-(--color-muted)">
+              間隔(秒)
+              <input
+                type="number" min="60" max="3600" step="30" value={autoInterval}
+                onChange={(e) => setAutoInterval(e.target.value)}
+                className="w-20 tnum bg-(--color-surface-2) border border-(--color-line) rounded-md px-2 py-1 text-(--color-foreground) focus:outline-none focus:border-(--color-accent)"
+              />
+            </label>
+            <button
+              onClick={() => pushAuto(autoEnabled)}
+              className="px-2.5 py-1 rounded-md border border-(--color-line) hover:border-(--color-accent)/60 hover:text-(--color-accent) text-xs font-bold transition-colors"
+            >
+              現在の設定を適用
+            </button>
+            {autoStatus && (
+              <span className="inline-flex flex-wrap items-center gap-1.5 text-[11px] text-(--color-muted) tnum ml-auto">
+                <Clock className="size-3" />
+                {autoStatus.scanning ? (
+                  <span className="text-(--color-accent) font-bold">自動取得中…</span>
+                ) : autoStatus.enabled ? (
+                  <>次回 {fmtTime(autoStatus.next_run_at)}</>
+                ) : (
+                  <span>自動取得 OFF</span>
+                )}
+                {autoStatus.last_run_at && (
+                  <span>・前回 {fmtTime(autoStatus.last_run_at)} ({autoStatus.last_status ?? "—"})</span>
+                )}
+                {!autoStatus.loop_running && <Badge tone="bad">ループ停止 (API 未起動?)</Badge>}
+              </span>
+            )}
+          </div>
+
           {showSettings && (
             <div className="space-y-4">
               <FieldGroup legend="基準 (勝負レースの定義)">

@@ -26,6 +26,30 @@ def shobu_today_jst() -> str:
     return datetime.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d")
 
 
+# 勝負レース 自動スキャン (make api 稼働中に N 分毎に再取得) の設定永続化。
+SHOBU_AUTO_FILE = ROOT / "data" / "cache" / "shobu_auto_state.json"
+
+
+def load_shobu_auto() -> dict[str, Any]:
+    """自動スキャン設定 (enabled / interval_sec / options) を読む。無ければ空 dict。"""
+    if not SHOBU_AUTO_FILE.exists():
+        return {}
+    try:
+        return json.loads(SHOBU_AUTO_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_shobu_auto(state: dict[str, Any]) -> None:
+    """自動スキャン設定を永続化 (uvicorn 再起動後も同設定で再開)。"""
+    try:
+        SHOBU_AUTO_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SHOBU_AUTO_FILE.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def get_shobu_result(date: str | None = None) -> dict[str, Any] | None:
     """勝負レース スキャン結果 (data/cache/shobu/<date>.json) を読む。無ければ None。"""
     import re
