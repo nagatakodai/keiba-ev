@@ -409,8 +409,8 @@ def build_shobu_cmd(
     use_claude_edge: bool = True,
     combine: str = "or",
     sep_threshold: float = 35.0,
-    edge_margin: float = 8.0,
-    edge_min_count: int = 2,
+    edge_margin: float = 3.0,
+    edge_threshold: float = 25.0,
     upcoming_only: bool = True,
     fetch_odds: bool = True,
     claude_all: bool = False,
@@ -425,7 +425,7 @@ def build_shobu_cmd(
         "--combine", combine,
         "--sep-threshold", str(sep_threshold),
         "--edge-margin", str(edge_margin),
-        "--edge-min-count", str(edge_min_count),
+        "--edge-threshold", str(edge_threshold),
         "--claude-eval", str(claude_eval),
     ]
     if date:

@@ -608,21 +608,28 @@ export type ShobuSeparation = {
   favorites: Array<{ number: number; name: string; prob: number }>;
 };
 
-// Claude>市場 (基準B): snapshot の index_compare 由来。
+// 市場との順位乖離 (基準B): 市場ランク vs Claude ランクの食い違い。
 export type ShobuEdgeHorse = {
   number: number | null;
   name: string;
   claude_index: number | null;
   market_index: number | null;
-  diff: number | null;       // claude − market
+  claude_rank: number;       // Claude 指数での順位 (1=本命)
+  market_rank: number;       // 市場での順位 (1=1番人気)
+  rank_gap: number;          // market_rank − claude_rank (正 = Claude が上位評価=市場過小)
+  diff: number;              // claude_index − market_index
   support: number | null;    // 補強根拠件数
   alerts: string[];
 };
 export type ShobuClaude = {
   available: boolean;
-  edge_count: number;        // diff ≥ margin の馬数
+  edge_count: number;        // 乖離馬の数 (rank_gap≥1 かつ 指数差≥フロア)
+  score: number;             // 0-100 市場乖離スコア (Claude本命の市場順位ギャップ主軸)
+  // Claude 本命と、それが市場で何番人気か (market_rank=2 → 「市場2位なのにClaude1位」)
+  top_pick: { number: number | null; name: string; market_rank: number } | null;
+  top_rank_gap: number;      // Claude本命の市場順位 − 1 (1=市場2番人気を本命視)
+  max_rank_gap: number;
   max_diff: number | null;
-  score: number;             // 0-100 (edge 馬の diff 合計)
   edge_horses: ShobuEdgeHorse[];
   scored_at?: string | null;
 };
@@ -632,7 +639,7 @@ export type ShobuRace = {
   race_id: string;           // 内部 race_id (/predictions/<id> への join key)
   venue: string;
   race_no: number;
-  race_type: "jra" | "nar";
+  race_type: "jra" | "nar" | "banei";
   start_at: number;
   close_at: number;
   n_runners: number | null;
@@ -654,13 +661,13 @@ export type ShobuResult = {
   generated_at: string;
   options: {
     date: string;
-    race_type: "all" | "jra" | "nar";
+    race_type: "all" | "jra" | "nar" | "banei";
     use_separation: boolean;
     use_claude_edge: boolean;
     combine: "or" | "and";
     sep_threshold: number;
     edge_margin: number;
-    edge_min_count: number;
+    edge_threshold: number;
     upcoming_only: boolean;
     fetch_odds: boolean;
     claude_all: boolean;
@@ -674,19 +681,20 @@ export type ShobuResult = {
     with_claude: number;
     with_fresh_odds: number;
     sep_median: number | null;
+    by_type?: { jra: number; nar: number; banei: number };
   };
   races: ShobuRace[];
 };
 
 export type ShobuScanRequest = {
   date?: string | null;
-  race_type?: "all" | "jra" | "nar";
+  race_type?: "all" | "jra" | "nar" | "banei";
   use_separation?: boolean;
   use_claude_edge?: boolean;
   combine?: "or" | "and";
   sep_threshold?: number;
   edge_margin?: number;
-  edge_min_count?: number;
+  edge_threshold?: number;
   upcoming_only?: boolean;
   fetch_odds?: boolean;
   claude_all?: boolean;

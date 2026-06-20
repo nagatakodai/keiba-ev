@@ -88,8 +88,10 @@ function ScoreBar({ value, tone = "emerald" }: { value: number; tone?: "emerald"
   );
 }
 
-function RaceTypeBadge({ t }: { t: "jra" | "nar" }) {
-  return t === "jra" ? <Badge tone="info">JRA</Badge> : <Badge tone="muted">地方</Badge>;
+function RaceTypeBadge({ t }: { t: "jra" | "nar" | "banei" }) {
+  if (t === "jra") return <Badge tone="info">JRA</Badge>;
+  if (t === "banei") return <Badge tone="warn">ばんえい</Badge>;
+  return <Badge tone="muted">地方</Badge>;
 }
 
 function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank?: number }) {
@@ -149,7 +151,7 @@ function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank
         )}
         {timing && timing.label !== "結果待ち" && <Badge tone={timing.tone}>{timing.label}</Badge>}
         {r.matched.includes("sep") && <Badge tone="info">強弱</Badge>}
-        {r.matched.includes("claude") && <Badge tone="magenta">Claude乖離</Badge>}
+        {r.matched.includes("claude") && <Badge tone="magenta">市場乖離</Badge>}
         {r.n_runners != null && <span>{r.n_runners}頭</span>}
         {r.data_source === "none" && <Badge tone="muted">データなし</Badge>}
         {r.data_source === "snapshot" && <Badge tone="muted">snapshot</Badge>}
@@ -185,30 +187,35 @@ function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank
         </div>
       )}
 
-      {/* ── Claude 乖離 (基準B) ── */}
-      {claude && claude.edge_horses.length > 0 && (
+      {/* ── 市場との順位乖離 (基準B) ── */}
+      {claude && (claude.top_rank_gap >= 1 || claude.edge_horses.length > 0) && (
         <div className="mt-2.5">
           <div className="flex items-baseline justify-between text-[11px] mb-1">
             <span className="font-bold text-fuchsia-300 inline-flex items-center gap-1">
-              <Sparkles className="size-3" />
-              Claude{">"}市場 {claude.edge_count}頭
+              <Sparkles className="size-3" />市場乖離
             </span>
-            {claude.max_diff != null && (
-              <span className="tnum text-(--color-muted)">最大 +{claude.max_diff.toFixed(0)}</span>
-            )}
+            <span className="tnum text-(--color-muted)">score {claude.score.toFixed(0)}</span>
           </div>
+          {/* Claude 本命が市場で何番人気か (「市場2番人気なのに Claude 本命」) */}
+          {claude.top_pick && claude.top_rank_gap >= 1 && (
+            <div className="mb-1 text-[11px] inline-flex items-center gap-1.5 rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 px-1.5 py-0.5 text-fuchsia-200">
+              <span className="font-bold">Claude本命</span>
+              <span className="mono font-bold">{claude.top_pick.number}</span>
+              {claude.top_pick.name && <span className="max-w-[6em] truncate">{claude.top_pick.name}</span>}
+              <span className="text-fuchsia-300/90">= 市場{claude.top_pick.market_rank}番人気</span>
+            </div>
+          )}
           <div className="flex flex-col gap-0.5">
             {claude.edge_horses.slice(0, 4).map((h, i) => (
               <div key={h.number ?? `edge-${i}`} className="flex items-center gap-2 text-[11px] tnum">
                 <span className="mono font-bold w-5 text-right">{h.number}</span>
-                {h.name && <span className="max-w-[7em] truncate text-(--color-foreground)">{h.name}</span>}
+                {h.name && <span className="max-w-[6.5em] truncate text-(--color-foreground)">{h.name}</span>}
                 <span className="text-(--color-muted)">
-                  Claude {h.claude_index != null ? Math.round(h.claude_index) : "—"} / 市場{" "}
-                  {h.market_index != null ? Math.round(h.market_index) : "—"}
+                  市場{h.market_rank}位 → Claude{h.claude_rank}位
                 </span>
-                {h.diff != null && (
-                  <span className="font-bold text-emerald-300 ml-auto">+{h.diff.toFixed(0)}</span>
-                )}
+                <span className="font-bold text-emerald-300 ml-auto" title="Claude が市場より何順位上に評価したか">
+                  ↑{h.rank_gap}
+                </span>
               </div>
             ))}
           </div>
@@ -234,13 +241,14 @@ function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank
 
 export default function ShobuPage() {
   // ── 抽出オプション ──
-  const [raceType, setRaceType] = useState<"all" | "jra" | "nar">("all");
+  const [raceType, setRaceType] = useState<"all" | "jra" | "nar" | "banei">("all");
   const [useSeparation, setUseSeparation] = useState(true);
   const [useClaudeEdge, setUseClaudeEdge] = useState(true);
   const [combine, setCombine] = useState<"or" | "and">("or");
   const [sepThreshold, setSepThreshold] = useState("35");
-  const [edgeMargin, setEdgeMargin] = useState("8");
-  const [edgeMinCount, setEdgeMinCount] = useState("2");
+  // 基準B: 市場との順位乖離。edgeThreshold=乖離スコアしきい値 / edgeMargin=指数差フロア。
+  const [edgeThreshold, setEdgeThreshold] = useState("25");
+  const [edgeMargin, setEdgeMargin] = useState("3");
   const [upcomingOnly, setUpcomingOnly] = useState(true);
   const [fetchOdds, setFetchOdds] = useState(true);
   // ボタン押下で全レースの Claude 指数を一括生成 (claude -p)。既定 ON (ユーザ指示 2026-06-20)。
@@ -319,11 +327,11 @@ export default function ShobuPage() {
         })(),
         edge_margin: (() => {
           const v = parseFloat(edgeMargin);
-          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 8;
+          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 3;
         })(),
-        edge_min_count: (() => {
-          const v = parseInt(edgeMinCount, 10);
-          return Number.isFinite(v) && v >= 1 ? v : 2;
+        edge_threshold: (() => {
+          const v = parseFloat(edgeThreshold);
+          return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 25;
         })(),
         upcoming_only: upcomingOnly,
         fetch_odds: fetchOdds,
@@ -366,7 +374,13 @@ export default function ShobuPage() {
           label="評価レース数"
           value={summary ? summary.evaluated : "—"}
           accentTone="info"
-          hint={summary ? `当日開催 ${summary.total_discovered}` : "—"}
+          hint={
+            summary
+              ? summary.by_type
+                ? `JRA ${summary.by_type.jra} / 地方 ${summary.by_type.nar} / ばんえい ${summary.by_type.banei}`
+                : `当日開催 ${summary.total_discovered}`
+              : "—"
+          }
         />
         <Stat
           label="Claude 指数あり"
@@ -423,8 +437,8 @@ export default function ShobuPage() {
                     <span className="text-(--color-muted) ml-1">— 市場 implied 勝率の集中度</span>
                   </Toggle>
                   <Toggle checked={useClaudeEdge} onChange={setUseClaudeEdge} disabled={scanning}>
-                    <span className="font-medium">(B) 市場より Claude 指数が高い馬が複数</span>
-                    <span className="text-(--color-muted) ml-1">— 既存スナップショット由来</span>
+                    <span className="font-medium">(B) 市場との順位乖離が強い</span>
+                    <span className="text-(--color-muted) ml-1">— 例: 市場2番人気なのに Claude 本命</span>
                   </Toggle>
                 </div>
                 <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -435,19 +449,23 @@ export default function ShobuPage() {
                   </Select>
                   <Input label="(A) 強弱しきい値 (0-100)" type="number" min="0" max="100" step="5"
                     value={sepThreshold} onChange={(e) => setSepThreshold(e.target.value)} disabled={scanning || !useSeparation} className="tnum" />
-                  <Input label="(B) 指数差マージン" type="number" min="0" max="100" step="1"
+                  <Input label="(B) 市場乖離スコア (0-100)" type="number" min="0" max="100" step="5"
+                    hint="高いほど強い乖離のみ推奨"
+                    value={edgeThreshold} onChange={(e) => setEdgeThreshold(e.target.value)} disabled={scanning || !useClaudeEdge} className="tnum" />
+                  <Input label="(B) 指数差フロア" type="number" min="0" max="100" step="1"
+                    hint="乖離馬は順位差+指数差この値以上"
                     value={edgeMargin} onChange={(e) => setEdgeMargin(e.target.value)} disabled={scanning || !useClaudeEdge} className="tnum" />
-                  <Input label="(B) 必要頭数 (複数=2)" type="number" min="1" max="18" step="1"
-                    value={edgeMinCount} onChange={(e) => setEdgeMinCount(e.target.value)} disabled={scanning || !useClaudeEdge} className="tnum" />
                 </div>
               </FieldGroup>
 
               <FieldGroup legend="対象 / データ取得">
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <Select label="対象" value={raceType} onChange={(e) => setRaceType(e.target.value as "all" | "jra" | "nar")} disabled={scanning}>
-                    <option value="all">JRA + 地方</option>
+                  <Select label="対象" value={raceType} onChange={(e) => setRaceType(e.target.value as "all" | "jra" | "nar" | "banei")} disabled={scanning}
+                    hint="ばんえいは別競技として分離 (確率モデルも segment 分離済)">
+                    <option value="all">JRA + 地方 + ばんえい</option>
                     <option value="jra">JRA のみ</option>
-                    <option value="nar">地方のみ</option>
+                    <option value="nar">地方 (平地) のみ</option>
+                    <option value="banei">ばんえい のみ</option>
                   </Select>
                   {!claudeAll && (
                     <Input label="Claude 指数を生成 (上位N件)" type="number" min="0" max="50" step="1"
@@ -558,8 +576,9 @@ export default function ShobuPage() {
 
           <p className="text-[10px] text-(--color-muted) px-1">
             ※ <b>推奨 (勝負レース)</b> = 選択した基準 (強弱 / Claude 乖離) を満たしたレース。緑枠+番号+「推奨」バッジで表示。
-            勝負スコア = 強弱スコアと Claude 乖離スコアの合成 (主signal + 0.25×副signal)。
-            強弱 = 市場の単勝 implied 勝率の集中度 (1−正規化エントロピー)。Claude 乖離 = Claude 指数 − 市場指数 ≥ マージンの馬数。
+            勝負スコア = 強弱スコアと市場乖離スコアの合成 (主signal + 0.25×副signal)。
+            強弱 = 市場の単勝 implied 勝率の集中度 (1−正規化エントロピー)。
+            市場乖離 = 市場順位と Claude 順位の食い違い (例: 市場2番人気を Claude が本命視 / 「市場5位→Claude2位」のように Claude が上位評価する馬。Claude 本命の市場順位ギャップを主軸にスコア化)。
             長期 +EV を保証するものではなく「賭ける価値の高そうなレース」の目安です。
           </p>
         </section>

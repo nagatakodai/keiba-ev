@@ -304,8 +304,9 @@ async def api_refresh_odds(race_id: str) -> dict[str, Any]:
 class ShobuScanRequest(BaseModel):
     # 評価日 (YYYYMMDD)。None なら当日 JST。
     date: str | None = None
-    # 対象 (all=JRA+NAR / jra / nar)。Literal で値検証。
-    race_type: Literal["all", "jra", "nar"] = "all"
+    # 対象 (all / jra / nar=地方平地 / banei=帯広ばんえい)。Literal で値検証。
+    # banei は別競技なので nar から分離 (確率モデルも ev.segment_of_rd で分離済)。
+    race_type: Literal["all", "jra", "nar", "banei"] = "all"
     # 基準A (強弱がはっきり = 市場 implied 勝率の集中度) を使うか。
     use_separation: bool = True
     # 基準B (市場より Claude 指数が高い馬が複数) を使うか。
@@ -314,10 +315,10 @@ class ShobuScanRequest(BaseModel):
     combine: Literal["or", "and"] = "or"
     # 基準A しきい値 (sep_score 0-100)。これ以上で「強弱はっきり」。
     sep_threshold: float = Field(default=35.0, ge=0, le=100)
-    # 基準B: Claude 指数 − 市場指数 がこの値以上の馬を「市場超え」とみなす。
-    edge_margin: float = Field(default=8.0, ge=0, le=100)
-    # 基準B: 「市場超え」の馬がこの頭数以上で勝負 (複数=2)。
-    edge_min_count: int = Field(default=2, ge=1, le=18)
+    # 基準B (市場との順位乖離): 乖離馬の指数差フロア (claude−market ≥ これ。順位だけでなく数値の裏付け)。
+    edge_margin: float = Field(default=3.0, ge=0, le=100)
+    # 基準B: 市場乖離スコア (Claude本命の市場順位ギャップ主軸) がこの値以上で勝負。
+    edge_threshold: float = Field(default=25.0, ge=0, le=100)
     # 発走前のみ (締切前) を対象にするか。False で締切済も含む。
     upcoming_only: bool = True
     # snapshot に市場データが無いレースの最新オッズ (単勝) を取得するか。
@@ -350,7 +351,7 @@ async def api_shobu_scan(req: ShobuScanRequest) -> dict[str, Any]:
         combine=req.combine,
         sep_threshold=req.sep_threshold,
         edge_margin=req.edge_margin,
-        edge_min_count=req.edge_min_count,
+        edge_threshold=req.edge_threshold,
         upcoming_only=req.upcoming_only,
         fetch_odds=req.fetch_odds,
         claude_all=req.claude_all,

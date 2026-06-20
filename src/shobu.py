@@ -39,6 +39,9 @@ JST = ZoneInfo("Asia/Tokyo")
 
 # ヘッダの netkeiba 場コード (01-10) は JRA。それ以外は NAR (= discovery の source でも判定)。
 _JRA_VENUE_CODES = {f"{i:02d}" for i in range(1, 11)}
+# 帯広ばんえいは netkeiba 場コード 65 (別競技)。確率モデルも ev.segment_of_rd で banei に分離
+# されているので、勝負レース screen でも JRA/NAR/banei の 3 区分にする (平地NARと混ぜない)。
+_BANEI_VENUE_CODE = "65"
 
 
 def today_jst() -> str:
@@ -47,14 +50,20 @@ def today_jst() -> str:
 
 
 def _race_type(rid: str, source: str) -> str:
-    """JRA / NAR の判定。discovery の source ("keibabook"=JRA / "oddspark"=NAR) を優先し、
-    無ければ netkeiba rid の場コードで判定する。"""
+    """JRA / NAR / banei の判定 (ev.segment_of_rd と同じ 3 区分)。
+
+    まず netkeiba 場コードで帯広ばんえい (65) を分離 (別競技なので平地 NAR と混ぜない)。
+    残りは discovery の source ("keibabook"=JRA / "oddspark"=NAR) 優先、無ければ場コードで判定。
+    """
+    code = rid[4:6] if len(rid) >= 6 else ""
+    if code == _BANEI_VENUE_CODE:
+        return "banei"
     s = (source or "").lower()
     if s == "keibabook":
         return "jra"
     if s in ("oddspark", "keibago"):
         return "nar"
-    return "jra" if (len(rid) >= 6 and rid[4:6] in _JRA_VENUE_CODES) else "nar"
+    return "jra" if code in _JRA_VENUE_CODES else "nar"
 
 
 def _internal_id(rid: str) -> str:
@@ -145,64 +154,77 @@ def _separation(implied: dict[int, float],
 
 # --------------------------------------------------------------- Claude (B) ----
 
-def _claude_edge(snap: dict[str, Any], margin: float) -> dict[str, Any] | None:
-    """snapshot から「Claude 指数 − 市場指数 ≥ margin」の馬を抽出。
+def _claude_edge(snap: dict[str, Any], *, value_floor: float) -> dict[str, Any] | None:
+    """snapshot から **市場とClaudeの順位乖離** を抽出 (単なる Claude>市場 ではなく順位の食い違い)。
 
-    index_compare があればそれを使い、無ければ llm_win_index / market_win_index から自前で diff を計算。
-    Claude 指数が一つも無い (score 未実施) snapshot は None (= 基準 B 評価不能)。
+    各馬を Claude 指数 / 市場指数それぞれで降順ランク付け (1=最上位) し、
+      rank_gap = market_rank − claude_rank   (正 = Claude が市場より上位に評価 = 市場が過小評価)
+    を見る。「市場2位なのに Claude1位」= その馬の rank_gap=1。乖離が強いほど rank_gap が大きい。
+
+    - **乖離馬 (edge)** = rank_gap ≥ 1 かつ 指数差 (claude−market) ≥ value_floor
+      (順位だけでなく指数差も伴うものに限定 = 数値の裏付けがある乖離)。
+    - **top 乖離** = Claude 本命 (claude_rank=1) が市場で何番手か。top_rank_gap = market_rank−1
+      (1 = 市場2番人気を Claude が本命に推している = ユーザの言う強い乖離)。
+    - **score (0-100)** = top_rank_gap·20 + Σ_edge(rank_gap·5 + max(0,指数差)·0.4)。
+      Claude 本命の市場順位ギャップを主軸に、乖離馬の順位差と指数差を加味 ("数値の差もいい感じに")。
+
+    ランク比較には Claude 指数と市場指数の **両方** が要る。両方ある馬が 2 頭未満なら None。
     """
     rows: list[dict[str, Any]] = []
     ic = snap.get("index_compare")
     if isinstance(ic, list) and ic:
         for r in ic:
-            ci = r.get("claude_index")
-            mi = r.get("market_index")
-            if ci is None:
-                continue
-            diff = r.get("diff")
-            if diff is None and mi is not None:
-                diff = ci - mi
-            rows.append({
-                "number": r.get("number"),
-                "name": r.get("name", ""),
-                "claude_index": ci,
-                "market_index": mi,
-                "diff": diff,
-                "support": r.get("support"),
-                "alerts": r.get("alerts") or [],
-            })
+            ci, mi = r.get("claude_index"), r.get("market_index")
+            if ci is None or mi is None:
+                continue   # 順位比較には両方必要
+            rows.append({"number": r.get("number"), "name": r.get("name", ""),
+                         "claude_index": float(ci), "market_index": float(mi),
+                         "support": r.get("support"), "alerts": r.get("alerts") or []})
     else:
         lwi = snap.get("llm_win_index") or {}
         mwi = snap.get("market_win_index") or {}
-        if not lwi:
-            return None
         for k, ci in lwi.items():
+            mi = mwi.get(k)
+            if mi is None:
+                continue
             try:
-                num = int(k)
-                ci = float(ci)
+                rows.append({"number": int(k), "name": "", "claude_index": float(ci),
+                             "market_index": float(mi), "support": None, "alerts": []})
             except (TypeError, ValueError):
                 continue
-            mi = mwi.get(k)
-            mi = float(mi) if mi is not None else None
-            diff = (ci - mi) if mi is not None else None
-            rows.append({"number": num, "name": "", "claude_index": ci,
-                         "market_index": mi, "diff": diff,
-                         "support": None, "alerts": []})
-    if not rows:
+    if len(rows) < 2:
         return None
-    # diff が出せた馬だけで edge を数える (margin 以上 = Claude が市場より強気)。
-    edge_horses = [r for r in rows if r.get("diff") is not None and r["diff"] >= margin]
-    edge_horses.sort(key=lambda r: r["diff"], reverse=True)
-    diffs = [r["diff"] for r in rows if r.get("diff") is not None]
-    max_diff = max(diffs) if diffs else None
-    # claude_score: edge 馬の diff 合計 (capped 100)。馬数と乖離の大きさの両方を反映。
-    claude_score = round(min(100.0, sum(max(0.0, r["diff"]) for r in edge_horses)), 1)
+    # 降順ランク (1=最上位)。安定ソートで同値はリスト順。
+    for i, r in enumerate(sorted(rows, key=lambda x: x["claude_index"], reverse=True), 1):
+        r["claude_rank"] = i
+    for i, r in enumerate(sorted(rows, key=lambda x: x["market_index"], reverse=True), 1):
+        r["market_rank"] = i
+    for r in rows:
+        r["rank_gap"] = r["market_rank"] - r["claude_rank"]   # + = Claude が上位評価
+        r["diff"] = round(r["claude_index"] - r["market_index"], 1)
+    top = min(rows, key=lambda r: r["claude_rank"])           # Claude 本命
+    top_rank_gap = top["market_rank"] - 1
+    edge = [r for r in rows if r["rank_gap"] >= 1 and r["diff"] >= value_floor]
+    edge.sort(key=lambda r: (r["rank_gap"], r["diff"]), reverse=True)
+    score = top_rank_gap * 20 + sum(r["rank_gap"] * 5 + max(0.0, r["diff"]) * 0.4 for r in edge)
+    score = round(min(100.0, max(0.0, score)), 1)
     return {
         "available": True,
-        "edge_count": len(edge_horses),
-        "max_diff": round(max_diff, 1) if max_diff is not None else None,
-        "score": claude_score,
-        "edge_horses": edge_horses[:6],
+        "edge_count": len(edge),
+        "score": score,
+        "top_pick": {"number": top["number"], "name": top["name"],
+                     "market_rank": top["market_rank"]},
+        "top_rank_gap": top_rank_gap,
+        "max_rank_gap": max((r["rank_gap"] for r in rows), default=0),
+        "max_diff": round(max((r["diff"] for r in rows), default=0.0), 1),
+        "edge_horses": [
+            {"number": r["number"], "name": r["name"],
+             "claude_index": r["claude_index"], "market_index": r["market_index"],
+             "claude_rank": r["claude_rank"], "market_rank": r["market_rank"],
+             "rank_gap": r["rank_gap"], "diff": r["diff"],
+             "support": r["support"], "alerts": r["alerts"]}
+            for r in edge[:6]
+        ],
         "scored_at": snap.get("llm_scored_at"),
     }
 
@@ -314,8 +336,8 @@ def scan(
     use_claude_edge: bool = True,
     combine: str = "or",
     sep_threshold: float = 35.0,
-    edge_margin: float = 8.0,
-    edge_min_count: int = 2,
+    edge_margin: float = 3.0,
+    edge_threshold: float = 25.0,
     upcoming_only: bool = True,
     fetch_odds: bool = True,
     claude_all: bool = False,
@@ -353,7 +375,7 @@ def scan(
         if len(rid) != 12:
             continue
         rtype = _race_type(rid, d.get("source", ""))
-        if race_type in ("jra", "nar") and rtype != race_type:
+        if race_type in ("jra", "nar", "banei") and rtype != race_type:
             continue
         start_at = int(d.get("start_at") or 0)
         close_at = close_at_for_start(start_at) if start_at else 0
@@ -421,8 +443,8 @@ def scan(
                     names[int(h["number"])] = h.get("name", "")
             sep = _separation(implied, names)
             sep_source = "snapshot"
-        # --- Claude (B) ---
-        claude = _claude_edge(snap, edge_margin) if snap else None
+        # --- Claude (B): 市場との順位乖離 ---
+        claude = _claude_edge(snap, value_floor=edge_margin) if snap else None
         # --- データ源 ---
         data_source = "fresh" if fresh else ("snapshot" if snap else "none")
         n_runners = (snap.get("n_runners") if snap else None) or (sep.get("n") if sep else None)
@@ -431,7 +453,7 @@ def scan(
         claude_avail = claude is not None
         sep_pass = use_separation and sep_avail and sep["score"] >= sep_threshold
         claude_pass = (use_claude_edge and claude_avail
-                       and claude["edge_count"] >= edge_min_count)
+                       and claude["score"] >= edge_threshold)
         active_passes = []
         if use_separation:
             active_passes.append(sep_pass)
@@ -465,10 +487,14 @@ def scan(
             favtxt = (f" / 1番手 {fav['number']}番 {int(fav['prob']*100)}%"
                       if fav else "")
             reasons.append(f"強弱スコア {sep['score']:.0f}{favtxt}")
-        if claude_avail and claude["edge_count"] > 0:
-            md = claude["max_diff"]
-            reasons.append(f"Claude>市場 {claude['edge_count']}頭"
-                           + (f" (最大+{md:.0f})" if md is not None else ""))
+        if claude_avail and (claude["top_rank_gap"] >= 1 or claude["edge_count"] > 0):
+            parts = []
+            tp = claude.get("top_pick")
+            if claude["top_rank_gap"] >= 1 and tp:
+                parts.append(f"Claude本命 {tp['number']}番=市場{tp['market_rank']}番人気")
+            if claude["edge_count"] > 0:
+                parts.append(f"乖離馬 {claude['edge_count']}頭")
+            reasons.append("市場乖離: " + " / ".join(parts) + f" (score {claude['score']:.0f})")
         return {
             "netkeiba_race_id": r["netkeiba_race_id"],
             "race_id": r["race_id"],
@@ -527,12 +553,17 @@ def scan(
         "with_claude": sum(1 for r in results if r["claude"]),
         "with_fresh_odds": sum(1 for r in results if r["data_source"] == "fresh"),
         "sep_median": sep_median,
+        "by_type": {
+            "jra": sum(1 for r in results if r["race_type"] == "jra"),
+            "nar": sum(1 for r in results if r["race_type"] == "nar"),
+            "banei": sum(1 for r in results if r["race_type"] == "banei"),
+        },
     }
     options = {
         "date": date, "race_type": race_type,
         "use_separation": use_separation, "use_claude_edge": use_claude_edge,
         "combine": combine, "sep_threshold": sep_threshold,
-        "edge_margin": edge_margin, "edge_min_count": edge_min_count,
+        "edge_margin": edge_margin, "edge_threshold": edge_threshold,
         "upcoming_only": upcoming_only, "fetch_odds": fetch_odds,
         "claude_all": claude_all, "claude_eval": claude_eval,
     }
@@ -551,13 +582,15 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="今日の勝負レース スキャン")
     ap.add_argument("--out", help="結果 JSON の出力先 (省略時は stdout に最後の1行で出す)")
     ap.add_argument("--date", default=None, help="YYYYMMDD (省略時は当日 JST)")
-    ap.add_argument("--race-type", choices=["all", "jra", "nar"], default="all")
+    ap.add_argument("--race-type", choices=["all", "jra", "nar", "banei"], default="all")
     ap.add_argument("--no-separation", action="store_true", help="基準A (強弱) を無効化")
     ap.add_argument("--no-claude", action="store_true", help="基準B (Claude>市場) を無効化")
     ap.add_argument("--combine", choices=["or", "and"], default="or")
     ap.add_argument("--sep-threshold", type=float, default=35.0)
-    ap.add_argument("--edge-margin", type=float, default=8.0)
-    ap.add_argument("--edge-min-count", type=int, default=2)
+    ap.add_argument("--edge-margin", type=float, default=3.0,
+                    help="乖離馬の指数差フロア (claude−market ≥ これ)")
+    ap.add_argument("--edge-threshold", type=float, default=25.0,
+                    help="市場乖離スコアしきい値 (これ以上で基準B合格)")
     ap.add_argument("--include-finished", action="store_true", help="締切済も含める")
     ap.add_argument("--no-fetch-odds", action="store_true", help="最新オッズ取得をしない (snapshot のみ)")
     ap.add_argument("--claude-all", action="store_true",
@@ -576,7 +609,7 @@ def main(argv: list[str] | None = None) -> int:
         combine=args.combine,
         sep_threshold=args.sep_threshold,
         edge_margin=args.edge_margin,
-        edge_min_count=args.edge_min_count,
+        edge_threshold=args.edge_threshold,
         upcoming_only=not args.include_finished,
         fetch_odds=not args.no_fetch_odds,
         claude_all=args.claude_all,

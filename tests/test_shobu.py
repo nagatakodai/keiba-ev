@@ -43,30 +43,54 @@ def test_implied_from_market_index_roundtrip():
     assert max(implied, key=implied.get) == 1
 
 
-def test_claude_edge_from_index_compare():
+def test_claude_edge_rank_divergence():
+    """市場2番人気を Claude が本命視 = 順位乖離。top_rank_gap と edge を正しく出す。"""
+    # 市場: 1番(90)>2番(70)>3番(50) / Claude: 2番(85)>1番(60)>3番(40)
     snap = {"index_compare": [
-        {"number": 3, "name": "X", "claude_index": 80, "market_index": 55, "diff": 25, "support": 2, "alerts": []},
-        {"number": 1, "name": "Y", "claude_index": 70, "market_index": 62, "diff": 8, "support": 1, "alerts": []},
-        {"number": 5, "name": "Z", "claude_index": 40, "market_index": 50, "diff": -10},
+        {"number": 1, "name": "Y", "claude_index": 60, "market_index": 90},  # 市場1位 Claude2位
+        {"number": 2, "name": "X", "claude_index": 85, "market_index": 70},  # 市場2位 Claude1位
+        {"number": 3, "name": "Z", "claude_index": 40, "market_index": 50},
     ]}
-    e = shobu._claude_edge(snap, margin=8.0)
-    assert e["edge_count"] == 2          # diff 25, 8 が margin 以上
-    assert e["max_diff"] == 25
-    assert e["score"] == 33              # 25 + 8 (cap 100)
-    assert e["edge_horses"][0]["number"] == 3   # diff 降順
+    e = shobu._claude_edge(snap, value_floor=3.0)
+    assert e["top_pick"]["number"] == 2          # Claude 本命
+    assert e["top_pick"]["market_rank"] == 2     # 市場2番人気
+    assert e["top_rank_gap"] == 1                # 「市場2位なのに Claude1位」
+    nums = [h["number"] for h in e["edge_horses"]]
+    assert 2 in nums                             # rank_gap=1, diff=15 ≥ floor
+    assert 1 not in nums                          # rank_gap=-1 (市場が上)
+    # score = top_rank_gap*20 + (rank_gap*5 + diff*0.4) = 20 + (5 + 6) = 31
+    assert e["score"] == 31.0
 
 
-def test_claude_edge_fallback_from_index_dicts():
-    """index_compare が無くても llm_win_index / market_win_index から diff を出せる。"""
-    snap = {"llm_win_index": {"1": 75, "2": 40}, "market_win_index": {"1": 50, "2": 45}}
-    e = shobu._claude_edge(snap, margin=8.0)
-    assert e["edge_count"] == 1          # 1: 75-50=25 ≥8 / 2: 40-45=-5 <8
-    assert e["max_diff"] == 25.0
+def test_claude_edge_value_floor_blocks_weak_diff():
+    """順位は乖離しても指数差が小さければ edge にしない (top_rank_gap は score に残る)。"""
+    snap = {"index_compare": [
+        {"number": 1, "claude_index": 70, "market_index": 80},  # 市場1位 Claude2位
+        {"number": 6, "claude_index": 78, "market_index": 75},  # 市場2位 Claude1位 diff=3
+        {"number": 3, "claude_index": 40, "market_index": 50},
+    ]}
+    e = shobu._claude_edge(snap, value_floor=10.0)   # diff 3 < 10
+    assert e["edge_count"] == 0
+    assert e["top_rank_gap"] == 1
+    assert e["score"] == 20.0                         # top_rank_gap*20 のみ
 
 
-def test_claude_edge_none_without_claude():
-    assert shobu._claude_edge({"market_win_index": {"1": 50}}, margin=8.0) is None
-    assert shobu._claude_edge({}, margin=8.0) is None
+def test_claude_edge_fallback_ranks_from_dicts():
+    """index_compare 無しでも llm/market 指数の両方から順位乖離を出す。"""
+    snap = {"llm_win_index": {"1": 60, "2": 85, "3": 40},
+            "market_win_index": {"1": 90, "2": 70, "3": 50}}
+    e = shobu._claude_edge(snap, value_floor=3.0)
+    assert e["top_pick"]["number"] == 2
+    assert e["top_rank_gap"] == 1
+
+
+def test_claude_edge_none_when_insufficient():
+    # claude 指数なし
+    assert shobu._claude_edge({"market_win_index": {"1": 50}}, value_floor=3.0) is None
+    assert shobu._claude_edge({}, value_floor=3.0) is None
+    # 両指数が揃う馬が 2 頭未満 → ランク比較不能
+    snap = {"index_compare": [{"number": 1, "claude_index": 70, "market_index": 80}]}
+    assert shobu._claude_edge(snap, value_floor=3.0) is None
 
 
 def test_race_type_and_internal_id():
@@ -76,6 +100,37 @@ def test_race_type_and_internal_id():
     assert shobu._race_type("202605010102", "") == "jra"
     assert shobu._race_type("202632060101", "") == "nar"
     assert shobu._internal_id("202605010102") == "20260501-1-2"
+
+
+def test_race_type_banei_separated():
+    """帯広ばんえい (場コード 65) は source に関わらず banei に分離 (ev.segment_of_rd と同じ)。"""
+    assert shobu._race_type("202665062001", "oddspark") == "banei"
+    assert shobu._race_type("202665062001", "") == "banei"
+    # nar フィルタは banei を含まない (rtype が異なるため)。
+    assert shobu._race_type("202665062001", "oddspark") != "nar"
+
+
+def test_scan_banei_filter(monkeypatch):
+    """race_type=banei は帯広だけ / nar は帯広を除外。by_type も分離して数える。"""
+    now = int(time.time())
+    monkeypatch.setattr("src.auto_watch.discover_today_races", lambda d: [
+        {"race_id": "202632060101", "url": "u", "start_at": now + 3600,
+         "venue": "佐賀", "race_no": 1, "source": "oddspark"},      # 平地NAR
+        {"race_id": "202665062001", "url": "u", "start_at": now + 3600,
+         "venue": "帯広", "race_no": 1, "source": "oddspark"},      # ばんえい
+    ])
+    monkeypatch.setattr(shobu, "_load_snapshot", lambda i: None)
+    monkeypatch.setattr(shobu, "_fetch_fresh_win", lambda r, t: None)
+
+    res_all = shobu.scan(race_type="all", fetch_odds=False, claude_eval=0, log=lambda *_: None)
+    assert res_all["summary"]["by_type"] == {"jra": 0, "nar": 1, "banei": 1}
+
+    res_nar = shobu.scan(race_type="nar", fetch_odds=False, claude_eval=0, log=lambda *_: None)
+    assert [r["race_type"] for r in res_nar["races"]] == ["nar"]
+
+    res_banei = shobu.scan(race_type="banei", fetch_odds=False, claude_eval=0, log=lambda *_: None)
+    assert [r["race_type"] for r in res_banei["races"]] == ["banei"]
+    assert res_banei["races"][0]["venue"] == "帯広"
 
 
 # ---------------------------------------------------------------- scan() ----
@@ -108,26 +163,31 @@ def _setup(monkeypatch, *, fresh_a, fresh_b, snap_a, snap_b):
     return nar_internal, jra_internal
 
 
+# B race の snapshot: 市場2番人気を Claude が本命視 (順位乖離) → 基準B 合格。
+_SNAP_DIVERGENCE = {"index_compare": [
+    {"number": 1, "claude_index": 60, "market_index": 90},   # 市場1位 Claude2位
+    {"number": 2, "claude_index": 85, "market_index": 70},   # 市場2位 Claude1位
+    {"number": 3, "claude_index": 40, "market_index": 50},
+]}
+
+
 def test_scan_or_combine(monkeypatch):
-    """OR: A は強弱で勝負、B は Claude 乖離で勝負。"""
+    """OR: A は強弱で勝負、B は市場との順位乖離で勝負。"""
     # A = 集中フィールド (sep 高) / snapshot なし
     fresh_a = {"odds": {1: 1.3, 2: 8.0, 3: 14.0, 4: 22.0, 5: 33.0},
                "names": {1: "AA", 2: "BB", 3: "CC", 4: "DD", 5: "EE"}}
-    # B = 一様フィールド (sep 低) だが snapshot に Claude 乖離 2 頭
+    # B = 一様フィールド (sep 低) だが snapshot に順位乖離 (市場2位→Claude1位)
     fresh_b = {"odds": {n: 5.0 for n in range(1, 9)}, "names": {}}
-    snap_b = {"index_compare": [
-        {"number": 1, "claude_index": 80, "market_index": 55, "diff": 25},
-        {"number": 2, "claude_index": 70, "market_index": 58, "diff": 12},
-    ]}
-    _setup(monkeypatch, fresh_a=fresh_a, fresh_b=fresh_b, snap_a=None, snap_b=snap_b)
+    _setup(monkeypatch, fresh_a=fresh_a, fresh_b=fresh_b, snap_a=None, snap_b=_SNAP_DIVERGENCE)
 
     res = shobu.scan(fetch_odds=True, combine="or", sep_threshold=25.0,
-                     edge_margin=8.0, edge_min_count=2, claude_eval=0, log=lambda *_: None)
+                     edge_margin=3.0, edge_threshold=20.0, claude_eval=0, log=lambda *_: None)
     by_venue = {r["venue"]: r for r in res["races"]}
     assert by_venue["佐賀"]["recommended"] is True
     assert "sep" in by_venue["佐賀"]["matched"]
     assert by_venue["東京"]["recommended"] is True
     assert "claude" in by_venue["東京"]["matched"]
+    assert by_venue["東京"]["claude"]["top_rank_gap"] == 1
     assert res["summary"]["recommended"] == 2
 
 
@@ -135,14 +195,10 @@ def test_scan_and_combine(monkeypatch):
     """AND: A は Claude 不在で不可、B は強弱不足で不可 → 推奨ゼロ。"""
     fresh_a = {"odds": {1: 1.3, 2: 8.0, 3: 14.0, 4: 22.0, 5: 33.0}, "names": {}}
     fresh_b = {"odds": {n: 5.0 for n in range(1, 9)}, "names": {}}
-    snap_b = {"index_compare": [
-        {"number": 1, "claude_index": 80, "market_index": 55, "diff": 25},
-        {"number": 2, "claude_index": 70, "market_index": 58, "diff": 12},
-    ]}
-    _setup(monkeypatch, fresh_a=fresh_a, fresh_b=fresh_b, snap_a=None, snap_b=snap_b)
+    _setup(monkeypatch, fresh_a=fresh_a, fresh_b=fresh_b, snap_a=None, snap_b=_SNAP_DIVERGENCE)
 
     res = shobu.scan(fetch_odds=True, combine="and", sep_threshold=25.0,
-                     edge_margin=8.0, edge_min_count=2, claude_eval=0, log=lambda *_: None)
+                     edge_margin=3.0, edge_threshold=20.0, claude_eval=0, log=lambda *_: None)
     assert res["summary"]["recommended"] == 0
 
 
@@ -204,25 +260,25 @@ def test_scan_claude_all_generates_for_all(monkeypatch):
     monkeypatch.setattr(shobu, "_fetch_fresh_win",
                         lambda r, t: {"odds": {1: 5.0, 2: 5.1, 3: 4.9}, "names": {}})
 
-    # 生成 stub: 対象 race の snapshot に Claude 乖離を「インストール」して件数を返す。
+    # 生成 stub: 対象 race の snapshot に順位乖離 (市場2位→Claude1位) を「インストール」。
     def fake_gen(targets, **kw):
         for t in targets:
             snaps[t["race_id"]] = {
                 "index_compare": [
-                    {"number": 1, "claude_index": 80, "market_index": 55, "diff": 25},
-                    {"number": 2, "claude_index": 70, "market_index": 58, "diff": 12},
+                    {"number": 1, "claude_index": 60, "market_index": 90},
+                    {"number": 2, "claude_index": 85, "market_index": 70},
+                    {"number": 3, "claude_index": 40, "market_index": 50},
                 ],
-                "market_win_index": {"1": 55, "2": 58, "3": 40},
             }
         return len(targets)
 
     monkeypatch.setattr(shobu, "_run_claude_eval", fake_gen)
     res = shobu.scan(claude_all=True, use_separation=False, use_claude_edge=True,
-                     sep_threshold=101, edge_margin=8.0, edge_min_count=2,
+                     sep_threshold=101, edge_margin=3.0, edge_threshold=20.0,
                      fetch_odds=True, log=lambda *_: None)
     assert res["summary"]["with_claude"] == 2          # 2 レースとも生成された
-    assert res["summary"]["recommended"] == 2          # 2 頭乖離 → 勝負 (claude のみ)
-    assert all(r["claude"]["edge_count"] == 2 for r in res["races"])
+    assert res["summary"]["recommended"] == 2          # 順位乖離 → 勝負 (claude のみ)
+    assert all(r["claude"]["top_rank_gap"] == 1 for r in res["races"])
 
 
 def test_scan_upcoming_only_excludes_past(monkeypatch):
