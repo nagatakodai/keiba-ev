@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -288,7 +289,10 @@ def _select_claude_targets(results: list[dict[str, Any]], *, claude_all: bool,
 
 
 def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
-                     parallel: int, log: Callable[[str], None]) -> int:
+                     parallel: int, log: Callable[[str], None],
+                     score_parallel: bool = False,
+                     score_queries_per_horse: int | None = None,
+                     llm_max_concurrent: int | None = None) -> int:
     """対象レースに score ステージ (claude -p) を spawn して Claude 指数を生成。生成成功数を返す。
 
     並列は ThreadPoolExecutor で回すが、実際の claude -p 同時数は src 側の file-slot semaphore
@@ -301,11 +305,21 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 "
         f"(並列 {parallel} / 各 timeout {timeout}s)…")
 
+    score_env = os.environ.copy()
+    # score subprocess の検索並列化 (KEIBA_SCORE_PARALLEL=1 で ARCH-A プロセス並列)。
+    # OFF のときは継承した "1" を空文字で打ち消す (main.py の score タブと同流儀)。
+    score_env["KEIBA_SCORE_PARALLEL"] = "1" if score_parallel else ""
+    if score_queries_per_horse:
+        score_env["KEIBA_SCORE_QUERIES_PER_HORSE"] = str(score_queries_per_horse)
+    if llm_max_concurrent:
+        # file-slot semaphore (claude -p 同時数上限)。並列を実際に通すため引き上げる。
+        score_env["KEIBA_LLM_MAX_CONCURRENT"] = str(llm_max_concurrent)
+
     def _one(t: dict[str, Any]) -> tuple[dict[str, Any], bool, str]:
         rid = t["netkeiba_race_id"]
         cmd = _score_stage_cmd(rid, t["race_type"], int(t.get("start_at") or 0))
         try:
-            r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True,
+            r = subprocess.run(cmd, cwd=str(ROOT), env=score_env, capture_output=True,
                                text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return (t, False, f"timeout ({timeout}s)")
@@ -344,6 +358,9 @@ def scan(
     claude_eval: int = 0,
     claude_eval_timeout: int = 900,
     claude_eval_parallel: int = 6,
+    score_parallel: bool = False,
+    score_queries_per_horse: int | None = None,
+    llm_max_concurrent: int | None = None,
     max_races: int | None = None,
     fetch_parallel: int = 6,
     log: Callable[[str], None] | None = None,
@@ -527,7 +544,10 @@ def scan(
             upcoming_only=upcoming_only, now=now)
         if targets:
             _run_claude_eval(targets, timeout=claude_eval_timeout,
-                             parallel=claude_eval_parallel, log=_log)
+                             parallel=claude_eval_parallel, log=_log,
+                             score_parallel=score_parallel,
+                             score_queries_per_horse=score_queries_per_horse,
+                             llm_max_concurrent=llm_max_concurrent)
             # 生成後に対象を再評価 (snapshot 再読込)。
             by_id = {r["race_id"]: r for r in races}
             pos = {r["race_id"]: i for i, r in enumerate(results)}
@@ -598,6 +618,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--claude-eval", type=int, default=0, help="上位N件に Claude 指数を新規生成 (--claude-all なしの時)")
     ap.add_argument("--claude-eval-timeout", type=int, default=900)
     ap.add_argument("--claude-eval-parallel", type=int, default=6)
+    ap.add_argument("--score-parallel", action="store_true", help="score 段の検索を並列化 (KEIBA_SCORE_PARALLEL=1)")
+    ap.add_argument("--score-queries-per-horse", type=int, default=None, help="1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE, 並列時のみ有効)")
+    ap.add_argument("--llm-max-concurrent", type=int, default=None, help="claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)")
     ap.add_argument("--max-races", type=int, default=None)
     args = ap.parse_args(argv)
 
@@ -616,6 +639,9 @@ def main(argv: list[str] | None = None) -> int:
         claude_eval=args.claude_eval,
         claude_eval_timeout=args.claude_eval_timeout,
         claude_eval_parallel=args.claude_eval_parallel,
+        score_parallel=args.score_parallel,
+        score_queries_per_horse=args.score_queries_per_horse,
+        llm_max_concurrent=args.llm_max_concurrent,
         max_races=args.max_races,
     )
     if args.out:

@@ -645,6 +645,203 @@ def compute_calibration(point_cost: int = 100) -> dict[str, Any]:
     }
 
 
+def _claude_index_by_number(snap: dict[str, Any]) -> dict[int, float]:
+    """snapshot から 馬番→Claude 指数 を抽出 (shobu._claude_edge と同じ源)。
+
+    index_compare (list, 各馬の claude_index/market_index 比較・権威) を優先、無ければ
+    llm_win_index (dict {馬番: 指数})。Claude 指数が無いレースは空 dict。
+    market_index は不要 (上位5頭は Claude 指数のみで決まる)。
+    """
+    out: dict[int, float] = {}
+    ic = snap.get("index_compare")
+    if isinstance(ic, list) and ic:
+        for r in ic:
+            ci = r.get("claude_index")
+            num = r.get("number")
+            if ci is None or num is None:
+                continue
+            try:
+                out[int(num)] = float(ci)
+            except (TypeError, ValueError):
+                continue
+        if out:
+            return out
+    for k, ci in (snap.get("llm_win_index") or {}).items():
+        try:
+            out[int(k)] = float(ci)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _shobu_box_size(n_runners: int | None, base: int = 5) -> int:
+    """3連単 BOX に使う上位頭数 (フィールドの大きさに応じて縮める)。
+
+    基本は上位 base 頭 (=5) だが、頭数が少ないと 5頭 BOX がフィールドの大半を覆って
+    「上位5頭に1-2-3着が収まる」が当たり前になり screen の意味が薄れる。そこで
+    **最低3頭は BOX 外に残す** ことにし `box = min(base, n − 3)` とする。
+    ユーザ指示 (2026-06-21): **7頭立ては4頭BOX** (= 7 − 3)。trifecta は最低3頭なので 3 で floor。
+      n ≥ 8 → 5頭 / n = 7 → 4頭 / n = 6 → 3頭 / n ≤ 5 → 3頭。
+    """
+    if not n_runners or n_runners <= 0:
+        return base
+    return max(3, min(base, n_runners - 3))
+
+
+def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
+    """勝負レース (recommended) 専用の **仮想収支** (ユーザ指示 2026-06-21)。
+
+    各勝負レースで Claude 指数 **上位 box_size 頭** (既定 5) の **3連単 BOX** を買ったと仮定し、
+    実際の 1・2・3 着がその上位5頭の中に全て収まれば的中 (= BOX が当たる) として、その3連単
+    配当 (trifecta_payout) で収支を集計する。「勝負レースだけの収支。上位5頭の内から 1,2,3着が
+    いた場合的中。3連単を買っていたことにする」。
+
+    - 対象: data/cache/shobu/<date>.json の recommended=true レースのうち、Claude 指数が
+      ある (= 上位N頭を決められる) かつ 結果が確定している もの。
+    - 上位N頭 = snapshot の Claude 指数 (index_compare / llm_win_index) 降順。N は
+      `_shobu_box_size(出走頭数)` で決まる (≥8頭=5 / 7頭=4 / 少頭数は最低3頭を場外に残す)。
+    - 3連単 BOX 点数 = P(N, 3) = 5×4×3 = 60点 (5頭) / 4×3×2 = 24点 (4頭)。
+    - stake/race = 点数 × point_cost。payout = 的中時の trifecta_payout を point_cost(¥100単位)へ
+      スケール。**長期回収を保証する指標ではなく「勝負レース判定 + 上位5頭 BOX」の paper 検証**。
+
+    返り値は compute_calibration の bundle 集計と同じく hits/hit_rate/stake/payout/roi + CI、
+    及び per-race detail (races_detail)。recommended だが Claude 指数なし=skipped_no_index、
+    結果未確定=skipped_no_result でカウント (分母には入れない)。
+    """
+    from itertools import permutations
+
+    # recommended レースを race_id で集約 (再スキャンの重複は generated_at 後勝ち。
+    # race は1日1回なので race_id は実質一意だが、念のため最新スキャン結果を優先)。
+    by_race: dict[str, dict[str, Any]] = {}
+    if SHOBU_DIR.exists():
+        for p in sorted(SHOBU_DIR.glob("*.json")):
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            gen = doc.get("generated_at") or ""
+            for race in doc.get("races") or []:
+                if not race.get("recommended"):
+                    continue
+                rid = race.get("race_id")
+                if not rid:
+                    continue
+                prev = by_race.get(rid)
+                if prev is None or gen >= (prev.get("_generated_at") or ""):
+                    by_race[rid] = {**race, "_generated_at": gen}
+
+    races_detail: list[dict[str, Any]] = []
+    per_race: list[tuple[int, int]] = []
+    hits = 0
+    stake_sum = 0
+    payout_sum = 0
+    skipped_no_index = 0
+    skipped_no_result = 0
+    last_updated_at: str | None = None
+
+    for rid, race in by_race.items():
+        safe = _safe_race_id(rid)
+        if safe is None:
+            continue
+        snap_path = PRED_DIR / f"{safe}.json"
+        if not snap_path.exists():
+            skipped_no_index += 1
+            continue
+        try:
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            skipped_no_index += 1
+            continue
+        idx = _claude_index_by_number(snap)
+        if len(idx) < 3:
+            skipped_no_index += 1   # Claude 指数が 3頭未満 = 3連単 BOX を組めない
+            continue
+        # 出走頭数 (頭立て) で BOX サイズを決める (7頭立て→4頭BOX 等)。
+        # 権威値は snapshot の n_runners、無ければ shobu entry → Claude 指数頭数。
+        n_runners = snap.get("n_runners") or race.get("n_runners") or len(idx)
+        box = _shobu_box_size(n_runners, base=box_size)
+        top = [num for num, _ci in
+               sorted(idx.items(), key=lambda kv: kv[1], reverse=True)][:box]
+        top_set = set(top)
+
+        result_path = RESULT_DIR / f"{safe}.json"
+        if not result_path.exists():
+            skipped_no_result += 1
+            continue
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            skipped_no_result += 1
+            continue
+        finish = [x for x in (result.get("finish_order") or [])[:3]
+                  if isinstance(x, int) and x > 0]
+        if len(finish) < 3:
+            skipped_no_result += 1   # 着順が3着まで確定していない (placeholder/壊れ)
+            continue
+
+        n_points = len(list(permutations(top, 3)))     # = P(len(top), 3) = 60 (5頭)
+        stake = n_points * point_cost
+        hit = all(f in top_set for f in finish)
+        tri = int(result.get("trifecta_payout") or 0)
+        # 3連単配当は ¥100 単位 → point_cost にスケール (point_cost=100 なら配当そのまま)。
+        payout = int(round(tri * point_cost / 100.0)) if hit else 0
+
+        hits += 1 if hit else 0
+        stake_sum += stake
+        payout_sum += payout
+        per_race.append((stake, payout))
+        r_ts = result.get("recorded_at")
+        if isinstance(r_ts, str) and (last_updated_at is None or r_ts > last_updated_at):
+            last_updated_at = r_ts
+
+        races_detail.append({
+            "race_id": rid,
+            "date": (race.get("_generated_at") or "")[:10],
+            "venue": race.get("venue") or "",
+            "race_no": race.get("race_no"),
+            "race_type": race.get("race_type"),
+            "shobu_score": race.get("shobu_score"),
+            "matched": race.get("matched") or [],
+            "n_runners": n_runners,       # 出走頭数 (頭立て)
+            "box": len(top),              # BOX に使った上位頭数 (7頭立て=4 等)
+            "top_horses": top,            # Claude 指数上位N頭 (馬番)
+            "finish": finish,             # 実 1-2-3着
+            "n_points": n_points,         # 3連単 BOX 点数 (P(box,3))
+            "stake": stake,
+            "hit": hit,
+            "payout": payout,
+            "trifecta_payout": tri,
+            "saved_at": snap.get("saved_at"),
+        })
+
+    n = len(per_race)
+    hit_rate = hits / n if n else 0.0
+    roi = (payout_sum / stake_sum) if stake_sum else 0.0
+    hr_low, hr_high = _wilson_ci(hits, n)
+    roi_low, roi_high = _bootstrap_roi_ci(per_race)
+    races_detail.sort(key=lambda r: (r.get("saved_at") or r.get("date") or ""), reverse=True)
+    return {
+        "point_cost": point_cost,
+        "box_size": box_size,
+        "races": n,                         # 集計成立 (指数+結果あり) レース数
+        "hits": hits,
+        "hit_rate": hit_rate,
+        "hit_rate_ci_low": hr_low,
+        "hit_rate_ci_high": hr_high,
+        "stake": stake_sum,
+        "payout": payout_sum,
+        "roi": roi,
+        "roi_ci_low": roi_low,
+        "roi_ci_high": roi_high,
+        "recommended_total": len(by_race),  # 勝負レース総数 (指数/結果欠落も含む)
+        "skipped_no_index": skipped_no_index,
+        "skipped_no_result": skipped_no_result,
+        "last_updated_at": last_updated_at,
+        "sample_warning": n < 30,
+        "races_detail": races_detail,
+    }
+
+
 def _wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """二項分布の Wilson 95% 信頼区間。
     n=0 は (0, 0)、n が小さいほど区間は広い。"""

@@ -60,6 +60,7 @@ from .store import (
     SHOBU_DIR,
     _safe_race_id,
     compute_calibration,
+    compute_shobu_pnl,
     get_prediction,
     get_shobu_result,
     list_auto_watch_history,
@@ -466,6 +467,14 @@ class ShobuScanRequest(BaseModel):
     claude_eval: int = Field(default=0, ge=0, le=50)
     # 評価レース数の上限 (デバッグ/負荷制御)。None=全件。
     max_races: int | None = Field(default=None, ge=1, le=300)
+    # Claude 指数一括生成の across-race 並列数 (ThreadPoolExecutor workers)。ユーザ指示 2026-06-21: 20。
+    claude_eval_parallel: int = Field(default=20, ge=1, le=50)
+    # score 段の検索並列化 (KEIBA_SCORE_PARALLEL)。既定 ON。
+    score_parallel: bool = True
+    # 1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。ユーザ指示: 12。
+    score_queries_per_horse: int = Field(default=12, ge=2, le=12)
+    # claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)。並列20を実際に通すため 20。
+    llm_max_concurrent: int = Field(default=20, ge=1, le=50)
 
 
 @app.post("/api/shobu/scan")
@@ -492,6 +501,10 @@ async def api_shobu_scan(req: ShobuScanRequest) -> dict[str, Any]:
         fetch_odds=req.fetch_odds,
         claude_all=req.claude_all,
         claude_eval=req.claude_eval,
+        claude_eval_parallel=req.claude_eval_parallel,
+        score_parallel=req.score_parallel,
+        score_queries_per_horse=req.score_queries_per_horse,
+        llm_max_concurrent=req.llm_max_concurrent,
         max_races=req.max_races,
     )
     job = JOBS.new(label=f"shobu-scan: {date}", cmd=cmd)
@@ -508,6 +521,16 @@ def api_shobu_result(date: str | None = None) -> dict[str, Any]:
     if d is None:
         raise HTTPException(404, "shobu result not found (まだスキャンしていません)")
     return d
+
+
+@app.get("/api/shobu/pnl")
+def api_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
+    """勝負レース専用の **仮想収支** (Claude 指数上位5頭の3連単 BOX を買ったと仮定)。
+
+    recommended 勝負レースで Claude 指数上位 box_size 頭の3連単 BOX (5頭=60点) を組み、実際の
+    1・2・3着が全て上位5頭内なら的中として trifecta 配当で収支集計 (ダッシュボードに表示)。
+    """
+    return compute_shobu_pnl(point_cost=point_cost, box_size=box_size)
 
 
 @app.get("/api/results/auto")

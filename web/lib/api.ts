@@ -703,6 +703,48 @@ export type ResultsAutoStatus = {
   } | null;
 };
 
+// 勝負レース専用の仮想収支 (GET /api/shobu/pnl)。Claude 指数上位N頭の3連単BOXを
+// 買ったと仮定した paper P&L。per-race 明細は races_detail。
+export type ShobuPnlRace = {
+  race_id: string;
+  date: string;
+  venue: string;
+  race_no: number | null;
+  race_type: "jra" | "nar" | "banei" | null;
+  shobu_score: number | null;
+  matched: string[];
+  n_runners: number | null;
+  box: number;             // BOX に使った上位頭数 (7頭立て=4 等)
+  top_horses: number[];    // Claude 指数上位N頭 (馬番)
+  finish: number[];        // 実 1-2-3着
+  n_points: number;        // 3連単 BOX 点数 (P(box,3))
+  stake: number;
+  hit: boolean;
+  payout: number;
+  trifecta_payout: number;
+  saved_at?: string | null;
+};
+export type ShobuPnl = {
+  point_cost: number;
+  box_size: number;
+  races: number;
+  hits: number;
+  hit_rate: number;
+  hit_rate_ci_low?: number;
+  hit_rate_ci_high?: number;
+  stake: number;
+  payout: number;
+  roi: number;
+  roi_ci_low?: number;
+  roi_ci_high?: number;
+  recommended_total: number;
+  skipped_no_index: number;
+  skipped_no_result: number;
+  last_updated_at: string | null;
+  sample_warning: boolean;
+  races_detail: ShobuPnlRace[];
+};
+
 export type ShobuScanRequest = {
   date?: string | null;
   race_type?: "all" | "jra" | "nar" | "banei";
@@ -717,6 +759,10 @@ export type ShobuScanRequest = {
   claude_all?: boolean;
   claude_eval?: number;
   max_races?: number | null;
+  claude_eval_parallel?: number;
+  score_parallel?: boolean;
+  score_queries_per_horse?: number;
+  llm_max_concurrent?: number;
 };
 
 // --- Endpoints ---
@@ -763,6 +809,9 @@ export const api = {
     jsonFetch<ShobuResult>(
       `/api/shobu/result${date ? `?date=${encodeURIComponent(date)}` : ""}`,
     ),
+  // 勝負レース専用の仮想収支 (Claude 指数上位N頭の3連単 BOX を買ったと仮定)。
+  shobuPnl: (pointCost = 100) =>
+    jsonFetch<ShobuPnl>("/api/shobu/pnl?point_cost=" + pointCost),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 

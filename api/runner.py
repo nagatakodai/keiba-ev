@@ -415,6 +415,10 @@ def build_shobu_cmd(
     fetch_odds: bool = True,
     claude_all: bool = False,
     claude_eval: int = 0,
+    claude_eval_parallel: int = 6,
+    score_parallel: bool = False,
+    score_queries_per_horse: int | None = None,
+    llm_max_concurrent: int | None = None,
     max_races: int | None = None,
 ) -> list[str]:
     """`python -m src.shobu` (今日の勝負レース スキャン) コマンドを組む。結果は out_path に書かれる。"""
@@ -442,6 +446,13 @@ def build_shobu_cmd(
         cmd.append("--claude-all")
     if max_races is not None:
         cmd += ["--max-races", str(max_races)]
+    cmd += ["--claude-eval-parallel", str(claude_eval_parallel)]
+    if score_parallel:
+        cmd.append("--score-parallel")
+    if score_queries_per_horse:
+        cmd += ["--score-queries-per-horse", str(score_queries_per_horse)]
+    if llm_max_concurrent:
+        cmd += ["--llm-max-concurrent", str(llm_max_concurrent)]
     return cmd
 
 

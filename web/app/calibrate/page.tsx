@@ -29,6 +29,7 @@ export default async function CalibratePage({
   const sp = await searchParams;
   const pointCost = sp.point_cost ? parseInt(sp.point_cost) : 100;
   const cal = await api.calibrate(pointCost).catch(() => null);
+  const shobuPnl = await api.shobuPnl(pointCost).catch(() => null);
 
   if (!cal) {
     return (
@@ -223,6 +224,90 @@ export default async function CalibratePage({
           />
         </Card>
       )}
+
+      <Card
+        title="勝負レース 仮想収支 (上位N頭の3連単BOX)"
+        right={
+          <span className="text-[10px] text-(--color-muted)">
+            Claude指数 上位N頭の3連単BOX。実際の1-2-3着が全て上位N頭に収まれば的中。8頭以上=5頭(60点)/7頭=4頭(24点)/少頭数は最低3頭を場外に残す。
+          </span>
+        }
+      >
+        {!shobuPnl || shobuPnl.recommended_total === 0 ? (
+          <p className="text-sm text-(--color-muted)">
+            勝負レースのデータがありません (今日の勝負レースをスキャンしてください)。
+          </p>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Stat
+                label="対象レース"
+                value={<span className="tnum">{shobuPnl.races}</span>}
+                hint={`勝負レース ${shobuPnl.recommended_total} / 結果待ち ${shobuPnl.skipped_no_result} / 指数なし ${shobuPnl.skipped_no_index}`}
+                accentTone="muted"
+              />
+              <Stat
+                label="的中率"
+                value={shobuPnl.races === 0 ? "—" : fmtPct(shobuPnl.hit_rate, 1)}
+                hint={
+                  shobuPnl.races
+                    ? `${shobuPnl.hits} 的中 / ${shobuPnl.races} レース`
+                    : "—"
+                }
+                accentTone="magenta"
+              />
+              <Stat
+                label="回収率"
+                value={
+                  shobuPnl.races === 0 ? "—" : `${Math.round(shobuPnl.roi * 100)}%`
+                }
+                hint={
+                  shobuPnl.races
+                    ? `賭金 ${fmtYen(shobuPnl.stake)} → 払戻 ${fmtYen(shobuPnl.payout)}`
+                    : "—"
+                }
+                tone={
+                  shobuPnl.races === 0 ? "default" : shobuPnl.roi >= 1 ? "good" : "bad"
+                }
+                accentTone="magenta"
+              />
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5 mt-3">
+              {shobuPnl.races_detail.map((r) => (
+                <Link
+                  key={r.race_id}
+                  href={`/predictions/${r.race_id}`}
+                  className={`flex items-center gap-2 text-sm tnum border border-(--color-line) rounded-lg px-2.5 py-1.5 transition-colors hover:border-(--color-accent)/40 ${
+                    r.hit ? "bg-emerald-500/10" : ""
+                  }`}
+                >
+                  <span className="font-bold text-xs whitespace-nowrap">
+                    {r.venue}
+                    {r.race_no}R
+                  </span>
+                  <span className="text-xs text-(--color-muted) whitespace-nowrap">
+                    {r.box}頭BOX
+                  </span>
+                  <span className="mono text-xs">上位 {r.top_horses.join(",")}</span>
+                  <span className="mono text-xs whitespace-nowrap">
+                    着 {r.finish.join("-")}
+                  </span>
+                  <span className="flex-1 text-right mono text-xs">
+                    {r.hit ? fmtYen(r.payout) : ""}
+                  </span>
+                  <Badge tone={r.hit ? "magenta" : "muted"}>
+                    {r.hit ? "的中" : "不的中"}
+                  </Badge>
+                </Link>
+              ))}
+            </div>
+            <p className="text-[10px] text-(--color-muted) mt-2">
+              ※ 長期回収を保証する指標ではなく「勝負レース判定 + 上位N頭BOX」の paper
+              検証。上部の実弾投票束KPIとは別物。
+            </p>
+          </>
+        )}
+      </Card>
 
       <Card title="Tier 別 (ratio = 実hit / 予測P合計)">
         {cal.tiers.length === 0 ? (
