@@ -89,6 +89,42 @@ function ScoreBar({ value, tone = "emerald" }: { value: number; tone?: "emerald"
   );
 }
 
+// 勝負スコアの前回比 (▲ 上昇 / ▼ 下降 / → 横ばい)。2分毎の最新オッズ更新で付く。
+function ScoreDelta({ delta }: { delta?: number | null }) {
+  if (delta == null) return null;
+  const up = delta > 0.05;
+  const down = delta < -0.05;
+  const cls = up ? "text-emerald-300" : down ? "text-rose-300" : "text-(--color-muted)";
+  const arrow = up ? "▲" : down ? "▼" : "→";
+  const txt = up || down ? `${delta > 0 ? "+" : ""}${delta.toFixed(1)}` : "±0";
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-[11px] font-bold tnum ${cls}`} title="前回更新比">
+      {arrow}
+      {txt}
+    </span>
+  );
+}
+
+// 勝負スコア履歴の極小スパークライン (装飾)。最初→最後 が上昇なら緑、下降なら赤。
+function MiniSpark({ points }: { points: number[] }) {
+  if (points.length < 2) return null;
+  const w = 56;
+  const h = 16;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = max - min || 1;
+  const yAt = (v: number) => h - 1 - ((v - min) / range) * (h - 2);
+  const d = points
+    .map((v, i) => `${((i / (points.length - 1)) * w).toFixed(1)},${yAt(v).toFixed(1)}`)
+    .join(" ");
+  const stroke = points[points.length - 1] >= points[0] ? "var(--good)" : "var(--bad)";
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-14 h-4" preserveAspectRatio="none" aria-hidden>
+      <polyline points={d} fill="none" stroke={stroke} strokeWidth={1.25} strokeOpacity={0.85} />
+    </svg>
+  );
+}
+
 function RaceTypeBadge({ t }: { t: "jra" | "nar" | "banei" }) {
   if (t === "jra") return <Badge tone="info">JRA</Badge>;
   if (t === "banei") return <Badge tone="warn">ばんえい</Badge>;
@@ -138,6 +174,14 @@ function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank
             {r.shobu_score.toFixed(0)}
           </div>
           <div className="text-[9px] font-bold uppercase tracking-wider text-(--color-muted)">勝負スコア</div>
+          {(r.score_delta != null || (r.score_history?.length ?? 0) >= 2) && (
+            <div className="mt-0.5 flex items-center justify-end gap-1">
+              <ScoreDelta delta={r.score_delta} />
+              {(r.score_history?.length ?? 0) >= 2 && (
+                <MiniSpark points={r.score_history!.map((p) => p.score)} />
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -263,6 +307,10 @@ export default function ShobuPage() {
   const [result, setResult] = useState<ShobuResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
+  // 勝負レースページを開いている間、2分毎に推奨レースの最新オッズで再採点する (既定 ON)。
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
 
   // 現在のフォーム設定を scan options に変換。
   const buildOptions = (): ShobuScanRequest => ({
@@ -357,6 +405,49 @@ export default function ShobuPage() {
   const recommended = races.filter((r) => r.recommended);
   const others = races.filter((r) => !r.recommended);
   const summary = result?.summary;
+
+  // 推奨レースのみ最新オッズで再採点 (Claude は呼ばない・単勝 1 fetch/レース)。手動 & 自動共通。
+  const doRefresh = async () => {
+    if (!result || refreshing) return;
+    setRefreshing(true);
+    try {
+      const updated = await api.refreshShobu(result.date);
+      setResult(updated);
+      setRefreshedAt(updated.refreshed_at ?? null);
+    } catch {
+      /* transient (404/ネットワーク) は無視 */
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // 2分毎の自動更新。ページを開いている間・推奨レースがある時だけ走る (スキャン中は止める)。
+  // 依存に recommended.length を入れて「0件→再スキャンで出た」場合にも interval を張り直す。
+  useEffect(() => {
+    if (!autoRefresh || !result || scanning || recommended.length === 0) return;
+    const date = result.date;
+    let cancelled = false;
+    const t = setInterval(async () => {
+      if (cancelled) return;
+      setRefreshing(true);
+      try {
+        const updated = await api.refreshShobu(date);
+        if (!cancelled) {
+          setResult(updated);
+          setRefreshedAt(updated.refreshed_at ?? null);
+        }
+      } catch {
+        /* transient は無視 */
+      } finally {
+        if (!cancelled) setRefreshing(false);
+      }
+    }, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRefresh, result?.date, scanning, recommended.length]);
 
   return (
     <Page>
@@ -537,6 +628,25 @@ export default function ShobuPage() {
               {recommended.length > 0 && (
                 <span className="text-[11px] text-(--color-muted)">勝負スコア順 ・ 緑カード = 推奨</span>
               )}
+              {/* ── 最新オッズ自動更新 (2分毎) コントロール ── */}
+              <div className="ml-auto flex items-center gap-3">
+                {refreshing && <Loader2 className="size-3.5 animate-spin text-(--color-muted)" />}
+                {(refreshedAt ?? result.refreshed_at) && (
+                  <span className="text-[11px] text-(--color-muted) tnum" title="推奨レースの最新オッズで勝負スコアを再計算した時刻">
+                    最新オッズ {(refreshedAt ?? result.refreshed_at)!.slice(11, 16)} 更新
+                  </span>
+                )}
+                <button
+                  onClick={doRefresh}
+                  disabled={refreshing || recommended.length === 0}
+                  className="text-[11px] font-bold text-(--color-accent) hover:underline disabled:opacity-40 disabled:no-underline"
+                >
+                  今すぐ更新
+                </button>
+                <Toggle checked={autoRefresh} onChange={setAutoRefresh}>
+                  <span className="text-[11px]">2分毎に最新オッズ更新</span>
+                </Toggle>
+              </div>
             </div>
 
             {recommended.length === 0 ? (

@@ -294,3 +294,68 @@ def test_scan_upcoming_only_excludes_past(monkeypatch):
     assert res["summary"]["evaluated"] == 0
     res2 = shobu.scan(upcoming_only=False, claude_eval=0, fetch_odds=False, log=lambda *_: None)
     assert res2["summary"]["evaluated"] == 1
+
+
+# ------------------------------------------------ refresh (2分毎・推奨のみ) --
+
+def test_refresh_recommended_rescore_and_history(tmp_path, monkeypatch):
+    """refresh_recommended が推奨レースを最新オッズで再採点し、score_delta/履歴を付け、
+    サイドカーに履歴を書き、推奨外レースは据え置く。Claude (snapshot) は呼ばない。"""
+    import json
+    monkeypatch.setattr(shobu, "SHOBU_DIR", tmp_path)
+    date = "20260101"
+    result = {
+        "date": date,
+        "generated_at": "2026-01-01T10:00:00+09:00",
+        "options": {"use_separation": True, "use_claude_edge": True, "combine": "or",
+                    "sep_threshold": 35.0, "edge_margin": 3.0, "edge_threshold": 25.0},
+        "summary": {"total_discovered": 5},
+        "races": [
+            {"netkeiba_race_id": "202601010101", "race_id": "1-1-1", "venue": "X",
+             "race_no": 1, "race_type": "nar", "start_at": 0, "close_at": 0,
+             "n_runners": 3, "data_source": "snapshot", "has_snapshot": True,
+             "recommended": True, "matched": ["claude"], "shobu_score": 58.0, "reasons": []},
+            {"netkeiba_race_id": "202601010102", "race_id": "1-1-2", "venue": "X",
+             "race_no": 2, "race_type": "nar", "start_at": 0, "close_at": 0,
+             "n_runners": 3, "data_source": "snapshot", "has_snapshot": True,
+             "recommended": False, "matched": [], "shobu_score": 5.0, "reasons": []},
+        ],
+    }
+    (tmp_path / f"{date}.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+
+    snap = {"index_compare": [
+        {"number": 1, "name": "A", "claude_index": 40.0, "market_index": 80.0},
+        {"number": 2, "name": "B", "claude_index": 90.0, "market_index": 50.0},
+        {"number": 3, "name": "C", "claude_index": 60.0, "market_index": 30.0},
+    ], "n_runners": 3, "stage": "bet"}
+    monkeypatch.setattr(shobu, "_load_snapshot", lambda rid: snap)
+    # 最新オッズ: 強い1番人気 (馬2 1.2倍) → 強弱で推奨維持、ただし市場乖離は縮小 → 総合スコア低下。
+    monkeypatch.setattr(shobu, "_fetch_fresh_win",
+                        lambda rid, rtype: {"odds": {1: 8.0, 2: 1.2, 3: 12.0},
+                                            "names": {1: "A", 2: "B", 3: "C"}})
+
+    doc = shobu.refresh_recommended(date)
+    assert doc is not None
+    rec = next(r for r in doc["races"] if r["race_id"] == "1-1-1")
+    assert rec["data_source"] == "fresh"               # 最新オッズで再採点された
+    assert rec["recommended"] is True                   # 強弱で推奨維持
+    assert rec["score_prev"] == 58.0                    # シード = スキャン時スコア
+    assert rec["shobu_score"] < 58.0                    # 市場が Claude に追いつき低下
+    assert rec["score_delta"] < 0
+    assert len(rec["score_history"]) == 2               # シード + 今回
+    other = next(r for r in doc["races"] if r["race_id"] == "1-1-2")
+    assert "score_history" not in other                 # 推奨外は据え置き
+    assert (tmp_path / f"{date}.scores.json").exists()  # サイドカー
+    assert doc.get("refreshed_at")
+
+    # 2回目: 履歴が伸び、score_prev は前回の新スコア。
+    doc2 = shobu.refresh_recommended(date)
+    rec2 = next(r for r in doc2["races"] if r["race_id"] == "1-1-1")
+    assert len(rec2["score_history"]) == 3
+    assert rec2["score_prev"] == rec["shobu_score"]
+
+
+def test_refresh_recommended_missing_result(tmp_path, monkeypatch):
+    """スキャン結果ファイルが無ければ None (404 元)。"""
+    monkeypatch.setattr(shobu, "SHOBU_DIR", tmp_path)
+    assert shobu.refresh_recommended("20260102") is None

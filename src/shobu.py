@@ -33,10 +33,15 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 PRED_DIR = ROOT / "data" / "predictions"
+# 勝負レース スキャン結果 (<date>.json) と スコア履歴 (<date>.scores.json) の置き場。
+SHOBU_DIR = ROOT / "data" / "cache" / "shobu"
 PY = str(ROOT / ".venv" / "bin" / "python")
 if not Path(PY).exists():
     PY = sys.executable
 JST = ZoneInfo("Asia/Tokyo")
+# 市場指数の温度 (analyze.MARKET_INDEX_T のミラー)。market_index = 100·(1/odds)^(1/T)。
+# 最新オッズ取得時の基準B再計算で snapshot と同じ尺度の market_index を作るのに使う。
+_MARKET_INDEX_T = 1.5
 
 # ヘッダの netkeiba 場コード (01-10) は JRA。それ以外は NAR (= discovery の source でも判定)。
 _JRA_VENUE_CODES = {f"{i:02d}" for i in range(1, 11)}
@@ -155,7 +160,15 @@ def _separation(implied: dict[int, float],
 
 # --------------------------------------------------------------- Claude (B) ----
 
-def _claude_edge(snap: dict[str, Any], *, value_floor: float) -> dict[str, Any] | None:
+def _market_index_from_odds(odds: float) -> float | None:
+    """単勝オッズ → 市場指数 (0-100)。analyze._market_win_index と同式 100·(1/odds)^(1/T)。"""
+    if not odds or odds <= 0:
+        return None
+    return round(max(0.0, min(100.0, 100.0 * ((1.0 / float(odds)) ** (1.0 / _MARKET_INDEX_T)))), 1)
+
+
+def _claude_edge(snap: dict[str, Any], *, value_floor: float,
+                 market_override: dict[int, float] | None = None) -> dict[str, Any] | None:
     """snapshot から **市場とClaudeの順位乖離** を抽出 (単なる Claude>市場 ではなく順位の食い違い)。
 
     各馬を Claude 指数 / 市場指数それぞれで降順ランク付け (1=最上位) し、
@@ -170,12 +183,29 @@ def _claude_edge(snap: dict[str, Any], *, value_floor: float) -> dict[str, Any] 
       Claude 本命の市場順位ギャップを主軸に、乖離馬の順位差と指数差を加味 ("数値の差もいい感じに")。
 
     ランク比較には Claude 指数と市場指数の **両方** が要る。両方ある馬が 2 頭未満なら None。
+
+    `market_override` ({馬番: 単勝オッズ}) を渡すと **最新オッズから market_index を再計算**して
+    snapshot の (スキャン時点の) market_index を上書きする (2分毎の最新オッズ更新で基準Bも動かす)。
+    Claude 指数は snapshot 由来のまま (= Claude を呼ばずに市場順位だけ最新化)。override に居ない馬
+    (最新オッズ欠落) は基準Bの対象から外す。
     """
     rows: list[dict[str, Any]] = []
     ic = snap.get("index_compare")
+
+    def _mkt(num: Any, fallback: Any) -> float | None:
+        """override があれば最新オッズ由来 market_index、無ければ snapshot の値。"""
+        if market_override is not None:
+            try:
+                od = market_override.get(int(num)) if num is not None else None
+            except (TypeError, ValueError):
+                od = None
+            return _market_index_from_odds(od) if od else None
+        return float(fallback) if fallback is not None else None
+
     if isinstance(ic, list) and ic:
         for r in ic:
-            ci, mi = r.get("claude_index"), r.get("market_index")
+            ci = r.get("claude_index")
+            mi = _mkt(r.get("number"), r.get("market_index"))
             if ci is None or mi is None:
                 continue   # 順位比較には両方必要
             rows.append({"number": r.get("number"), "name": r.get("name", ""),
@@ -185,11 +215,15 @@ def _claude_edge(snap: dict[str, Any], *, value_floor: float) -> dict[str, Any] 
         lwi = snap.get("llm_win_index") or {}
         mwi = snap.get("market_win_index") or {}
         for k, ci in lwi.items():
-            mi = mwi.get(k)
+            try:
+                num = int(k)
+            except (TypeError, ValueError):
+                continue
+            mi = _mkt(num, mwi.get(k))
             if mi is None:
                 continue
             try:
-                rows.append({"number": int(k), "name": "", "claude_index": float(ci),
+                rows.append({"number": num, "name": "", "claude_index": float(ci),
                              "market_index": float(mi), "support": None, "alerts": []})
             except (TypeError, ValueError):
                 continue
@@ -227,6 +261,137 @@ def _claude_edge(snap: dict[str, Any], *, value_floor: float) -> dict[str, Any] 
             for r in edge[:6]
         ],
         "scored_at": snap.get("llm_scored_at"),
+    }
+
+
+# ---------------------------------------------------------------- 採点 --------
+
+def _evaluate_race(
+    r: dict[str, Any],
+    *,
+    use_separation: bool,
+    use_claude_edge: bool,
+    combine: str,
+    sep_threshold: float,
+    edge_margin: float,
+    edge_threshold: float,
+    claude_use_fresh_market: bool = False,
+) -> dict[str, Any]:
+    """1 レースを 2 基準 (強弱 / 市場乖離) で採点して結果 dict を返す。
+
+    `r` は `_snap` (snapshot) / `_fresh` ({"odds","names"}) を持つレースメタ。scan() と
+    refresh_recommended() の双方が使う共通採点。`claude_use_fresh_market=True` のとき、最新
+    オッズ (`_fresh`) があれば基準B (市場乖離) の market_index も最新オッズから再計算する。
+    """
+    snap = r.get("_snap")
+    fresh = r.get("_fresh")
+    # --- 強弱 (A) ---
+    sep = None
+    sep_source = None
+    if fresh:
+        sep = _separation(_implied_from_win_odds(fresh["odds"]), fresh.get("names"))
+        sep_source = "fresh"
+    elif snap and snap.get("market_win_index"):
+        implied = _implied_from_market_index(snap["market_win_index"])
+        names = {}
+        for h in (snap.get("horse_aptitude") or []):
+            if h.get("number") is not None:
+                names[int(h["number"])] = h.get("name", "")
+        sep = _separation(implied, names)
+        sep_source = "snapshot"
+    # --- Claude (B): 市場との順位乖離 (最新オッズがあれば market 側を再計算) ---
+    market_override = fresh["odds"] if (claude_use_fresh_market and fresh) else None
+    claude = (_claude_edge(snap, value_floor=edge_margin, market_override=market_override)
+              if snap else None)
+    # --- データ源 ---
+    data_source = "fresh" if fresh else ("snapshot" if snap else "none")
+    n_runners = (snap.get("n_runners") if snap else None) or (sep.get("n") if sep else None)
+    # --- 判定 ---
+    sep_avail = sep is not None
+    claude_avail = claude is not None
+    sep_pass = use_separation and sep_avail and sep["score"] >= sep_threshold
+    claude_pass = (use_claude_edge and claude_avail
+                   and claude["score"] >= edge_threshold)
+    active_passes = []
+    if use_separation:
+        active_passes.append(sep_pass)
+    if use_claude_edge:
+        active_passes.append(claude_pass)
+    if not active_passes:
+        recommended = False
+    elif combine == "and":
+        recommended = all(active_passes)
+    else:
+        recommended = any(active_passes)
+    matched = []
+    if sep_pass:
+        matched.append("sep")
+    if claude_pass:
+        matched.append("claude")
+    # --- score (ランキング用) ---
+    sep_s = sep["score"] if (use_separation and sep_avail) else 0.0
+    claude_s = claude["score"] if (use_claude_edge and claude_avail) else 0.0
+    comps = [s for s, active in
+             ((sep_s, use_separation), (claude_s, use_claude_edge)) if active]
+    if comps:
+        shobu_score = round(max(comps) + 0.25 * min(comps), 1) if len(comps) > 1 else round(comps[0], 1)
+        shobu_score = min(100.0, shobu_score)
+    else:
+        shobu_score = 0.0
+    # --- reasons (人が読む) ---
+    reasons: list[str] = []
+    if sep_avail:
+        fav = sep["favorites"][0] if sep["favorites"] else None
+        favtxt = (f" / 1番手 {fav['number']}番 {int(fav['prob']*100)}%"
+                  if fav else "")
+        reasons.append(f"強弱スコア {sep['score']:.0f}{favtxt}")
+    if claude_avail and (claude["top_rank_gap"] >= 1 or claude["edge_count"] > 0):
+        parts = []
+        tp = claude.get("top_pick")
+        if claude["top_rank_gap"] >= 1 and tp:
+            parts.append(f"Claude本命 {tp['number']}番=市場{tp['market_rank']}番人気")
+        if claude["edge_count"] > 0:
+            parts.append(f"乖離馬 {claude['edge_count']}頭")
+        reasons.append("市場乖離: " + " / ".join(parts) + f" (score {claude['score']:.0f})")
+    return {
+        "netkeiba_race_id": r["netkeiba_race_id"],
+        "race_id": r["race_id"],
+        "venue": r["venue"],
+        "race_no": r["race_no"],
+        "race_type": r["race_type"],
+        "start_at": r["start_at"],
+        "close_at": r["close_at"],
+        "n_runners": n_runners,
+        "data_source": data_source,
+        "sep_source": sep_source,
+        "has_snapshot": snap is not None,
+        "snapshot_stage": (snap.get("stage") if snap else None),
+        "separation": sep,
+        "claude": claude,
+        "recommended": recommended,
+        "matched": matched,
+        "shobu_score": shobu_score,
+        "reasons": reasons,
+    }
+
+
+def _build_summary(results: list[dict[str, Any]], total_discovered: int) -> dict[str, Any]:
+    """results から summary を組む (scan / refresh 共通)。"""
+    sep_scores = [r["separation"]["score"] for r in results if r.get("separation")]
+    sep_median = round(sorted(sep_scores)[len(sep_scores) // 2], 1) if sep_scores else None
+    return {
+        "total_discovered": total_discovered,
+        "evaluated": len(results),
+        "recommended": sum(1 for r in results if r.get("recommended")),
+        "with_snapshot": sum(1 for r in results if r.get("has_snapshot")),
+        "with_claude": sum(1 for r in results if r.get("claude")),
+        "with_fresh_odds": sum(1 for r in results if r.get("data_source") == "fresh"),
+        "sep_median": sep_median,
+        "by_type": {
+            "jra": sum(1 for r in results if r.get("race_type") == "jra"),
+            "nar": sum(1 for r in results if r.get("race_type") == "nar"),
+            "banei": sum(1 for r in results if r.get("race_type") == "banei"),
+        },
     }
 
 
@@ -442,98 +607,12 @@ def scan(
                     ok += 1
         _log(f"[odds] 取得成功 {ok}/{len(need_fresh)}")
 
-    # 各レースを採点。
-    def _evaluate(r: dict[str, Any]) -> dict[str, Any]:
-        snap = r.get("_snap")
-        fresh = r.get("_fresh")
-        # --- 強弱 (A) ---
-        sep = None
-        sep_source = None
-        if fresh:
-            sep = _separation(_implied_from_win_odds(fresh["odds"]), fresh.get("names"))
-            sep_source = "fresh"
-        elif snap and snap.get("market_win_index"):
-            implied = _implied_from_market_index(snap["market_win_index"])
-            names = {}
-            for h in (snap.get("horse_aptitude") or []):
-                if h.get("number") is not None:
-                    names[int(h["number"])] = h.get("name", "")
-            sep = _separation(implied, names)
-            sep_source = "snapshot"
-        # --- Claude (B): 市場との順位乖離 ---
-        claude = _claude_edge(snap, value_floor=edge_margin) if snap else None
-        # --- データ源 ---
-        data_source = "fresh" if fresh else ("snapshot" if snap else "none")
-        n_runners = (snap.get("n_runners") if snap else None) or (sep.get("n") if sep else None)
-        # --- 判定 ---
-        sep_avail = sep is not None
-        claude_avail = claude is not None
-        sep_pass = use_separation and sep_avail and sep["score"] >= sep_threshold
-        claude_pass = (use_claude_edge and claude_avail
-                       and claude["score"] >= edge_threshold)
-        active_passes = []
-        if use_separation:
-            active_passes.append(sep_pass)
-        if use_claude_edge:
-            active_passes.append(claude_pass)
-        if not active_passes:
-            recommended = False
-        elif combine == "and":
-            recommended = all(active_passes)
-        else:
-            recommended = any(active_passes)
-        matched = []
-        if sep_pass:
-            matched.append("sep")
-        if claude_pass:
-            matched.append("claude")
-        # --- score (ランキング用) ---
-        sep_s = sep["score"] if (use_separation and sep_avail) else 0.0
-        claude_s = claude["score"] if (use_claude_edge and claude_avail) else 0.0
-        comps = [s for s, active in
-                 ((sep_s, use_separation), (claude_s, use_claude_edge)) if active]
-        if comps:
-            shobu_score = round(max(comps) + 0.25 * min(comps), 1) if len(comps) > 1 else round(comps[0], 1)
-            shobu_score = min(100.0, shobu_score)
-        else:
-            shobu_score = 0.0
-        # --- reasons (人が読む) ---
-        reasons: list[str] = []
-        if sep_avail:
-            fav = sep["favorites"][0] if sep["favorites"] else None
-            favtxt = (f" / 1番手 {fav['number']}番 {int(fav['prob']*100)}%"
-                      if fav else "")
-            reasons.append(f"強弱スコア {sep['score']:.0f}{favtxt}")
-        if claude_avail and (claude["top_rank_gap"] >= 1 or claude["edge_count"] > 0):
-            parts = []
-            tp = claude.get("top_pick")
-            if claude["top_rank_gap"] >= 1 and tp:
-                parts.append(f"Claude本命 {tp['number']}番=市場{tp['market_rank']}番人気")
-            if claude["edge_count"] > 0:
-                parts.append(f"乖離馬 {claude['edge_count']}頭")
-            reasons.append("市場乖離: " + " / ".join(parts) + f" (score {claude['score']:.0f})")
-        return {
-            "netkeiba_race_id": r["netkeiba_race_id"],
-            "race_id": r["race_id"],
-            "venue": r["venue"],
-            "race_no": r["race_no"],
-            "race_type": r["race_type"],
-            "start_at": r["start_at"],
-            "close_at": r["close_at"],
-            "n_runners": n_runners,
-            "data_source": data_source,
-            "sep_source": sep_source,
-            "has_snapshot": snap is not None,
-            "snapshot_stage": (snap.get("stage") if snap else None),
-            "separation": sep,
-            "claude": claude,
-            "recommended": recommended,
-            "matched": matched,
-            "shobu_score": shobu_score,
-            "reasons": reasons,
-        }
-
-    results = [_evaluate(r) for r in races]
+    # 各レースを採点 (scan / refresh 共通の _evaluate_race を使う)。
+    eval_kwargs = dict(
+        use_separation=use_separation, use_claude_edge=use_claude_edge, combine=combine,
+        sep_threshold=sep_threshold, edge_margin=edge_margin, edge_threshold=edge_threshold,
+    )
+    results = [_evaluate_race(r, **eval_kwargs) for r in races]
 
     # --- Claude 指数の生成 (ボタンで一括取得 / 上位N件) ---
     # claude_all=True: Claude 指数が無い発走前レースを **全件** 生成 (ボタン押下で一気に取得)。
@@ -556,29 +635,14 @@ def scan(
                 if base is None:
                     continue
                 base["_snap"] = _load_snapshot(t["race_id"])
-                results[pos[t["race_id"]]] = _evaluate(base)
+                results[pos[t["race_id"]]] = _evaluate_race(base, **eval_kwargs)
         else:
             _log("[claude-eval] 生成対象なし (全レース既に Claude 指数あり/締切済)")
 
     # 並べ替え: 推奨を上に、その中で shobu_score 降順。
     results.sort(key=lambda r: (r["recommended"], r["shobu_score"]), reverse=True)
 
-    sep_scores = [r["separation"]["score"] for r in results if r["separation"]]
-    sep_median = round(sorted(sep_scores)[len(sep_scores) // 2], 1) if sep_scores else None
-    summary = {
-        "total_discovered": len(discovered),
-        "evaluated": len(results),
-        "recommended": sum(1 for r in results if r["recommended"]),
-        "with_snapshot": sum(1 for r in results if r["has_snapshot"]),
-        "with_claude": sum(1 for r in results if r["claude"]),
-        "with_fresh_odds": sum(1 for r in results if r["data_source"] == "fresh"),
-        "sep_median": sep_median,
-        "by_type": {
-            "jra": sum(1 for r in results if r["race_type"] == "jra"),
-            "nar": sum(1 for r in results if r["race_type"] == "nar"),
-            "banei": sum(1 for r in results if r["race_type"] == "banei"),
-        },
-    }
+    summary = _build_summary(results, len(discovered))
     options = {
         "date": date, "race_type": race_type,
         "use_separation": use_separation, "use_claude_edge": use_claude_edge,
@@ -596,6 +660,129 @@ def scan(
         "summary": summary,
         "races": results,
     }
+
+
+# ---------------------------------------------------- refresh (2分毎・推奨のみ) --
+
+_SCORE_HISTORY_MAX = 40
+
+
+def _scores_path(date: str) -> Path:
+    return SHOBU_DIR / f"{date}.scores.json"
+
+
+def _load_scores(date: str) -> dict[str, list[list[float]]]:
+    p = _scores_path(date)
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _iso_to_unix(iso: str | None) -> int | None:
+    if not iso:
+        return None
+    try:
+        return int(datetime.fromisoformat(iso).timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def refresh_recommended(date: str | None = None, *, parallel: int = 8,
+                        log: Callable[[str], None] | None = None) -> dict[str, Any] | None:
+    """既存スキャン結果の **推奨 (勝負レース) のみ** を最新オッズで再採点する (Claude は呼ばない)。
+
+    勝負レースページを開いている間 2 分毎に呼ばれる軽量更新。各推奨レースの単勝を 1 回 fetch し、
+    強弱 (基準A) と 市場乖離 (基準B = market_index を最新オッズで再計算) を recompute → 勝負スコアを
+    更新する。スコア履歴 (data/cache/shobu/<date>.scores.json) に追記し、前回比 (score_delta) と
+    履歴 (score_history) をレースに付ける。結果 JSON を上書きして返す。結果ファイルが無ければ None。
+
+    discovery も Claude -p も呼ばない (= netkeiba 規制リスク無し・即時)。推奨外レースは据え置き。
+    """
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    date = date or today_jst()
+    rp = SHOBU_DIR / f"{date}.json"
+    if not rp.exists():
+        return None
+    try:
+        doc = json.loads(rp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    races = doc.get("races") or []
+    opts = doc.get("options") or {}
+    eval_kwargs = dict(
+        use_separation=bool(opts.get("use_separation", True)),
+        use_claude_edge=bool(opts.get("use_claude_edge", True)),
+        combine=str(opts.get("combine", "or")),
+        sep_threshold=float(opts.get("sep_threshold", 35.0)),
+        edge_margin=float(opts.get("edge_margin", 3.0)),
+        edge_threshold=float(opts.get("edge_threshold", 25.0)),
+    )
+    rec_idx = [i for i, r in enumerate(races) if r.get("recommended")]
+    now = int(time.time())
+    if rec_idx:
+        # 推奨レースの単勝を並列 fetch (1 レース 1 リクエスト)。
+        fresh_by_i: dict[int, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=max(1, parallel)) as ex:
+            futs = {ex.submit(_fetch_fresh_win, races[i]["netkeiba_race_id"],
+                              races[i]["race_type"]): i for i in rec_idx}
+            for fut in as_completed(futs):
+                i = futs[fut]
+                try:
+                    res = fut.result()
+                except Exception:  # noqa: BLE001
+                    res = None
+                if res:
+                    fresh_by_i[i] = res
+        _log(f"[refresh] 最新オッズ {len(fresh_by_i)}/{len(rec_idx)} 取得")
+
+        scores = _load_scores(date)
+        gen_unix = _iso_to_unix(doc.get("generated_at"))
+        for i in rec_idx:
+            fresh = fresh_by_i.get(i)
+            if fresh is None:
+                continue   # 取得失敗は据え置き (履歴も増やさない)
+            old = races[i]
+            meta = {**old, "_snap": _load_snapshot(old["race_id"]), "_fresh": fresh}
+            new = _evaluate_race(meta, claude_use_fresh_market=True, **eval_kwargs)
+            rid = old["race_id"]
+            prev_score = round(float(old.get("shobu_score") or 0.0), 1)
+            hist = scores.get(rid) or []
+            if not hist:
+                hist = [[gen_unix or now, prev_score]]   # スキャン時点をシード
+            new_score = round(float(new.get("shobu_score") or 0.0), 1)
+            hist.append([now, new_score])
+            hist = hist[-_SCORE_HISTORY_MAX:]
+            scores[rid] = hist
+            new["score_prev"] = hist[-2][1]
+            new["score_delta"] = round(new_score - hist[-2][1], 1)
+            new["score_history"] = [{"at": int(a), "score": s} for a, s in hist]
+            new["refreshed_at"] = now
+            races[i] = new
+        _atomic_write_json(_scores_path(date), scores)
+
+    # 並べ替え (推奨を上, shobu_score 降順) + summary 再計算 + refreshed_at。
+    races.sort(key=lambda r: (bool(r.get("recommended")), r.get("shobu_score") or 0.0), reverse=True)
+    doc["races"] = races
+    doc["summary"] = _build_summary(
+        races, (doc.get("summary") or {}).get("total_discovered", len(races)))
+    doc["refreshed_at"] = datetime.now(JST).isoformat(timespec="seconds")
+    _atomic_write_json(rp, doc)
+    return doc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -622,7 +809,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--score-queries-per-horse", type=int, default=None, help="1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE, 並列時のみ有効)")
     ap.add_argument("--llm-max-concurrent", type=int, default=None, help="claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)")
     ap.add_argument("--max-races", type=int, default=None)
+    ap.add_argument("--refresh", action="store_true",
+                    help="既存スキャン結果の推奨レースのみ最新オッズで再採点 (Claude 呼ばない)")
     args = ap.parse_args(argv)
+
+    if args.refresh:
+        result = refresh_recommended(date=args.date)
+        if result is None:
+            print("[refresh] スキャン結果が見つかりません (先に scan を実行してください)", flush=True)
+            return 1
+        print(f"[refresh] {result['date']} 推奨 {result['summary']['recommended']} 件を更新 "
+              f"({result.get('refreshed_at')})", flush=True)
+        return 0
 
     result = scan(
         date=args.date,

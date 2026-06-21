@@ -636,11 +636,19 @@ export type ShobuRace = {
   matched: string[];             // "sep" / "claude"
   shobu_score: number;           // ランキング用の総合スコア (0-100)
   reasons: string[];
+  // 2分毎の最新オッズ更新 (POST /api/shobu/refresh) で推奨レースに付く:
+  // 勝負スコアの前回比 (score_delta = 今回−前回, 正=上昇) と時系列履歴。
+  score_delta?: number | null;
+  score_prev?: number | null;
+  score_history?: Array<{ at: number; score: number }>;
+  refreshed_at?: number | null;  // 最終 refresh の unix 秒
 };
 
 export type ShobuResult = {
   date: string;
   generated_at: string;
+  // 最新オッズ更新 (refresh) の最終時刻 (ISO8601 JST)。未更新なら欠落。
+  refreshed_at?: string;
   options: {
     date: string;
     race_type: "all" | "jra" | "nar" | "banei";
@@ -791,6 +799,13 @@ export const api = {
     jsonFetch<ShobuResult>(
       `/api/shobu/result${date ? `?date=${encodeURIComponent(date)}` : ""}`,
     ),
+  // 推奨 (勝負レース) のみ最新オッズで再採点 (2分毎ポーリング用)。Claude は呼ばず単勝 1 fetch/レース。
+  // 勝負スコアの履歴・前回比 (score_delta) 付きの更新済 ShobuResult を返す。未スキャンは 404。
+  refreshShobu: (date?: string) =>
+    jsonFetch<ShobuResult>(`/api/shobu/refresh`, {
+      method: "POST",
+      body: JSON.stringify({ date: date ?? null }),
+    }),
   // 勝負レース専用の仮想収支 (Claude 指数上位N頭の3連単 BOX を買ったと仮定)。
   shobuPnl: (pointCost = 100) =>
     jsonFetch<ShobuPnl>("/api/shobu/pnl?point_cost=" + pointCost),

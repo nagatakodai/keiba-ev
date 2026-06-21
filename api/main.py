@@ -523,6 +523,31 @@ def api_shobu_result(date: str | None = None) -> dict[str, Any]:
     return d
 
 
+class ShobuRefreshRequest(BaseModel):
+    # 再採点する日付 (YYYYMMDD)。None なら当日 JST。
+    date: str | None = None
+
+
+@app.post("/api/shobu/refresh")
+async def api_shobu_refresh(req: ShobuRefreshRequest) -> dict[str, Any]:
+    """勝負レース (推奨) のみ最新オッズで再採点 (Claude 呼ばず単勝 1 fetch/レース)。
+
+    勝負レースページを開いている間 2 分毎に叩く軽量更新。強弱 (基準A) と 市場乖離 (基準B=
+    market_index を最新オッズで再計算) を recompute して勝負スコアを更新、スコア履歴に追記して
+    前回比 (score_delta) 付きの更新済 ShobuResult を返す。スキャン結果が無ければ 404。
+    discovery も Claude -p も呼ばない (= netkeiba 規制リスク無し・即時)。
+    """
+    date = (req.date or shobu_today_jst()).strip()
+    import re as _re
+    if not _re.fullmatch(r"\d{8}", date):
+        raise HTTPException(400, f"invalid date (YYYYMMDD expected): {req.date}")
+    from src.shobu import refresh_recommended  # 遅延 import (scrape は呼ばれる時のみ)
+    doc = await asyncio.to_thread(refresh_recommended, date)
+    if doc is None:
+        raise HTTPException(404, "shobu result not found (まだスキャンしていません)")
+    return doc
+
+
 @app.get("/api/shobu/pnl")
 def api_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
     """勝負レース専用の **仮想収支** (Claude 指数上位5頭の3連単 BOX を買ったと仮定)。
