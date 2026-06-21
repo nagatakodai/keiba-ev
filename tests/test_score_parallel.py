@@ -193,3 +193,27 @@ def test_dispatcher_off_when_too_few_horses(monkeypatch):
     rd = _mk_race(6)   # < 8 頭 → 単一セッション
     events = list(llm.score_horses(rd))
     assert ("result", "SINGLE_SMALL_FIELD") in events
+
+
+def test_score_prompts_have_no_market_odds():
+    """Claude 指数の score プロンプト (単一 + 並列 RESEARCH/SCORING) は単勝オッズ・人気を
+    一切載せない = 市場非依存 (2026-06-21)。適性総合は過去走由来でオッズ非依存なので残す。"""
+    from types import SimpleNamespace
+    rd = _mk_race(6)
+    rd.race.horses[0].win_odds = 77.7          # 距離/馬体重と衝突しない distinctive 値
+    apt = {1: SimpleNamespace(total=88.0)}
+    prompts = {
+        "score": llm.build_horse_score_prompt(rd, aptitudes=apt),
+        "research": llm.build_horse_research_prompt(rd, [1, 2], aptitudes=apt),
+        "from_research": llm.build_horse_score_from_research_prompt(
+            rd, {1: {"alerts": [], "support": 1, "digest": "d"}}, aptitudes=apt),
+    }
+    for label, p in prompts.items():
+        assert "| 単勝 |" not in p, f"{label}: 単勝オッズ列が残存"
+        assert "単勝オッズ)" not in p, f"{label}: 表ヘッダに単勝オッズ"
+        assert "77.7" not in p, f"{label}: 単勝オッズ値が漏洩"
+        assert "| 88 |" in p, f"{label}: 適性総合が落ちている"
+    # オッズ・人気アンカー指示は除去、意図的非提示の注記は明記。
+    assert "オッズの常識" not in prompts["score"]
+    assert "人気・評価が" not in prompts["score"]
+    assert "意図的に与えていません" in prompts["score"]
