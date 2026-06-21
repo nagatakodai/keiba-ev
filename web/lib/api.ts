@@ -193,13 +193,6 @@ export type TrifectaHitmaxBundle = {
   // "claude" = 締切直前に Claude が3連単買い目を選定 (build_trifecta_from_keys)。
   // 無し/その他 = 機械フォーメーション (build_trifecta_hitmax)。
   selection_source?: string | null;
-  // 3連単束モード: "recovery"=回収(穴狙い, 市場1番人気を1着除外・Claude指数>90で解禁) /
-  // "hit"=旧 全力的中。古い snapshot は欠落 (= hit 相当)。
-  mode?: string | null;
-  excluded_head?: number | null;        // 回収モードで1着から除外した馬番 (市場1番人気)。null=除外なし
-  market_favorite?: number | null;      // 市場1番人気の馬番 (ゲート判定に使用)
-  favorite_claude_index?: number | null; // 1番人気の Claude 指数 (>90 で1着解禁)
-  dropped_excluded_head?: number;       // 1着除外ルール違反でハードフィルタした買い目数
   llm_select?: { summary?: string; confidence?: string; n_keys?: number } | null;
   formation?: string | null;      // "1×4×7" (1着×2着×3着 の頭数)
   head_horses?: number[];         // 1着候補 (絞る)
@@ -383,9 +376,6 @@ export type WatchAutoStatus = {
     plan_t_bankroll?: number;
     // 3連単の1レース購入予算 (円)。束の合計購入額をこの予算内に収める (Claude選定・モデル共通)。
     trifecta_bankroll?: number;
-    // 3連単束モード: "recovery"=回収(穴狙い, 市場1番人気を1着除外・Claude指数>90で解禁, 既定) /
-    // "hit"=旧 全力的中。旧 persist 済 config は欠落 (= recovery 扱い)。
-    trifecta_mode?: "recovery" | "hit";
     // 投票束 (2026-06-10 復活): "ev"=EV束 (recommended_bundle, 推奨既定) / "trifecta"=3連単束。
     // 旧 persist 済 config は欠落 (= 旧挙動 trifecta 扱い、resume 側で互換処理)。
     bet_bundle?: "ev" | "trifecta";
@@ -525,9 +515,6 @@ export type CalibrationRaceItem = {
   trifecta_bundle_stake?: number;
   trifecta_bundle_payout?: number;              // 予想オッズ基準
   trifecta_bundle_payout_final?: number;        // 最終オッズ基準
-  // 3連単束のモード。"hit"=的中 / "recovery"=回収 (mode 欠落の旧 snapshot は "hit" に
-  // 正規化済)。束なし race は null。
-  trifecta_bundle_mode?: "hit" | "recovery" | null;
   // 3連単的中モードの計測対象か (saved_at >= trifecta_cutoff)。false は集計/チャート除外。
   trifecta_measured?: boolean;
   // EV束 (実弾既定束) の計測対象か (saved_at >= ev_cutoff = 修正版 EV束の稼働開始 2026-06-10)。
@@ -577,11 +564,6 @@ export type CalibrationReport = {
   // 3連単束 (recommended_bundle_t, KEIBA_BET_BUNDLE=trifecta 選択時の実弾束) の集計。
   // claude_bundle と同形。trifecta_cutoff 以降の race のみが分母に入る。
   trifecta_bundle?: ClaudeBundleAggregate;
-  // 3連単束の mode 別集計 (trifecta_bundle と同形)。hit=的中モード / recovery=回収モード。
-  trifecta_bundle_modes?: {
-    hit?: ClaudeBundleAggregate;
-    recovery?: ClaudeBundleAggregate;
-  };
   // 各系列の計測開始日 (ISO8601 JST naive)。注記表示用。
   trifecta_cutoff?: string;
   ev_cutoff?: string;
@@ -852,7 +834,6 @@ export const api = {
     bet_payment_method?: "opcoin" | "buylimit";
     bet_ipat?: boolean;
     trifecta_bankroll?: number;
-    trifecta_mode?: "recovery" | "hit";
     bet_bundle?: "ev" | "trifecta";
     ev_bankroll?: number;
     score_parallel?: boolean;

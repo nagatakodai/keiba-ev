@@ -544,7 +544,6 @@ class WatchAutoManager:
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
         trifecta_bankroll: int = 10_000,
-        trifecta_mode: str = "hit",
         bet_bundle: str = "ev",
         ev_bankroll: int = 5_000,
         score_parallel: bool = False,
@@ -567,7 +566,6 @@ class WatchAutoManager:
                 bet_auto_login=bet_auto_login,
                 bet_ipat=bet_ipat,
                 trifecta_bankroll=trifecta_bankroll,
-                trifecta_mode=trifecta_mode,
                 bet_bundle=bet_bundle,
                 ev_bankroll=ev_bankroll,
                 score_parallel=score_parallel,
@@ -601,7 +599,6 @@ class WatchAutoManager:
         bet_auto_login: bool = False,
         bet_ipat: bool = False,
         trifecta_bankroll: int = 10_000,
-        trifecta_mode: str = "hit",
         bet_bundle: str = "ev",
         ev_bankroll: int = 5_000,
         score_parallel: bool = False,
@@ -610,8 +607,6 @@ class WatchAutoManager:
         # 投票束/予算系の値検証 (env への適用は early-return 判定の**後** — 下記参照)。
         if bet_bundle not in ("ev", "trifecta"):
             bet_bundle = "ev"
-        if trifecta_mode not in ("recovery", "hit"):
-            trifecta_mode = "hit"
         # daemon に渡す掛金倍率 (各脚 stake を ×N)。
         eff_stake_multiplier = bet_stake_multiplier
         # self.job が既に "running" なら早期 return。pending (spawn 中) も
@@ -693,8 +688,6 @@ class WatchAutoManager:
         # 伝播する (_save_prediction_snapshot が _trifecta_bankroll で尊重)。束を組む時点の予算なので、
         # 投票倍率 (bet_stake_multiplier) とは別物。変更はループ再起動が必要 (spawn 時に env が固定)。
         os.environ["KEIBA_TRIFECTA_BANKROLL"] = str(int(trifecta_bankroll))
-        # 3連単束モード (recovery=回収/穴狙い 既定, hit=旧 全力的中) も env で全 dispatch に伝播。
-        os.environ["KEIBA_TRIFECTA_MODE"] = trifecta_mode
         # score ステージ (Claude 指数) の検索並列化と検索回数 (src/llm.py score_horses が尊重)。
         # _env_truthy は未設定=False なので、ON のときだけ "1" を立てる (OFF 時は積極的に消す)。
         if score_parallel:
@@ -765,7 +758,6 @@ class WatchAutoManager:
             "bet_auto_login": bet_auto_login,
             "bet_ipat": bet_ipat,
             "trifecta_bankroll": trifecta_bankroll,
-            "trifecta_mode": trifecta_mode,
             "bet_bundle": bet_bundle,
             "ev_bankroll": ev_bankroll,
             "score_parallel": score_parallel,
@@ -1037,9 +1029,6 @@ class WatchAutoManager:
                     if cfg.get("trifecta_bankroll") is not None
                     else int(cfg["plan_t_bankroll"])
                     if cfg.get("plan_t_bankroll") is not None else 10_000,
-                # 旧 state (mode キー無し) は既定 hit。不正値は _start_locked 側でも hit に倒す。
-                trifecta_mode=str(cfg["trifecta_mode"])
-                    if cfg.get("trifecta_mode") else "hit",
                 # 旧 state (bet_bundle キー無し) は旧挙動 = 3連単束を維持 (resume で投票束が
                 # 黙って EV束に切り替わるのを防ぐ)。新規開始の既定は ev (main.py の Literal 既定)。
                 bet_bundle=str(cfg["bet_bundle"])

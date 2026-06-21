@@ -865,8 +865,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
     # fresh 単勝オッズを Horse.win_odds に overlay (oddspark 経路の overlay_oddspark_odds と
     # 同パターン)。cached netkeiba 出馬表利用時は h.win_odds が cache 時点の stale 値のままで、
-    # _market_favorite (recovery モードの1番人気特定・1.5倍帯ゲート) と market_anchor_probs が
-    # 古いオッズで誤判定していた (2026-06-10 bughunt 修正)。
+    # market_anchor_probs が古いオッズで誤判定していた (2026-06-10 bughunt 修正)。
     for _h in rd.race.horses:
         if _h.number in win_odds:
             _h.win_odds = win_odds[_h.number]

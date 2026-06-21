@@ -316,24 +316,8 @@ def test_build_trifecta_from_keys_max_points_cap():
     assert b["n_candidates"] <= 20                     # max_points で打ち切り
 
 
-def test_build_trifecta_from_keys_exclude_head():
-    """回収モード: exclude_head の馬が1着の key はハードフィルタで除外 (2着/3着は可)。"""
-    win = {1: 0.40, 2: 0.25, 3: 0.15, 4: 0.12, 5: 0.08}
-    probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
-    tri = _tri_odds([((1, 2, 3), 60), ((2, 1, 3), 120), ((3, 1, 2), 200), ((2, 3, 1), 150)])
-    keys = [[1, 2, 3], [2, 1, 3], [3, 1, 2], [2, 3, 1]]
-    b = pf.build_trifecta_from_keys(probs, tri, keys, exclude_head=1)
-    got = {tuple(l["key"]) for l in b["legs"]}
-    # 馬1 が1着の (1,2,3) は除外。2着/3着に馬1 を含む key は残る。
-    assert (1, 2, 3) not in got
-    assert b["dropped_excluded_head"] == 1
-    assert b["excluded_head"] == 1
-    assert got <= {(2, 1, 3), (3, 1, 2), (2, 3, 1)}
-    assert len(got) >= 1
-
-
-def test_trifecta_hitmax_exclude_head():
-    """回収モード: build_trifecta_hitmax の1着列から exclude_head を除外 (2着/3着列は可)。"""
+def test_trifecta_hitmax_head_gap_two_horses():
+    """build_trifecta_hitmax: 指数 top2 が接戦なら1着列が2頭になる (head_gap 判定)。"""
     from src.models import BetOdds
     win = {i: 1.0 / 8 for i in range(1, 9)}
     probs = Probabilities(win=win, place2=dict(win), place3=dict(win))
@@ -343,17 +327,9 @@ def test_trifecta_hitmax_exclude_head():
             for c in range(1, 9):
                 if len({a, b_, c}) == 3:
                     trif.append(BetOdds(bet_type="trifecta", key=[a, b_, c], odds=300.0))
-    # Claude 指数1位 = 馬1 (市場1番人気想定) を1着除外 → head は馬2から。
+    # 馬1=100, 馬2=95 (相対差 5/100 < 0.12) → head 2頭。
     rank = {i: 100 - i * 5 for i in range(1, 9)}
-    bt = pf.build_trifecta_hitmax(probs, trif, rank_index=rank, exclude_head=1,
+    bt = pf.build_trifecta_hitmax(probs, trif, rank_index=rank,
                                   head_max=2, head_gap=0.12)
-    assert bt["excluded_head"] == 1
-    assert 1 not in bt["head_horses"]
-    assert all(l["key"][0] != 1 for l in bt["legs"])
-    # 2着/3着列には馬1 が残ってよい (mid/tail は全ランキングから)。
-    assert 1 in bt["mid_horses"] or 1 in bt["tail_horses"]
-    # head_gap 判定は除外後の top2 (馬2=90, 馬3=85: 相対差 5/90 < 0.12) → head 2頭。
-    assert bt["head_horses"] == [2, 3]
-    # 除外なしと比べ head が一つ下にずれる
-    bt0 = pf.build_trifecta_hitmax(probs, trif, rank_index=rank, head_max=2, head_gap=0.12)
-    assert bt0["head_horses"] == [1, 2]
+    assert bt["head_horses"] == [1, 2]
+    assert all(l["key"][0] in (1, 2) for l in bt["legs"])

@@ -165,9 +165,6 @@ export default function WatchAutoPage() {
   // 初期値は計測モード ¥2,000 (2026-06-10 実測: 3連単束は全系列 ROI 14-83% — rolling ROI>100%
   // が出るまで実弾は最小限に。bundle_calibration_report.py で定点観測)。
   const [trifectaBankroll, setTrifectaBankroll] = useState("2000");
-  // 3連単束モード: recovery=回収(穴狙い, 市場1番人気はClaude指数>90でない限り1着に置かない) /
-  // hit=旧 全力的中 (既定, 2026-06-18〜 実測 ROI で hit>recovery)。env KEIBA_TRIFECTA_MODE で全 dispatch subprocess に伝播。
-  const [trifectaMode, setTrifectaMode] = useState<"recovery" | "hit">("hit");
   // 投票束 (2026-06-10 レビュー後の推奨既定 = EV束): "ev"=EV束 — 全脚がドリフトシェード込み
   // P×O≥1.02 + px_o≤2.0 + ½Kelly + トリガミ防止を通過した時のみ買う (大半のレースは見送り =
   // 正しい挙動)。"trifecta"=3連単束 (Claude 指数・市場無視, 実測 -EV のため計測モード推奨)。
@@ -218,11 +215,9 @@ export default function WatchAutoPage() {
     // 旧 config 互換: 旧キー plan_t_bankroll で persist された予算も読む。
     if (c.trifecta_bankroll != null) setTrifectaBankroll(String(c.trifecta_bankroll));
     else if (c.plan_t_bankroll != null) setTrifectaBankroll(String(c.plan_t_bankroll));
-    if (c.trifecta_mode === "recovery" || c.trifecta_mode === "hit")
-      setTrifectaMode(c.trifecta_mode);
     // 旧 config (bet_bundle キー無し) は旧挙動 = 3連単束として表示 (黙って EV束に変えない)。
     if (c.bet_bundle === "ev" || c.bet_bundle === "trifecta") setBetBundle(c.bet_bundle);
-    else if (c.trifecta_bankroll != null || c.trifecta_mode != null) setBetBundle("trifecta");
+    else if (c.trifecta_bankroll != null) setBetBundle("trifecta");
     if (c.ev_bankroll != null) setEvBankroll(String(c.ev_bankroll));
     if (c.score_parallel != null) setScoreParallel(!!c.score_parallel);
     if (c.score_queries_per_horse != null) setScoreQueriesPerHorse(String(c.score_queries_per_horse));
@@ -301,7 +296,6 @@ export default function WatchAutoPage() {
           const v = parseInt(trifectaBankroll, 10);
           return Number.isFinite(v) && v >= 100 ? v : 10000;
         })(),
-        trifecta_mode: trifectaMode,
         bet_bundle: betBundle,
         // EV束の1レース予算 (円)。backend は ge=100 拒否なので NaN/100未満は既定 5000 に。
         ev_bankroll: (() => {
@@ -622,22 +616,6 @@ export default function WatchAutoPage() {
                     disabled={running}
                   />
                 )}
-                {betBundle === "trifecta" && (
-                  <Select
-                    label="3連単束モード"
-                    value={trifectaMode}
-                    onChange={(e) => setTrifectaMode(e.target.value as "recovery" | "hit")}
-                    disabled={running}
-                    hint={
-                      trifectaMode === "recovery"
-                        ? "市場1番人気は単勝1.5倍未満の鉄板か Claude 指数 > 90 でない限り1着に置かない"
-                        : "旧 全力的中: 1着除外なし (Claude 指数上位をそのまま1着候補に)"
-                    }
-                  >
-                    <option value="hit">的中 (旧 全力的中) — 既定</option>
-                    <option value="recovery">回収 (穴狙い)</option>
-                  </Select>
-                )}
               </div>
               <div className="mt-3 flex items-center gap-5 text-sm flex-wrap">
                 <Toggle checked={betOddspark} onChange={setBetOddspark} disabled={running}>
@@ -657,7 +635,7 @@ export default function WatchAutoPage() {
                       </>
                     ) : (
                       <>
-                        投票束は <b>3連単束 (市場無視・既定 回収モード)</b>。
+                        投票束は <b>3連単束 (市場無視・的中モード)</b>。
                         <b>Claude 指数が無いレースは自動 skip</b> します (rank_source≠claude は投票しない)。
                       </>
                     )}
@@ -848,7 +826,7 @@ export default function WatchAutoPage() {
         ) : (
           <p className="text-xs text-(--color-muted)">
             {running
-              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 150}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"} / 束=${status?.config?.bet_bundle === "ev" ? "EV束" : `3連単/${status?.config?.trifecta_mode === "hit" ? "的中" : "回収(穴狙い)"}`}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}${status?.config?.score_parallel ? ` / score並列×q${status?.config?.score_queries_per_horse ?? 6}` : ""}`
+              ? `稼働中: 考察${status?.config?.score_window ?? 5}分前→投票締切${status?.config?.bet_lead_sec ?? 150}秒前 / ${status?.config?.interval_sec}s / ${status?.config?.active_hours ?? "—"} / 束=${status?.config?.bet_bundle === "ev" ? "EV束" : "3連単/的中"}${status?.config?.bet_oddspark ? (status?.bet_running ? " / 投票ブラウザ稼働中" : " / 投票ブラウザ未起動") : ""}${status?.config?.bet_ipat ? (status?.ipat_bet_running ? " / IPAT稼働中" : " / IPAT未起動") : ""}${status?.config?.score_parallel ? ` / score並列×q${status?.config?.score_queries_per_horse ?? 6}` : ""}`
               : "停止中。「設定」ボタンでパラメータを展開。"}
             {error && <span className="ml-2 text-(--color-bad)">{error}</span>}
           </p>

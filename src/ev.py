@@ -94,8 +94,8 @@ LGBM_TEMPERATURE = 0.4
 #   - β=0 では past_runs 欠損時に fundamental が一様分布に縮退し、EV=odds/n で
 #     「最長オッズを自動購入」する事故が実発生 (snapshot 2026650608-608-5: 全馬 prob=0.1000
 #     のまま 単勝39.9倍/ワイド47.4倍 を購入)。
-#   - 実弾系列の実測 ROI: EV束 69.7% (n=284) / 3連単束 claude 53.7% (n=99) /
-#     recovery モード 14.9% (n=26) — 全系列が大幅マイナス。
+#   - 実弾系列の実測 ROI: EV束 69.7% (n=284) / 3連単束 claude 53.7% (n=99)
+#     — 全系列が大幅マイナス。
 # → live を市場アンカー (β=BLEND_DEFAULT=0.78) に復帰。Claude 指数・速度図表は
 #   fundamental 側に残り「市場とズレる所」は px_o (P×O) として引き続き観測される。
 # β の再推定は scripts/fit_blend_mle.py (Benter 2-step, α+β 自由) で live 蓄積データから

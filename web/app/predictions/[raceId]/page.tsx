@@ -689,9 +689,7 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
   const rankLabel = b.rank_source === "claude" ? "Claude 指数" : "モデル指数 (Claude 未実施)";
   // 締切直前に Claude が買い目自体を選定したか (build_trifecta_from_keys)。
   const claudeSelected = b.selection_source === "claude";
-  // 回収モード (穴狙い): 市場1番人気を1着除外 (Claude 指数 > 90 で解禁)。古い snapshot は mode 欠落 = hit。
-  const recovery = b.mode === "recovery";
-  const modeTitle = recovery ? "3連単回収モード (穴狙い)" : "3連単的中モード — 全力フォーメーション";
+  const modeTitle = "3連単的中モード — 全力フォーメーション";
   return (
     <Card
       tone={settled && hit ? "active" : "default"}
@@ -700,27 +698,6 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
           <Target className="w-4 h-4 text-(--color-magenta) shrink-0" aria-hidden />
           <span>{modeTitle}</span>
           <Badge tone="warn">市場無視</Badge>
-          {recovery && b.excluded_head != null && (
-            <Badge tone="info">1着除外: 馬{b.excluded_head} (市場1番人気)</Badge>
-          )}
-          {recovery && b.excluded_head == null && b.market_favorite != null && (() => {
-            // 解禁理由は2系統 (src/analyze.py _recovery_exclude_head): ①鉄板帯
-            // (単勝<1.5 — 指数と無関係) ②Claude 指数>90。snapshot に理由が無いので
-            // 指数で判別する (旧表示は常に「指数X>90」で、鉄板帯解禁に虚偽の理由が
-            // 付いていた, 2026-06-11 第5R)。
-            const idx = b.favorite_claude_index;
-            const byIndex = idx != null && idx > 90;
-            const favOdds = d.bet_tables?.win?.find(
-              (r) => r.key[0] === b.market_favorite)?.odds;
-            return (
-              <Badge tone="magenta">
-                1番人気 馬{b.market_favorite}{" "}
-                {byIndex
-                  ? `指数${Math.round(idx!)}>90 で1着解禁`
-                  : `鉄板帯 (単勝${favOdds != null ? ` ${favOdds.toFixed(1)}` : ""}<1.5) で1着解禁`}
-              </Badge>
-            );
-          })()}
           {claudeSelected && <Badge tone="magenta">Claude 買い目選定</Badge>}
           {b.formation && <Badge tone="info">{b.formation} フォーメーション</Badge>}
           {claudeMissing && <Badge tone="bad">Claude指数なし→自動投票対象外</Badge>}
@@ -730,13 +707,6 @@ function TrifectaCard({ d, finish }: { d: PredictionDetail; finish?: number[] })
     >
       <p className="text-xs text-(--color-muted) mb-3">
         市場(オッズ)をランキングに一切使わず、<b>{rankLabel}</b>の上位を本命に3連単フォーメーションを組む。
-        {recovery && (
-          <>
-            <b>回収モード (穴狙い)</b>: 市場1番人気は <b>鉄板帯 (単勝1.5倍未満)</b> か
-            Claude 指数が 90 を超えない限り<b>1着に置かない</b> (2着・3着は可)。
-            市場情報はこの除外判定のみに使用。{" "}
-          </>
-        )}
         1着は絞り (指数の開きで {b.head_n ?? 1} 頭) ・2着は中くらい・3着は広げる。トリガミ防止あり
         (当たれば投資総額以上を回収)。理論的中率は model 基準なので過信禁物 (楽観バイアス込み)・当たらなければ
         −EV。実弾投票束は <b>watch-auto の「投票束」設定 (env KEIBA_BET_BUNDLE)</b> で切替 —
