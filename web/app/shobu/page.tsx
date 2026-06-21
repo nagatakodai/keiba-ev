@@ -311,6 +311,8 @@ export default function ShobuPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
+  // 勝負スコア 100 (上限に張り付いた最強シグナル) のレースだけ表示するフィルタ。
+  const [onlyScore100, setOnlyScore100] = useState(false);
 
   // 現在のフォーム設定を scan options に変換。
   const buildOptions = (): ShobuScanRequest => ({
@@ -405,6 +407,12 @@ export default function ShobuPage() {
   const recommended = races.filter((r) => r.recommended);
   const others = races.filter((r) => !r.recommended);
   const summary = result?.summary;
+
+  // 「勝負スコア100のみ」フィルタ適用後の表示リスト (shobu_score は 100 で cap)。
+  const isScore100 = (r: ShobuRace) => r.shobu_score >= 100;
+  const score100Count = races.filter(isScore100).length;
+  const recShown = onlyScore100 ? recommended.filter(isScore100) : recommended;
+  const othersShown = onlyScore100 ? others.filter(isScore100) : others;
 
   // 推奨レースのみ最新オッズで再採点 (Claude は呼ばない・単勝 1 fetch/レース)。手動 & 自動共通。
   const doRefresh = async () => {
@@ -624,10 +632,20 @@ export default function ShobuPage() {
                 勝負レース
                 <span className="ml-1.5 text-sm font-normal text-(--color-muted)">(推奨)</span>
               </h2>
-              <Badge tone={recommended.length > 0 ? "good" : "muted"}>{recommended.length} 件</Badge>
+              <Badge tone={recShown.length > 0 ? "good" : "muted"}>
+                {recShown.length} 件
+                {onlyScore100 && recommended.length !== recShown.length ? ` / ${recommended.length}` : ""}
+              </Badge>
               {recommended.length > 0 && (
                 <span className="text-[11px] text-(--color-muted)">勝負スコア順 ・ 緑カード = 推奨</span>
               )}
+              {/* 勝負スコア100 (上限張り付き) のみ表示フィルタ */}
+              <Toggle checked={onlyScore100} onChange={setOnlyScore100} disabled={score100Count === 0}>
+                <span className="text-[11px]">
+                  勝負スコア100のみ
+                  <span className="ml-1 text-(--color-muted) tnum">({score100Count})</span>
+                </span>
+              </Toggle>
               {/* ── 最新オッズ自動更新 (2分毎) コントロール ── */}
               <div className="ml-auto flex items-center gap-3">
                 {refreshing && <Loader2 className="size-3.5 animate-spin text-(--color-muted)" />}
@@ -649,17 +667,19 @@ export default function ShobuPage() {
               </div>
             </div>
 
-            {recommended.length === 0 ? (
+            {recShown.length === 0 ? (
               <Card>
                 <div className="py-6 text-center text-sm text-(--color-muted)">
                   {races.length === 0
                     ? "評価対象のレースがありません (当日の開催が無い / 全て締切済の可能性)。"
-                    : "選択した基準を満たす勝負レースはありませんでした。下の「その他のレース」をスコア順で確認するか、しきい値 (強弱/指数差/頭数) を下げてください。"}
+                    : onlyScore100
+                      ? `勝負スコア100の勝負レースはありません${recommended.length > 0 ? ` (フィルタを外すと ${recommended.length} 件)` : ""}。`
+                      : "選択した基準を満たす勝負レースはありませんでした。下の「その他のレース」をスコア順で確認するか、しきい値 (強弱/指数差/頭数) を下げてください。"}
                 </div>
               </Card>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                {recommended.map((r, i) => (
+                {recShown.map((r, i) => (
                   <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} rank={i + 1} />
                 ))}
               </div>
@@ -667,7 +687,7 @@ export default function ShobuPage() {
           </div>
 
           {/* その他のレース (推奨外) — 折りたたみ */}
-          {others.length > 0 && (
+          {othersShown.length > 0 && (
             <div className="space-y-3">
               <button
                 onClick={() => setShowOthers((v) => !v)}
@@ -676,12 +696,12 @@ export default function ShobuPage() {
               >
                 <ChevronRight size={15} className={`transition-transform ${showOthers ? "rotate-90" : ""}`} aria-hidden />
                 <span className="text-sm font-bold">その他のレース (推奨外)</span>
-                <Badge tone="muted">{others.length} 件</Badge>
+                <Badge tone="muted">{othersShown.length} 件</Badge>
                 <span className="text-[11px]">{showOthers ? "隠す" : "スコア順で表示"}</span>
               </button>
               {showOthers && (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                  {others.map((r) => (
+                  {othersShown.map((r) => (
                     <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} />
                   ))}
                 </div>
