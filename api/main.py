@@ -467,13 +467,18 @@ class ShobuScanRequest(BaseModel):
     claude_eval: int = Field(default=0, ge=0, le=50)
     # 評価レース数の上限 (デバッグ/負荷制御)。None=全件。
     max_races: int | None = Field(default=None, ge=1, le=300)
-    # Claude 指数一括生成の across-race 並列数 (ThreadPoolExecutor workers)。ユーザ指示 2026-06-21: 20。
-    claude_eval_parallel: int = Field(default=20, ge=1, le=50)
+    # Claude 指数一括生成の across-race 並列数 (= 同時にスクレイプ+score する **レース数**)。
+    # **keiba.go.jp / JRA公式は 1 IP からの同時アクセスをレート制限**し、~20 並列だと odds が
+    # 空で返る → KeibagoError → score subprocess が rc=1 で死に Claude 指数がつかない (2026-06-21
+    # 実機確認: 21 並列スクレイプで全件 win 空 + 以後の sequential も一時ブロック)。なので across-race は
+    # 低く保つ。「並列20」は下の llm_max_concurrent (claude -p 同時数=keiba.go.jp 非依存) が担い、
+    # 各レースは score_parallel の per-race シャードで 20-wide の深い検索を維持する。
+    claude_eval_parallel: int = Field(default=4, ge=1, le=50)
     # score 段の検索並列化 (KEIBA_SCORE_PARALLEL)。既定 ON。
     score_parallel: bool = True
     # 1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。ユーザ指示: 12。
     score_queries_per_horse: int = Field(default=12, ge=2, le=12)
-    # claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)。並列20を実際に通すため 20。
+    # claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)。claude の並列は keiba.go.jp と無関係なので 20 維持。
     llm_max_concurrent: int = Field(default=20, ge=1, le=50)
 
 
