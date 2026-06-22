@@ -281,6 +281,83 @@ def test_scan_claude_all_generates_for_all(monkeypatch):
     assert all(r["claude"]["top_rank_gap"] == 1 for r in res["races"])
 
 
+def test_scan_provisional_then_final_emits(tmp_path, monkeypatch):
+    """out 指定時: 生成前に暫定 (generating=True/gen_done=0) → 生成完了ごとに live 更新 →
+    最終 (generating=False/gen_done==gen_total) を書き出し、基準B が確定する。"""
+    import json
+    now = int(time.time())
+    monkeypatch.setattr("src.auto_watch.discover_today_races", lambda d: [
+        {"race_id": "202632060101", "url": "u", "start_at": now + 3600,
+         "venue": "佐賀", "race_no": 1, "source": "oddspark"},
+        {"race_id": "202632060102", "url": "u", "start_at": now + 3600,
+         "venue": "佐賀", "race_no": 2, "source": "oddspark"},
+    ])
+    snaps: dict = {}
+    monkeypatch.setattr(shobu, "_load_snapshot", lambda i: snaps.get(i))
+    monkeypatch.setattr(shobu, "_fetch_fresh_win",
+                        lambda r, t: {"odds": {1: 5.0, 2: 5.1, 3: 4.9}, "names": {}})
+
+    # 各 _atomic_write_json の (generating, gen_total, gen_done, with_claude) を記録。
+    emits: list[tuple] = []
+    real_write = shobu._atomic_write_json
+
+    def rec_write(path, doc):
+        emits.append((doc.get("generating"), doc.get("gen_total"), doc.get("gen_done"),
+                      doc["summary"]["with_claude"]))
+        real_write(path, doc)
+
+    monkeypatch.setattr(shobu, "_atomic_write_json", rec_write)
+
+    # 生成 stub: 各 target の snapshot に順位乖離を install して on_progress を呼ぶ (live)。
+    def fake_gen(targets, *, on_progress=None, **kw):
+        for i, t in enumerate(targets, 1):
+            snaps[t["race_id"]] = {"index_compare": [
+                {"number": 1, "claude_index": 60, "market_index": 90},
+                {"number": 2, "claude_index": 85, "market_index": 70},
+                {"number": 3, "claude_index": 40, "market_index": 50},
+            ]}
+            if on_progress:
+                on_progress(t, i, len(targets))
+        return len(targets)
+
+    monkeypatch.setattr(shobu, "_run_claude_eval", fake_gen)
+
+    out = tmp_path / "20260101.json"
+    res = shobu.scan(claude_all=True, use_separation=False, use_claude_edge=True,
+                     sep_threshold=101, edge_margin=3.0, edge_threshold=20.0,
+                     fetch_odds=True, out=out, log=lambda *_: None)
+
+    # 暫定 (生成前) = 最初の書き出し: generating=True / gen_done=0 / Claude まだ 0。
+    assert emits[0][0] is True and emits[0][2] == 0 and emits[0][3] == 0
+    # generating=True の各 emit で gen_done が 0→1→2 と進み Claude が付いていく。
+    assert [e[2] for e in emits if e[0] is True] == [0, 1, 2]
+    # 最終 = generating=False / gen_done==gen_total==2 / Claude 2。
+    assert emits[-1][0] is False and emits[-1][1] == 2 and emits[-1][2] == 2 and emits[-1][3] == 2
+    # 返り値・ファイルとも最終状態 (基準B 確定)。
+    assert res["generating"] is False and res["summary"]["with_claude"] == 2
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["generating"] is False and written["gen_total"] == 2 and written["gen_done"] == 2
+
+
+def test_scan_no_generation_single_final_emit(tmp_path, monkeypatch):
+    """生成対象が無い (claude_eval=0) なら暫定を出さず最終のみ (generating=False)。"""
+    import json
+    now = int(time.time())
+    monkeypatch.setattr("src.auto_watch.discover_today_races", lambda d: [
+        {"race_id": "202632060101", "url": "u", "start_at": now + 3600,
+         "venue": "佐賀", "race_no": 1, "source": "oddspark"},
+    ])
+    monkeypatch.setattr(shobu, "_load_snapshot", lambda i: None)
+    monkeypatch.setattr(shobu, "_fetch_fresh_win",
+                        lambda r, t: {"odds": {1: 1.3, 2: 8.0, 3: 14.0}, "names": {}})
+    out = tmp_path / "20260101.json"
+    res = shobu.scan(claude_all=False, claude_eval=0, fetch_odds=True, out=out,
+                     log=lambda *_: None)
+    assert res["generating"] is False and res["gen_total"] == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["generating"] is False and written["gen_total"] == 0
+
+
 def test_scan_upcoming_only_excludes_past(monkeypatch):
     """発走前のみ: 締切済 (start_at が過去) は除外。"""
     now = int(time.time())

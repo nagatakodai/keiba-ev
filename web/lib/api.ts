@@ -674,6 +674,12 @@ export type ShobuResult = {
     by_type?: { jra: number; nar: number; banei: number };
   };
   races: ShobuRace[];
+  // Claude 指数の一括生成進捗 (ユーザ指示 2026-06-22)。生成がある時、scan は生成前に暫定一覧
+  // (基準A中心・generating=true) を先出しし、各レース生成完了ごとに live 更新、全完了で
+  // generating=false の確定版 (基準B=市場乖離 反映済) に切替える。生成が無い scan は最初から false。
+  generating?: boolean;
+  gen_total?: number;   // 生成対象レース数
+  gen_done?: number;    // 生成完了レース数 (基準B 確定済)
 };
 
 // 予測分析履歴の結果 (着順/払戻) 自動取得 (make api 稼働中に N 秒毎) の状態。

@@ -359,11 +359,21 @@ export default function ShobuPage() {
       });
   }, []);
 
-  // スキャン Job の完了を polling → 完了したら結果を取得。
+  // スキャン Job を polling。各 tick で **暫定/進捗中の結果も取得** して表示する
+  // (生成前: 基準A中心の暫定一覧 → 各レース生成完了ごとに基準B が確定して live 更新)。
+  // Job 完了で最終版を取得して終了。
   useEffect(() => {
     if (!job || !scanning) return;
     let cancelled = false;
     const poll = setInterval(async () => {
+      // 1) 進捗中の結果 (暫定→確定) を反映。まだ書かれていない (404) は無視。
+      try {
+        const r = await api.getShobuResult(job.date);
+        if (!cancelled) setResult(r);
+      } catch {
+        /* 未書き出し (404) / transient は無視 */
+      }
+      // 2) Job ステータス。終了したら最終版を取得して polling 終了。
       try {
         const j = await api.getJob(job.id);
         if (cancelled) return;
@@ -416,7 +426,7 @@ export default function ShobuPage() {
 
   // 推奨レースのみ最新オッズで再採点 (Claude は呼ばない・単勝 1 fetch/レース)。手動 & 自動共通。
   const doRefresh = async () => {
-    if (!result || refreshing) return;
+    if (!result || refreshing || result.generating) return;
     setRefreshing(true);
     try {
       const updated = await api.refreshShobu(result.date);
@@ -429,10 +439,11 @@ export default function ShobuPage() {
     }
   };
 
-  // 2分毎の自動更新。ページを開いている間・推奨レースがある時だけ走る (スキャン中は止める)。
+  // 2分毎の自動更新。ページを開いている間・推奨レースがある時だけ走る (スキャン中・生成中は止める)。
   // 依存に recommended.length を入れて「0件→再スキャンで出た」場合にも interval を張り直す。
   useEffect(() => {
-    if (!autoRefresh || !result || scanning || recommended.length === 0) return;
+    if (!autoRefresh || !result || scanning || result.generating || recommended.length === 0)
+      return;
     const date = result.date;
     let cancelled = false;
     const t = setInterval(async () => {
@@ -455,7 +466,7 @@ export default function ShobuPage() {
       clearInterval(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, result?.date, scanning, recommended.length]);
+  }, [autoRefresh, result?.date, scanning, result?.generating, recommended.length]);
 
   return (
     <Page>
@@ -624,6 +635,37 @@ export default function ShobuPage() {
       {/* ── 結果 ── */}
       {result && (
         <section className="space-y-6">
+          {/* ── Claude 指数 一括生成の進捗バナー ──
+              生成中は下の一覧が「暫定 (基準A中心)」で、各レースの指数が付き次第 基準B が確定する。 */}
+          {result.generating && (result.gen_total ?? 0) > 0 && (
+            <div className="rounded-xl border border-fuchsia-500/40 bg-fuchsia-500/[0.07] px-4 py-3">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Loader2 className="size-4 animate-spin text-fuchsia-300 shrink-0" />
+                  <span className="text-sm font-bold text-fuchsia-100">Claude 指数を生成中</span>
+                  <span className="tnum text-sm font-black text-fuchsia-200">
+                    {result.gen_done ?? 0}
+                    <span className="text-fuchsia-300/70 font-bold">/{result.gen_total}</span>
+                  </span>
+                </div>
+                <span className="text-[11px] text-fuchsia-200/80 leading-snug max-w-xl">
+                  下の一覧は<b>暫定 (基準A=強弱 中心)</b> です。各レースの指数が付き次第{" "}
+                  <b>基準B (市場乖離)</b> が確定し、勝負スコアと順位が更新されます。
+                </span>
+              </div>
+              <div className="mt-2 h-1.5 rounded-full bg-fuchsia-500/15 overflow-hidden">
+                <div
+                  className="h-full bg-fuchsia-400/80 transition-[width] duration-500"
+                  style={{
+                    width: `${Math.round(
+                      ((result.gen_done ?? 0) / Math.max(1, result.gen_total ?? 1)) * 100,
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
           {/* 勝負レース (推奨) — 番号付きで明確に */}
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2 px-1">
@@ -656,7 +698,7 @@ export default function ShobuPage() {
                 )}
                 <button
                   onClick={doRefresh}
-                  disabled={refreshing || recommended.length === 0}
+                  disabled={refreshing || recommended.length === 0 || result.generating}
                   className="text-[11px] font-bold text-(--color-accent) hover:underline disabled:opacity-40 disabled:no-underline"
                 >
                   今すぐ更新

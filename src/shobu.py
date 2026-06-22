@@ -457,12 +457,17 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                      parallel: int, log: Callable[[str], None],
                      score_parallel: bool = False,
                      score_queries_per_horse: int | None = None,
-                     llm_max_concurrent: int | None = None) -> int:
+                     llm_max_concurrent: int | None = None,
+                     on_progress: Callable[[dict[str, Any], int, int], None] | None = None) -> int:
     """対象レースに score ステージ (claude -p) を spawn して Claude 指数を生成。生成成功数を返す。
 
     並列は ThreadPoolExecutor で回すが、実際の claude -p 同時数は src 側の file-slot semaphore
     (KEIBA_LLM_MAX_CONCURRENT, 既定5) で頭打ちになる (fail-open)。各 race の subprocess 出力は
     capture して捨て、進捗だけ 1 行ずつ log に流す (scan のログを汚さない)。
+
+    `on_progress(target, completed, total)` を渡すと、1 レース生成が終わるたびに呼ぶ (呼び出し
+    スレッドの as_completed ループ内 = シリアル)。scan が「生成完了レースを再採点して暫定一覧を
+    live 更新する」のに使う。例外は握り潰して生成を止めない。
     """
     if not targets:
         return 0
@@ -501,6 +506,11 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
             if ok:
                 done += 1
             log(f"[claude-eval] ({completed}/{total}) {t['venue']}{t['race_no']}R {note}")
+            if on_progress is not None:
+                try:
+                    on_progress(t, completed, total)
+                except Exception:  # noqa: BLE001  進捗更新の失敗で生成を止めない
+                    pass
     log(f"[claude-eval] 完了: {done}/{total} 生成成功")
     return done
 
@@ -528,9 +538,17 @@ def scan(
     llm_max_concurrent: int | None = None,
     max_races: int | None = None,
     fetch_parallel: int = 6,
+    out: Path | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """当日全レースを採点して勝負レースを抽出した dict を返す。"""
+    """当日全レースを採点して勝負レースを抽出した dict を返す。
+
+    `out` を渡すと結果 JSON を **2 段階で書き出す**: ①Claude 指数の一括生成がある時は生成前に
+    暫定一覧 (基準A中心・`generating=True`) を先出し ②各レース生成完了ごとに再採点して live 更新
+    ③全生成後に最終版 (`generating=False`) を書き出す。これでフロントは生成完了を待たず暫定一覧を
+    表示でき、各レースの Claude 指数が付き次第 基準B (市場乖離) が確定する (ユーザ指示 2026-06-22)。
+    `out=None` (CLI stdout / テスト) のときは書き出さず最終 dict を返すだけ。
+    """
     def _log(msg: str) -> None:
         if log:
             log(msg)
@@ -613,36 +631,7 @@ def scan(
         sep_threshold=sep_threshold, edge_margin=edge_margin, edge_threshold=edge_threshold,
     )
     results = [_evaluate_race(r, **eval_kwargs) for r in races]
-
-    # --- Claude 指数の生成 (ボタンで一括取得 / 上位N件) ---
-    # claude_all=True: Claude 指数が無い発走前レースを **全件** 生成 (ボタン押下で一気に取得)。
-    # claude_all=False & claude_eval>0: 強弱上位 claude_eval 件のみ。既にスコア済は二重生成しない。
-    if use_claude_edge and (claude_all or claude_eval > 0):
-        targets = _select_claude_targets(
-            results, claude_all=claude_all, claude_eval=claude_eval,
-            upcoming_only=upcoming_only, now=now)
-        if targets:
-            _run_claude_eval(targets, timeout=claude_eval_timeout,
-                             parallel=claude_eval_parallel, log=_log,
-                             score_parallel=score_parallel,
-                             score_queries_per_horse=score_queries_per_horse,
-                             llm_max_concurrent=llm_max_concurrent)
-            # 生成後に対象を再評価 (snapshot 再読込)。
-            by_id = {r["race_id"]: r for r in races}
-            pos = {r["race_id"]: i for i, r in enumerate(results)}
-            for t in targets:
-                base = by_id.get(t["race_id"])
-                if base is None:
-                    continue
-                base["_snap"] = _load_snapshot(t["race_id"])
-                results[pos[t["race_id"]]] = _evaluate_race(base, **eval_kwargs)
-        else:
-            _log("[claude-eval] 生成対象なし (全レース既に Claude 指数あり/締切済)")
-
-    # 並べ替え: 推奨を上に、その中で shobu_score 降順。
-    results.sort(key=lambda r: (r["recommended"], r["shobu_score"]), reverse=True)
-
-    summary = _build_summary(results, len(discovered))
+    by_id = {r["race_id"]: r for r in races}   # race_id → メタ (再採点に使う)
     options = {
         "date": date, "race_type": race_type,
         "use_separation": use_separation, "use_claude_edge": use_claude_edge,
@@ -651,15 +640,77 @@ def scan(
         "upcoming_only": upcoming_only, "fetch_odds": fetch_odds,
         "claude_all": claude_all, "claude_eval": claude_eval,
     }
-    _log(f"[done] 推奨 {summary['recommended']} / 評価 {summary['evaluated']} "
-         f"(snapshot {summary['with_snapshot']} / Claude {summary['with_claude']})")
-    return {
-        "date": date,
-        "generated_at": datetime.now(JST).isoformat(timespec="seconds"),
-        "options": options,
-        "summary": summary,
-        "races": results,
-    }
+
+    def _emit(*, generating: bool, gen_total: int, gen_done: int) -> dict[str, Any]:
+        """results を推奨優先 + score 降順に並べた結果 doc を作り、out があれば atomic 書き出し。"""
+        results.sort(key=lambda r: (r["recommended"], r["shobu_score"]), reverse=True)
+        doc = {
+            "date": date,
+            "generated_at": datetime.now(JST).isoformat(timespec="seconds"),
+            "options": options,
+            "summary": _build_summary(results, len(discovered)),
+            "races": results,
+            # 生成進捗 — 基準B (市場乖離) は各レースの Claude 指数生成後に確定する。
+            # generating=True の間は「暫定 (基準A中心)」、False で「確定 (基準B反映済)」。
+            "generating": generating,
+            "gen_total": gen_total,
+            "gen_done": gen_done,
+        }
+        if out is not None:
+            _atomic_write_json(out, doc)
+        return doc
+
+    def _rescore(race_id: str) -> None:
+        """race_id のレースを snapshot 再読込して再採点し results 内を差し替える。"""
+        base = by_id.get(race_id)
+        if base is None:
+            return
+        base["_snap"] = _load_snapshot(race_id)
+        new_res = _evaluate_race(base, **eval_kwargs)
+        for i, r in enumerate(results):
+            if r["race_id"] == race_id:
+                results[i] = new_res
+                return
+        results.append(new_res)
+
+    # --- Claude 指数の生成 (ボタンで一括取得 / 上位N件) ---
+    # claude_all=True: Claude 指数が無い発走前レースを **全件** 生成 (ボタン押下で一気に取得)。
+    # claude_all=False & claude_eval>0: 強弱上位 claude_eval 件のみ。既にスコア済は二重生成しない。
+    targets: list[dict[str, Any]] = []
+    if use_claude_edge and (claude_all or claude_eval > 0):
+        targets = _select_claude_targets(
+            results, claude_all=claude_all, claude_eval=claude_eval,
+            upcoming_only=upcoming_only, now=now)
+    gen_total = len(targets)
+
+    if gen_total > 0:
+        # ① 暫定一覧 (基準A中心) を生成前に先出し。フロントは生成完了を待たず表示できる。
+        _log(f"[provisional] 暫定一覧 (基準A中心) を先出し → Claude 指数 {gen_total} 件を生成中…")
+        _emit(generating=True, gen_total=gen_total, gen_done=0)
+
+        # ② 1 レース生成完了ごとに再採点して live 更新 (as_completed は呼び出しスレッド=シリアル)。
+        def _on_progress(t: dict[str, Any], completed: int, _total: int) -> None:
+            _rescore(t["race_id"])
+            _emit(generating=True, gen_total=gen_total, gen_done=completed)
+
+        _run_claude_eval(targets, timeout=claude_eval_timeout,
+                         parallel=claude_eval_parallel, log=_log,
+                         score_parallel=score_parallel,
+                         score_queries_per_horse=score_queries_per_horse,
+                         llm_max_concurrent=llm_max_concurrent,
+                         on_progress=_on_progress)
+
+        # ③ 権威的な最終再評価 — on_progress が呼ばれなくても (テストの monkeypatch 等) 確定させる。
+        for t in targets:
+            _rescore(t["race_id"])
+    elif use_claude_edge and (claude_all or claude_eval > 0):
+        _log("[claude-eval] 生成対象なし (全レース既に Claude 指数あり/締切済)")
+
+    final = _emit(generating=False, gen_total=gen_total, gen_done=gen_total)
+    s = final["summary"]
+    _log(f"[done] 推奨 {s['recommended']} / 評価 {s['evaluated']} "
+         f"(snapshot {s['with_snapshot']} / Claude {s['with_claude']})")
+    return final
 
 
 # ---------------------------------------------------- refresh (2分毎・推奨のみ) --
@@ -781,6 +832,9 @@ def refresh_recommended(date: str | None = None, *, parallel: int = 8,
     doc["summary"] = _build_summary(
         races, (doc.get("summary") or {}).get("total_discovered", len(races)))
     doc["refreshed_at"] = datetime.now(JST).isoformat(timespec="seconds")
+    # refresh は scan 完了後にしか走らない (フロントは生成中は refresh を止める) ので、
+    # 念のため生成フラグを下ろして「確定」状態を維持する (基準B は既に確定済)。
+    doc["generating"] = False
     _atomic_write_json(rp, doc)
     return doc
 
@@ -822,6 +876,7 @@ def main(argv: list[str] | None = None) -> int:
               f"({result.get('refreshed_at')})", flush=True)
         return 0
 
+    out = Path(args.out) if args.out else None
     result = scan(
         date=args.date,
         race_type=args.race_type,
@@ -841,13 +896,10 @@ def main(argv: list[str] | None = None) -> int:
         score_queries_per_horse=args.score_queries_per_horse,
         llm_max_concurrent=args.llm_max_concurrent,
         max_races=args.max_races,
+        out=out,   # scan が暫定→確定の 2 段階で書き出す (生成完了ごとに live 更新)
     )
-    if args.out:
-        out = Path(args.out)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(out.suffix + ".tmp")
-        tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(out)
+    if out:
+        # 書き出しは scan が担う (暫定/進捗/確定)。ここでは最終状態の確認だけ出す。
         print(f"[out] {out} に書き出しました ({len(result['races'])} レース)", flush=True)
     else:
         print(json.dumps(result, ensure_ascii=False), flush=True)
