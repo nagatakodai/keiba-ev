@@ -11,6 +11,7 @@ import {
   Sparkles,
   Swords,
   TrendingUp,
+  X,
 } from "lucide-react";
 import {
   Badge,
@@ -341,6 +342,7 @@ export default function ShobuPage() {
 
   const [job, setJob] = useState<(JobInfo & { date?: string }) | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [result, setResult] = useState<ShobuResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
@@ -420,15 +422,18 @@ export default function ShobuPage() {
         if (j.status === "done" || j.status === "failed" || j.status === "cancelled") {
           clearInterval(poll);
           setScanning(false);
-          if (j.status === "done") {
+          if (j.status === "failed") {
+            setError("スキャンが失敗しました (ログ参照)");
+          } else {
+            // done / cancelled: 最新結果を取得して表示。中止時は partial を確定表示にするため
+            // generating を下ろす (生成中バナーを消す。生成済みレースは基準B が付いている)。
             try {
               const r = await api.getShobuResult(job.date);
-              if (!cancelled) setResult(r);
+              if (!cancelled)
+                setResult(j.status === "cancelled" ? { ...r, generating: false } : r);
             } catch (e) {
-              if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+              if (!cancelled && j.status === "done") setError(e instanceof Error ? e.message : String(e));
             }
-          } else {
-            setError(`スキャンが ${j.status} で終了しました (ログ参照)`);
           }
         }
       } catch {
@@ -450,6 +455,20 @@ export default function ShobuPage() {
     } catch (e) {
       setScanning(false);
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // 実行中のスキャン Job を中止 (プロセスグループを SIGINT→SIGTERM→SIGKILL)。
+  // Job が cancelled になると上の poll が partial 結果を確定表示にして scanning を下ろす。
+  const cancelScan = async () => {
+    if (!job || cancelling) return;
+    setCancelling(true);
+    try {
+      await api.cancelJob(job.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -604,6 +623,12 @@ export default function ShobuPage() {
               オプション
               <ChevronRight size={14} className={`transition-transform ${showSettings ? "rotate-90" : ""}`} aria-hidden />
             </Button>
+            {scanning && (
+              <Button variant="danger" size="lg" disabled={cancelling} onClick={cancelScan}>
+                {cancelling ? <Loader2 className="size-4 animate-spin" /> : <X className="size-4" />}
+                {cancelling ? "中止中..." : "中止"}
+              </Button>
+            )}
             <Button size="lg" disabled={scanning} onClick={startScan}>
               {scanning ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" fill="currentColor" />}
               {scanning
