@@ -284,6 +284,43 @@ function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank
   );
 }
 
+// 一覧側で判定基準を切り替える (再スキャン不要・表示だけ) ための recompute。
+// src/shobu.py `_evaluate_race` の recommended / matched / shobu_score を client で再現する。
+// 「基準A不要」モード = useSeparation=false で呼ぶ → 基準B (市場乖離) のみで判定し score も B 由来。
+type DisplayCriteria = {
+  useSeparation: boolean;
+  useClaudeEdge: boolean;
+  combine: "or" | "and";
+  sepThreshold: number;
+  edgeThreshold: number;
+};
+
+function deriveDisplay(
+  r: ShobuRace,
+  c: DisplayCriteria,
+): { recommended: boolean; matched: string[]; shobu_score: number } {
+  const sepScore = r.separation ? r.separation.score : null;
+  const claudeScore = r.claude ? r.claude.score : null;
+  const sepPass = c.useSeparation && sepScore != null && sepScore >= c.sepThreshold;
+  const claudePass = c.useClaudeEdge && claudeScore != null && claudeScore >= c.edgeThreshold;
+  const active: boolean[] = [];
+  if (c.useSeparation) active.push(sepPass);
+  if (c.useClaudeEdge) active.push(claudePass);
+  const recommended =
+    active.length === 0 ? false : c.combine === "and" ? active.every(Boolean) : active.some(Boolean);
+  const matched: string[] = [];
+  if (sepPass) matched.push("sep");
+  if (claudePass) matched.push("claude");
+  // shobu_score = 主signal + 0.25×副signal (active な基準の component score のみ)。
+  const comps: number[] = [];
+  if (c.useSeparation && sepScore != null) comps.push(sepScore);
+  if (c.useClaudeEdge && claudeScore != null) comps.push(claudeScore);
+  let score = 0;
+  if (comps.length === 1) score = comps[0];
+  else if (comps.length > 1) score = Math.min(100, Math.max(...comps) + 0.25 * Math.min(...comps));
+  return { recommended, matched, shobu_score: Math.round(score * 10) / 10 };
+}
+
 export default function ShobuPage() {
   // ── 抽出オプション ──
   const [raceType, setRaceType] = useState<"all" | "jra" | "nar" | "banei">("all");
@@ -313,6 +350,9 @@ export default function ShobuPage() {
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   // 勝負スコア 100 (上限に張り付いた最強シグナル) のレースだけ表示するフィルタ。
   const [onlyScore100, setOnlyScore100] = useState(false);
+  // 一覧側で「基準A (強弱) を必須にしない」= 基準B (市場乖離) のみで勝負レースを判定する表示。
+  // 再スキャン不要 (deriveDisplay で client 再採点)。基準B が scan で有効だった時のみ意味を持つ。
+  const [aOptional, setAOptional] = useState(false);
 
   // 現在のフォーム設定を scan options に変換。
   const buildOptions = (): ShobuScanRequest => ({
@@ -413,10 +453,39 @@ export default function ShobuPage() {
     }
   };
 
-  const races = result?.races ?? [];
+  const rawRaces = result?.races ?? [];
+  const summary = result?.summary;
+  const opts = result?.options;
+  // 基準B が scan で有効だった時だけ「基準A不要」表示が成立する (両基準OFFだと推奨ゼロになる)。
+  const canDropA = !!opts?.use_claude_edge;
+  const dropA = aOptional && canDropA;
+
+  // 「基準A不要」モード: 一覧を 基準B のみで判定し直す (deriveDisplay で client 再採点)。
+  // 再スキャンせず、生成済みの Claude 指数だけで勝負レースを決め直して並べ替える。
+  const races: ShobuRace[] = dropA
+    ? rawRaces
+        .map((r) => ({
+          ...r,
+          ...deriveDisplay(r, {
+            useSeparation: false,
+            useClaudeEdge: true,
+            combine: opts?.combine ?? "or",
+            sepThreshold: opts?.sep_threshold ?? 35,
+            edgeThreshold: opts?.edge_threshold ?? 25,
+          }),
+          // refresh の delta/履歴は server の合成スコア由来なので、基準Bのみ表示では消す
+          // (表示中の score=基準B と食い違うため)。
+          score_delta: null,
+          score_prev: null,
+          score_history: undefined,
+        }))
+        .sort((a, b) =>
+          a.recommended === b.recommended ? b.shobu_score - a.shobu_score : a.recommended ? -1 : 1,
+        )
+    : rawRaces;
+
   const recommended = races.filter((r) => r.recommended);
   const others = races.filter((r) => !r.recommended);
-  const summary = result?.summary;
 
   // 「勝負スコア100のみ」フィルタ適用後の表示リスト (shobu_score は 100 で cap)。
   const isScore100 = (r: ShobuRace) => r.shobu_score >= 100;
@@ -480,10 +549,14 @@ export default function ShobuPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Stat
           label="勝負レース"
-          value={summary ? summary.recommended : "—"}
-          tone={summary && summary.recommended > 0 ? "good" : "default"}
+          value={result ? recommended.length : "—"}
+          tone={recommended.length > 0 ? "good" : "default"}
           accentTone="good"
-          hint={summary ? `評価 ${summary.evaluated} レース中` : "未スキャン"}
+          hint={
+            summary
+              ? `${dropA ? "基準Bのみ ・ " : ""}評価 ${summary.evaluated} レース中`
+              : "未スキャン"
+          }
         />
         <Stat
           label="評価レース数"
@@ -681,6 +754,15 @@ export default function ShobuPage() {
               {recommended.length > 0 && (
                 <span className="text-[11px] text-(--color-muted)">勝負スコア順 ・ 緑カード = 推奨</span>
               )}
+              {/* 基準A (強弱) を必須にしない = 基準B (市場乖離) のみで判定 (再スキャン不要・表示だけ) */}
+              {canDropA && (
+                <Toggle checked={aOptional} onChange={setAOptional}>
+                  <span className="text-[11px]">
+                    基準A不要
+                    <span className="ml-1 text-(--color-muted)">(基準Bのみで判定)</span>
+                  </span>
+                </Toggle>
+              )}
               {/* 勝負スコア100 (上限張り付き) のみ表示フィルタ */}
               <Toggle checked={onlyScore100} onChange={setOnlyScore100} disabled={score100Count === 0}>
                 <span className="text-[11px]">
@@ -756,6 +838,7 @@ export default function ShobuPage() {
             勝負スコア = 強弱スコアと市場乖離スコアの合成 (主signal + 0.25×副signal)。
             強弱 = 市場の単勝 implied 勝率の集中度 (1−正規化エントロピー)。
             市場乖離 = 市場順位と Claude 順位の食い違い (例: 市場2番人気を Claude が本命視 / 「市場5位→Claude2位」のように Claude が上位評価する馬。Claude 本命の市場順位ギャップを主軸にスコア化)。
+            <b>基準A不要</b> をオンにすると、再スキャンせず一覧を <b>基準B (市場乖離) のみ</b> で判定し直します (勝負スコアも基準B由来)。
             長期 +EV を保証するものではなく「賭ける価値の高そうなレース」の目安です。
           </p>
         </section>
