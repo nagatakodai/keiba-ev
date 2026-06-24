@@ -530,6 +530,18 @@ def _run_score_stage(
     if no_llm:
         console.print("[dim]--no-llm — score ステージ (Claude 指数) skip[/dim]")
         return None
+    # 既存の当日キャッシュ指数を再利用 (web 検索を再実行しない, 2026-06-24)。同一レースの
+    # Claude 指数は一日を通して不変 (市場非依存・各馬の適性/状態ベース) なので、オッズ発売前に
+    # 先行生成 → 発売後の再スキャンで snapshot を作る時は再検索せずキャッシュを使う
+    # (morning pre-cache → evening snapshot を安価にする)。取消は absent 昇格で別途処理されるため
+    # 指数の reuse は安全。KEIBA_SCORE_FORCE_RESCORE=1 で強制再検索。
+    if not (os.environ.get("KEIBA_SCORE_FORCE_RESCORE") or "").strip():
+        c_scores, c_support, c_scale, c_at, c_alerts = _load_llm_scores(race_id, max_age_sec=10**9)
+        if c_scores:
+            console.print(f"[cyan]score: 既存 Claude 指数を再利用 ({len(c_scores)} 頭, "
+                          f"{c_at}) — web 検索 skip[/cyan]")
+            return {"scores": c_scores, "support": c_support or {}, "scale": c_scale,
+                    "alerts": c_alerts or {}, "summary": "", "notes": {}, "confidence": ""}
     if not llm_mod.is_available():
         console.print("[yellow]claude CLI 不可 — score ステージ skip[/yellow]")
         return None

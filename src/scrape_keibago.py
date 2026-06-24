@@ -531,7 +531,10 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     other = res["other_bets"]
     trifecta = res["trifecta"]
     cons = res["consistency"]
-    if not other.get("win"):
+    # オッズが空 (前売り発売前で全馬 0.0 等) でも score 段は Claude 指数 (市場非依存) を
+    # 出馬表 DebaTable から先行生成できる (2026-06-24 ユーザ指示)。bet 段は市場が要るので raise。
+    odds_empty = not other.get("win")
+    if odds_empty and phase != "score":
         raise KeibagoError("keiba.go.jp オッズが空")
     # 安全ゲート: ワイド>馬連 等の異常を検知したら pair/trio を捨てる (誤オッズを出さない)
     if not cons["ok"]:
@@ -555,13 +558,17 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         if deba:
             # 出馬表 + HorseMarkInfo の馬柱で確率モデルをフル稼働 (公式自給)
             rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True)
-        else:
+        elif not odds_empty:
             # DebaTable 取れず → 単複の馬リストのみ (past_runs なし=市場ブレンド主導)。
             # 単複ページは発売対象馬のみ (取消馬は単勝が数値でなく載らない) → absent=False。
             hl = parse_horse_list(_get(_odds_url(loc, _EP["tanfuku"])))
             rd = build_keibago_racedata(
                 netkeiba_rid, [(n, nm, "", False) for n, nm, _od in hl], win_odds,
                 fetch_past=False)
+        else:
+            # 発売前 (odds_empty) で DebaTable も取れない → 出走馬ソースが無く score 不能
+            # (単複の馬リストも全馬 0.0 で空になる)。
+            raise KeibagoError("keiba.go.jp 出馬表もオッズも取得不可 (発売前/解決不能)")
 
     if start_at and not rd.race.start_at:
         from .parse import close_at_for_start
@@ -607,11 +614,19 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         # 暫定 snapshot (stage="score") を保存する。3連単買い目の Claude 選定は bet 段のみ
         # (下の claude_trifecta_select 参照)。bet 段が締切直前に fresh odds で再計算・上書きする。
         # 実弾 enqueue は auto_watch の bet phase のみが行うので score の snapshot で賭けは飛ばない。
-        if not save_snapshot:
-            return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
+        # odds_empty (発売前): 市場が無いので基準A/B 用 snapshot は作れない。Claude 指数
+        # (llm.json) だけキャッシュして早期 return。オッズ発売後の再スキャンが snapshot を作る
+        # (その時 _run_score_stage が朝の指数を再利用 = 再検索しない, 2026-06-24)。
+        if not save_snapshot or odds_empty:
+            return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score",
+                    "odds_empty": odds_empty}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
-    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(race_id)
+    # score 段の snapshot 構築 (発売後の再スキャン) では朝に先行生成した指数を使うため age gate を
+    # 緩める (既定 30 分だと朝の指数が stale 判定で落ちて基準B が Claude 無しになる, 2026-06-24)。
+    _llm_max_age = 10**9 if phase == "score" else 1800
+    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(
+        race_id, max_age_sec=_llm_max_age)
 
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
     # fresh 単勝オッズを Horse.win_odds に overlay (oddspark 経路の overlay_oddspark_odds と
