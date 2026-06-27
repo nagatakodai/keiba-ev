@@ -246,6 +246,117 @@ def test_select_claude_targets():
                                         upcoming_only=True, now=now) == []
 
 
+class _RC0:
+    returncode = 0
+
+
+def test_run_claude_eval_sets_search_env(monkeypatch):
+    """_run_claude_eval が score subprocess へ 10クエリ/頭・並列飽和・timeout余裕の env を渡す。
+
+    頭数×10 クエリ (KEIBA_SCORE_QUERIES_PER_HORSE=10 を全シャード被覆) + across-race=4 に対し
+    シャード/レース = 20//4 = 5 (per_shard=3) で claude 同時実行を飽和 + 外側 kill 手前の
+    KEIBA_SCORE_TIMEOUT。
+    """
+    for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
+        monkeypatch.delenv(k, raising=False)
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["env"] = kw.get("env")
+        captured["cmd"] = cmd
+        return _RC0()
+
+    monkeypatch.setattr(shobu.subprocess, "run", fake_run)
+    targets = [{"netkeiba_race_id": "202632060101", "race_type": "nar",
+                "start_at": 1000, "venue": "佐賀", "race_no": 1}]
+    done = shobu._run_claude_eval(
+        targets, timeout=900, parallel=4, log=lambda m: None,
+        score_parallel=True, score_queries_per_horse=10, llm_max_concurrent=20)
+    assert done == 1
+    env = captured["env"]
+    assert env["KEIBA_SCORE_PARALLEL"] == "1"
+    assert env["KEIBA_SCORE_QUERIES_PER_HORSE"] == "10"
+    assert env["KEIBA_LLM_MAX_CONCURRENT"] == "20"
+    assert env["KEIBA_SCORE_HORSES_PER_SHARD"] == "3"
+    assert env["KEIBA_SCORE_MAX_SHARDS"] == "5"          # 20 // 4
+    assert int(env["KEIBA_SCORE_TIMEOUT"]) == 810        # 900 - 90 (外側 kill の手前)
+    # score subprocess コマンドも phase=score。
+    assert "--phase=score" in captured["cmd"]
+
+
+def test_run_claude_eval_no_parallel_omits_shard_env(monkeypatch):
+    """score_parallel=False ではシャード env を入れず KEIBA_SCORE_PARALLEL を打ち消す。"""
+    for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
+        monkeypatch.delenv(k, raising=False)
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return _RC0()
+
+    monkeypatch.setattr(shobu.subprocess, "run", fake_run)
+    targets = [{"netkeiba_race_id": "x", "race_type": "nar",
+                "start_at": 0, "venue": "V", "race_no": 1}]
+    shobu._run_claude_eval(targets, timeout=900, parallel=4, log=lambda m: None,
+                           score_parallel=False, score_queries_per_horse=10,
+                           llm_max_concurrent=20)
+    env = captured["env"]
+    assert env["KEIBA_SCORE_PARALLEL"] == ""
+    assert env["KEIBA_SCORE_QUERIES_PER_HORSE"] == "10"  # クエリ数は並列に依らず伝える
+    assert "KEIBA_SCORE_MAX_SHARDS" not in env
+    assert "KEIBA_SCORE_HORSES_PER_SHARD" not in env
+
+
+def test_run_claude_eval_inner_timeout_below_outer(monkeypatch):
+    """KEIBA_SCORE_TIMEOUT は常に外側 subprocess timeout より小さい (反転防止)。
+
+    外側が先に発火すると score 結果が丸ごと失われるため、小さい timeout でも内側<外側を保証。
+    """
+    for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
+        monkeypatch.delenv(k, raising=False)
+    captured: dict = {}
+    monkeypatch.setattr(shobu.subprocess, "run",
+                        lambda cmd, **kw: captured.__setitem__("env", kw.get("env")) or _RC0())
+    targets = [{"netkeiba_race_id": "x", "race_type": "nar",
+                "start_at": 0, "venue": "V", "race_no": 1}]
+    for outer in (900, 300, 210, 150, 130):
+        shobu._run_claude_eval(targets, timeout=outer, parallel=4, log=lambda m: None,
+                               score_parallel=True, score_queries_per_horse=10,
+                               llm_max_concurrent=20)
+        inner = int(captured["env"]["KEIBA_SCORE_TIMEOUT"])
+        assert 0 < inner < outer, f"timeout={outer}: 内側 {inner} が外側を超えた (反転)"
+    # 通常運用 (900) は 810s。
+    shobu._run_claude_eval(targets, timeout=900, parallel=4, log=lambda m: None,
+                           score_parallel=True, score_queries_per_horse=10, llm_max_concurrent=20)
+    assert int(captured["env"]["KEIBA_SCORE_TIMEOUT"]) == 810
+
+
+def test_cli_clamps_tiny_timeout(monkeypatch, capsys):
+    """CLI --claude-eval-timeout が小さすぎる値を 210s にクランプする。"""
+    seen: dict = {}
+    monkeypatch.setattr(shobu, "scan",
+                        lambda **k: seen.update(k) or {"races": [],
+                            "summary": {"recommended": 0, "evaluated": 0,
+                                        "with_snapshot": 0, "with_claude": 0}})
+    shobu.main(["--no-fetch-odds", "--claude-eval-timeout", "10"])
+    assert seen["claude_eval_timeout"] == 210
+
+
+def test_run_claude_eval_shards_scale_with_concurrency(monkeypatch):
+    """シャード/レース = llm_max_concurrent // across-race (飽和度の自動スケール)。"""
+    for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
+        monkeypatch.delenv(k, raising=False)
+    captured: dict = {}
+    monkeypatch.setattr(shobu.subprocess, "run",
+                        lambda cmd, **kw: captured.__setitem__("env", kw.get("env")) or _RC0())
+    targets = [{"netkeiba_race_id": "x", "race_type": "jra",
+                "start_at": 0, "venue": "V", "race_no": 1}]
+    shobu._run_claude_eval(targets, timeout=900, parallel=2, log=lambda m: None,
+                           score_parallel=True, score_queries_per_horse=10,
+                           llm_max_concurrent=20)
+    assert captured["env"]["KEIBA_SCORE_MAX_SHARDS"] == "10"   # 20 // 2
+
+
 def test_scan_claude_all_generates_for_all(monkeypatch):
     """claude_all: Claude 指数なしの全レースに生成 → 全レースが Claude 乖離を持つ。"""
     now = int(time.time())

@@ -476,8 +476,9 @@ class ShobuScanRequest(BaseModel):
     claude_eval_parallel: int = Field(default=4, ge=1, le=50)
     # score 段の検索並列化 (KEIBA_SCORE_PARALLEL)。既定 ON。
     score_parallel: bool = True
-    # 1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。ユーザ指示: 12。
-    score_queries_per_horse: int = Field(default=12, ge=2, le=12)
+    # 1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。ユーザ指示 (2026-06-28): 10。
+    # 「頭数 × これ」クエリが流れる (並列パスは全シャードで被覆、単一セッションも同 env を尊重)。
+    score_queries_per_horse: int = Field(default=10, ge=2, le=12)
     # claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)。claude の並列は keiba.go.jp と無関係なので 20 維持。
     llm_max_concurrent: int = Field(default=20, ge=1, le=50)
 

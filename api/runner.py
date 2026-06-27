@@ -447,8 +447,9 @@ def build_shobu_cmd(
     if max_races is not None:
         cmd += ["--max-races", str(max_races)]
     cmd += ["--claude-eval-parallel", str(claude_eval_parallel)]
-    if score_parallel:
-        cmd.append("--score-parallel")
+    # CLI 側は --score-parallel が既定 ON なので、False のときは明示的に打ち消す
+    # (省略すると CLI 既定の ON が効いてしまう)。
+    cmd.append("--score-parallel" if score_parallel else "--no-score-parallel")
     if score_queries_per_horse:
         cmd += ["--score-queries-per-horse", str(score_queries_per_horse)]
     if llm_max_concurrent:

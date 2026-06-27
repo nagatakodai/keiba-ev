@@ -472,18 +472,58 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     if not targets:
         return 0
     total = len(targets)
-    log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 "
-        f"(並列 {parallel} / 各 timeout {timeout}s)…")
 
     score_env = os.environ.copy()
     # score subprocess の検索並列化 (KEIBA_SCORE_PARALLEL=1 で ARCH-A プロセス並列)。
     # OFF のときは継承した "1" を空文字で打ち消す (main.py の score タブと同流儀)。
     score_env["KEIBA_SCORE_PARALLEL"] = "1" if score_parallel else ""
     if score_queries_per_horse:
+        # 1馬あたり検索クエリ数。並列パスは「頭数 × これ」を全シャードで被覆し、
+        # 単一セッション (< 並列しきい値の小頭数) も llm.score_horses_stream が同 env を読むので
+        # どの頭数でも「頭数 × これ」クエリが流れる (ユーザ指示: 10/頭)。
         score_env["KEIBA_SCORE_QUERIES_PER_HORSE"] = str(score_queries_per_horse)
     if llm_max_concurrent:
         # file-slot semaphore (claude -p 同時数上限)。並列を実際に通すため引き上げる。
         score_env["KEIBA_LLM_MAX_CONCURRENT"] = str(llm_max_concurrent)
+
+    shards_per_race = None
+    if score_parallel:
+        # --- 並列を飽和させて実行を速める (ユーザ指示: 並列化して速める) ---
+        # across-race は `parallel` 本同時に走る。各レースの RESEARCH シャードを小さく刻み
+        # (per_shard=3)、シャード数を「claude 同時上限 ÷ across-race」に合わせると、全体の
+        # claude -p 同時実行が上限近くまで埋まり、各シャードの担当頭数が減って research が速い。
+        # _shard_numbers は全馬を必ず被覆するので「頭数 × クエリ/頭」(= 頭数×N) は不変。
+        # keiba.go.jp レート制限は SCRAPE (across-race=parallel) 側の制約で、claude -p (Tavily)
+        # は別系統なのでシャードを増やしても scrape は bursting しない。
+        try:
+            conc = int(llm_max_concurrent or score_env.get("KEIBA_LLM_MAX_CONCURRENT") or 20)
+        except (TypeError, ValueError):
+            conc = 20
+        shards_per_race = max(2, conc // max(1, parallel))
+        # 既に operator が明示設定していれば尊重 (= 空のときだけ shobu が飽和値を入れる)。
+        if not (score_env.get("KEIBA_SCORE_HORSES_PER_SHARD") or "").strip():
+            score_env["KEIBA_SCORE_HORSES_PER_SHARD"] = "3"
+        if not (score_env.get("KEIBA_SCORE_MAX_SHARDS") or "").strip():
+            score_env["KEIBA_SCORE_MAX_SHARDS"] = str(shards_per_race)
+        # 内側 claude の score timeout を外側 subprocess kill (timeout) の手前に収める。
+        # 外側が先に発火すると score 結果が丸ごと失われる (TimeoutExpired → rc≠0 で指数なし) ため、
+        # ~90s の余裕 (scrape + 起動 + JSON finalize + snapshot 保存) を残す。operator 設定値は
+        # その上限でクランプ (外側 kill を越えさせない)。**必ず外側 < timeout** を保証するため、
+        # 90s 余裕の希望値を timeout-10 でも上限クランプする (timeout が小さくても反転しない)。
+        # 通常運用 (timeout=900) は 810s。CLI も --claude-eval-timeout を 210s 下限にクランプ済。
+        headroom = min(max(120, int(timeout) - 90), int(timeout) - 10)
+        prior = (score_env.get("KEIBA_SCORE_TIMEOUT") or "").strip()
+        try:
+            prior_v = int(prior)
+        except ValueError:
+            prior_v = 0
+        score_env["KEIBA_SCORE_TIMEOUT"] = str(min(prior_v, headroom) if prior_v > 0 else headroom)
+
+    qph_txt = f" / {score_queries_per_horse}クエリ/頭" if score_queries_per_horse else ""
+    shard_txt = (f" / {shards_per_race}シャード/レース (per_shard 3)"
+                 if shards_per_race else "")
+    log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 "
+        f"(across-race 並列 {parallel}{qph_txt}{shard_txt} / 各 timeout {timeout}s)…")
 
     def _one(t: dict[str, Any]) -> tuple[dict[str, Any], bool, str]:
         rid = t["netkeiba_race_id"]
@@ -857,15 +897,30 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--claude-all", action="store_true",
                     help="Claude 指数が無い発走前レースを全件 claude -p で一括生成")
     ap.add_argument("--claude-eval", type=int, default=0, help="上位N件に Claude 指数を新規生成 (--claude-all なしの時)")
-    ap.add_argument("--claude-eval-timeout", type=int, default=900)
+    ap.add_argument("--claude-eval-timeout", type=int, default=900,
+                    help="各レースの score subprocess の外側 timeout 秒 (既定 900)。下限 210s に"
+                         "クランプ — 内側 claude (research 60s + scoring 60s floor + scrape) が"
+                         "外側 kill より先に終わるのを保証する")
     ap.add_argument("--claude-eval-parallel", type=int, default=6)
-    ap.add_argument("--score-parallel", action="store_true", help="score 段の検索を並列化 (KEIBA_SCORE_PARALLEL=1)")
-    ap.add_argument("--score-queries-per-horse", type=int, default=None, help="1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE, 並列時のみ有効)")
-    ap.add_argument("--llm-max-concurrent", type=int, default=None, help="claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)")
+    ap.add_argument("--score-parallel", dest="score_parallel", action="store_true",
+                    default=True, help="score 段の検索を並列化 (KEIBA_SCORE_PARALLEL=1, 既定 ON)")
+    ap.add_argument("--no-score-parallel", dest="score_parallel", action="store_false",
+                    help="score 段の検索並列化を無効化 (単一セッション)")
+    ap.add_argument("--score-queries-per-horse", type=int, default=10,
+                    help="1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。"
+                         "頭数×これ クエリが流れる (既定 10)")
+    ap.add_argument("--llm-max-concurrent", type=int, default=20, help="claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT, 既定 20)")
     ap.add_argument("--max-races", type=int, default=None)
     ap.add_argument("--refresh", action="store_true",
                     help="既存スキャン結果の推奨レースのみ最新オッズで再採点 (Claude 呼ばない)")
     args = ap.parse_args(argv)
+    # 外側 subprocess timeout が小さすぎると内側 claude の score timeout より先に発火し
+    # score 結果が丸ごと失われる (内側は research 60s + scoring 60s + scrape の floor を持つ)。
+    # 210s 下限でクランプして反転を防ぐ (_run_claude_eval の headroom も二重防御済)。
+    if args.claude_eval_timeout < 210:
+        print(f"[warn] --claude-eval-timeout={args.claude_eval_timeout} は小さすぎるため 210s に"
+              "クランプ (内側 claude が外側 kill より先に終わるのを保証)", flush=True)
+        args.claude_eval_timeout = 210
 
     if args.refresh:
         result = refresh_recommended(date=args.date)

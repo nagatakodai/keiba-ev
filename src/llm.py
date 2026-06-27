@@ -194,6 +194,7 @@ def build_horse_score_prompt(
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
+    queries_per_horse: int = 2,
 ) -> str:
     """各馬に **0-100 の強さ指数** (高い=強い=1位,2位…) を付けさせる prompt。
 
@@ -268,10 +269,11 @@ def build_horse_score_prompt(
         "  4. 騎手の当該コース成績 / 乗り替わりの強化・弱体",
         "**検索すべきでない**: 既に上表にある数値 (適性)、市場の人気/オッズ (= 市場の鏡で edge にならない)、"
         "競馬の基本ルール、1か月以上前の汎用情報、「単に人気だから強い」という類の確認。",
-        f"**検索予算**: このレースは {len(horses)} 頭立て。**全馬を 1 頭あたり約 2 クエリ "
-        f"(合計 ~{len(horses) * 2} クエリ) まで** Tavily で補強してよい。各馬について最低 "
+        f"**検索予算**: このレースは {len(horses)} 頭立て。**全馬を 1 頭あたり約 "
+        f"{max(1, queries_per_horse)} クエリ (合計 ~{len(horses) * max(1, queries_per_horse)} "
+        "クエリ) まで** Tavily で補強してよい。各馬について最低 "
         "1 回は ①直前情報 (取消/馬体重) または ②軟情報 (近走の不利/勝負気配) を確認し、評価が"
-        "割れる馬は 2 回まで深掘りする。各クエリ前に「何が決まるか」を 1 行説明。",
+        "割れる馬は深掘りする。各クエリ前に「何が決まるか」を 1 行説明。",
         "**並列実行 (重要・速度に直結)**: 互いに依存しない検索・WebFetch は **必ず 1 ターンで同時に "
         "(parallel に複数 tool_use を) 呼び出す**こと。馬ごとに 1 つずつ順番 (sequential) に投げると "
         "1 ラウンド 30-50s × 頭数で timeout する。例: 全馬の近走を一度にまとめて並列発行 → 結果が揃って "
@@ -335,6 +337,10 @@ def score_horses_stream(
 ) -> Iterator[tuple[str, Any]]:
     """各馬の強さ指数を web 検索付きで出させる stream-json (spawn/event 形式は
     select_trifecta_stream と共通)。出力は parse_horse_scores で {scores,...} に正規化する。
+
+    検索予算は env `KEIBA_SCORE_QUERIES_PER_HORSE` (既定 2) を尊重する。並列 score (ARCH-A) が
+    効かない少頭数 (< KEIBA_SCORE_MIN_HORSES_FOR_PARALLEL) でも、shobu 等が同 env を立てていれば
+    単一セッションでも「頭数 × N クエリ」が流れる (env 未設定なら従来どおり 2/頭 で挙動不変)。
     """
     if not is_available():
         yield ("error", "claude CLI が見つかりません")
@@ -343,9 +349,10 @@ def score_horses_stream(
     if not horses:
         yield ("result", "")
         return
+    qph = _env_int("KEIBA_SCORE_QUERIES_PER_HORSE", 2)
     prompt = build_horse_score_prompt(
         rd, aptitudes=aptitudes, market_signals=market_signals,
-        horse_best_times=horse_best_times,
+        horse_best_times=horse_best_times, queries_per_horse=qph,
     )
     cmd = [
         "claude", "-p", prompt,

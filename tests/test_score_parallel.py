@@ -195,6 +195,67 @@ def test_dispatcher_off_when_too_few_horses(monkeypatch):
     assert ("result", "SINGLE_SMALL_FIELD") in events
 
 
+def test_score_prompt_query_budget_configurable():
+    """build_horse_score_prompt の検索予算は queries_per_horse で可変 (既定 2 / shobu は 10)。"""
+    rd = _mk_race(6)
+    p2 = llm.build_horse_score_prompt(rd)                 # 既定 2/頭
+    assert "1 頭あたり約 2 クエリ" in p2
+    assert "~12 クエリ" in p2                             # 6 頭 × 2
+    p10 = llm.build_horse_score_prompt(rd, queries_per_horse=10)
+    assert "1 頭あたり約 10 クエリ" in p10
+    assert "~60 クエリ" in p10                            # 6 頭 × 10
+
+
+def test_single_session_respects_query_env(monkeypatch):
+    """単一セッション (score_horses_stream) も KEIBA_SCORE_QUERIES_PER_HORSE を尊重する。
+
+    並列しきい値未満の少頭数でも、shobu 等が env を立てれば「頭数 × N」クエリが流れる。
+    """
+    monkeypatch.setenv("KEIBA_SCORE_QUERIES_PER_HORSE", "10")
+    monkeypatch.setattr(llm, "is_available", lambda: True)
+    captured: dict[str, str] = {}
+
+    def fake_spawn(cmd):
+        captured["prompt"] = cmd[2]
+        return _FakeProc([_result_line(_PHASE_B_SCORES)]), io.StringIO()
+
+    monkeypatch.setattr(llm, "_spawn_claude", fake_spawn)
+    rd = _mk_race(6)                                      # < 8 頭 → 単一セッション経路
+    list(llm.score_horses_stream(rd))
+    assert "1 頭あたり約 10 クエリ" in captured["prompt"]
+    assert "~60 クエリ" in captured["prompt"]             # 6 頭 × 10
+
+
+def test_single_session_default_query_budget(monkeypatch):
+    """env 未設定なら単一セッションは従来どおり 2/頭 (挙動不変)。"""
+    monkeypatch.delenv("KEIBA_SCORE_QUERIES_PER_HORSE", raising=False)
+    monkeypatch.setattr(llm, "is_available", lambda: True)
+    captured: dict[str, str] = {}
+
+    def fake_spawn(cmd):
+        captured["prompt"] = cmd[2]
+        return _FakeProc([_result_line(_PHASE_B_SCORES)]), io.StringIO()
+
+    monkeypatch.setattr(llm, "_spawn_claude", fake_spawn)
+    rd = _mk_race(6)
+    list(llm.score_horses_stream(rd))
+    assert "1 頭あたり約 2 クエリ" in captured["prompt"]
+
+
+def test_research_prompt_full_field_budget():
+    """並列 RESEARCH は担当頭数 × queries_per_horse 分の予算を提示 (全シャード合算で頭数×N)。"""
+    rd = _mk_race(16)
+    # per_shard=3 で 16 頭を分割 → 各シャードの予算が 担当頭数 × 10 になることを確認。
+    shards = llm._shard_numbers(list(range(1, 17)), 3, 5)
+    assert sum(len(s) for s in shards) == 16             # 全馬被覆 = 合計 16×10=160 クエリ
+    total_budget = 0
+    for s in shards:
+        p = llm.build_horse_research_prompt(rd, s, queries_per_horse=10)
+        assert f"~{len(s) * 10} クエリ" in p              # 担当 len(s) 頭 × 10
+        total_budget += len(s) * 10
+    assert total_budget == 160                            # 頭数 × 10
+
+
 def test_score_prompts_have_no_market_odds():
     """Claude 指数の score プロンプト (単一 + 並列 RESEARCH/SCORING) は単勝オッズ・人気を
     一切載せない = 市場非依存 (2026-06-21)。適性総合は過去走由来でオッズ非依存なので残す。"""
