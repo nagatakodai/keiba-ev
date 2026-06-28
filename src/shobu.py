@@ -502,6 +502,41 @@ def scan(
     races.sort(key=lambda r: (r["start_at"] or 0, r["race_no"]))
     if max_races is not None:
         races = races[:max_races]
+
+    # **発走後も推奨レースをファイルに残す** (ユーザ指摘 2026-06-28): scan は file を上書きし、
+    # upcoming_only=True は発走済を discovery から落とす。再スキャンするとそれまで推奨だった
+    # 発走済レースが file から消え、ダッシュボード仮想収支 (compute_shobu_pnl は file の
+    # recommended を読む) が発走後に数えられなくなる。→ 前回 file の発走済の **評価対象レース**
+    # (recommended に限らず・当日母集団全体) を復元してマージし、file を当日の累積記録にする。
+    if upcoming_only and out is not None and out.exists():
+        have = {r["race_id"] for r in races}
+        try:
+            prior_races = json.loads(out.read_text(encoding="utf-8")).get("races") or []
+        except (OSError, json.JSONDecodeError):
+            prior_races = []
+        carried = 0
+        for pr in prior_races:
+            rid = pr.get("race_id")
+            if not rid or rid in have:
+                continue
+            if race_type in ("jra", "nar", "banei") and pr.get("race_type") != race_type:
+                continue   # type 別スキャンに別 type を混ぜない
+            races.append({
+                "netkeiba_race_id": pr.get("netkeiba_race_id", ""),
+                "race_id": rid,
+                "venue": pr.get("venue", ""),
+                "race_no": int(pr.get("race_no") or 0),
+                "race_type": pr.get("race_type", ""),
+                "start_at": int(pr.get("start_at") or 0),
+                "close_at": int(pr.get("close_at") or 0),
+                "source": "", "url": "",
+            })
+            have.add(rid)
+            carried += 1
+        if carried:
+            races.sort(key=lambda r: (r["start_at"] or 0, r["race_no"]))
+            _log(f"[carry] 前回 file の発走済レース {carried} 件を維持 (発走後も dashboard が数えられるように)")
+
     _log(f"[filter] 評価対象 {len(races)} レース "
          f"(race_type={race_type} / 発走前のみ={upcoming_only})")
 

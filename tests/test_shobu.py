@@ -170,6 +170,51 @@ def test_scan_race_type_filter(monkeypatch):
     assert res["races"][0]["race_type"] == "nar"
 
 
+def test_scan_carries_past_recommended(tmp_path, monkeypatch):
+    """再スキャンで発走済になった推奨レースを file に維持する (ユーザ指摘 2026-06-28)。
+
+    upcoming_only=True で discovery から落ちても、前回 file の発走済レースを carry-forward して
+    再採点 → file に残す。これでダッシュボード仮想収支が発走後も勝負レースを数え続けられる。
+    """
+    import json
+    now = int(time.time())
+    nar = shobu._internal_id("202632060101")   # A
+    jra = shobu._internal_id("202605010111")   # B
+    monkeypatch.setattr(shobu, "_load_snapshot", lambda i: _SNAP_DIVERGENCE)
+
+    # 1回目: A, B とも発走前 → 両方 file に推奨で入る。
+    calls = {"n": 0}
+
+    def disc(_d):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [
+                {"race_id": "202632060101", "url": "u", "start_at": now + 3600,
+                 "venue": "佐賀", "race_no": 1, "source": "oddspark"},
+                {"race_id": "202605010111", "url": "u", "start_at": now + 7200,
+                 "venue": "東京", "race_no": 11, "source": "keibabook"},
+            ]
+        # 2回目: A は発走済で discovery から消えた (B のみ返る)。
+        return [
+            {"race_id": "202605010111", "url": "u", "start_at": now + 7200,
+             "venue": "東京", "race_no": 11, "source": "keibabook"},
+        ]
+
+    monkeypatch.setattr("src.auto_watch.discover_today_races", disc)
+    out = tmp_path / "20260628.json"
+    r1 = shobu.scan(edge_threshold=20.0, claude_eval=0, out=out, log=lambda *_: None)
+    assert {r["race_id"] for r in r1["races"]} == {nar, jra}
+    assert r1["summary"]["recommended"] == 2
+
+    # 2回目: A は discovery に無いが、前回 file から carry されて残る。
+    r2 = shobu.scan(edge_threshold=20.0, claude_eval=0, out=out, log=lambda *_: None)
+    ids = {r["race_id"] for r in r2["races"]}
+    assert nar in ids and jra in ids                    # A が消えずに残る
+    a = next(r for r in r2["races"] if r["race_id"] == nar)
+    assert a["recommended"] is True                      # 再採点され推奨のまま
+    assert r2["summary"]["recommended"] == 2             # dashboard が数える母集団は維持
+
+
 def test_select_claude_targets():
     now = 1000
 
