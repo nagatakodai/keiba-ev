@@ -3,7 +3,11 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
+  ArrowDownUp,
   ChevronRight,
+  Clock,
+  Eye,
+  EyeOff,
   Flame,
   Loader2,
   Play,
@@ -132,7 +136,19 @@ function RaceTypeBadge({ t }: { t: "jra" | "nar" | "banei" }) {
   return <Badge tone="muted">地方</Badge>;
 }
 
-function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank?: number }) {
+function RaceCard({
+  r,
+  nowMs,
+  rank,
+  hidden,
+  onToggleHide,
+}: {
+  r: ShobuRace;
+  nowMs: number | null;
+  rank?: number;
+  hidden?: boolean;
+  onToggleHide?: () => void;
+}) {
   const sep = r.separation;
   const claude = r.claude;
   const timing =
@@ -268,18 +284,30 @@ function RaceCard({ r, nowMs, rank }: { r: ShobuRace; nowMs: number | null; rank
         </div>
       )}
 
-      {/* ── reasons + 詳細リンク ── */}
+      {/* ── reasons + 非表示 / 詳細リンク ── */}
       <div className="mt-2.5 flex items-end justify-between gap-2 pt-2 border-t border-(--color-line-soft)">
         <p className="text-[11px] text-(--color-muted) leading-snug min-w-0">
           {r.reasons.length > 0 ? r.reasons.join(" ／ ") : "—"}
         </p>
-        <Link
-          href={`/predictions/${r.race_id}`}
-          className="shrink-0 inline-flex items-center gap-0.5 text-[11px] font-bold text-(--color-accent) hover:underline"
-        >
-          詳細
-          <ChevronRight className="size-3.5" />
-        </Link>
+        <div className="shrink-0 flex items-center gap-2.5">
+          {onToggleHide && (
+            <button
+              onClick={onToggleHide}
+              className="inline-flex items-center gap-0.5 text-[11px] font-bold text-(--color-muted) hover:text-(--color-foreground) transition-colors"
+              title={hidden ? "この勝負レースを一覧に戻す" : "このレースを非表示にして一番下へ移動"}
+            >
+              {hidden ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+              {hidden ? "表示" : "非表示"}
+            </button>
+          )}
+          <Link
+            href={`/predictions/${r.race_id}`}
+            className="inline-flex items-center gap-0.5 text-[11px] font-bold text-(--color-accent) hover:underline"
+          >
+            詳細
+            <ChevronRight className="size-3.5" />
+          </Link>
+        </div>
       </div>
     </div>
   );
@@ -322,6 +350,9 @@ function deriveDisplay(
   return { recommended, matched, shobu_score: Math.round(score * 10) / 10 };
 }
 
+// レースの安定キー (React key + 非表示 Set のメンバー判定に共通使用)。
+const keyOf = (r: ShobuRace) => `${r.race_id}-${r.netkeiba_race_id}`;
+
 export default function ShobuPage() {
   // ── 抽出オプション ──
   const [raceType, setRaceType] = useState<"all" | "jra" | "nar" | "banei">("all");
@@ -355,6 +386,12 @@ export default function ShobuPage() {
   // 一覧側で「基準A (強弱) を必須にしない」= 基準B (市場乖離) のみで勝負レースを判定する表示。
   // 再スキャン不要 (deriveDisplay で client 再採点)。基準B が scan で有効だった時のみ意味を持つ。
   const [aOptional, setAOptional] = useState(false);
+  // 並び順: "score" = 勝負スコア降順 (同点は発走が近い順) / "time" = 発走時刻の昇順 (近い順)。
+  // ボタンで切替 (ユーザ指示 2026-06-28: 100まとめ連動でなく独立したソートボタン)。
+  const [sortMode, setSortMode] = useState<"score" | "time">("score");
+  // 非表示にしたレース (card key の Set)。一番下の「非表示」セクションに集約。日付ごとに localStorage 永続。
+  const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set());
+  const [showHidden, setShowHidden] = useState(false);
 
   // 現在のフォーム設定を scan options に変換。
   const buildOptions = (): ShobuScanRequest => ({
@@ -400,6 +437,40 @@ export default function ShobuPage() {
         /* 未スキャン (404) は無視 */
       });
   }, []);
+
+  // 非表示リストを日付ごとに localStorage から復元 (ページ再読込・自動更新を跨いで維持)。
+  useEffect(() => {
+    if (!result?.date) return;
+    let next: Set<string>;
+    try {
+      const raw = localStorage.getItem(`shobu-hidden-${result.date}`);
+      next = raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch {
+      next = new Set();
+    }
+    // localStorage → state の同期 (date 変化時のみ)。外部ストアの同期なので effect で setState する。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHiddenKeys(next);
+  }, [result?.date]);
+
+  // カードの非表示 / 再表示トグル (localStorage に永続)。
+  const toggleHide = (r: ShobuRace) => {
+    const date = result?.date;
+    setHiddenKeys((prev) => {
+      const next = new Set(prev);
+      const k = keyOf(r);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      if (date) {
+        try {
+          localStorage.setItem(`shobu-hidden-${date}`, JSON.stringify([...next]));
+        } catch {
+          /* localStorage 不可 (private mode 等) は無視 — メモリ上の state は更新済 */
+        }
+      }
+      return next;
+    });
+  };
 
   // スキャン Job を polling。各 tick で **暫定/進捗中の結果も取得** して表示する
   // (生成前: 基準A中心の暫定一覧 → 各レース生成完了ごとに基準B が確定して live 更新)。
@@ -503,14 +574,28 @@ export default function ShobuPage() {
         )
     : rawRaces;
 
+  const isHidden = (r: ShobuRace) => hiddenKeys.has(keyOf(r));
+  // 並び順の比較関数。"score" = 勝負スコア降順 (同点=発走が近い順 → スコア100まとめ時は発走順)、
+  // "time" = 発走時刻の昇順 (近い順、同時刻はスコア降順)。ソートボタンで切替。
+  const cmp = (a: ShobuRace, b: ShobuRace) =>
+    sortMode === "time"
+      ? (a.start_at || 0) - (b.start_at || 0) || b.shobu_score - a.shobu_score
+      : b.shobu_score - a.shobu_score || (a.start_at || 0) - (b.start_at || 0);
+
   const recommended = races.filter((r) => r.recommended);
   const others = races.filter((r) => !r.recommended);
 
   // 「勝負スコア100のみ」フィルタ適用後の表示リスト (shobu_score は 100 で cap)。
   const isScore100 = (r: ShobuRace) => r.shobu_score >= 100;
   const score100Count = races.filter(isScore100).length;
-  const recShown = onlyScore100 ? recommended.filter(isScore100) : recommended;
-  const othersShown = onlyScore100 ? others.filter(isScore100) : others;
+  // 非表示を除外 → 並び順を適用。非表示レースは一番下の専用セクションへ集約。
+  const recShown = (onlyScore100 ? recommended.filter(isScore100) : recommended)
+    .filter((r) => !isHidden(r))
+    .sort(cmp);
+  const othersShown = (onlyScore100 ? others.filter(isScore100) : others)
+    .filter((r) => !isHidden(r))
+    .sort(cmp);
+  const hiddenShown = races.filter(isHidden).sort(cmp);
 
   // 推奨レースのみ最新オッズで再採点 (Claude は呼ばない・単勝 1 fetch/レース)。手動 & 自動共通。
   const doRefresh = async () => {
@@ -774,11 +859,22 @@ export default function ShobuPage() {
               </h2>
               <Badge tone={recShown.length > 0 ? "good" : "muted"}>
                 {recShown.length} 件
-                {onlyScore100 && recommended.length !== recShown.length ? ` / ${recommended.length}` : ""}
+                {recommended.length !== recShown.length ? ` / ${recommended.length}` : ""}
               </Badge>
               {recommended.length > 0 && (
-                <span className="text-[11px] text-(--color-muted)">勝負スコア順 ・ 緑カード = 推奨</span>
+                <span className="text-[11px] text-(--color-muted)">
+                  {sortMode === "time" ? "発走時刻順" : "勝負スコア順"} ・ 緑カード = 推奨
+                </span>
               )}
+              {/* 並び替えボタン: 勝負スコア順 ⇄ 発走時刻順 (近い順)。スコア100でまとめても発走順に並べられる */}
+              <button
+                onClick={() => setSortMode((m) => (m === "score" ? "time" : "score"))}
+                className="inline-flex items-center gap-1 rounded-md border border-(--color-line) bg-(--color-surface-2) px-2 py-0.5 text-[11px] font-bold text-(--color-foreground) hover:border-(--color-accent) transition-colors"
+                title="並び順を切り替え (勝負スコア順 / 発走時刻の昇順)"
+              >
+                {sortMode === "time" ? <Clock className="size-3" /> : <ArrowDownUp className="size-3" />}
+                {sortMode === "time" ? "発走時刻順" : "勝負スコア順"}
+              </button>
               {/* 基準A (強弱) を必須にしない = 基準B (市場乖離) のみで判定 (再スキャン不要・表示だけ) */}
               {canDropA && (
                 <Toggle checked={aOptional} onChange={setAOptional}>
@@ -821,15 +917,23 @@ export default function ShobuPage() {
                 <div className="py-6 text-center text-sm text-(--color-muted)">
                   {races.length === 0
                     ? "評価対象のレースがありません (当日の開催が無い / 全て締切済の可能性)。"
-                    : onlyScore100
-                      ? `勝負スコア100の勝負レースはありません${recommended.length > 0 ? ` (フィルタを外すと ${recommended.length} 件)` : ""}。`
-                      : "選択した基準を満たす勝負レースはありませんでした。下の「その他のレース」をスコア順で確認するか、しきい値 (強弱/指数差/頭数) を下げてください。"}
+                    : recommended.length > 0 && hiddenShown.length > 0 && !onlyScore100
+                      ? "表示できる勝負レースがありません (すべて非表示)。下の「非表示にしたレース」から戻せます。"
+                      : onlyScore100
+                        ? `勝負スコア100の勝負レースはありません${recommended.length > 0 ? ` (フィルタを外すと ${recommended.length} 件)` : ""}。`
+                        : "選択した基準を満たす勝負レースはありませんでした。下の「その他のレース」をスコア順で確認するか、しきい値 (強弱/指数差/頭数) を下げてください。"}
                 </div>
               </Card>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                 {recShown.map((r, i) => (
-                  <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} rank={i + 1} />
+                  <RaceCard
+                    key={keyOf(r)}
+                    r={r}
+                    nowMs={nowMs}
+                    rank={i + 1}
+                    onToggleHide={() => toggleHide(r)}
+                  />
                 ))}
               </div>
             )}
@@ -851,7 +955,31 @@ export default function ShobuPage() {
               {showOthers && (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                   {othersShown.map((r) => (
-                    <RaceCard key={`${r.race_id}-${r.netkeiba_race_id}`} r={r} nowMs={nowMs} />
+                    <RaceCard key={keyOf(r)} r={r} nowMs={nowMs} onToggleHide={() => toggleHide(r)} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 非表示にしたレース — 一番下に集約 (折りたたみ)。各カードの「表示」で一覧に戻せる */}
+          {hiddenShown.length > 0 && (
+            <div className="space-y-3">
+              <button
+                onClick={() => setShowHidden((v) => !v)}
+                aria-expanded={showHidden}
+                className="flex items-center gap-2 px-1 text-(--color-muted) hover:text-(--color-foreground) transition-colors"
+              >
+                <ChevronRight size={15} className={`transition-transform ${showHidden ? "rotate-90" : ""}`} aria-hidden />
+                <EyeOff size={14} aria-hidden />
+                <span className="text-sm font-bold">非表示にしたレース</span>
+                <Badge tone="muted">{hiddenShown.length} 件</Badge>
+                <span className="text-[11px]">{showHidden ? "隠す" : "表示"}</span>
+              </button>
+              {showHidden && (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {hiddenShown.map((r) => (
+                    <RaceCard key={keyOf(r)} r={r} nowMs={nowMs} hidden onToggleHide={() => toggleHide(r)} />
                   ))}
                 </div>
               )}
