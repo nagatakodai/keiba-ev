@@ -101,6 +101,24 @@ def test_scan_banei_filter(monkeypatch):
     assert res_banei["races"][0]["venue"] == "帯広"
 
 
+def test_scan_max_races_keeps_latest_start(monkeypatch):
+    """取得レース数 (max_races) は発走日時が遅い (最新) 順に N 件を採用する (ユーザ指示 2026-06-28)。"""
+    now = int(time.time())
+    disc = [
+        {"race_id": f"20263206010{n}", "url": "u", "start_at": now + 3600 * n,
+         "venue": "佐賀", "race_no": n, "source": "oddspark"}
+        for n in (1, 2, 3, 4)   # start_at が n に比例 (race_no 4 = 最も遅い発走)
+    ]
+    monkeypatch.setattr("src.auto_watch.discover_today_races", lambda d: disc)
+    monkeypatch.setattr(shobu, "_load_snapshot", lambda i: None)
+    res = shobu.scan(max_races=2, claude_eval=0, log=lambda *_: None)
+    nos = sorted(r["race_no"] for r in res["races"])
+    assert nos == [3, 4], f"発走が遅い 2 件 (race_no 3,4) を採用するはず: {nos}"
+    # max_races=None (全件) なら 4 件すべて。
+    res_all = shobu.scan(max_races=None, claude_eval=0, log=lambda *_: None)
+    assert sorted(r["race_no"] for r in res_all["races"]) == [1, 2, 3, 4]
+
+
 # ---------------------------------------------------------------- scan() ----
 
 def _fake_discovery(now: int):

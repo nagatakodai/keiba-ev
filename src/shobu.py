@@ -585,8 +585,13 @@ def scan(
             "url": d.get("url", ""),
         })
     races.sort(key=lambda r: (r["start_at"] or 0, r["race_no"]))
-    if max_races is not None:
-        races = races[:max_races]
+    if max_races is not None and max_races > 0 and len(races) > max_races:
+        # 発走日時の **最新 (遅い) 順** に N 件だけ採用 (ユーザ指示 2026-06-28)。races は
+        # start_at 昇順なので末尾 N = 発走時刻が最も遅い N 件。表示順 (発走昇順) は維持される。
+        dropped = len(races) - max_races
+        races = races[-max_races:]
+        _log(f"[limit] 取得レース数={max_races} → 発走が遅い {max_races} 件を採用 "
+             f"(発走が早い {dropped} 件を除外)")
 
     # **発走後も推奨レースをファイルに残す** (ユーザ指摘 2026-06-28): scan は file を上書きし、
     # upcoming_only=True は発走済を discovery から落とす。再スキャンするとそれまで推奨だった
@@ -862,7 +867,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。"
                          "頭数×これ クエリが流れる (既定 10)")
     ap.add_argument("--llm-max-concurrent", type=int, default=20, help="claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT, 既定 20)")
-    ap.add_argument("--max-races", type=int, default=None)
+    ap.add_argument("--max-races", type=int, default=None,
+                    help="取得レース数の上限。発走日時が遅い (最新) 順に N 件だけ評価 (既定=全件)")
     ap.add_argument("--refresh", action="store_true",
                     help="既存スキャン結果の推奨レースのみ最新オッズで再採点 (Claude 呼ばない)")
     args = ap.parse_args(argv)
