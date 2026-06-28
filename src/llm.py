@@ -296,12 +296,15 @@ def build_horse_score_prompt(
         "- **取消/除外/重度の体調不安**が確認できた馬は指数 0 にする (絡む目をモデルが落とせるよう)。",
         "- ①②の確たる根拠が無い馬は適性総合の常識的水準に留め、過度に動かさない (楽観バイアス警戒)。",
         "",
-        "## 各馬の補強根拠件数 (support)",
-        "各馬について、指数を動かす **裏付けとなった検索根拠の件数** を 0-3+ で出す。"
-        "**プラス材料もマイナス材料も同じく 1 件として数える** (例: 馬体重-12kg=1 / 前走不利=1 / "
-        "厩舎勝負気配=1 / 距離不適性が判明=1 / 乗替りで実績薄=1)。①直前情報・②軟情報の根拠を"
-        "特に重視して数える。支持が多い馬ほどモデルはあなたの指数 (上げ・下げ問わず) を厚く採用する。"
-        "材料が無ければ 0。",
+        "## 各馬の補強根拠 (evidence) と件数 (support) — 詳しく・全部出す",
+        "各馬について、指数を上げ下げした **裏付け根拠を 1 件ずつ具体的に** `evidence` 配列へ書く。"
+        "**件数の上限は無い — 3 件で打ち切らず、見つけた根拠はあるだけ全部 (10 件以上でも構わない、"
+        "多いほどよい) を列挙する。** 1 要素 = 1 事実を、馬名・数値・出典の手がかりを添えて具体的に "
+        "(例: \"前走(東京1400)は直線で前が詰まり追えず着順以上に強い内容\" / \"今走は叩き2走目で上昇度大\" / "
+        "\"鞍上◯◯は当該コース複勝率45%\" / \"当日馬体重-12kgで余裕残しなし\" / \"距離短縮が末脚を活かす形\")。"
+        "**プラス材料もマイナス材料も同じく 1 件**。①直前情報・②軟情報の根拠を特に重視して挙げる。"
+        "`support` は **その evidence の件数** (= len(evidence)、上限なし)。根拠が多い馬ほどモデルは"
+        "あなたの指数 (上げ・下げ問わず) を厚く採用する。材料が無ければ evidence は空配列・support 0。",
         "",
         "## 各馬の直前/軟情報フラグ (alerts) — 構造化して必ず出す",
         "検索で見つけた **①直前情報・②軟情報を短い日本語ラベルの配列**として馬番ごとに出す。"
@@ -313,13 +316,16 @@ def build_horse_score_prompt(
         "取消/除外を入れた馬は scores も 0 にすること。",
         "",
         "## 出力",
-        "全出走馬の 馬番→指数(0-100) と support を必ず網羅し、alerts は該当馬のみ、"
-        "最後に以下の JSON を ```json ... ``` で出力:",
+        "全出走馬の 馬番→指数(0-100)・support・evidence を必ず網羅し (evidence は省略せず全件)、"
+        "alerts は該当馬のみ、最後に以下の JSON を ```json ... ``` で出力:",
         "```json",
         '{"scores": {"7": 82, "2": 64, "11": 40, "3": 0},'
-        ' "support": {"7": 3, "2": 1, "11": 0, "3": 1},'
+        ' "support": {"7": 5, "2": 1, "11": 0, "3": 1},'
+        ' "evidence": {"7": ["前走(東京1400)は直線で前が詰まり追えず着順以上に強い内容",'
+        ' "今走は叩き2走目で上昇度大", "距離短縮が末脚を活かす形に合致",'
+        ' "鞍上が当該コース複勝率45%と相性良", "厩舎が遠征に勝負気配のコメント"],'
+        ' "2": ["当日馬体重-10kgで仕上がりに不安"], "3": ["出走取消を確認"]},'
         ' "alerts": {"7": ["前走不利", "厩舎勝負気配"], "2": ["馬体重-10kg"], "3": ["取消"]},'
-        ' "notes": {"7": "補強3件: 前走直線で詰まる不利/厩舎遠征の勝負気配/距離適性◎"},'
         ' "summary": "考察の総評 (直前/軟情報で市場とどこがズレるか)", "confidence": "high|mid|low"}',
         "```",
     ]
@@ -423,6 +429,39 @@ def _normalize_alerts(raw_alerts: Any) -> dict[int, list[str]]:
     return out
 
 
+def _normalize_evidence(raw: Any, *, max_items: int = 40, max_len: int = 300) -> dict[int, list[str]]:
+    """evidence (各馬の補強根拠の詳細配列) を {int: [str,...]} に正規化。
+
+    alerts と同じ {"3": ["…", "…"]} 形式だが、こちらは **件数上限を緩く** (max_items, 既定 40)
+    取り、各要素を max_len で軽くクランプするだけ (ユーザ指示「あればあるだけ・3件で打ち切らない」)。
+    単一文字列もリスト化、空文字/None は除外、空配列の馬は落とす。壊れた/無い入力は {}。
+    """
+    out: dict[int, list[str]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        try:
+            num = int(k)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(v, str):
+            items = [v]
+        elif isinstance(v, (list, tuple)):
+            items = list(v)
+        else:
+            continue
+        cleaned: list[str] = []
+        for x in items:
+            if x is None:
+                continue
+            s = str(x).strip()
+            if s:
+                cleaned.append(s[:max_len])
+        if cleaned:
+            out[num] = cleaned[:max_items]
+    return out
+
+
 def parse_horse_scores(text: str) -> dict:
     """score 出力の JSON を正規化して
     {"scores":{int:float}, "support":{int:int}, "scale":str, "alerts":{int:[str]},
@@ -435,7 +474,7 @@ def parse_horse_scores(text: str) -> dict:
     その場合 scale="prob" (温度なし直接使用)。
     """
     empty = {"scores": {}, "support": {}, "scale": "strength", "alerts": {},
-             "notes": {}, "summary": "", "confidence": ""}
+             "evidence": {}, "notes": {}, "summary": "", "confidence": ""}
     raw = parse_evidence(text)
     if not isinstance(raw, dict):
         return dict(empty)
@@ -465,11 +504,17 @@ def parse_horse_scores(text: str) -> dict:
             except (ValueError, TypeError):
                 continue
     notes = raw.get("notes") if isinstance(raw.get("notes"), dict) else {}
+    evidence = _normalize_evidence(raw.get("evidence"))
+    # support が無い/過小でも evidence があれば件数で補完 (UI の「根」= evidence 件数に揃える)。
+    for num, items in evidence.items():
+        if items and support.get(num, 0) < len(items):
+            support[num] = len(items)
     return {
         "scores": scores,
         "support": support,
         "scale": scale,
         "alerts": _normalize_alerts(raw.get("alerts")),
+        "evidence": evidence,
         "notes": notes,
         "summary": str(raw.get("summary", "")),
         "confidence": str(raw.get("confidence", "")),
@@ -642,11 +687,16 @@ def build_horse_research_prompt(
         "出力 (担当外の馬・0-100 指数は含めない):",
         "  - alerts: 短い日本語ラベル配列 (\"取消\"/\"馬体重-12kg\"/\"前走不利\"/\"厩舎勝負気配\"/"
         "\"乗替り\"/\"馬場渋化\"/\"逃げ濃厚\"/\"展開不利\" 等。根拠が無ければ空配列)",
-        "  - support: 指数を動かす裏付け根拠の件数 (0-3+。プラス材料もマイナス材料も 1 件)",
+        "  - evidence: 指数を動かす裏付け根拠を **1 件ずつ具体的に** 書いた配列。"
+        "**上限なし — あるだけ全部 (10 件以上でも可・多いほどよい)**。各要素は数値・出典の手がかりを"
+        "添えて具体的に (1 要素 = 1 事実、プラス材料もマイナス材料も 1 件)。根拠が無ければ空配列。",
+        "  - support: evidence の件数 (= len(evidence)、上限なし)",
         "  - digest: その馬の調査要約 (240 字以内・市場とズレる点を中心に)",
         "```json",
         '{"facts": {"' + str(example_no) + '": {"alerts": ["前走不利", "厩舎勝負気配"], '
-        '"support": 2, "digest": "前走は直線で詰まる不利、本来は掲示板級。今走は叩き2走目で上昇、距離も合う。"}}}',
+        '"evidence": ["前走(東京1400)は直線で前が詰まり追えず着順以上に強い", "今走は叩き2走目で上昇度大", '
+        '"距離短縮が末脚を活かす形に合致", "鞍上が当該コース複勝率45%と相性良"], '
+        '"support": 4, "digest": "前走は直線で詰まる不利、本来は掲示板級。今走は叩き2走目で上昇、距離も合う。"}}}',
         "```",
     ]
     return pre + "\n".join(rules)
@@ -679,6 +729,8 @@ def build_horse_score_from_research_prompt(
             al = " / ".join(rec.get("alerts") or []) or "—"
             dg = (str(rec.get("digest") or "")).strip() or "—"
             rlines.append(f"- 馬番 {num}: [{al}] {dg}")
+            for e in (rec.get("evidence") or []):
+                rlines.append(f"    ・{e}")        # 補強根拠を 1 件ずつ (採点段が全件 evidence へ書き出す)
     else:
         rlines.append("- (リサーチ無し → 出走馬表の適性と近走から採点)")
     rlines += [
@@ -686,7 +738,8 @@ def build_horse_score_from_research_prompt(
         "## 採点時の検索ルール (収集済みの根拠を使用)",
         "上の **収集済みリサーチ** + 出走馬表 (適性) を使って **全馬を相対採点** する。"
         "新規検索は原則不要 (どうしても矛盾を確認したい時のみ最大 1 クエリ)。リサーチで取消/除外が"
-        "確認された馬は指数 0。リサーチの support 件数は下の support 出力に反映する。",
+        "確認された馬は指数 0。**収集済みリサーチの根拠 (・ 行) は省略せず `evidence` 配列に全件"
+        "書き出し** (各馬 10 件以上でも構わない・あるだけ全部)、support はその件数にする。",
         "",
     ]
     return pre + "\n".join(rlines) + sep + tail
@@ -711,12 +764,15 @@ def _merge_research(shard_texts: list[str]) -> dict[int, dict]:
             if not isinstance(v, dict):
                 continue
             alerts = _normalize_alerts({num: v.get("alerts")}).get(num, [])
+            evidence = _normalize_evidence({num: v.get("evidence")}).get(num, [])
             try:
                 support = max(0, int(float(v.get("support", 0))))
             except (ValueError, TypeError):
                 support = 0
+            support = max(support, len(evidence))   # evidence があれば件数で補完
             digest = str(v.get("digest", "") or "")[:240]
-            research[num] = {"alerts": alerts, "support": support, "digest": digest}
+            research[num] = {"alerts": alerts, "evidence": evidence,
+                             "support": support, "digest": digest}
     return research
 
 

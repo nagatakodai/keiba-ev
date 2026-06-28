@@ -158,7 +158,7 @@ def main(
         # fall through → 下の共通解析 + snapshot 保存へ
 
     # bet/score 共通: キャッシュ指数を読んで estimate_probs に合成する。
-    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = _load_llm_scores(race_id)
+    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts, llm_evidence = _load_llm_scores(race_id)
 
     lgbm_info = ev_mod.lgbm_status()
     if lgbm_info.get("available"):
@@ -220,6 +220,7 @@ def main(
             feats=feats, lgbm_info=lgbm_info, hit_points=hit_points, probs=probs,
             llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
             llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
+            llm_evidence=llm_evidence,
             speed_v2_blend=speed_v2_blend, probs_t=probs_t,
             trifecta_head_max=trifecta_head_max, trifecta_head_gap=trifecta_head_gap,
             trifecta_mid=trifecta_mid, trifecta_tail=trifecta_tail,
@@ -420,6 +421,8 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
         "support": {str(k): v for k, v in (parsed.get("support") or {}).items()},
         # alerts: 各馬の直前/軟情報フラグ配列 (例 {"3": ["取消", "馬体重-12kg"]})。記録/表示用。
         "alerts": {str(k): list(v) for k, v in (parsed.get("alerts") or {}).items()},
+        # evidence: 各馬の補強根拠の詳細配列 (上限なし・あるだけ全部)。記録/表示用。
+        "evidence": {str(k): list(v) for k, v in (parsed.get("evidence") or {}).items()},
         "notes": parsed.get("notes") or {},
         "summary": parsed.get("summary", ""),
         "confidence": parsed.get("confidence", ""),
@@ -431,12 +434,13 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
 
 
 def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
-    """`<race_id>.llm.json` を読み (scores, support, scale, scored_at, alerts) を返す。
+    """`<race_id>.llm.json` を読み (scores, support, scale, scored_at, alerts, evidence) を返す。
 
     scores=dict[int,float] (scale="strength" なら 0-100 指数、"prob" なら推定勝率 %)、
-    support=dict[int,int] (補強根拠件数)、alerts=dict[int,list[str]] (直前/軟情報フラグ、表示用)。
-    無い / 壊れている / 古すぎる (max_age_sec 超過) なら (None, None, "strength", scored_at, None)
-    を返し、bet ステージはモデルのみにフォールバックする。alerts は確率には使わず snapshot 表示用。
+    support=dict[int,int] (補強根拠件数)、alerts=dict[int,list[str]] (直前/軟情報フラグ、表示用)、
+    evidence=dict[int,list[str]] (補強根拠の詳細配列、表示用)。
+    無い / 壊れている / 古すぎる (max_age_sec 超過) なら (None, None, "strength", scored_at, None, None)
+    を返し、bet ステージはモデルのみにフォールバックする。alerts/evidence は確率には使わず snapshot 表示用。
 
     env `KEIBA_LLM_SCORE_MAX_AGE_SEC` があれば age gate を上書きする。予測履歴の「オッズ更新」
     (最新オッズのみ・Claude 呼ばない) で、古いキャッシュでも既存の Claude 指数を保持したまま
@@ -450,17 +454,17 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
             pass
     p = _llm_scores_path(race_id)
     if not p.exists():
-        return None, None, "strength", None, None
+        return None, None, "strength", None, None, None
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None, None, "strength", None, None
+        return None, None, "strength", None, None, None
     scored_at = d.get("scored_at")
     if scored_at:
         try:
             age = (dt.datetime.now() - dt.datetime.fromisoformat(scored_at)).total_seconds()
             if age > max_age_sec:
-                return None, None, "strength", scored_at, None
+                return None, None, "strength", scored_at, None, None
         except ValueError:
             pass
     # isinstance ガード: `or {}` は falsy しか救済せず、非 dict (list 等) だと .items() で
@@ -483,7 +487,8 @@ def _load_llm_scores(race_id: str, *, max_age_sec: int = 1800):
                 continue
     scale = d.get("scale") or "strength"
     alerts = llm_mod._normalize_alerts(d.get("alerts"))
-    return (scores or None), (support or None), scale, scored_at, (alerts or None)
+    evidence = llm_mod._normalize_evidence(d.get("evidence"))
+    return (scores or None), (support or None), scale, scored_at, (alerts or None), (evidence or None)
 
 
 # score ステージ timeout の見積り基準。effort=max の web 検索は 1 ラウンド ~30-50s かかり
@@ -536,12 +541,13 @@ def _run_score_stage(
     # (morning pre-cache → evening snapshot を安価にする)。取消は absent 昇格で別途処理されるため
     # 指数の reuse は安全。KEIBA_SCORE_FORCE_RESCORE=1 で強制再検索。
     if not (os.environ.get("KEIBA_SCORE_FORCE_RESCORE") or "").strip():
-        c_scores, c_support, c_scale, c_at, c_alerts = _load_llm_scores(race_id, max_age_sec=10**9)
+        c_scores, c_support, c_scale, c_at, c_alerts, c_evidence = _load_llm_scores(race_id, max_age_sec=10**9)
         if c_scores:
             console.print(f"[cyan]score: 既存 Claude 指数を再利用 ({len(c_scores)} 頭, "
                           f"{c_at}) — web 検索 skip[/cyan]")
             return {"scores": c_scores, "support": c_support or {}, "scale": c_scale,
-                    "alerts": c_alerts or {}, "summary": "", "notes": {}, "confidence": ""}
+                    "alerts": c_alerts or {}, "evidence": c_evidence or {},
+                    "summary": "", "notes": {}, "confidence": ""}
     if not llm_mod.is_available():
         console.print("[yellow]claude CLI 不可 — score ステージ skip[/yellow]")
         return None
@@ -575,11 +581,15 @@ def _run_score_stage(
                 inp = (payload or {}).get("input") or {}
                 q = inp.get("query") or inp.get("q") or inp.get("url") or ""
                 label = name.replace("mcp__", "").replace("__", "/")
+                # クエリは全文をログに出す (ユーザ指示: クエリもログに出す・truncate しない)。
+                # style="dim"+markup=False で q 内の角括弧による rich MarkupError を回避し、
+                # soft_wrap=True で 80 桁折返しを抑止 (captured pipe でも 1 行 = shobu が拾える)。
                 if q:
-                    qshort = q if len(q) <= 70 else q[:67] + "..."
-                    console.print(f"[dim]  🔍 {label}: {qshort}[/dim]")
+                    console.print(f"  🔍 {label}: {q}", style="dim",
+                                  markup=False, highlight=False, soft_wrap=True)
                 else:
-                    console.print(f"[dim]  ⚙ {label}[/dim]")
+                    console.print(f"  ⚙ {label}", style="dim",
+                                  markup=False, highlight=False, soft_wrap=True)
             elif etype == "result":
                 saw_result = True
                 if payload:
@@ -763,29 +773,37 @@ def _build_index_compare(
     rd, llm_win_index: dict[int, float] | None,
     llm_support: dict[int, int] | None = None,
     llm_alerts: dict[int, list[str]] | None = None,
+    llm_evidence: dict[int, list[str]] | None = None,
 ) -> list[dict]:
     """Claude 指数 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。両指数は独立。
     Claude 値降順 (無ければ市場指数降順)。どちらか一方しか無い馬も含める。support は補強根拠件数、
-    alerts は直前/軟情報フラグ配列 (無ければ空)。"""
+    alerts は直前/軟情報フラグ配列 (無ければ空)、evidence は補強根拠の詳細配列 (無ければ空)。"""
     market = _market_win_index(rd)
     claude = llm_win_index or {}
     support = llm_support or {}
     alerts = llm_alerts or {}
+    evidence = llm_evidence or {}
     names = {h.number: (h.name or "") for h in rd.race.horses if not h.absent}
-    # alerts は Claude/市場いずれの指数も無い取消馬でも出したいので nums に含める。
-    nums = (set(claude) | set(market) | set(alerts)) & set(names)
+    # alerts/evidence は Claude/市場いずれの指数も無い取消馬でも出したいので nums に含める。
+    nums = (set(claude) | set(market) | set(alerts) | set(evidence)) & set(names)
     rows_out: list[dict] = []
     for n in nums:
         c = claude.get(n)
         mk = market.get(n)
+        ev_n = list(evidence[n]) if n in evidence and evidence[n] else []
+        # evidence がある馬は「根」(support) を **evidence 件数そのもの** にする (UI の根バッジと
+        # 展開リストの件数を一致させる)。LLM が support を多めに返しても展開行と食い違わせない。
+        # evidence が無い馬は LLM の support (alerts のみ等) をそのまま使う。
+        sup_n = len(ev_n) if ev_n else (support[n] if n in support else None)
         rows_out.append({
             "number": n,
             "name": names.get(n, ""),
             "claude_index": (round(float(c), 1) if c is not None else None),
             "market_index": (mk if mk is not None else None),
             "diff": (round(float(c) - mk, 1) if (c is not None and mk is not None) else None),
-            "support": (int(support[n]) if n in support else None),
+            "support": (int(sup_n) if sup_n is not None else None),
             "alerts": (list(alerts[n]) if n in alerts and alerts[n] else []),
+            "evidence": ev_n,
         })
     rows_out.sort(
         key=lambda r: (
@@ -816,6 +834,7 @@ def _save_prediction_snapshot(
     llm_support: dict[int, int] | None = None,
     llm_scale: str = "strength",
     llm_alerts: dict[int, list[str]] | None = None,
+    llm_evidence: dict[int, list[str]] | None = None,
     speed_v2_blend: float | None = None,
     probs_t=None,                       # 3連単束用 market-free probs (無ければ probs を使う)
     trifecta_head_max: int = 2,
@@ -1075,7 +1094,7 @@ def _save_prediction_snapshot(
                              or None),
         # Claude 指数 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場、support=補強件数、
         # alerts=直前/軟情報フラグ)。
-        "index_compare": _build_index_compare(rd, llm_win_index, llm_support, llm_alerts),
+        "index_compare": _build_index_compare(rd, llm_win_index, llm_support, llm_alerts, llm_evidence),
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1598,7 +1617,7 @@ def _refresh_and_reevaluate(
     # Claude 指数キャッシュ + --probs YAML を本経路と同様に合成する (2026-06-11 第5R:
     # 旧実装はどちらも読まず、最終 (締切直前) の再評価が指数なし・rank_source=model に
     # 退化した snapshot で上書きしていた)。
-    llm_index2, llm_support2, llm_scale2, llm_scored_at2, llm_alerts2 = _load_llm_scores(race_id)
+    llm_index2, llm_support2, llm_scale2, llm_scored_at2, llm_alerts2, llm_evidence2 = _load_llm_scores(race_id)
     probs2 = ev_mod.estimate_probs(rd2, market_blend=market_blend, market_floor=market_floor,
                                    speed_v2_blend=speed_v2_blend,
                                    llm_win_index=llm_index2, llm_blend=llm_blend,
@@ -1626,6 +1645,7 @@ def _refresh_and_reevaluate(
             feats=feats2, lgbm_info=lgbm_info2, hit_points=hit_points, probs=probs2,
             llm_win_index=llm_index2, llm_blend=llm_blend, llm_scored_at=llm_scored_at2,
             llm_support=llm_support2, llm_scale=llm_scale2, llm_alerts=llm_alerts2,
+            llm_evidence=llm_evidence2,
             speed_v2_blend=speed_v2_blend, probs_t=probs2_t,
             # phase=score の refresh は暫定 (stage="score") のまま保存 → 計測対象外を維持。
             # phase=bet (CLI フル analyze) は従来どおり stage="bet" 確定で上書き

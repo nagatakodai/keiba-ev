@@ -278,3 +278,56 @@ def test_score_prompts_have_no_market_odds():
     assert "オッズの常識" not in prompts["score"]
     assert "人気・評価が" not in prompts["score"]
     assert "意図的に与えていません" in prompts["score"]
+
+
+def test_normalize_evidence_keeps_all_items():
+    """_normalize_evidence は 3 件で打ち切らず全件 (上限なし) を保持し、空/壊れを除去する。"""
+    raw = {"7": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "", None],  # 11 valid
+           "3": "単一文字列も配列化",
+           "x": ["数値化できないキーは無視"]}
+    out = llm._normalize_evidence(raw)
+    assert set(out) == {7, 3}                      # 無効キー "x" は落ちる
+    assert len(out[7]) == 11                        # 空/None 除去後の全件 (>3 = cap なし)
+    assert out[3] == ["単一文字列も配列化"]
+    # 各要素は max_len でクランプ、件数も緩い上限まで保持。
+    big = {"1": ["z" * 500] + [f"e{i}" for i in range(50)]}
+    out2 = llm._normalize_evidence(big)
+    assert len(out2[1][0]) == 300                   # 1 要素 300 字クランプ
+    assert len(out2[1]) == 40                        # max_items 既定 40 (3 ではない)
+
+
+def test_parse_horse_scores_evidence_and_support_backfill():
+    """evidence を解析し、support 未指定/過小でも evidence 件数で補完する。"""
+    text = ('```json\n{"scores": {"7": 80, "2": 50},'
+            ' "support": {"2": 1},'
+            ' "evidence": {"7": ["根拠1", "根拠2", "根拠3", "根拠4", "根拠5"], "2": ["x"]},'
+            ' "summary": "s", "confidence": "high"}\n```')
+    parsed = llm.parse_horse_scores(text)
+    assert parsed["evidence"][7] == ["根拠1", "根拠2", "根拠3", "根拠4", "根拠5"]
+    assert parsed["support"][7] == 5                # support 未指定 → evidence 件数で補完
+    assert parsed["support"][2] == 1                # support(1) >= len(evidence)=1 はそのまま
+    # evidence 無しの壊れ出力でも raise せず空で返す。
+    assert llm.parse_horse_scores("no json")["evidence"] == {}
+
+
+def test_merge_research_carries_evidence():
+    """_merge_research が facts.evidence を馬番キーへ union し support を件数で補完する。"""
+    txt = ('```json\n{"facts": {"5": {"alerts": ["前走不利"],'
+           ' "evidence": ["e1", "e2", "e3"], "support": 1, "digest": "d"}}}\n```')
+    out = llm._merge_research([txt])
+    assert out[5]["evidence"] == ["e1", "e2", "e3"]
+    assert out[5]["support"] == 3                   # support(1) < len(evidence)=3 → 3 に補完
+
+
+def test_score_prompts_advertise_unbounded_evidence():
+    """score / research / scoring プロンプトが「上限なし・10件以上可」+ evidence schema を明記。"""
+    rd = _mk_race(6)
+    score = llm.build_horse_score_prompt(rd)
+    research = llm.build_horse_research_prompt(rd, [1, 2, 3])
+    scoring = llm.build_horse_score_from_research_prompt(
+        rd, {1: {"alerts": [], "evidence": ["EV_MARK"], "support": 1, "digest": "d"}})
+    for label, p in (("score", score), ("research", research), ("scoring", scoring)):
+        assert "evidence" in p, f"{label}: evidence 指示が無い"
+        assert "10 件以上" in p, f"{label}: 上限なし (10件以上) の明記が無い"
+    assert '"evidence"' in score                    # JSON schema 例に evidence
+    assert "EV_MARK" in scoring                      # 収集済み evidence を採点段へ渡す

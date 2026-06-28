@@ -870,7 +870,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
     # score 段の snapshot 構築 (発売後の再スキャン) では朝に先行生成した指数を使うため age gate を
     # 緩める (既定 30 分だと朝の指数が stale 判定で落ちる, 2026-06-24)。
     _llm_max_age = 10**9 if phase == "score" else 1800
-    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts = az_mod._load_llm_scores(
+    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts, llm_evidence = az_mod._load_llm_scores(
         race_id, max_age_sec=_llm_max_age)
 
     win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
@@ -919,6 +919,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
                 hit_points=3, probs=probs, probs_t=probs_t,
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
+                llm_evidence=llm_evidence,
                 # 3連単買い目の Claude 選定は **bet 段のみ** (score 段の暫定 snapshot は機械
                 # フォーメーション)。--no-llm (with_llm=False) ではキルスイッチとして選定も止める。
                 claude_trifecta_select=(with_llm and phase == "bet"),

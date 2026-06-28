@@ -6,6 +6,10 @@ import { fmtTime } from "@/components/ui";
 
 type LogEntry = { seq: number; ts: number; stream: string; text: string };
 
+// 長時間の scan (shobu claude_all は 1万行超のクエリログを流し得る) で React state / DOM が
+// 無制限に膨らむのを防ぐため、末尾 MAX_LINES だけ保持する (バックエンド Job も deque で有界)。
+const MAX_LINES = 4000;
+
 // 親側で `key={url}` を渡してマウントし直す前提。
 // このコンポーネント自体は url を 1 つだけ subscribe する。
 // 一時的な切断後は exponential backoff で auto-reconnect し、受信済 seq の
@@ -49,7 +53,10 @@ export function LogStream({
           lastSeqRef.current = Math.max(lastSeqRef.current, data.seq);
           retry = 0; // 受信成功で backoff リセット
           setStatus("open");
-          setLines((prev) => [...prev, data]);
+          setLines((prev) => {
+            const next = [...prev, data];
+            return next.length > MAX_LINES ? next.slice(-MAX_LINES) : next;
+          });
         } catch {
           // ignore
         }

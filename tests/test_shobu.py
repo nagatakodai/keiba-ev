@@ -249,8 +249,28 @@ def test_select_claude_targets():
                                         upcoming_only=True, now=now) == []
 
 
-class _RC0:
-    returncode = 0
+class _FakePopen:
+    """_run_claude_eval._one が使う Popen 互換ダミー。stdout 行を yield し env/cmd を capture。"""
+
+    def __init__(self, cmd, *, env=None, capture=None, returncode=0, lines=None):
+        self.returncode = returncode
+        self.stdout = iter(list(lines or []))
+        if capture is not None:
+            capture["env"] = env
+            capture["cmd"] = cmd
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+
+def _fake_popen_factory(capture, *, returncode=0, lines=None):
+    def _factory(cmd, **kw):
+        return _FakePopen(cmd, env=kw.get("env"), capture=capture,
+                          returncode=returncode, lines=lines)
+    return _factory
 
 
 def test_run_claude_eval_sets_search_env(monkeypatch):
@@ -263,13 +283,7 @@ def test_run_claude_eval_sets_search_env(monkeypatch):
     for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
-
-    def fake_run(cmd, **kw):
-        captured["env"] = kw.get("env")
-        captured["cmd"] = cmd
-        return _RC0()
-
-    monkeypatch.setattr(shobu.subprocess, "run", fake_run)
+    monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
     targets = [{"netkeiba_race_id": "202632060101", "race_type": "nar",
                 "start_at": 1000, "venue": "佐賀", "race_no": 1}]
     done = shobu._run_claude_eval(
@@ -292,12 +306,7 @@ def test_run_claude_eval_no_parallel_omits_shard_env(monkeypatch):
     for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
-
-    def fake_run(cmd, **kw):
-        captured["env"] = kw.get("env")
-        return _RC0()
-
-    monkeypatch.setattr(shobu.subprocess, "run", fake_run)
+    monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
     targets = [{"netkeiba_race_id": "x", "race_type": "nar",
                 "start_at": 0, "venue": "V", "race_no": 1}]
     shobu._run_claude_eval(targets, timeout=900, parallel=4, log=lambda m: None,
@@ -318,8 +327,7 @@ def test_run_claude_eval_inner_timeout_below_outer(monkeypatch):
     for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
-    monkeypatch.setattr(shobu.subprocess, "run",
-                        lambda cmd, **kw: captured.__setitem__("env", kw.get("env")) or _RC0())
+    monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
     targets = [{"netkeiba_race_id": "x", "race_type": "nar",
                 "start_at": 0, "venue": "V", "race_no": 1}]
     for outer in (900, 300, 210, 150, 130):
@@ -350,14 +358,65 @@ def test_run_claude_eval_shards_scale_with_concurrency(monkeypatch):
     for k in ("KEIBA_SCORE_HORSES_PER_SHARD", "KEIBA_SCORE_MAX_SHARDS", "KEIBA_SCORE_TIMEOUT"):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
-    monkeypatch.setattr(shobu.subprocess, "run",
-                        lambda cmd, **kw: captured.__setitem__("env", kw.get("env")) or _RC0())
+    monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
     targets = [{"netkeiba_race_id": "x", "race_type": "jra",
                 "start_at": 0, "venue": "V", "race_no": 1}]
     shobu._run_claude_eval(targets, timeout=900, parallel=2, log=lambda m: None,
                            score_parallel=True, score_queries_per_horse=10,
                            llm_max_concurrent=20)
     assert captured["env"]["KEIBA_SCORE_MAX_SHARDS"] == "10"   # 20 // 2
+
+
+def test_run_claude_eval_forwards_query_lines(monkeypatch):
+    """score subprocess の検索クエリ行 (🔍) を scan ログへレース名付きで転送する。
+
+    ユーザ指示「クエリもログに出す」。⚙ (非検索ツール) や冗長な LLM 出力は転送しない。
+    """
+    lines = [
+        "Claude 考察の冗長な本文 ...\n",
+        "  🔍 tavily/tavily_search: サンプル馬 前走 不利 OR 出遅れ\n",
+        "  ⚙ Read\n",
+    ]
+    captured: dict = {}
+    monkeypatch.setattr(shobu.subprocess, "Popen",
+                        _fake_popen_factory(captured, lines=lines))
+    logs: list[str] = []
+    targets = [{"netkeiba_race_id": "x", "race_type": "nar",
+                "start_at": 0, "venue": "佐賀", "race_no": 11}]
+    done = shobu._run_claude_eval(targets, timeout=900, parallel=1, log=logs.append,
+                                  score_parallel=False, score_queries_per_horse=10,
+                                  llm_max_concurrent=20)
+    assert done == 1
+    qlogs = [m for m in logs if "🔍" in m]
+    assert qlogs == ["[query] 佐賀11R 🔍 tavily/tavily_search: サンプル馬 前走 不利 OR 出遅れ"]
+    assert not any("冗長" in m for m in logs)   # 本文は転送しない
+    assert not any("⚙" in m for m in logs)       # 非検索ツールは転送しない
+
+
+def test_run_claude_eval_real_subprocess_timeout(monkeypatch):
+    """実プロセスで timeout→killpg→stdout EOF→(done=0, note=timeout) と 🔍 ライブ転送を検証。
+
+    _FakePopen では threading.Timer/kill 経路が no-op なので、ここだけ本物の子プロセスを使う。
+    子は 🔍 を 1 行出してから 30s sleep。timeout=1 で kill されることを確認 (sleep を待たない)。
+    """
+    import sys
+    child = ("import sys, time\n"
+             "sys.stdout.write('  \U0001f50d t: REALQ\\n'); sys.stdout.flush()\n"
+             "time.sleep(30)\n")
+    monkeypatch.setattr(shobu, "_score_stage_cmd",
+                        lambda rid, rtype, start_at: [sys.executable, "-c", child])
+    logs: list[str] = []
+    targets = [{"netkeiba_race_id": "x", "race_type": "nar",
+                "start_at": 0, "venue": "佐賀", "race_no": 11}]
+    t0 = time.time()
+    done = shobu._run_claude_eval(targets, timeout=1, parallel=1, log=logs.append,
+                                  score_parallel=False, score_queries_per_horse=10,
+                                  llm_max_concurrent=20)
+    elapsed = time.time() - t0
+    assert done == 0                                       # timeout は生成失敗
+    assert any("timeout" in m for m in logs)               # 完了行に timeout note
+    assert any("🔍 t: REALQ" in m for m in logs)           # kill 前に query が live 転送された
+    assert elapsed < 20, f"30s sleep を待たず kill されるはず (elapsed={elapsed:.1f}s)"
 
 
 def test_scan_claude_all_generates_for_all(monkeypatch):

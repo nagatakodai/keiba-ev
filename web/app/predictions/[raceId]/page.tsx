@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Fragment } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import {
@@ -1243,57 +1244,81 @@ function IndexCompareCard({
               <th className="py-2 pr-3 text-right text-violet-300/90" title="Claude 強さ指数 0-100 (市場独立の相対評価、検索補強で上下)">Claude 指数</th>
               <th className="py-2 pr-3 text-right" title="市場指数 = 100·(1/オッズ)^(1/1.5) (1.0倍で100、温度T=1.5で0-100に分布)。参考: 確率 P には未合成 (市場無視)、P×O の O として効く">市場指数<span className="text-(--color-muted)"> (参考)</span></th>
               <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
-              <th className="py-2 pr-3 text-right" title="補強根拠件数。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)">根</th>
+              <th className="py-2 pr-3 text-right" title="補強根拠件数 (上限なし・あるだけ全部)。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)。各馬の行の下に根拠の詳細を展開表示">根</th>
               <th className="py-2 pr-2" title="直前/軟情報フラグ (取消・馬体重増減・前走不利・厩舎勝負気配・展開 等)。市場がまだ織り込みきれない情報。表示/記録用 (確率には未反映)">直前/軟情報</th>
             </tr>
           </thead>
           <tbody>
             {items.map((r) => {
               const hit = finishSet.has(r.number);
+              const evidence = r.evidence ?? [];
               return (
-                <tr
-                  key={r.number}
-                  className={`border-b border-(--color-line)/60 ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
-                >
-                  <td className="py-1.5 pr-3 text-right font-bold">{r.number}</td>
-                  <td className="py-1.5 pr-3">
-                    {r.name}
-                    {hit && finish && <HitMark place={finish.indexOf(r.number) + 1} />}
-                  </td>
-                  <td className="py-1.5 pr-3 text-right">
-                    {r.claude_index != null ? r.claude_index.toFixed(1) : "—"}
-                  </td>
-                  <td className="py-1.5 pr-3 text-right">
-                    {r.market_index != null ? r.market_index.toFixed(1) : "—"}
-                  </td>
-                  <td className="py-1.5 pr-3 text-right">
-                    {r.diff != null ? (
-                      <Badge tone={diffTone(r.diff)}>
-                        {r.diff > 0 ? `+${r.diff.toFixed(1)}` : r.diff.toFixed(1)}
-                      </Badge>
-                    ) : (
-                      <span className="text-(--color-muted)">—</span>
-                    )}
-                  </td>
-                  <td className="py-1.5 pr-3 text-right">
-                    {r.support != null && r.support > 0 ? (
-                      <Badge tone={r.support >= 3 ? "good" : "muted"}>{r.support}</Badge>
-                    ) : (
-                      <span className="text-(--color-muted)">{r.support === 0 ? "0" : "—"}</span>
-                    )}
-                  </td>
-                  <td className="py-1.5 pr-2">
-                    {r.alerts && r.alerts.length > 0 ? (
-                      <span className="flex flex-wrap gap-1">
-                        {r.alerts.map((a, i) => (
-                          <Badge key={i} tone={alertTone(a)}>{a}</Badge>
-                        ))}
-                      </span>
-                    ) : (
-                      <span className="text-(--color-muted)">—</span>
-                    )}
-                  </td>
-                </tr>
+                <Fragment key={r.number}>
+                  <tr
+                    className={`border-b border-(--color-line)/60 ${evidence.length ? "border-b-0" : ""} ${hit ? `${HIT_ROW_BG} text-emerald-300` : ""}`}
+                  >
+                    <td className="py-1.5 pr-3 text-right font-bold">{r.number}</td>
+                    <td className="py-1.5 pr-3">
+                      {r.name}
+                      {hit && finish && <HitMark place={finish.indexOf(r.number) + 1} />}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right">
+                      {r.claude_index != null ? r.claude_index.toFixed(1) : "—"}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right">
+                      {r.market_index != null ? r.market_index.toFixed(1) : "—"}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right">
+                      {r.diff != null ? (
+                        <Badge tone={diffTone(r.diff)}>
+                          {r.diff > 0 ? `+${r.diff.toFixed(1)}` : r.diff.toFixed(1)}
+                        </Badge>
+                      ) : (
+                        <span className="text-(--color-muted)">—</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right">
+                      {r.support != null && r.support > 0 ? (
+                        <Badge tone={r.support >= 5 ? "good" : "muted"}>{r.support}</Badge>
+                      ) : (
+                        <span className="text-(--color-muted)">{r.support === 0 ? "0" : "—"}</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      {r.alerts && r.alerts.length > 0 ? (
+                        <span className="flex flex-wrap gap-1">
+                          {r.alerts.map((a, i) => (
+                            <Badge key={i} tone={alertTone(a)}>{a}</Badge>
+                          ))}
+                        </span>
+                      ) : (
+                        <span className="text-(--color-muted)">—</span>
+                      )}
+                    </td>
+                  </tr>
+                  {evidence.length > 0 && (
+                    <tr
+                      className={`border-b border-(--color-line)/60 ${hit ? HIT_ROW_BG : ""}`}
+                    >
+                      <td className="pb-2 pt-0" />
+                      <td colSpan={6} className="pb-2 pt-0 align-top">
+                        <details open className="text-xs">
+                          <summary className="cursor-pointer select-none text-violet-300/80 marker:text-violet-300/50">
+                            補強根拠 {evidence.length}件{evidence.length >= 10 ? "（充実）" : ""}
+                          </summary>
+                          <ul className="mt-1 space-y-0.5 text-(--color-muted)">
+                            {evidence.map((e, i) => (
+                              <li key={i} className="flex gap-1.5">
+                                <span className="text-violet-300/60">・</span>
+                                <span>{e}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               );
             })}
           </tbody>
@@ -1305,7 +1330,8 @@ function IndexCompareCard({
         (市場無視 market_blend=0)。市場は P×O の O (実オッズ) としてのみ効く。Claude 指数 = 各馬の力を
         0-100 で相対評価 (市場には揃えず、全馬を web 検索で補強して上下)。差 = Claude − 市場 (正 =
         Claude が市場より強気 = contrarian の狙い目)。根 (補強根拠件数) が多い馬ほど確率モデルが
-        Claude 指数を厚く採用 (0 = 動かさない)。
+        Claude 指数を厚く採用 (0 = 動かさない)。各馬の行の下に「補強根拠」として、検索で見つけた裏付けを
+        1 件ずつ全件 (上限なし) 展開表示する。
         {scoredAt ? ` · Claude 指数: ${fmtServerDateTime(scoredAt)}` : ""}
       </p>
     </Card>

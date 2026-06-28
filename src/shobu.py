@@ -19,8 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -336,7 +339,9 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
 
     並列は ThreadPoolExecutor で回すが、実際の claude -p 同時数は src 側の file-slot semaphore
     (KEIBA_LLM_MAX_CONCURRENT, 既定5) で頭打ちになる (fail-open)。各 race の subprocess 出力は
-    capture して捨て、進捗だけ 1 行ずつ log に流す (scan のログを汚さない)。
+    Popen で 1 行ずつ読み、**検索クエリ行 (🔍) は scan ログへレース名付きで転送** (ユーザ指示
+    「クエリもログに出す」)、それ以外の冗長な出力は捨てる。進捗も 1 行ずつ log に流す。
+    worker スレッドと as_completed ループの双方から log を呼ぶので Lock で write を直列化する。
 
     `on_progress(target, completed, total)` を渡すと、1 レース生成が終わるたびに呼ぶ (呼び出し
     スレッドの as_completed ループ内 = シリアル)。scan が「生成完了レースを再採点して暫定一覧を
@@ -347,6 +352,9 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     total = len(targets)
 
     score_env = os.environ.copy()
+    # 子 (scrape_keibago/jra) の stdout を unbuffered に = 検索クエリ行 (🔍) が即 flush され
+    # ライブで scan ログへ流れる (pipe 既定の block buffering だと終了まで溜まる)。
+    score_env["PYTHONUNBUFFERED"] = "1"
     # score subprocess の検索並列化 (KEIBA_SCORE_PARALLEL=1 で ARCH-A プロセス並列)。
     # OFF のときは継承した "1" を空文字で打ち消す (main.py の score タブと同流儀)。
     score_env["KEIBA_SCORE_PARALLEL"] = "1" if score_parallel else ""
@@ -395,20 +403,97 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     qph_txt = f" / {score_queries_per_horse}クエリ/頭" if score_queries_per_horse else ""
     shard_txt = (f" / {shards_per_race}シャード/レース (per_shard 3)"
                  if shards_per_race else "")
-    log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 "
-        f"(across-race 並列 {parallel}{qph_txt}{shard_txt} / 各 timeout {timeout}s)…")
+    # worker スレッド (クエリ転送) と main スレッド (進捗) の log write を直列化。
+    _log_lock = threading.Lock()
+
+    def _safe_log(msg: str) -> None:
+        with _log_lock:
+            log(msg)
+
+    _safe_log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 "
+              f"(across-race 並列 {parallel}{qph_txt}{shard_txt} / 各 timeout {timeout}s)…")
+
+    def _killpg(proc) -> None:
+        """score subprocess を **プロセスグループごと** SIGKILL (research の claude -p 孫まで道連れ)。
+        start_new_session=True で起動しているので pgid==pid。失敗時は単独 kill にフォールバック。"""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _one(t: dict[str, Any]) -> tuple[dict[str, Any], bool, str]:
         rid = t["netkeiba_race_id"]
+        label = f"{t['venue']}{t['race_no']}R"
         cmd = _score_stage_cmd(rid, t["race_type"], int(t.get("start_at") or 0))
+        # stderr は一時ファイルへ (rc≠0 = keiba.go.jp レート制限でオッズ空 等 の原因を末尾から拾う)。
+        err_f = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
         try:
-            r = subprocess.run(cmd, cwd=str(ROOT), env=score_env, capture_output=True,
-                               text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return (t, False, f"timeout ({timeout}s)")
+            proc = subprocess.Popen(
+                cmd, cwd=str(ROOT), env=score_env,
+                stdout=subprocess.PIPE, stderr=err_f,
+                text=True, bufsize=1,
+                start_new_session=True,   # 孫 (claude -p) ごと timeout で kill できるよう別 pgid に
+            )
         except Exception as e:  # noqa: BLE001
+            err_f.close()
             return (t, False, str(e))
-        return (t, r.returncode == 0, "OK" if r.returncode == 0 else f"rc={r.returncode}")
+        timed_out = [False]
+
+        def _kill() -> None:
+            timed_out[0] = True
+            _killpg(proc)
+
+        timer = threading.Timer(timeout, _kill)
+        timer.daemon = True
+        timer.start()
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                # 内側 score subprocess (analyze._run_score_stage) は検索クエリを
+                # "  🔍 <tool>: <query>" 行で出す。その行だけレース名付きで scan ログへ転送し、
+                # 他の冗長な LLM 出力は読み捨てる (pipe を drain しデッドロックも防ぐ)。
+                if "🔍" in raw:
+                    q = raw.split("🔍", 1)[1].strip()
+                    if q:
+                        _safe_log(f"[query] {label} 🔍 {q}")
+        except Exception:  # noqa: BLE001
+            pass  # ログ転送の失敗で生成判定 (rc) を壊さない
+        finally:
+            timer.cancel()
+            try:
+                proc.wait(timeout=15)
+            except Exception:  # noqa: BLE001
+                _killpg(proc)
+                try:
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+        rc = proc.returncode
+        # rc==0 (内側が JSON を書き終え正常終了) を最優先で成功扱い: timeout 丁度の境界で _kill が
+        # timed_out を立てても、既に終わっていた成功を誤って失敗にしない。
+        if rc == 0:
+            ok, note = True, "OK"
+        elif timed_out[0]:
+            ok, note = False, f"timeout ({timeout}s)"
+        else:
+            ok, note = False, f"rc={rc}"
+            try:   # 非 timeout の失敗のみ stderr 末尾を診断ログへ
+                err_f.seek(0, 2)
+                size = err_f.tell()
+                err_f.seek(max(0, size - 500))
+                tail = err_f.read().strip().replace("\n", " ")
+                if tail:
+                    _safe_log(f"[claude-eval] {label} rc={rc} stderr: …{tail[-300:]}")
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            err_f.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return (t, ok, note)
 
     done = 0
     completed = 0
@@ -418,13 +503,13 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
             completed += 1
             if ok:
                 done += 1
-            log(f"[claude-eval] ({completed}/{total}) {t['venue']}{t['race_no']}R {note}")
+            _safe_log(f"[claude-eval] ({completed}/{total}) {t['venue']}{t['race_no']}R {note}")
             if on_progress is not None:
                 try:
                     on_progress(t, completed, total)
                 except Exception:  # noqa: BLE001  進捗更新の失敗で生成を止めない
                     pass
-    log(f"[claude-eval] 完了: {done}/{total} 生成成功")
+    _safe_log(f"[claude-eval] 完了: {done}/{total} 生成成功")
     return done
 
 

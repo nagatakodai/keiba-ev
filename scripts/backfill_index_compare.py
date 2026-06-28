@@ -35,8 +35,26 @@ def _market_index_from_signals(market_signals: list[dict]) -> dict[int, float]:
     return out
 
 
+def _num_str_map(raw: dict | None) -> dict[int, list[str]]:
+    """{"3": ["…","…"]} を {3: [...]} に正規化 (alerts / evidence 共用)。"""
+    out: dict[int, list[str]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        try:
+            n = int(k)
+        except (ValueError, TypeError):
+            continue
+        items = [v] if isinstance(v, str) else (list(v) if isinstance(v, (list, tuple)) else [])
+        labels = [str(x).strip() for x in items if x is not None and str(x).strip()]
+        if labels:
+            out[n] = labels
+    return out
+
+
 def _build(
-    market_signals: list[dict], llm_win_index: dict | None, llm_support: dict | None
+    market_signals: list[dict], llm_win_index: dict | None, llm_support: dict | None,
+    *, alerts: dict | None = None, evidence: dict | None = None,
 ) -> tuple[dict, list]:
     market = _market_index_from_signals(market_signals)
     claude = {int(k): float(v) for k, v in (llm_win_index or {}).items()}
@@ -46,19 +64,27 @@ def _build(
             support[int(k)] = max(0, int(float(v)))
         except (ValueError, TypeError):
             continue
+    al = _num_str_map(alerts)
+    ev = _num_str_map(evidence)
     names = {int(s["number"]): (s.get("name") or "") for s in market_signals}
-    nums = (set(claude) | set(market)) & set(names)
+    # alerts/evidence は指数の無い取消馬でも残せるよう nums に含める (analyze._build_index_compare と同様)。
+    nums = (set(claude) | set(market) | set(al) | set(ev)) & set(names)
     rows = []
     for n in nums:
         c = claude.get(n)
         mk = market.get(n)
+        ev_n = ev.get(n, [])
+        # 「根」は evidence 件数に一致させる (analyze._build_index_compare と同じ contract)。
+        sup_n = len(ev_n) if ev_n else (support[n] if n in support else None)
         rows.append({
             "number": n,
             "name": names.get(n, ""),
             "claude_index": (round(c, 1) if c is not None else None),
             "market_index": (mk if mk is not None else None),
             "diff": (round(c - mk, 1) if (c is not None and mk is not None) else None),
-            "support": (support[n] if n in support else None),
+            "support": sup_n,
+            "alerts": al.get(n, []),
+            "evidence": ev_n,
         })
     rows.sort(
         key=lambda r: (
@@ -86,8 +112,29 @@ def main() -> int:
         if not ms:
             n_skip += 1
             continue
+        # alerts/evidence は ①既存 index_compare 行 (再実行での退行防止) と ②<race_id>.llm.json
+        # (score キャッシュ) から拾い、再構築で落とさない (analyze.py の保存と同じ表示フィールド)。
+        alerts: dict[str, list] = {}
+        evidence: dict[str, list] = {}
+        for row in (d.get("index_compare") or []):
+            num = row.get("number")
+            if num is None:
+                continue
+            if row.get("alerts"):
+                alerts[str(num)] = list(row["alerts"])
+            if row.get("evidence"):
+                evidence[str(num)] = list(row["evidence"])
+        llm_path = f.with_name(f.stem + ".llm.json")
+        if llm_path.exists():
+            try:
+                lj = json.loads(llm_path.read_text(encoding="utf-8"))
+                alerts.update({str(k): v for k, v in (lj.get("alerts") or {}).items() if v})
+                evidence.update({str(k): v for k, v in (lj.get("evidence") or {}).items() if v})
+            except (json.JSONDecodeError, OSError):
+                pass
         # Claude 列は指数 (0-100) として表示。strength/prob どちらの snapshot でも出す。
-        market_idx, index_compare = _build(ms, d.get("llm_win_index"), d.get("llm_support"))
+        market_idx, index_compare = _build(ms, d.get("llm_win_index"), d.get("llm_support"),
+                                           alerts=alerts, evidence=evidence)
         if not index_compare:
             n_skip += 1
             continue
