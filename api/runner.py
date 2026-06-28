@@ -405,14 +405,9 @@ def build_shobu_cmd(
     *,
     date: str | None = None,
     race_type: str = "all",
-    use_separation: bool = False,
-    use_claude_edge: bool = True,
-    combine: str = "or",
-    sep_threshold: float = 35.0,
     edge_margin: float = 3.0,
     edge_threshold: float = 25.0,
     upcoming_only: bool = True,
-    fetch_odds: bool = True,
     claude_all: bool = False,
     claude_eval: int = 0,
     claude_eval_parallel: int = 6,
@@ -421,28 +416,22 @@ def build_shobu_cmd(
     llm_max_concurrent: int | None = None,
     max_races: int | None = None,
 ) -> list[str]:
-    """`python -m src.shobu` (今日の勝負レース スキャン) コマンドを組む。結果は out_path に書かれる。"""
+    """`python -m src.shobu` (今日の勝負レース スキャン) コマンドを組む。結果は out_path に書かれる。
+
+    判定は基準B (市場との順位乖離) 単独 (ユーザ指示 2026-06-28: 基準A=強弱は廃止)。
+    """
     cmd = [
         PY, "-m", "src.shobu",
         "--out", out_path,
         "--race-type", race_type,
-        "--combine", combine,
-        "--sep-threshold", str(sep_threshold),
         "--edge-margin", str(edge_margin),
         "--edge-threshold", str(edge_threshold),
         "--claude-eval", str(claude_eval),
     ]
     if date:
         cmd += ["--date", date]
-    # CLI 既定が基準B単独 (use_separation=False) なので両方向を明示
-    # (省略すると True を送っても CLI 既定の False になってしまう)。
-    cmd.append("--separation" if use_separation else "--no-separation")
-    if not use_claude_edge:
-        cmd.append("--no-claude")
     if not upcoming_only:
         cmd.append("--include-finished")
-    if not fetch_odds:
-        cmd.append("--no-fetch-odds")
     if claude_all:
         cmd.append("--claude-all")
     if max_races is not None:

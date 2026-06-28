@@ -14,7 +14,6 @@ import {
   Settings2,
   Sparkles,
   Swords,
-  TrendingUp,
   X,
 } from "lucide-react";
 import {
@@ -83,17 +82,6 @@ function FieldGroup({ legend, children }: { legend: string; children: ReactNode 
   );
 }
 
-// 強弱スコア / 勝負スコア のミニバー。
-function ScoreBar({ value, tone = "emerald" }: { value: number; tone?: "emerald" | "sky" | "fuchsia" }) {
-  const c =
-    tone === "sky" ? "bg-sky-500/80" : tone === "fuchsia" ? "bg-fuchsia-500/80" : "bg-emerald-500/80";
-  return (
-    <div className="h-1.5 rounded-full bg-(--color-surface-2) border border-(--color-line-soft) overflow-hidden">
-      <div className={c} style={{ width: `${Math.max(0, Math.min(100, value))}%`, height: "100%" }} />
-    </div>
-  );
-}
-
 // 勝負スコアの前回比 (▲ 上昇 / ▼ 下降 / → 横ばい)。2分毎の最新オッズ更新で付く。
 function ScoreDelta({ delta }: { delta?: number | null }) {
   if (delta == null) return null;
@@ -149,7 +137,6 @@ function RaceCard({
   hidden?: boolean;
   onToggleHide?: () => void;
 }) {
-  const sep = r.separation;
   const claude = r.claude;
   const timing =
     nowMs !== null ? raceTimingStatus(r.close_at || null, r.start_at || null, false, nowMs) : null;
@@ -212,42 +199,12 @@ function RaceCard({
           </span>
         )}
         {timing && timing.label !== "結果待ち" && <Badge tone={timing.tone}>{timing.label}</Badge>}
-        {r.matched.includes("sep") && <Badge tone="info">強弱</Badge>}
         {r.matched.includes("claude") && <Badge tone="magenta">市場乖離</Badge>}
         {r.n_runners != null && <span>{r.n_runners}頭</span>}
         {r.data_source === "none" && <Badge tone="muted">データなし</Badge>}
         {r.data_source === "snapshot" && <Badge tone="muted">snapshot</Badge>}
         {r.snapshot_stage === "score" && <Badge tone="muted">暫定</Badge>}
       </div>
-
-      {/* ── 強弱 (基準A) ── */}
-      {sep && (
-        <div className="mt-2.5">
-          <div className="flex items-baseline justify-between text-[11px] mb-1">
-            <span className="font-bold text-sky-300 inline-flex items-center gap-1">
-              <TrendingUp className="size-3" />強弱
-            </span>
-            <span className="tnum text-(--color-muted)">スコア {sep.score.toFixed(0)}</span>
-          </div>
-          <ScoreBar value={sep.score} tone="sky" />
-          <div className="mt-1.5 flex flex-wrap gap-1">
-            {sep.favorites.map((f, i) => (
-              <span
-                key={f.number}
-                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[11px] tnum ${
-                  i === 0
-                    ? "bg-amber-500/10 border-amber-500/30 text-amber-200 font-bold"
-                    : "bg-(--color-surface-2) border-(--color-line-soft)"
-                }`}
-              >
-                <span className="mono font-bold">{f.number}</span>
-                {f.name && <span className="max-w-[6.5em] truncate">{f.name}</span>}
-                <span className="text-(--color-muted)">{Math.round(f.prob * 100)}%</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* ── 市場との順位乖離 (基準B) ── */}
       {claude && (claude.top_rank_gap >= 1 || claude.edge_horses.length > 0) && (
@@ -313,60 +270,17 @@ function RaceCard({
   );
 }
 
-// 一覧側で判定基準を切り替える (再スキャン不要・表示だけ) ための recompute。
-// src/shobu.py `_evaluate_race` の recommended / matched / shobu_score を client で再現する。
-// 「基準A不要」モード = useSeparation=false で呼ぶ → 基準B (市場乖離) のみで判定し score も B 由来。
-type DisplayCriteria = {
-  useSeparation: boolean;
-  useClaudeEdge: boolean;
-  combine: "or" | "and";
-  sepThreshold: number;
-  edgeThreshold: number;
-};
-
-function deriveDisplay(
-  r: ShobuRace,
-  c: DisplayCriteria,
-): { recommended: boolean; matched: string[]; shobu_score: number } {
-  const sepScore = r.separation ? r.separation.score : null;
-  const claudeScore = r.claude ? r.claude.score : null;
-  const sepPass = c.useSeparation && sepScore != null && sepScore >= c.sepThreshold;
-  const claudePass = c.useClaudeEdge && claudeScore != null && claudeScore >= c.edgeThreshold;
-  const active: boolean[] = [];
-  if (c.useSeparation) active.push(sepPass);
-  if (c.useClaudeEdge) active.push(claudePass);
-  const recommended =
-    active.length === 0 ? false : c.combine === "and" ? active.every(Boolean) : active.some(Boolean);
-  const matched: string[] = [];
-  if (sepPass) matched.push("sep");
-  if (claudePass) matched.push("claude");
-  // shobu_score = 主signal + 0.25×副signal (active な基準の component score のみ)。
-  const comps: number[] = [];
-  if (c.useSeparation && sepScore != null) comps.push(sepScore);
-  if (c.useClaudeEdge && claudeScore != null) comps.push(claudeScore);
-  let score = 0;
-  if (comps.length === 1) score = comps[0];
-  else if (comps.length > 1) score = Math.min(100, Math.max(...comps) + 0.25 * Math.min(...comps));
-  return { recommended, matched, shobu_score: Math.round(score * 10) / 10 };
-}
-
 // レースの安定キー (React key + 非表示 Set のメンバー判定に共通使用)。
 const keyOf = (r: ShobuRace) => `${r.race_id}-${r.netkeiba_race_id}`;
 
 export default function ShobuPage() {
   // ── 抽出オプション ──
+  // 判定は基準B (市場との順位乖離) 単独 (ユーザ指示 2026-06-28: 基準A=強弱は廃止)。
   const [raceType, setRaceType] = useState<"all" | "jra" | "nar" | "banei">("all");
-  // 既定は基準B (市場乖離) 単独で推奨判定 (ユーザ指示 2026-06-28「基準はBだけで良い」)。
-  // 基準A (強弱) は表示は残すが既定 OFF。併用したいときだけトグルで ON。
-  const [useSeparation, setUseSeparation] = useState(false);
-  const [useClaudeEdge, setUseClaudeEdge] = useState(true);
-  const [combine, setCombine] = useState<"or" | "and">("or");
-  const [sepThreshold, setSepThreshold] = useState("35");
   // 基準B: 市場との順位乖離。edgeThreshold=乖離スコアしきい値 / edgeMargin=指数差フロア。
   const [edgeThreshold, setEdgeThreshold] = useState("25");
   const [edgeMargin, setEdgeMargin] = useState("3");
   const [upcomingOnly, setUpcomingOnly] = useState(true);
-  const [fetchOdds, setFetchOdds] = useState(true);
   // ボタン押下で全レースの Claude 指数を一括生成 (claude -p)。既定 ON (ユーザ指示 2026-06-20)。
   const [claudeAll, setClaudeAll] = useState(true);
   const [claudeEval, setClaudeEval] = useState("0");
@@ -385,9 +299,6 @@ export default function ShobuPage() {
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   // 勝負スコア 100 (上限に張り付いた最強シグナル) のレースだけ表示するフィルタ。
   const [onlyScore100, setOnlyScore100] = useState(false);
-  // 一覧側で「基準A (強弱) を必須にしない」= 基準B (市場乖離) のみで勝負レースを判定する表示。
-  // 再スキャン不要 (deriveDisplay で client 再採点)。基準B が scan で有効だった時のみ意味を持つ。
-  const [aOptional, setAOptional] = useState(false);
   // 並び順: "score" = 勝負スコア降順 (同点は発走が近い順) / "time" = 発走時刻の昇順 (近い順)。
   // ボタンで切替 (ユーザ指示 2026-06-28: 100まとめ連動でなく独立したソートボタン)。
   const [sortMode, setSortMode] = useState<"score" | "time">("score");
@@ -395,16 +306,9 @@ export default function ShobuPage() {
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set());
   const [showHidden, setShowHidden] = useState(false);
 
-  // 現在のフォーム設定を scan options に変換。
+  // 現在のフォーム設定を scan options に変換 (基準B 単独)。
   const buildOptions = (): ShobuScanRequest => ({
     race_type: raceType,
-    use_separation: useSeparation,
-    use_claude_edge: useClaudeEdge,
-    combine,
-    sep_threshold: (() => {
-      const v = parseFloat(sepThreshold);
-      return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 35;
-    })(),
     edge_margin: (() => {
       const v = parseFloat(edgeMargin);
       return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 3;
@@ -414,7 +318,6 @@ export default function ShobuPage() {
       return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 25;
     })(),
     upcoming_only: upcomingOnly,
-    fetch_odds: fetchOdds,
     claude_all: claudeAll,
     claude_eval: (() => {
       const v = parseInt(claudeEval, 10);
@@ -545,36 +448,9 @@ export default function ShobuPage() {
     }
   };
 
-  const rawRaces = result?.races ?? [];
   const summary = result?.summary;
-  const opts = result?.options;
-  // 基準B が scan で有効だった時だけ「基準A不要」表示が成立する (両基準OFFだと推奨ゼロになる)。
-  const canDropA = !!opts?.use_claude_edge;
-  const dropA = aOptional && canDropA;
-
-  // 「基準A不要」モード: 一覧を 基準B のみで判定し直す (deriveDisplay で client 再採点)。
-  // 再スキャンせず、生成済みの Claude 指数だけで勝負レースを決め直して並べ替える。
-  const races: ShobuRace[] = dropA
-    ? rawRaces
-        .map((r) => ({
-          ...r,
-          ...deriveDisplay(r, {
-            useSeparation: false,
-            useClaudeEdge: true,
-            combine: opts?.combine ?? "or",
-            sepThreshold: opts?.sep_threshold ?? 35,
-            edgeThreshold: opts?.edge_threshold ?? 25,
-          }),
-          // refresh の delta/履歴は server の合成スコア由来なので、基準Bのみ表示では消す
-          // (表示中の score=基準B と食い違うため)。
-          score_delta: null,
-          score_prev: null,
-          score_history: undefined,
-        }))
-        .sort((a, b) =>
-          a.recommended === b.recommended ? b.shobu_score - a.shobu_score : a.recommended ? -1 : 1,
-        )
-    : rawRaces;
+  // 判定は基準B 単独 (server が確定済み)。一覧は server の結果をそのまま使う。
+  const races: ShobuRace[] = result?.races ?? [];
 
   const isHidden = (r: ShobuRace) => hiddenKeys.has(keyOf(r));
   // 並び順の比較関数。"score" = 勝負スコア降順 (同点=発走が近い順 → スコア100まとめ時は発走順)、
@@ -648,21 +524,17 @@ export default function ShobuPage() {
       <PageHeader
         eyebrow="Shobu"
         title="今日の勝負レース"
-        subtitle="ボタンで当日の全レース (JRA+地方) を取得し、既定では (B) 市場と Claude 指数の順位乖離が大きいレースを勝負レースとして抽出します ((A) 馬の強弱はオプションで併用可・しきい値も選べます)。"
+        subtitle="ボタンで当日の全レース (JRA+地方) を取得し、市場ランクと Claude 指数ランクの乖離が大きいレース (例: 市場2番人気を Claude が本命視) を勝負レースとして抽出します。しきい値はオプションで調整できます。"
       />
 
       {/* ── サマリー ── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <Stat
           label="勝負レース"
           value={result ? recommended.length : "—"}
           tone={recommended.length > 0 ? "good" : "default"}
           accentTone="good"
-          hint={
-            summary
-              ? `${dropA ? "基準Bのみ ・ " : ""}評価 ${summary.evaluated} レース中`
-              : "未スキャン"
-          }
+          hint={summary ? `市場乖離 ・ 評価 ${summary.evaluated} レース中` : "未スキャン"}
         />
         <Stat
           label="評価レース数"
@@ -681,12 +553,6 @@ export default function ShobuPage() {
           value={summary ? summary.with_claude : "—"}
           accentTone="magenta"
           hint={summary ? `snapshot ${summary.with_snapshot}` : "—"}
-        />
-        <Stat
-          label="強弱スコア中央値"
-          value={summary?.sep_median != null ? summary.sep_median.toFixed(0) : "—"}
-          accentTone="info"
-          hint={summary ? `最新オッズ取得 ${summary.with_fresh_odds}` : "—"}
         />
       </div>
 
@@ -720,7 +586,7 @@ export default function ShobuPage() {
               {scanning ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" fill="currentColor" />}
               {scanning
                 ? "スキャン中..."
-                : claudeAll && useClaudeEdge
+                : claudeAll
                   ? "全レース取得 + Claude指数生成"
                   : "全レース取得して抽出"}
             </Button>
@@ -730,31 +596,17 @@ export default function ShobuPage() {
         <div className="p-4 space-y-4">
           {showSettings && (
             <div className="space-y-4">
-              <FieldGroup legend="基準 (勝負レースの定義)">
-                <div className="flex flex-col gap-2.5">
-                  <Toggle checked={useSeparation} onChange={setUseSeparation} disabled={scanning}>
-                    <span className="font-medium">(A) 馬の強弱がはっきり</span>
-                    <span className="text-(--color-muted) ml-1">— 市場 implied 勝率の集中度</span>
-                  </Toggle>
-                  <Toggle checked={useClaudeEdge} onChange={setUseClaudeEdge} disabled={scanning}>
-                    <span className="font-medium">(B) 市場との順位乖離が強い</span>
-                    <span className="text-(--color-muted) ml-1">— 例: 市場2番人気なのに Claude 本命</span>
-                  </Toggle>
-                </div>
-                <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <Select label="基準の合成" value={combine} onChange={(e) => setCombine(e.target.value as "or" | "and")} disabled={scanning}
-                    hint={combine === "or" ? "いずれか満たせば勝負" : "両方満たすと勝負"}>
-                    <option value="or">いずれか (OR)</option>
-                    <option value="and">両方 (AND)</option>
-                  </Select>
-                  <Input label="(A) 強弱しきい値 (0-100)" type="number" min="0" max="100" step="5"
-                    value={sepThreshold} onChange={(e) => setSepThreshold(e.target.value)} disabled={scanning || !useSeparation} className="tnum" />
-                  <Input label="(B) 市場乖離スコア (0-100)" type="number" min="0" max="100" step="5"
+              <FieldGroup legend="基準 (市場との順位乖離 = 勝負レースの定義)">
+                <p className="text-[11px] text-(--color-muted) mb-2">
+                  市場ランクと Claude 指数ランクの食い違い (例: 市場2番人気なのに Claude 本命) で抽出します。
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input label="市場乖離スコア (0-100)" type="number" min="0" max="100" step="5"
                     hint="高いほど強い乖離のみ推奨"
-                    value={edgeThreshold} onChange={(e) => setEdgeThreshold(e.target.value)} disabled={scanning || !useClaudeEdge} className="tnum" />
-                  <Input label="(B) 指数差フロア" type="number" min="0" max="100" step="1"
+                    value={edgeThreshold} onChange={(e) => setEdgeThreshold(e.target.value)} disabled={scanning} className="tnum" />
+                  <Input label="指数差フロア" type="number" min="0" max="100" step="1"
                     hint="乖離馬は順位差+指数差この値以上"
-                    value={edgeMargin} onChange={(e) => setEdgeMargin(e.target.value)} disabled={scanning || !useClaudeEdge} className="tnum" />
+                    value={edgeMargin} onChange={(e) => setEdgeMargin(e.target.value)} disabled={scanning} className="tnum" />
                 </div>
               </FieldGroup>
 
@@ -768,26 +620,21 @@ export default function ShobuPage() {
                     <option value="banei">ばんえい のみ</option>
                   </Select>
                   {!claudeAll && (
-                    <Input label="Claude 指数を生成 (上位N件)" type="number" min="0" max="50" step="1"
-                      value={claudeEval} onChange={(e) => setClaudeEval(e.target.value)} disabled={scanning || !useClaudeEdge}
+                    <Input label="Claude 指数を生成 (発走が近い順 N件)" type="number" min="0" max="50" step="1"
+                      value={claudeEval} onChange={(e) => setClaudeEval(e.target.value)} disabled={scanning}
                       hint="0=既存スナップショットのみ" className="tnum" />
                   )}
                 </div>
                 <div className="mt-3 flex flex-col gap-2.5">
-                  <Toggle checked={claudeAll} onChange={setClaudeAll} disabled={scanning || !useClaudeEdge}>
+                  <Toggle checked={claudeAll} onChange={setClaudeAll} disabled={scanning}>
                     <span className="font-medium">全レースの Claude 指数を一括生成</span>
                     <span className="text-(--color-muted) ml-1">— ボタンで claude -p を一斉実行</span>
                   </Toggle>
-                  <div className="flex items-center gap-5 flex-wrap">
-                    <Toggle checked={upcomingOnly} onChange={setUpcomingOnly} disabled={scanning}>
-                      発走前のみ
-                    </Toggle>
-                    <Toggle checked={fetchOdds} onChange={setFetchOdds} disabled={scanning}>
-                      最新オッズを取得 (未解析レースの強弱判定)
-                    </Toggle>
-                  </div>
+                  <Toggle checked={upcomingOnly} onChange={setUpcomingOnly} disabled={scanning}>
+                    発走前のみ
+                  </Toggle>
                 </div>
-                {claudeAll && useClaudeEdge && (
+                {claudeAll && (
                   <p className="mt-2.5 text-xs text-(--color-warn) leading-relaxed">
                     Claude 指数の無い発走前レースを <b>全件</b> claude -p で生成します
                     (Tavily / WebFetch で各馬を web 検索 → 0-100 指数)。レース数によっては
@@ -834,8 +681,8 @@ export default function ShobuPage() {
                   </span>
                 </div>
                 <span className="text-[11px] text-fuchsia-200/80 leading-snug max-w-xl">
-                  下の一覧は<b>暫定 (基準A=強弱 中心)</b> です。各レースの指数が付き次第{" "}
-                  <b>基準B (市場乖離)</b> が確定し、勝負スコアと順位が更新されます。
+                  下の一覧は<b>暫定</b> です。各レースの Claude 指数が付き次第{" "}
+                  <b>市場との順位乖離</b> が確定し、勝負スコアと順位が更新されます。
                 </span>
               </div>
               <div className="mt-2 h-1.5 rounded-full bg-fuchsia-500/15 overflow-hidden">
@@ -877,15 +724,6 @@ export default function ShobuPage() {
                 {sortMode === "time" ? <Clock className="size-3" /> : <ArrowDownUp className="size-3" />}
                 {sortMode === "time" ? "発走時刻順" : "勝負スコア順"}
               </button>
-              {/* 基準A (強弱) を必須にしない = 基準B (市場乖離) のみで判定 (再スキャン不要・表示だけ) */}
-              {canDropA && (
-                <Toggle checked={aOptional} onChange={setAOptional}>
-                  <span className="text-[11px]">
-                    基準A不要
-                    <span className="ml-1 text-(--color-muted)">(基準Bのみで判定)</span>
-                  </span>
-                </Toggle>
-              )}
               {/* 勝負スコア100 (上限張り付き) のみ表示フィルタ */}
               <Toggle checked={onlyScore100} onChange={setOnlyScore100} disabled={score100Count === 0}>
                 <span className="text-[11px]">
@@ -923,7 +761,7 @@ export default function ShobuPage() {
                       ? "表示できる勝負レースがありません (すべて非表示)。下の「非表示にしたレース」から戻せます。"
                       : onlyScore100
                         ? `勝負スコア100の勝負レースはありません${recommended.length > 0 ? ` (フィルタを外すと ${recommended.length} 件)` : ""}。`
-                        : "選択した基準を満たす勝負レースはありませんでした。下の「その他のレース」をスコア順で確認するか、しきい値 (強弱/指数差/頭数) を下げてください。"}
+                        : "市場との順位乖離が基準を満たす勝負レースはありませんでした。下の「その他のレース」をスコア順で確認するか、しきい値 (市場乖離スコア / 指数差フロア) を下げてください。"}
                 </div>
               </Card>
             ) : (
@@ -989,11 +827,9 @@ export default function ShobuPage() {
           )}
 
           <p className="text-[10px] text-(--color-muted) px-1">
-            ※ <b>推奨 (勝負レース)</b> = 選択した基準 (強弱 / Claude 乖離) を満たしたレース。緑枠+番号+「推奨」バッジで表示。
-            勝負スコア = 強弱スコアと市場乖離スコアの合成 (主signal + 0.25×副signal)。
-            強弱 = 市場の単勝 implied 勝率の集中度 (1−正規化エントロピー)。
-            市場乖離 = 市場順位と Claude 順位の食い違い (例: 市場2番人気を Claude が本命視 / 「市場5位→Claude2位」のように Claude が上位評価する馬。Claude 本命の市場順位ギャップを主軸にスコア化)。
-            <b>基準A不要</b> をオンにすると、再スキャンせず一覧を <b>基準B (市場乖離) のみ</b> で判定し直します (勝負スコアも基準B由来)。
+            ※ <b>推奨 (勝負レース)</b> = <b>市場との順位乖離</b> が基準を満たしたレース。緑枠+番号+「推奨」バッジで表示。
+            勝負スコア = 市場乖離スコア (= 市場順位と Claude 順位の食い違い。例: 市場2番人気を Claude が本命視 /
+            「市場5位→Claude2位」のように Claude が上位評価する馬。Claude 本命の市場順位ギャップを主軸にスコア化)。
             長期 +EV を保証するものではなく「賭ける価値の高そうなレース」の目安です。
           </p>
         </section>

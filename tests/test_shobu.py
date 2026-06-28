@@ -10,38 +10,7 @@ import src.shobu as shobu
 
 
 # ---------------------------------------------------------------- pure 関数 --
-
-def test_separation_concentrated_vs_uniform():
-    """集中したフィールドは高 sep、一様フィールドは ~0。"""
-    conc = shobu._implied_from_win_odds({1: 1.3, 2: 8.0, 3: 14.0, 4: 22.0, 5: 33.0})
-    unif = shobu._implied_from_win_odds({1: 5.0, 2: 5.1, 3: 4.9, 4: 5.2, 5: 4.8})
-    s_conc = shobu._separation(conc)
-    s_unif = shobu._separation(unif)
-    assert s_conc["score"] > 25
-    assert s_unif["score"] < 5
-    assert s_conc["score"] > s_unif["score"]
-    # favorites は prob 降順の top3。
-    assert [f["number"] for f in s_conc["favorites"]] == [1, 2, 3]
-
-
-def test_separation_needs_two_horses():
-    assert shobu._separation({1: 1.0}) is None
-    assert shobu._separation({}) is None
-
-
-def test_implied_from_market_index_roundtrip():
-    """market_win_index (=100·p^(1/1.5)) から implied 勝率を復元できる。"""
-    # 単勝 1.5 / 8 / 12 倍相当の指数。
-    mwi = {
-        "1": 100.0 * (1 / 1.5) ** (1 / 1.5),
-        "2": 100.0 * (1 / 8.0) ** (1 / 1.5),
-        "3": 100.0 * (1 / 12.0) ** (1 / 1.5),
-    }
-    implied = shobu._implied_from_market_index(mwi)
-    assert abs(sum(implied.values()) - 1.0) < 1e-6
-    # 1.5 倍が最大の implied を持つ。
-    assert max(implied, key=implied.get) == 1
-
+# 判定は基準B (市場との順位乖離) 単独 (ユーザ指示 2026-06-28: 基準A=強弱は廃止)。
 
 def test_claude_edge_rank_divergence():
     """市場2番人気を Claude が本命視 = 順位乖離。top_rank_gap と edge を正しく出す。"""
@@ -120,15 +89,14 @@ def test_scan_banei_filter(monkeypatch):
          "venue": "帯広", "race_no": 1, "source": "oddspark"},      # ばんえい
     ])
     monkeypatch.setattr(shobu, "_load_snapshot", lambda i: None)
-    monkeypatch.setattr(shobu, "_fetch_fresh_win", lambda r, t: None)
 
-    res_all = shobu.scan(race_type="all", fetch_odds=False, claude_eval=0, log=lambda *_: None)
+    res_all = shobu.scan(race_type="all", claude_eval=0, log=lambda *_: None)
     assert res_all["summary"]["by_type"] == {"jra": 0, "nar": 1, "banei": 1}
 
-    res_nar = shobu.scan(race_type="nar", fetch_odds=False, claude_eval=0, log=lambda *_: None)
+    res_nar = shobu.scan(race_type="nar", claude_eval=0, log=lambda *_: None)
     assert [r["race_type"] for r in res_nar["races"]] == ["nar"]
 
-    res_banei = shobu.scan(race_type="banei", fetch_odds=False, claude_eval=0, log=lambda *_: None)
+    res_banei = shobu.scan(race_type="banei", claude_eval=0, log=lambda *_: None)
     assert [r["race_type"] for r in res_banei["races"]] == ["banei"]
     assert res_banei["races"][0]["venue"] == "帯広"
 
@@ -145,7 +113,7 @@ def _fake_discovery(now: int):
     ]
 
 
-def _setup(monkeypatch, *, fresh_a, fresh_b, snap_a, snap_b):
+def _setup(monkeypatch, *, snap_a, snap_b):
     now = int(time.time())
     monkeypatch.setattr("src.auto_watch.discover_today_races", lambda d: _fake_discovery(now))
 
@@ -155,58 +123,49 @@ def _setup(monkeypatch, *, fresh_a, fresh_b, snap_a, snap_b):
     def fake_snap(internal):
         return {nar_internal: snap_a, jra_internal: snap_b}.get(internal)
 
-    def fake_fresh(rid, rtype):
-        return {"202632060101": fresh_a, "202605010111": fresh_b}.get(rid)
-
     monkeypatch.setattr(shobu, "_load_snapshot", fake_snap)
-    monkeypatch.setattr(shobu, "_fetch_fresh_win", fake_fresh)
     return nar_internal, jra_internal
 
 
-# B race の snapshot: 市場2番人気を Claude が本命視 (順位乖離) → 基準B 合格。
+# snapshot: 市場2番人気を Claude が本命視 (順位乖離) → 基準B 合格。
 _SNAP_DIVERGENCE = {"index_compare": [
     {"number": 1, "claude_index": 60, "market_index": 90},   # 市場1位 Claude2位
     {"number": 2, "claude_index": 85, "market_index": 70},   # 市場2位 Claude1位
     {"number": 3, "claude_index": 40, "market_index": 50},
 ]}
+# snapshot: 市場と Claude の順位が一致 (乖離なし) → 基準B 不合格。
+_SNAP_ALIGNED = {"index_compare": [
+    {"number": 1, "claude_index": 90, "market_index": 90},
+    {"number": 2, "claude_index": 70, "market_index": 70},
+    {"number": 3, "claude_index": 50, "market_index": 50},
+]}
 
 
-def test_scan_or_combine(monkeypatch):
-    """OR: A は強弱で勝負、B は市場との順位乖離で勝負。"""
-    # A = 集中フィールド (sep 高) / snapshot なし
-    fresh_a = {"odds": {1: 1.3, 2: 8.0, 3: 14.0, 4: 22.0, 5: 33.0},
-               "names": {1: "AA", 2: "BB", 3: "CC", 4: "DD", 5: "EE"}}
-    # B = 一様フィールド (sep 低) だが snapshot に順位乖離 (市場2位→Claude1位)
-    fresh_b = {"odds": {n: 5.0 for n in range(1, 9)}, "names": {}}
-    _setup(monkeypatch, fresh_a=fresh_a, fresh_b=fresh_b, snap_a=None, snap_b=_SNAP_DIVERGENCE)
-
-    res = shobu.scan(fetch_odds=True, combine="or", sep_threshold=25.0,
-                     edge_margin=3.0, edge_threshold=20.0, claude_eval=0, log=lambda *_: None)
+def test_scan_recommends_on_divergence(monkeypatch):
+    """基準B 単独: 順位乖離のある snapshot だけ推奨、一致 snapshot は非推奨。"""
+    _setup(monkeypatch, snap_a=_SNAP_ALIGNED, snap_b=_SNAP_DIVERGENCE)
+    res = shobu.scan(edge_margin=3.0, edge_threshold=20.0, claude_eval=0, log=lambda *_: None)
     by_venue = {r["venue"]: r for r in res["races"]}
-    assert by_venue["佐賀"]["recommended"] is True
-    assert "sep" in by_venue["佐賀"]["matched"]
-    assert by_venue["東京"]["recommended"] is True
+    assert by_venue["東京"]["recommended"] is True          # 順位乖離あり
     assert "claude" in by_venue["東京"]["matched"]
     assert by_venue["東京"]["claude"]["top_rank_gap"] == 1
-    assert res["summary"]["recommended"] == 2
+    assert by_venue["佐賀"]["recommended"] is False         # 乖離なし
+    assert res["summary"]["recommended"] == 1
 
 
-def test_scan_and_combine(monkeypatch):
-    """AND: A は Claude 不在で不可、B は強弱不足で不可 → 推奨ゼロ。"""
-    fresh_a = {"odds": {1: 1.3, 2: 8.0, 3: 14.0, 4: 22.0, 5: 33.0}, "names": {}}
-    fresh_b = {"odds": {n: 5.0 for n in range(1, 9)}, "names": {}}
-    _setup(monkeypatch, fresh_a=fresh_a, fresh_b=fresh_b, snap_a=None, snap_b=_SNAP_DIVERGENCE)
-
-    res = shobu.scan(fetch_odds=True, combine="and", sep_threshold=25.0,
-                     edge_margin=3.0, edge_threshold=20.0, claude_eval=0, log=lambda *_: None)
+def test_scan_no_snapshot_not_recommended(monkeypatch):
+    """snapshot (Claude 指数) が無いレースは基準B 評価不能 = 非推奨だが evaluated には数える。"""
+    _setup(monkeypatch, snap_a=None, snap_b=None)
+    res = shobu.scan(edge_margin=3.0, edge_threshold=20.0, claude_eval=0, log=lambda *_: None)
+    assert res["summary"]["evaluated"] == 2
     assert res["summary"]["recommended"] == 0
+    assert all(not r["recommended"] for r in res["races"])
 
 
 def test_scan_race_type_filter(monkeypatch):
     """race_type=nar は NAR だけ評価する。"""
-    fresh_a = {"odds": {1: 1.3, 2: 8.0, 3: 14.0}, "names": {}}
-    _setup(monkeypatch, fresh_a=fresh_a, fresh_b=None, snap_a=None, snap_b=None)
-    res = shobu.scan(race_type="nar", fetch_odds=True, claude_eval=0, log=lambda *_: None)
+    _setup(monkeypatch, snap_a=None, snap_b=None)
+    res = shobu.scan(race_type="nar", claude_eval=0, log=lambda *_: None)
     assert res["summary"]["evaluated"] == 1
     assert res["races"][0]["race_type"] == "nar"
 
@@ -214,26 +173,25 @@ def test_scan_race_type_filter(monkeypatch):
 def test_select_claude_targets():
     now = 1000
 
-    def race(rid, claude, sep, future):
+    def race(rid, claude, start_at, future):
         return {
             "race_id": rid, "netkeiba_race_id": "x", "venue": "V", "race_no": 1,
-            "race_type": "nar", "start_at": 0,
+            "race_type": "nar", "start_at": start_at,
             "close_at": now + 100 if future else now - 100,
             "claude": ({"available": True} if claude else None),
-            "separation": ({"score": sep} if sep is not None else None),
         }
 
     results = [
-        race("a", False, 50, True),    # 未スコア・発走前・sep 50
-        race("b", False, 80, True),    # 未スコア・発走前・sep 80
-        race("c", True, 90, True),     # スコア済 → 対象外
-        race("d", False, 10, False),   # 締切済 → upcoming_only で対象外
+        race("a", False, 2000, True),   # 未スコア・発走前・発走 2000 (遅い)
+        race("b", False, 1500, True),   # 未スコア・発走前・発走 1500 (近い)
+        race("c", True, 1400, True),    # スコア済 → 対象外
+        race("d", False, 900, False),   # 締切済 → upcoming_only で対象外
     ]
-    # 全件モード: 未スコア発走前を sep 降順で全部。
+    # 全件モード: 未スコア発走前を発走が近い順で全部。
     t_all = shobu._select_claude_targets(results, claude_all=True, claude_eval=0,
                                          upcoming_only=True, now=now)
-    assert [r["race_id"] for r in t_all] == ["b", "a"]
-    # 上位 N モード。
+    assert [r["race_id"] for r in t_all] == ["b", "a"]   # 発走時刻 1500 < 2000
+    # 上位 N モード (発走が近い順)。
     t_top = shobu._select_claude_targets(results, claude_all=False, claude_eval=1,
                                          upcoming_only=True, now=now)
     assert [r["race_id"] for r in t_top] == ["b"]
@@ -338,7 +296,7 @@ def test_cli_clamps_tiny_timeout(monkeypatch, capsys):
                         lambda **k: seen.update(k) or {"races": [],
                             "summary": {"recommended": 0, "evaluated": 0,
                                         "with_snapshot": 0, "with_claude": 0}})
-    shobu.main(["--no-fetch-odds", "--claude-eval-timeout", "10"])
+    shobu.main(["--claude-eval-timeout", "10"])
     assert seen["claude_eval_timeout"] == 210
 
 
@@ -384,9 +342,8 @@ def test_scan_claude_all_generates_for_all(monkeypatch):
         return len(targets)
 
     monkeypatch.setattr(shobu, "_run_claude_eval", fake_gen)
-    res = shobu.scan(claude_all=True, use_separation=False, use_claude_edge=True,
-                     sep_threshold=101, edge_margin=3.0, edge_threshold=20.0,
-                     fetch_odds=True, log=lambda *_: None)
+    res = shobu.scan(claude_all=True, edge_margin=3.0, edge_threshold=20.0,
+                     log=lambda *_: None)
     assert res["summary"]["with_claude"] == 2          # 2 レースとも生成された
     assert res["summary"]["recommended"] == 2          # 順位乖離 → 勝負 (claude のみ)
     assert all(r["claude"]["top_rank_gap"] == 1 for r in res["races"])
@@ -434,9 +391,8 @@ def test_scan_provisional_then_final_emits(tmp_path, monkeypatch):
     monkeypatch.setattr(shobu, "_run_claude_eval", fake_gen)
 
     out = tmp_path / "20260101.json"
-    res = shobu.scan(claude_all=True, use_separation=False, use_claude_edge=True,
-                     sep_threshold=101, edge_margin=3.0, edge_threshold=20.0,
-                     fetch_odds=True, out=out, log=lambda *_: None)
+    res = shobu.scan(claude_all=True, edge_margin=3.0, edge_threshold=20.0,
+                     out=out, log=lambda *_: None)
 
     # 暫定 (生成前) = 最初の書き出し: generating=True / gen_done=0 / Claude まだ 0。
     assert emits[0][0] is True and emits[0][2] == 0 and emits[0][3] == 0
@@ -459,11 +415,8 @@ def test_scan_no_generation_single_final_emit(tmp_path, monkeypatch):
          "venue": "佐賀", "race_no": 1, "source": "oddspark"},
     ])
     monkeypatch.setattr(shobu, "_load_snapshot", lambda i: None)
-    monkeypatch.setattr(shobu, "_fetch_fresh_win",
-                        lambda r, t: {"odds": {1: 1.3, 2: 8.0, 3: 14.0}, "names": {}})
     out = tmp_path / "20260101.json"
-    res = shobu.scan(claude_all=False, claude_eval=0, fetch_odds=True, out=out,
-                     log=lambda *_: None)
+    res = shobu.scan(claude_all=False, claude_eval=0, out=out, log=lambda *_: None)
     assert res["generating"] is False and res["gen_total"] == 0
     written = json.loads(out.read_text(encoding="utf-8"))
     assert written["generating"] is False and written["gen_total"] == 0
@@ -477,10 +430,9 @@ def test_scan_upcoming_only_excludes_past(monkeypatch):
          "venue": "佐賀", "race_no": 1, "source": "oddspark"},
     ])
     monkeypatch.setattr(shobu, "_load_snapshot", lambda i: None)
-    monkeypatch.setattr(shobu, "_fetch_fresh_win", lambda r, t: None)
     res = shobu.scan(upcoming_only=True, claude_eval=0, log=lambda *_: None)
     assert res["summary"]["evaluated"] == 0
-    res2 = shobu.scan(upcoming_only=False, claude_eval=0, fetch_odds=False, log=lambda *_: None)
+    res2 = shobu.scan(upcoming_only=False, claude_eval=0, log=lambda *_: None)
     assert res2["summary"]["evaluated"] == 1
 
 
@@ -495,8 +447,7 @@ def test_refresh_recommended_rescore_and_history(tmp_path, monkeypatch):
     result = {
         "date": date,
         "generated_at": "2026-01-01T10:00:00+09:00",
-        "options": {"use_separation": True, "use_claude_edge": True, "combine": "or",
-                    "sep_threshold": 35.0, "edge_margin": 3.0, "edge_threshold": 25.0},
+        "options": {"edge_margin": 3.0, "edge_threshold": 10.0},
         "summary": {"total_discovered": 5},
         "races": [
             {"netkeiba_race_id": "202601010101", "race_id": "1-1-1", "venue": "X",
@@ -517,7 +468,8 @@ def test_refresh_recommended_rescore_and_history(tmp_path, monkeypatch):
         {"number": 3, "name": "C", "claude_index": 60.0, "market_index": 30.0},
     ], "n_runners": 3, "stage": "bet"}
     monkeypatch.setattr(shobu, "_load_snapshot", lambda rid: snap)
-    # 最新オッズ: 強い1番人気 (馬2 1.2倍) → 強弱で推奨維持、ただし市場乖離は縮小 → 総合スコア低下。
+    # 最新オッズ: 馬2 が強い1番人気 (1.2倍) になり市場が Claude 本命に追いつく → 市場乖離が縮小し
+    # 勝負スコア (基準B) 低下。edge_threshold=10 なので低下後も推奨は維持される。
     monkeypatch.setattr(shobu, "_fetch_fresh_win",
                         lambda rid, rtype: {"odds": {1: 8.0, 2: 1.2, 3: 12.0},
                                             "names": {1: "A", 2: "B", 3: "C"}})
@@ -526,7 +478,7 @@ def test_refresh_recommended_rescore_and_history(tmp_path, monkeypatch):
     assert doc is not None
     rec = next(r for r in doc["races"] if r["race_id"] == "1-1-1")
     assert rec["data_source"] == "fresh"               # 最新オッズで再採点された
-    assert rec["recommended"] is True                   # 強弱で推奨維持
+    assert rec["recommended"] is True                   # 市場乖離が残り推奨維持 (threshold=10)
     assert rec["score_prev"] == 58.0                    # シード = スキャン時スコア
     assert rec["shobu_score"] < 58.0                    # 市場が Claude に追いつき低下
     assert rec["score_delta"] < 0

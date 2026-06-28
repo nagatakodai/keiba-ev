@@ -446,28 +446,17 @@ class ShobuScanRequest(BaseModel):
     # 対象 (all / jra / nar=地方平地 / banei=帯広ばんえい)。Literal で値検証。
     # banei は別競技なので nar から分離 (確率モデルも ev.segment_of_rd で分離済)。
     race_type: Literal["all", "jra", "nar", "banei"] = "all"
-    # 基準A (強弱がはっきり = 市場 implied 勝率の集中度) を推奨判定に使うか。
-    # 既定 False (ユーザ指示 2026-06-28「基準はBだけで良い」)。強弱スコアは表示用に算出は続けるが
-    # 推奨/勝負スコアは基準B (市場との順位乖離) のみで決める。A も併用したいときだけ True。
-    use_separation: bool = False
-    # 基準B (市場との順位乖離) を使うか。既定の推奨判定はこれ単独。
-    use_claude_edge: bool = True
-    # 基準の合成 (or=いずれか / and=両方)。
-    combine: Literal["or", "and"] = "or"
-    # 基準A しきい値 (sep_score 0-100)。これ以上で「強弱はっきり」。
-    sep_threshold: float = Field(default=35.0, ge=0, le=100)
-    # 基準B (市場との順位乖離): 乖離馬の指数差フロア (claude−market ≥ これ。順位だけでなく数値の裏付け)。
+    # 推奨判定は **基準B (市場との順位乖離) 単独** (ユーザ指示 2026-06-28: 基準A=強弱は廃止)。
+    # 乖離馬の指数差フロア (claude−market ≥ これ。順位だけでなく数値の裏付け)。
     edge_margin: float = Field(default=3.0, ge=0, le=100)
-    # 基準B: 市場乖離スコア (Claude本命の市場順位ギャップ主軸) がこの値以上で勝負。
+    # 市場乖離スコア (Claude本命の市場順位ギャップ主軸) がこの値以上で勝負レース。
     edge_threshold: float = Field(default=25.0, ge=0, le=100)
     # 発走前のみ (締切前) を対象にするか。False で締切済も含む。
     upcoming_only: bool = True
-    # snapshot に市場データが無いレースの最新オッズ (単勝) を取得するか。
-    fetch_odds: bool = True
     # ボタン押下で **全レースの Claude 指数を一括生成** するか (claude -p を一斉実行)。
     # 既定 True (ユーザ指示 2026-06-20: ボタンで一気に取得)。Claude 指数が無い発走前レースが対象。
     claude_all: bool = True
-    # claude_all=False のとき、強弱上位 N 件だけ score ステージで指数を新規生成 (0=しない)。
+    # claude_all=False のとき、発走が近い順 N 件だけ score ステージで指数を新規生成 (0=しない)。
     claude_eval: int = Field(default=0, ge=0, le=50)
     # 評価レース数の上限 (デバッグ/負荷制御)。None=全件。
     max_races: int | None = Field(default=None, ge=1, le=300)
@@ -501,14 +490,9 @@ async def api_shobu_scan(req: ShobuScanRequest) -> dict[str, Any]:
         out_path,
         date=date,
         race_type=req.race_type,
-        use_separation=req.use_separation,
-        use_claude_edge=req.use_claude_edge,
-        combine=req.combine,
-        sep_threshold=req.sep_threshold,
         edge_margin=req.edge_margin,
         edge_threshold=req.edge_threshold,
         upcoming_only=req.upcoming_only,
-        fetch_odds=req.fetch_odds,
         claude_all=req.claude_all,
         claude_eval=req.claude_eval,
         claude_eval_parallel=req.claude_eval_parallel,

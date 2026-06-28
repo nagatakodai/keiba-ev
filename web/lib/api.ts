@@ -578,17 +578,7 @@ export const isEvMeasured = (savedAt?: string | null): boolean =>
   !!savedAt && savedAt >= EV_CUTOFF_ISO;
 
 // --- 今日の勝負レース (GET /api/shobu/result, POST /api/shobu/scan) ---
-
-// 強弱 (基準A): 市場 implied 勝率分布の集中度。score=100·(1−正規化エントロピー)。
-export type ShobuSeparation = {
-  score: number;            // 0-100 (高い=強弱がはっきり)
-  n: number;                // 出走頭数 (オッズが取れた)
-  top1: number;             // 1番手の implied 勝率
-  top2: number;
-  gap: number;              // top1 − top2
-  entropy_norm: number;
-  favorites: Array<{ number: number; name: string; prob: number }>;
-};
+// 判定は基準B (市場との順位乖離) 単独 (ユーザ指示 2026-06-28: 基準A=強弱は廃止)。
 
 // 市場との順位乖離 (基準B): 市場ランク vs Claude ランクの食い違い。
 export type ShobuEdgeHorse = {
@@ -627,14 +617,12 @@ export type ShobuRace = {
   n_runners: number | null;
   // fresh=最新オッズ取得 / snapshot=既存スナップショット / none=データなし(未解析)
   data_source: "fresh" | "snapshot" | "none";
-  sep_source?: string | null;
   has_snapshot: boolean;
   snapshot_stage?: "score" | "bet" | null;
-  separation: ShobuSeparation | null;
   claude: ShobuClaude | null;
-  recommended: boolean;          // 選択した基準を満たす = 勝負レース
-  matched: string[];             // "sep" / "claude"
-  shobu_score: number;           // ランキング用の総合スコア (0-100)
+  recommended: boolean;          // 基準B (市場乖離) を満たす = 勝負レース
+  matched: string[];             // "claude"
+  shobu_score: number;           // ランキング用スコア (0-100) = 市場乖離スコア
   reasons: string[];
   // 2分毎の最新オッズ更新 (POST /api/shobu/refresh) で推奨レースに付く:
   // 勝負スコアの前回比 (score_delta = 今回−前回, 正=上昇) と時系列履歴。
@@ -652,14 +640,9 @@ export type ShobuResult = {
   options: {
     date: string;
     race_type: "all" | "jra" | "nar" | "banei";
-    use_separation: boolean;
-    use_claude_edge: boolean;
-    combine: "or" | "and";
-    sep_threshold: number;
     edge_margin: number;
     edge_threshold: number;
     upcoming_only: boolean;
-    fetch_odds: boolean;
     claude_all: boolean;
     claude_eval: number;
   };
@@ -670,7 +653,6 @@ export type ShobuResult = {
     with_snapshot: number;
     with_claude: number;
     with_fresh_odds: number;
-    sep_median: number | null;
     by_type?: { jra: number; nar: number; banei: number };
   };
   races: ShobuRace[];
@@ -744,14 +726,9 @@ export type ShobuPnl = {
 export type ShobuScanRequest = {
   date?: string | null;
   race_type?: "all" | "jra" | "nar" | "banei";
-  use_separation?: boolean;
-  use_claude_edge?: boolean;
-  combine?: "or" | "and";
-  sep_threshold?: number;
   edge_margin?: number;
   edge_threshold?: number;
   upcoming_only?: boolean;
-  fetch_odds?: boolean;
   claude_all?: boolean;
   claude_eval?: number;
   max_races?: number | null;

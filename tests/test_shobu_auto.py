@@ -6,23 +6,27 @@ from __future__ import annotations
 
 
 def test_build_shobu_cmd_flags():
+    """基準B 単独 (基準A=強弱は廃止 2026-06-28)。sep/combine/fetch_odds フラグは出さない。"""
     from api.runner import build_shobu_cmd
     cmd = build_shobu_cmd(
         "/tmp/out.json", date="20260620", race_type="banei",
-        use_separation=False, use_claude_edge=True, combine="and",
-        sep_threshold=40, edge_margin=5, edge_threshold=30,
-        upcoming_only=False, fetch_odds=False, claude_all=True, max_races=7)
+        edge_margin=5, edge_threshold=30,
+        upcoming_only=False, claude_all=True, max_races=7)
     s = " ".join(cmd)
     assert "src.shobu" in s
     assert "--race-type banei" in s
     assert "--edge-threshold 30" in s
     assert "--edge-margin 5" in s
-    assert "--no-separation" in s
     assert "--include-finished" in s
-    assert "--no-fetch-odds" in s
     assert "--claude-all" in s
     assert "--max-races 7" in s
-    assert "--edge-min-count" not in s   # 廃止済 (順位乖離スコアに置換)
+    # 廃止済フラグは出さない。
+    assert "--separation" not in s
+    assert "--no-separation" not in s
+    assert "--combine" not in s
+    assert "--sep-threshold" not in s
+    assert "--no-fetch-odds" not in s
+    assert "--no-claude" not in s
 
 
 def test_results_auto_status_shape():
