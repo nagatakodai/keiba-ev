@@ -93,7 +93,7 @@ function Sparkline({ values, positive }: { values: number[]; positive: boolean }
   );
 }
 
-// 全 Claude 指数レース (recommended に限らない) の仮想収支カード (勝負レースとは別カードで併記)。
+// shobu 評価レース全体 (recommended に限らない) の仮想収支カード (勝負レースとは別カードで併記)。
 function IndexedPnlCard({ data, nowMs }: { data: ShobuPnl; nowMs: number }) {
   const pl = data.payout - data.stake;
   const has = data.races > 0;
@@ -106,7 +106,7 @@ function IndexedPnlCard({ data, nowMs }: { data: ShobuPnl; nowMs: number }) {
         <div className="flex flex-wrap items-center gap-2">
           <Layers className="w-4 h-4 text-sky-300" />
           <span className="text-[10px] font-bold tracking-[0.22em] uppercase text-(--color-muted)">
-            参考 — 全 Claude 指数レース (全馬指数+結果あり・上位N頭3連単BOX)
+            参考 — shobu 評価レース全体 (推奨+非推奨・上位N頭3連単BOX)
           </span>
           {data.sample_warning && <Badge tone="muted">サンプル少</Badge>}
         </div>
@@ -135,13 +135,13 @@ function IndexedPnlCard({ data, nowMs }: { data: ShobuPnl; nowMs: number }) {
           <KpiCell
             label="対象レース"
             value={data.races}
-            sub={`全指数レース ${data.recommended_total} / 結果待ち ${data.skipped_no_result}`}
+            sub={`shobu評価 ${data.recommended_total} / 結果待ち ${data.skipped_no_result}`}
           />
         </div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
           <span>
-            ※ recommended に限らず全出走馬に Claude 指数が付いたレースの全数 paper P/L
-            (母集団が広いぶん回収率は控除水準へ収束しやすい)
+            ※ 推奨に限らず shobu が評価した全レースの paper P/L (推奨カードの superset・
+            ほぼ推奨。betting pipeline の過去スコアは含めず当日スキャン母集団のみ)
           </span>
           <span className="inline-flex items-center gap-1">
             <History className="w-3 h-3" />
@@ -327,7 +327,7 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* ====== 別カード: 全 Claude 指数レースの仮想収支 (非破壊・参考) ====== */}
+      {/* ====== 別カード: shobu 評価レース全体の仮想収支 (非破壊・参考) ====== */}
       {indexed && <IndexedPnlCard data={indexed} nowMs={nowMs} />}
 
       {/* ====== per-race 明細 (勝負レース=推奨) ====== */}

@@ -674,14 +674,12 @@ def _box_race_pnl(
     point_cost: int,
     box_size: int,
     meta: dict[str, Any],
-    require_full_index: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     """1 レースの **Claude 指数上位 N 頭の 3連単 BOX** 仮想収支を計算する共通ヘルパ。
 
-    compute_shobu_pnl (勝負レース=recommended) と compute_indexed_pnl (全 Claude 指数レース) で
+    compute_shobu_pnl (勝負レース=recommended) と compute_indexed_pnl (shobu 評価レース全体) で
     共有する。返り値 `(detail | None, reason)`。reason は "ok" / "no_index" / "no_result":
-      - "no_index": Claude 指数が 3 頭未満 (BOX 不能)、または require_full_index=True で
-        全出走馬に指数が付いていない。
+      - "no_index": Claude 指数が 3 頭未満 (BOX 不能)。
       - "no_result": 着順が 3 着まで確定していない (result file 欠落も呼び側が {} を渡せば該当)。
     `meta` は detail に載せる race_id/date/venue/race_no/race_type/shobu_score/matched/n_runners。
     """
@@ -691,8 +689,6 @@ def _box_race_pnl(
     if len(idx) < 3:
         return None, "no_index"
     n_runners = snap.get("n_runners") or meta.get("n_runners") or len(idx)
-    if require_full_index and not (n_runners and len(idx) >= int(n_runners)):
-        return None, "no_index"   # 全出走馬に指数が付いていない (= 全馬指数を要求するモード)
     box = _shobu_box_size(n_runners, base=box_size)
     top = [num for num, _ci in sorted(idx.items(), key=lambda kv: kv[1], reverse=True)][:box]
     top_set = set(top)
@@ -727,28 +723,29 @@ def _box_race_pnl(
     return detail, "ok"
 
 
-def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
-    """勝負レース (recommended) 専用の **仮想収支** (ユーザ指示 2026-06-21)。
+def _shobu_box_pnl(
+    point_cost: int = 100, box_size: int = 5, *, recommended_only: bool = True
+) -> dict[str, Any]:
+    """**shobu スキャンが評価したレース** の Claude 指数上位N頭3連単BOX 仮想収支 (共通コア)。
 
-    各勝負レースで Claude 指数 **上位 box_size 頭** (既定 5) の **3連単 BOX** を買ったと仮定し、
-    実際の 1・2・3 着がその上位5頭の中に全て収まれば的中 (= BOX が当たる) として、その3連単
-    配当 (trifecta_payout) で収支を集計する。「勝負レースだけの収支。上位5頭の内から 1,2,3着が
-    いた場合的中。3連単を買っていたことにする」。
+    各レースで Claude 指数 **上位 box_size 頭** (既定 5) の **3連単 BOX** を買ったと仮定し、
+    実際の 1・2・3 着がその上位N頭に全て収まれば的中として trifecta 配当で収支を集計する。
+    `recommended_only=True` (compute_shobu_pnl): 勝負レース(推奨)のみ。
+    `recommended_only=False` (compute_indexed_pnl): 推奨に限らず **shobu が評価した全レース**
+    (= 当日スキャンの母集団。data/predictions 全体ではないので betting pipeline の過去スコアは
+    混ざらない — ユーザ指摘 2026-06-28「全レースがこんなに多いはずがない・ほとんど推奨のはず」)。
 
-    - 対象: data/cache/shobu/<date>.json の recommended=true レースのうち、Claude 指数が
-      ある (= 上位N頭を決められる) かつ 結果が確定している もの。
+    - 対象: data/cache/shobu/<date>.json の (recommended_only なら recommended の) レースのうち、
+      Claude 指数があり (上位N頭を決められる) 結果が確定しているもの。
     - 上位N頭 = snapshot の Claude 指数 (index_compare / llm_win_index) 降順。N は
-      `_shobu_box_size(出走頭数)` で決まる (≥8頭=5 / 7頭=4 / 少頭数は最低3頭を場外に残す)。
-    - 3連単 BOX 点数 = P(N, 3) = 5×4×3 = 60点 (5頭) / 4×3×2 = 24点 (4頭)。
-    - stake/race = 点数 × point_cost。payout = 的中時の trifecta_payout を point_cost(¥100単位)へ
-      スケール。**長期回収を保証する指標ではなく「勝負レース判定 + 上位5頭 BOX」の paper 検証**。
-
-    返り値は compute_calibration の bundle 集計と同じく hits/hit_rate/stake/payout/roi + CI、
-    及び per-race detail (races_detail)。recommended だが Claude 指数なし=skipped_no_index、
-    結果未確定=skipped_no_result でカウント (分母には入れない)。
+      `_shobu_box_size(出走頭数)` (≥8頭=5 / 7頭=4 / 少頭数は最低3頭を場外に残す)。
+    - 3連単 BOX 点数 = P(N, 3) = 60点(5頭) / 24点(4頭)。stake = 点数 × point_cost。
+    - payout = 的中時の trifecta_payout を point_cost(¥100単位)へスケール。
+    返り値は hits/hit_rate/stake/payout/roi + CI + per-race detail。指数なし=skipped_no_index、
+    結果未確定=skipped_no_result (分母外)。recommended_total = 集約レース数 (= recommended_only なら
+    勝負レース総数 / False なら shobu 評価レース総数)。
     """
-    # recommended レースを race_id で集約 (再スキャンの重複は generated_at 後勝ち。
-    # race は1日1回なので race_id は実質一意だが、念のため最新スキャン結果を優先)。
+    # shobu 評価レースを race_id で集約 (再スキャンの重複は generated_at 後勝ち)。
     by_race: dict[str, dict[str, Any]] = {}
     if SHOBU_DIR.exists():
         for p in sorted(SHOBU_DIR.glob("*.json")):
@@ -758,7 +755,7 @@ def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any
                 continue
             gen = doc.get("generated_at") or ""
             for race in doc.get("races") or []:
-                if not race.get("recommended"):
+                if recommended_only and not race.get("recommended"):
                     continue
                 rid = race.get("race_id")
                 if not rid:
@@ -843,7 +840,7 @@ def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any
         "roi": roi,
         "roi_ci_low": roi_low,
         "roi_ci_high": roi_high,
-        "recommended_total": len(by_race),  # 勝負レース総数 (指数/結果欠落も含む)
+        "recommended_total": len(by_race),  # 集約レース総数 (recommended_only なら勝負レース総数 / False なら shobu 評価レース総数)
         "skipped_no_index": skipped_no_index,
         "skipped_no_result": skipped_no_result,
         "last_updated_at": last_updated_at,
@@ -852,100 +849,21 @@ def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any
     }
 
 
+def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
+    """勝負レース (recommended) 専用の仮想収支 (ダッシュボード hero。ユーザ指示 2026-06-21)。"""
+    return _shobu_box_pnl(point_cost, box_size, recommended_only=True)
+
+
 def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
-    """**全 Claude 指数レース** (recommended に限らない) の上位N頭3連単BOX 仮想収支。
+    """**shobu が評価した全レース** (recommended に限らない) の仮想収支 (別カード併記)。
 
-    ユーザ指示 (2026-06-28): 「Claude 指数が **全ての馬についていて** 結果があればダッシュボードに
-    反映する」。勝負レース(推奨)収支 (compute_shobu_pnl) とは **別カードで併記** する全数指標。
-    対象 = data/predictions のうち **全出走馬に Claude 指数が付いた** (= len(index) ≥ n_runners)
-    レースで、結果が確定しているもの。BOX/的中/配当ロジックは compute_shobu_pnl と共通
-    (_box_race_pnl, require_full_index=True)。返り値の shape は compute_shobu_pnl と互換
-    (recommended_total → 全数指数レース総数, skipped_no_index は常に 0 = 全数前提)。
+    ユーザ指示 (2026-06-28): 「Claude 指数が全ての馬についていて結果があればダッシュボードに反映」
+    → ただし母集団は **当日スキャンが評価したレース** (data/predictions 全体ではない)。
+    ユーザ指摘で betting pipeline の過去スコア (~06-12〜) が混ざって 153 件に膨れていたのを修正し、
+    shobu 評価レース (recommended + 非recommended) に scope。これで「ほとんど推奨」(推奨カードの
+    proper superset) になる。指数条件は推奨カードと同じ (BOX 可能=指数3頭以上) で揃える。
     """
-    races_detail: list[dict[str, Any]] = []
-    per_race: list[tuple[int, int]] = []
-    hits = 0
-    stake_sum = 0
-    payout_sum = 0
-    indexed_total = 0
-    skipped_no_result = 0
-    last_updated_at: str | None = None
-
-    if PRED_DIR.exists():
-        for snap_path in PRED_DIR.glob("*.json"):
-            try:
-                snap = json.loads(snap_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            idx = _claude_index_by_number(snap)
-            n_runners = snap.get("n_runners")
-            # 「全ての馬に Claude 指数」= 出走頭数が判明し、指数頭数がそれ以上。3頭未満は BOX 不能。
-            if len(idx) < 3 or not n_runners or len(idx) < int(n_runners):
-                continue
-            indexed_total += 1
-            rid = snap.get("race_id") or snap_path.stem
-            safe = _safe_race_id(rid) or snap_path.stem
-            result_path = RESULT_DIR / f"{safe}.json"
-            result: dict[str, Any] = {}
-            if result_path.exists():
-                try:
-                    result = json.loads(result_path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    result = {}
-            os_src = (snap.get("odds_source") or "").lower()
-            venue = snap.get("venue_name") or ""
-            rtype = "jra" if os_src == "jra" else ("banei" if venue == "帯広" else "nar")
-            meta = {
-                "race_id": rid,
-                "date": (snap.get("saved_at") or "")[:10],
-                "venue": venue,
-                "race_no": snap.get("race_number"),
-                "race_type": rtype,
-                "shobu_score": None,
-                "matched": [],
-                "n_runners": n_runners,
-            }
-            detail, reason = _box_race_pnl(
-                snap, result, point_cost=point_cost, box_size=box_size,
-                meta=meta, require_full_index=True)
-            if reason != "ok" or detail is None:
-                skipped_no_result += 1   # 全数指数は確定済なので残る skip は結果待ちのみ
-                continue
-            hits += 1 if detail["hit"] else 0
-            stake_sum += detail["stake"]
-            payout_sum += detail["payout"]
-            per_race.append((detail["stake"], detail["payout"]))
-            r_ts = result.get("recorded_at")
-            if isinstance(r_ts, str) and (last_updated_at is None or r_ts > last_updated_at):
-                last_updated_at = r_ts
-            races_detail.append(detail)
-
-    n = len(per_race)
-    hit_rate = hits / n if n else 0.0
-    roi = (payout_sum / stake_sum) if stake_sum else 0.0
-    hr_low, hr_high = _wilson_ci(hits, n)
-    roi_low, roi_high = _bootstrap_roi_ci(per_race)
-    races_detail.sort(key=lambda r: (r.get("saved_at") or r.get("date") or ""), reverse=True)
-    return {
-        "point_cost": point_cost,
-        "box_size": box_size,
-        "races": n,
-        "hits": hits,
-        "hit_rate": hit_rate,
-        "hit_rate_ci_low": hr_low,
-        "hit_rate_ci_high": hr_high,
-        "stake": stake_sum,
-        "payout": payout_sum,
-        "roi": roi,
-        "roi_ci_low": roi_low,
-        "roi_ci_high": roi_high,
-        "recommended_total": indexed_total,   # 全 Claude 指数レース総数 (結果欠落含む)
-        "skipped_no_index": 0,                # 全数指数を前提に絞っているので該当なし
-        "skipped_no_result": skipped_no_result,
-        "last_updated_at": last_updated_at,
-        "sample_warning": n < 30,
-        "races_detail": races_detail,
-    }
+    return _shobu_box_pnl(point_cost, box_size, recommended_only=False)
 
 
 def _wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
