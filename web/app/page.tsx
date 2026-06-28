@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { Activity, History, ServerOff } from "lucide-react";
-import { api, type ShobuPnlRace } from "@/lib/api";
+import { Activity, History, Layers, ServerOff } from "lucide-react";
+import { api, type ShobuPnl, type ShobuPnlRace } from "@/lib/api";
 import {
   Badge,
   Card,
@@ -93,6 +93,66 @@ function Sparkline({ values, positive }: { values: number[]; positive: boolean }
   );
 }
 
+// 全 Claude 指数レース (recommended に限らない) の仮想収支カード (勝負レースとは別カードで併記)。
+function IndexedPnlCard({ data, nowMs }: { data: ShobuPnl; nowMs: number }) {
+  const pl = data.payout - data.stake;
+  const has = data.races > 0;
+  const lastUpdated = data.last_updated_at
+    ? fmtRelativeFromNow(data.last_updated_at, nowMs)
+    : "—";
+  return (
+    <Card>
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Layers className="w-4 h-4 text-sky-300" />
+          <span className="text-[10px] font-bold tracking-[0.22em] uppercase text-(--color-muted)">
+            参考 — 全 Claude 指数レース (全馬指数+結果あり・上位N頭3連単BOX)
+          </span>
+          {data.sample_warning && <Badge tone="muted">サンプル少</Badge>}
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-4">
+          <KpiCell
+            label="収支"
+            value={has ? fmtSignedYen(pl) : "—"}
+            valueClass={!has ? "" : pl < 0 ? "text-rose-300" : "text-emerald-300"}
+            sub={has ? `賭金 ${fmtYen(data.stake)} → 払戻 ${fmtYen(data.payout)}` : "—"}
+          />
+          <KpiCell
+            label="回収率"
+            value={has ? fmtRoiPct(data.roi) : "—"}
+            valueClass={!has ? "" : data.roi >= 1 ? "text-emerald-300" : "text-rose-300"}
+            sub={
+              data.roi_ci_low != null && data.roi_ci_high != null
+                ? `95%CI ${Math.round(data.roi_ci_low * 100)}–${Math.round(data.roi_ci_high * 100)}%`
+                : "—"
+            }
+          />
+          <KpiCell
+            label="的中率"
+            value={has ? fmtPct(data.hit_rate, 1) : "—"}
+            sub={has ? `${data.hits} 的中 / ${data.races} レース` : "対象なし"}
+          />
+          <KpiCell
+            label="対象レース"
+            value={data.races}
+            sub={`全指数レース ${data.recommended_total} / 結果待ち ${data.skipped_no_result}`}
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
+          <span>
+            ※ recommended に限らず全出走馬に Claude 指数が付いたレースの全数 paper P/L
+            (母集団が広いぶん回収率は控除水準へ収束しやすい)
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <History className="w-3 h-3" />
+            最終更新 {lastUpdated}
+          </span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // API 未接続時のエラーカード (silent null の代わりに明示表示)
 function ApiDownCard() {
   return (
@@ -117,7 +177,10 @@ function ApiDownCard() {
 }
 
 export default async function DashboardPage() {
-  const shobu = await api.shobuPnl().catch(() => null);
+  const [shobu, indexed] = await Promise.all([
+    api.shobuPnl().catch(() => null),
+    api.indexedPnl().catch(() => null),
+  ]);
 
   // API 未接続: silent null ではなく明示のエラーカードを出す。
   if (!shobu) {
@@ -264,7 +327,10 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-      {/* ====== per-race 明細 ====== */}
+      {/* ====== 別カード: 全 Claude 指数レースの仮想収支 (非破壊・参考) ====== */}
+      {indexed && <IndexedPnlCard data={indexed} nowMs={nowMs} />}
+
+      {/* ====== per-race 明細 (勝負レース=推奨) ====== */}
       {hasRaces ? (
         <Card>
           <div className="overflow-x-auto">

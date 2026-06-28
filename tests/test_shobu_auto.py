@@ -37,7 +37,11 @@ def test_results_auto_status_shape():
 
 
 def test_results_auto_enqueue_filters(monkeypatch):
-    """発走済・本日・結果未取得 の予測だけを schedule する (それ以外は skip)。"""
+    """発走済・結果未取得 の予測を **日付不問で** schedule する (ユーザ指示 2026-06-28)。
+
+    本日分のみ → 全レースに拡大。未発走 / 結果あり は引き続き skip。terminal failed を
+    復活させないよう schedule(..., resurrect_failed=False) を渡すことも検証。
+    """
     import datetime
     import time as _t
     from zoneinfo import ZoneInfo
@@ -55,17 +59,20 @@ def test_results_auto_enqueue_filters(monkeypatch):
         # skip: 未発走
         {"race_id": "20260501-1-3", "start_at": now + 3600, "has_result": False,
          "saved_at": f"{today}T10:00:00"},
-        # skip: 別日
+        # 対象: 別日でも発走済・結果なしなら enqueue (今は本日縛りなし)
         {"race_id": "20260501-1-4", "start_at": now - 3600, "has_result": False,
          "saved_at": "2020-01-01T10:00:00"},
     ]
-    monkeypatch.setattr(m, "list_predictions", lambda limit=2000: items)
+    monkeypatch.setattr(m, "list_predictions", lambda limit=5000: items)
     scheduled: list = []
     monkeypatch.setattr("src.fetch_result.schedule",
-                        lambda rid, url, sa, **k: scheduled.append((rid, url, sa)))
+                        lambda rid, url, sa, **k: scheduled.append((rid, url, sa, k)))
 
-    n = m.ResultAutoFetcher._enqueue_finished_today()
-    assert n == 1
-    assert scheduled[0][0] == "20260501-1-2"
-    assert "race_id=202605010102" in scheduled[0][1]   # 内部id→netkeiba rid 復元
-    assert "race.netkeiba.com" in scheduled[0][1]       # JRA host (場 01-10)
+    n = m.ResultAutoFetcher._enqueue_finished()
+    assert n == 2                                       # 本日 + 別日 の発走済2件
+    rids = {s[0] for s in scheduled}
+    assert rids == {"20260501-1-2", "20260501-1-4"}    # 結果あり/未発走は除外
+    first = next(s for s in scheduled if s[0] == "20260501-1-2")
+    assert "race_id=202605010102" in first[1]           # 内部id→netkeiba rid 復元
+    assert "race.netkeiba.com" in first[1]              # JRA host (場 01-10)
+    assert all(s[3].get("resurrect_failed") is False for s in scheduled)  # 無限リトライ防止

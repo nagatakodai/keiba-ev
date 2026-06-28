@@ -210,7 +210,15 @@ def schedule(
     delay_sec: int = DEFAULT_DELAY_SEC,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_interval_sec: int = DEFAULT_RETRY_INTERVAL_SEC,
+    resurrect_failed: bool = True,
 ) -> Pending:
+    """pending queue に race を登録 (既存結果あり=no-op, 同 race_id は dedup)。
+
+    `resurrect_failed=True` (既定): 既存 entry が "failed" (max_attempts 到達) なら pending に
+    戻す = 手動 retry / block 解除後の救済。**自動ループから全レースを毎 tick 再 enqueue する場合は
+    `resurrect_failed=False`** を渡すこと — でないと恒久的に取得不能な古いレース (中止/欠落) を
+    毎 tick 復活させて無限リトライ + netkeiba 過負荷になる (terminal failed はそのまま据え置く)。
+    """
     if (RESULTS_DIR / f"{race_id}.json").exists():
         return Pending(
             race_id=race_id, url="", due_at=0, next_attempt_at=0, status="success",
@@ -225,7 +233,9 @@ def schedule(
                 # 「ユーザーによる手動 retry リクエスト」と解釈して pending に戻す。
                 # auto_watch は同じ race を re-analyze しないので自動 trigger されないが、
                 # 手動 `python -m src.fetch_result schedule` で IP block 解除後の救済が可能になる。
-                if e.status == "failed":
+                # resurrect_failed=False (自動ループの全件 enqueue) では terminal failed を
+                # 復活させない (恒久取得不能レースの無限リトライ防止)。
+                if e.status == "failed" and resurrect_failed:
                     e.status = "pending"
                     e.attempts = 0
                     e.last_error = ""

@@ -61,6 +61,7 @@ from .store import (
     _safe_race_id,
     compute_calibration,
     compute_shobu_pnl,
+    compute_indexed_pnl,
     get_prediction,
     get_shobu_result,
     list_auto_watch_history,
@@ -128,22 +129,24 @@ WATCH = WatchAutoManager(registry=JOBS)
 
 
 class ResultAutoFetcher:
-    """make api 稼働中に **予測分析履歴の結果 (着順/払戻)** を interval 毎 (既定5分) に自動取得する常駐ループ。
+    """make api 稼働中に **予測分析履歴の結果 (着順/払戻)** を interval 毎 (既定10分) に自動取得する常駐ループ。
 
-    本日の予測 (data/predictions) のうち発走済で結果未取得のものを pending queue に enqueue し
-    (fetch_result.schedule = 既存結果はスキップ・race_id で dedup)、process_pending で確定結果を
-    取得 → data/results に保存 → calibrate / 予測分析履歴 / ダッシュボードに反映される。
-    process_pending は file-lock 済なので watch-auto と併走しても二重 fetch しない。watch-auto を
-    回していなくても (手動 analyze / 勝負レース由来の予測も含め) 結果が埋まり続ける。
-    interval は env KEIBA_RESULT_FETCH_INTERVAL_SEC で上書き可 (既定 300)。
+    予測 (data/predictions) のうち**発走済で結果未取得の全レース** (日付不問・ユーザ指示 2026-06-28)
+    を pending queue に enqueue し (fetch_result.schedule = 既存結果はスキップ・race_id で dedup・
+    terminal failed は resurrect しない)、process_pending で確定結果を取得 → data/results に保存 →
+    calibrate / 予測分析履歴 / ダッシュボードに反映される。process_pending は file-lock 済なので
+    watch-auto と併走しても二重 fetch しない。watch-auto を回していなくても (手動 analyze / 勝負
+    レース由来の予測も含め) 結果が埋まり続ける。interval は env KEIBA_RESULT_FETCH_INTERVAL_SEC で
+    上書き可 (既定 600)。
     """
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
+        # 既定 10 分毎 (ユーザ指示 2026-06-28)。env KEIBA_RESULT_FETCH_INTERVAL_SEC で上書き可。
         try:
-            self.interval_sec = max(60, int(os.environ.get("KEIBA_RESULT_FETCH_INTERVAL_SEC", "300")))
+            self.interval_sec = max(60, int(os.environ.get("KEIBA_RESULT_FETCH_INTERVAL_SEC", "600")))
         except (TypeError, ValueError):
-            self.interval_sec = 300
+            self.interval_sec = 600
         self.last_run_at: float | None = None
         self.next_run_at: float | None = None
         self.last_summary: dict[str, Any] | None = None
@@ -174,35 +177,34 @@ class ResultAutoFetcher:
                 pass
 
     @staticmethod
-    def _enqueue_finished_today() -> int:
-        """本日の発走済・結果未取得の予測を pending queue に enqueue (件数を返す)。
+    def _enqueue_finished() -> int:
+        """**発走済・結果未取得の全予測** (日付不問) を pending queue に enqueue (件数を返す)。
 
-        schedule() は既存結果があれば no-op、同 race_id は dedup されるので毎 tick 呼んで安全。
+        ユーザ指示 (2026-06-28): 本日分のみでなく全レースの結果取得を試行する。発走前 (sa<=0 /
+        未発走) と holdout 等 (start_at 無し) は対象外なので件数は数十程度に収まる (実測 ~39)。
+        schedule() は既存結果があれば no-op・同 race_id は dedup。**resurrect_failed=False** で
+        terminal failed (恒久取得不能=中止/欠落) は復活させない (毎 tick の無限リトライ + netkeiba
+        過負荷を防ぐ)。block 失敗は process_pending が attempt を消費せず pending のまま retry する。
         netkeiba URL は内部 race_id から復元 (NAR は block→keiba.go.jp / JRA→公式 へ process_pending が fallback)。
         """
-        import datetime
-        from zoneinfo import ZoneInfo
         from src.fetch_result import schedule
 
         now = int(time.time())
-        today = datetime.datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
         jra_codes = {f"{i:02d}" for i in range(1, 11)}
         n = 0
-        for it in list_predictions(limit=2000):
+        for it in list_predictions(limit=5000):
             if it.get("has_result"):
                 continue
             sa = int(it.get("start_at") or 0)
-            if sa <= 0 or now < sa + 60:           # 未発走 (発走1分後から結果待ち)
+            if sa <= 0 or now < sa + 60:           # 未発走 (発走1分後から結果待ち) / start_at 無し
                 continue
-            if (it.get("saved_at") or "")[:10] != today:
-                continue                            # 本日分のみ (古い日付を毎 tick enqueue しない)
             rid = netkeiba_rid_from_internal(it.get("race_id") or "")
             if not rid or len(rid) < 6:
                 continue
             host = "race.netkeiba.com" if rid[4:6] in jra_codes else "nar.netkeiba.com"
             url = f"https://{host}/race/shutuba.html?race_id={rid}"
             try:
-                schedule(it["race_id"], url, sa)
+                schedule(it["race_id"], url, sa, resurrect_failed=False)
                 n += 1
             except Exception:  # noqa: BLE001
                 pass
@@ -211,7 +213,7 @@ class ResultAutoFetcher:
     async def _run_once(self) -> None:
         from src.fetch_result import process_pending
         # blocking (file IO + HTTP) なので別スレッドへ。
-        enq = await asyncio.to_thread(self._enqueue_finished_today)
+        enq = await asyncio.to_thread(self._enqueue_finished)
         summary = await asyncio.to_thread(process_pending)
         self.last_run_at = time.time()
         self.runs += 1
@@ -564,12 +566,23 @@ def api_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
     return compute_shobu_pnl(point_cost=point_cost, box_size=box_size)
 
 
+@app.get("/api/shobu/indexed-pnl")
+def api_shobu_indexed_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
+    """**全 Claude 指数レース** (recommended に限らない) の仮想収支 (ユーザ指示 2026-06-28)。
+
+    全出走馬に Claude 指数が付いて結果が確定したレースを上位 box_size 頭の3連単 BOX で集計。
+    勝負レース(推奨)収支 (/api/shobu/pnl) とは別カードでダッシュボードに併記する全数指標。
+    """
+    return compute_indexed_pnl(point_cost=point_cost, box_size=box_size)
+
+
 @app.get("/api/results/auto")
 def api_results_auto_status() -> dict[str, Any]:
     """予測分析履歴の結果 自動取得ループの状態 (interval / 次回・前回実行 / 直近サマリ)。
 
-    make api 稼働中は既定 5 分毎に発走済の予測を pending に enqueue → process_pending で
-    確定結果を取得し、calibrate / 予測分析履歴 に反映する (watch-auto 非依存)。
+    make api 稼働中は既定 10 分毎に**発走済の全予測** (日付不問) を pending に enqueue →
+    process_pending で確定結果を取得し、calibrate / 予測分析履歴 / ダッシュボードに反映する
+    (watch-auto 非依存)。
     """
     return RESULTS_AUTO.status()
 

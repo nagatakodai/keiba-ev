@@ -815,6 +815,9 @@ export const api = {
   // 勝負レース専用の仮想収支 (Claude 指数上位N頭の3連単 BOX を買ったと仮定)。
   shobuPnl: (pointCost = 100) =>
     jsonFetch<ShobuPnl>("/api/shobu/pnl?point_cost=" + pointCost),
+  // 全 Claude 指数レース (recommended に限らない・全馬指数+結果あり) の仮想収支。
+  indexedPnl: (pointCost = 100) =>
+    jsonFetch<ShobuPnl>("/api/shobu/indexed-pnl?point_cost=" + pointCost),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 
