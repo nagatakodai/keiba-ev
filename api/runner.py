@@ -405,7 +405,7 @@ def build_shobu_cmd(
     *,
     date: str | None = None,
     race_type: str = "all",
-    use_separation: bool = True,
+    use_separation: bool = False,
     use_claude_edge: bool = True,
     combine: str = "or",
     sep_threshold: float = 35.0,
@@ -434,8 +434,9 @@ def build_shobu_cmd(
     ]
     if date:
         cmd += ["--date", date]
-    if not use_separation:
-        cmd.append("--no-separation")
+    # CLI 既定が基準B単独 (use_separation=False) なので両方向を明示
+    # (省略すると True を送っても CLI 既定の False になってしまう)。
+    cmd.append("--separation" if use_separation else "--no-separation")
     if not use_claude_edge:
         cmd.append("--no-claude")
     if not upcoming_only:

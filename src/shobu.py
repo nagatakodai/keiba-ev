@@ -884,7 +884,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", help="結果 JSON の出力先 (省略時は stdout に最後の1行で出す)")
     ap.add_argument("--date", default=None, help="YYYYMMDD (省略時は当日 JST)")
     ap.add_argument("--race-type", choices=["all", "jra", "nar", "banei"], default="all")
-    ap.add_argument("--no-separation", action="store_true", help="基準A (強弱) を無効化")
+    ap.add_argument("--separation", dest="use_separation", action="store_true",
+                    help="基準A (強弱) も推奨判定に使う (既定は基準B=市場乖離のみ)")
+    ap.add_argument("--no-separation", dest="use_separation", action="store_false",
+                    help="基準A (強弱) を使わない (既定)")
+    ap.set_defaults(use_separation=False)   # 既定は基準B単独 (ユーザ指示 2026-06-28)
     ap.add_argument("--no-claude", action="store_true", help="基準B (Claude>市場) を無効化")
     ap.add_argument("--combine", choices=["or", "and"], default="or")
     ap.add_argument("--sep-threshold", type=float, default=35.0)
@@ -935,7 +939,7 @@ def main(argv: list[str] | None = None) -> int:
     result = scan(
         date=args.date,
         race_type=args.race_type,
-        use_separation=not args.no_separation,
+        use_separation=args.use_separation,
         use_claude_edge=not args.no_claude,
         combine=args.combine,
         sep_threshold=args.sep_threshold,

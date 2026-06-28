@@ -356,7 +356,9 @@ const keyOf = (r: ShobuRace) => `${r.race_id}-${r.netkeiba_race_id}`;
 export default function ShobuPage() {
   // ── 抽出オプション ──
   const [raceType, setRaceType] = useState<"all" | "jra" | "nar" | "banei">("all");
-  const [useSeparation, setUseSeparation] = useState(true);
+  // 既定は基準B (市場乖離) 単独で推奨判定 (ユーザ指示 2026-06-28「基準はBだけで良い」)。
+  // 基準A (強弱) は表示は残すが既定 OFF。併用したいときだけトグルで ON。
+  const [useSeparation, setUseSeparation] = useState(false);
   const [useClaudeEdge, setUseClaudeEdge] = useState(true);
   const [combine, setCombine] = useState<"or" | "and">("or");
   const [sepThreshold, setSepThreshold] = useState("35");
@@ -646,7 +648,7 @@ export default function ShobuPage() {
       <PageHeader
         eyebrow="Shobu"
         title="今日の勝負レース"
-        subtitle="ボタンで当日の全レース (JRA+地方) を取得し、(A) 馬の強弱がはっきりしている / (B) 市場より Claude 指数が高い馬が複数いる レースを抽出します。基準・しきい値はオプションで選択できます。"
+        subtitle="ボタンで当日の全レース (JRA+地方) を取得し、既定では (B) 市場と Claude 指数の順位乖離が大きいレースを勝負レースとして抽出します ((A) 馬の強弱はオプションで併用可・しきい値も選べます)。"
       />
 
       {/* ── サマリー ── */}

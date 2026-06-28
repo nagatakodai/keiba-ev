@@ -446,9 +446,11 @@ class ShobuScanRequest(BaseModel):
     # 対象 (all / jra / nar=地方平地 / banei=帯広ばんえい)。Literal で値検証。
     # banei は別競技なので nar から分離 (確率モデルも ev.segment_of_rd で分離済)。
     race_type: Literal["all", "jra", "nar", "banei"] = "all"
-    # 基準A (強弱がはっきり = 市場 implied 勝率の集中度) を使うか。
-    use_separation: bool = True
-    # 基準B (市場より Claude 指数が高い馬が複数) を使うか。
+    # 基準A (強弱がはっきり = 市場 implied 勝率の集中度) を推奨判定に使うか。
+    # 既定 False (ユーザ指示 2026-06-28「基準はBだけで良い」)。強弱スコアは表示用に算出は続けるが
+    # 推奨/勝負スコアは基準B (市場との順位乖離) のみで決める。A も併用したいときだけ True。
+    use_separation: bool = False
+    # 基準B (市場との順位乖離) を使うか。既定の推奨判定はこれ単独。
     use_claude_edge: bool = True
     # 基準の合成 (or=いずれか / and=両方)。
     combine: Literal["or", "and"] = "or"
