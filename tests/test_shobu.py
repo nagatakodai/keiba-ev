@@ -302,6 +302,9 @@ def test_run_claude_eval_sets_search_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
     monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
+    # 成功判定は snapshot の claude_index で行う (rc ではない) → 指数付き snapshot を模す。
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
     targets = [{"netkeiba_race_id": "202632060101", "race_type": "nar",
                 "start_at": 1000, "venue": "佐賀", "race_no": 1}]
     done = shobu._run_claude_eval(
@@ -325,6 +328,8 @@ def test_run_claude_eval_no_parallel_omits_shard_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
     monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
     targets = [{"netkeiba_race_id": "x", "race_type": "nar",
                 "start_at": 0, "venue": "V", "race_no": 1}]
     shobu._run_claude_eval(targets, timeout=900, parallel=4, log=lambda m: None,
@@ -346,6 +351,8 @@ def test_run_claude_eval_inner_timeout_below_outer(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
     monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
     targets = [{"netkeiba_race_id": "x", "race_type": "nar",
                 "start_at": 0, "venue": "V", "race_no": 1}]
     for outer in (900, 300, 210, 150, 130):
@@ -377,6 +384,8 @@ def test_run_claude_eval_shards_scale_with_concurrency(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     captured: dict = {}
     monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
     targets = [{"netkeiba_race_id": "x", "race_type": "jra",
                 "start_at": 0, "venue": "V", "race_no": 1}]
     shobu._run_claude_eval(targets, timeout=900, parallel=2, log=lambda m: None,
@@ -398,6 +407,8 @@ def test_run_claude_eval_forwards_query_lines(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(shobu.subprocess, "Popen",
                         _fake_popen_factory(captured, lines=lines))
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
     logs: list[str] = []
     targets = [{"netkeiba_race_id": "x", "race_type": "nar",
                 "start_at": 0, "venue": "佐賀", "race_no": 11}]
@@ -427,14 +438,63 @@ def test_run_claude_eval_real_subprocess_timeout(monkeypatch):
     targets = [{"netkeiba_race_id": "x", "race_type": "nar",
                 "start_at": 0, "venue": "佐賀", "race_no": 11}]
     t0 = time.time()
+    # max_retries=0: 単一パスで timeout を検証 (リトライ無しなので 30s sleep を待たず即終了)。
     done = shobu._run_claude_eval(targets, timeout=1, parallel=1, log=logs.append,
                                   score_parallel=False, score_queries_per_horse=10,
-                                  llm_max_concurrent=20)
+                                  llm_max_concurrent=20, max_retries=0)
     elapsed = time.time() - t0
     assert done == 0                                       # timeout は生成失敗
     assert any("timeout" in m for m in logs)               # 完了行に timeout note
     assert any("🔍 t: REALQ" in m for m in logs)           # kill 前に query が live 転送された
     assert elapsed < 20, f"30s sleep を待たず kill されるはず (elapsed={elapsed:.1f}s)"
+
+
+def test_run_claude_eval_rc0_without_index_is_failure(monkeypatch):
+    """**バグ修正の核**: subprocess が rc=0 でも snapshot に Claude 指数が無ければ失敗扱い。
+
+    実機 (盛岡8-11R 2026-06-29): 同時実行輻輳で claude -p が早期死 → llm_fallback=True・指数なし
+    のまま **rc=0 で正常終了**。旧コードは rc=0 を成功にカウントし「5/5 生成成功」と誤報告した。
+    """
+    captured: dict = {}
+    monkeypatch.setattr(shobu.subprocess, "Popen",
+                        _fake_popen_factory(captured, returncode=0))
+    # 指数が付かない snapshot (llm_fallback) を常に返す → 成功にしてはいけない。
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": None}],
+                                     "llm_fallback": True})
+    monkeypatch.setattr(shobu.time, "sleep", lambda *_a, **_k: None)   # backoff 即時
+    logs: list[str] = []
+    targets = [{"netkeiba_race_id": "x", "race_type": "nar", "start_at": 0,
+                "venue": "佐賀", "race_no": 11, "race_id": "zz-z-11"}]
+    done = shobu._run_claude_eval(targets, timeout=900, parallel=1, log=logs.append,
+                                  score_parallel=False, max_retries=1)
+    assert done == 0                                       # rc=0 でも指数なし=未生成
+    assert any("見送り" in m for m in logs)                 # リトライ尽きて見送り
+
+
+def test_run_claude_eval_retries_until_indexed(monkeypatch):
+    """指数未生成のレースを並列を下げてリトライし、付いたら成功にカウントする。"""
+    captured: dict = {}
+    monkeypatch.setattr(shobu.subprocess, "Popen",
+                        _fake_popen_factory(captured, returncode=0))
+    # 1 回目の判定は未生成、2 回目 (リトライ) で生成済 → done=1。
+    state = {"n": 0}
+
+    def _snap(_id):
+        state["n"] += 1
+        if state["n"] >= 2:
+            return {"index_compare": [{"claude_index": 60.0}]}
+        return {"index_compare": [{"claude_index": None}], "llm_fallback": True}
+
+    monkeypatch.setattr(shobu, "_load_snapshot", _snap)
+    monkeypatch.setattr(shobu.time, "sleep", lambda *_a, **_k: None)
+    logs: list[str] = []
+    targets = [{"netkeiba_race_id": "x", "race_type": "nar", "start_at": 0,
+                "venue": "佐賀", "race_no": 11, "race_id": "zz-z-11"}]
+    done = shobu._run_claude_eval(targets, timeout=900, parallel=1, log=logs.append,
+                                  score_parallel=False, max_retries=2)
+    assert done == 1
+    assert any("リトライ" in m for m in logs)
 
 
 def test_scan_claude_all_generates_for_all(monkeypatch):

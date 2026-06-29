@@ -410,7 +410,7 @@ def build_shobu_cmd(
     upcoming_only: bool = True,
     claude_all: bool = False,
     claude_eval: int = 0,
-    claude_eval_parallel: int = 6,
+    claude_eval_parallel: int = 4,
     score_parallel: bool = False,
     score_queries_per_horse: int | None = None,
     llm_max_concurrent: int | None = None,

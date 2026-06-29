@@ -188,6 +188,66 @@ def parse_evidence(text: str) -> dict:
     return obj if obj is not None else {}
 
 
+def _fmt_past_run(p: Any) -> str:
+    """1 走分の PastRun を 1 行のコンパクト表記に。空フィールドは省く。
+
+    例: "06/15 盛岡11R B1 ダ1400良 12頭 4人→3着 上り37.2 通過5-5"。
+    着順は 1/2/3 のみ確定 (馬柱は他を明示しない) → それ以外は "着外" (= 4着以下)。
+    """
+    raw = (getattr(p, "date", "") or "").strip()
+    parts = raw.replace("-", ".").replace("/", ".").split(".")
+    md = f"{parts[1]}/{parts[2]}" if len(parts) >= 3 else raw
+    venue = getattr(p, "venue", "") or ""
+    rno = f"{p.race_no}R" if getattr(p, "race_no", 0) else ""
+    klass = (getattr(p, "race_class", "") or "").strip()
+    surf = getattr(p, "surface", "") or ""
+    dist = str(p.distance) if getattr(p, "distance", 0) else ""
+    going = getattr(p, "going", "") or ""
+    fs = f"{p.field_size}頭" if getattr(p, "field_size", 0) else ""
+    pop = f"{p.popularity}人" if getattr(p, "popularity", 0) else ""
+    fp = getattr(p, "finish_pos", None)
+    fin = f"{fp}着" if fp in (1, 2, 3) else "着外"
+    last3f = f"上り{p.last_3f_sec:.1f}" if getattr(p, "last_3f_sec", 0) else ""
+    passing = f"通過{p.passing}" if (getattr(p, "passing", "") or "").strip() else ""
+    head = " ".join(x for x in (md, f"{venue}{rno}", klass,
+                                f"{surf}{dist}{going}", fs) if x)
+    res = f"{pop}→{fin}" if pop else fin
+    tail = " ".join(x for x in (res, last3f, passing) if x)
+    return (head + " " + tail).strip()
+
+
+def _render_past_runs_lines(horses: list, past_source: str = "") -> list[str]:
+    """各馬の **前走〜近走 (公式の確定成績)** を prompt セクションとして描画。
+
+    h.past_runs は keibago (HorseMarkInfo=地方競馬公式) / JRA (accessU=JRA公式) / netkeiba 馬柱
+    から既に取得済 & leakage 防止 (対象日以降除外・直近5走) 済み。ここで提示することで Claude が
+    着順・距離・馬場・頭数・人気・上り・通過順を **web 検索せず** に読めるようにし、検索予算を
+    「それ以外」(直前情報・軟情報・騎手成績) に集中させる (ユーザ指示 2026-06-29)。
+
+    過去走が 1 頭も無ければ空リスト (= セクションを出さない → 従来どおり Claude が近走を検索)。
+    section header は partition マーカー ('## 検索 MCP の運用ルール' / '## 指数の付け方') と
+    衝突しない文字列にする (string-surgery 保護)。
+    """
+    if not any(getattr(h, "past_runs", None) for h in horses):
+        return []
+    src = f" ({past_source} 取得)" if past_source else " (公式データ)"
+    out = [
+        "",
+        "## 前走戦績 (公式データ・検索不要)",
+        f"下記は各馬の **前走〜近走の確定成績**{src}。**着順・距離・馬場・頭数・人気・上り・"
+        "通過順はここを正とし、これらは web 検索しない** (検索予算は下記「それ以外」に回す)。"
+        "\"着外\" は 4 着以下 (馬柱に着順非掲載)。",
+    ]
+    for h in horses:
+        runs = getattr(h, "past_runs", None) or []
+        if runs:
+            body = " / ".join(_fmt_past_run(p) for p in runs[:5])
+        else:
+            body = "(前走データなし → この馬のみ近走を検索で補ってよい)"
+        out.append(f"- {h.number} {h.name or '?'}: {body}")
+    return out
+
+
 def build_horse_score_prompt(
     rd: RaceData,
     *,
@@ -195,6 +255,7 @@ def build_horse_score_prompt(
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
     queries_per_horse: int = 2,
+    past_source: str = "",
 ) -> str:
     """各馬に **0-100 の強さ指数** (高い=強い=1位,2位…) を付けさせる prompt。
 
@@ -259,16 +320,36 @@ def build_horse_score_prompt(
         bwd = getattr(h, "body_weight_diff", 0)
         bws = f"{bw}({bwd:+d})" if bw else "-"
         lines.append(f"| {h.number} | {h.name or '?'} | {sa} | {jk} | {bws} | {atot} |")
+    # 前走戦績 (公式の確定成績) を提示 — Claude が近走を検索せず読めるようにし、検索は「それ以外」へ。
+    past_lines = _render_past_runs_lines(horses, past_source)
+    lines += past_lines
+    has_past = bool(past_lines)
+    # has_past のとき 前走着順は上の公式データを正とし検索しない (= 検索予算を直前/軟情報に集中)。
+    bullet3 = (
+        "  3. **前走戦績は上の「前走戦績」セクション (公式データ) を参照 — 着順/距離/馬場/頭数/"
+        "人気/上り/通過は検索しない**。前走の \"質\" (不利・展開・made the running 等の言葉) のみ②で補う。"
+        if has_past else
+        "  3. 直近5走の着順詳細・距離/コース適性 (公開済で市場に入りやすいが波形確認に使う)"
+    )
+    no_search = (
+        "**検索すべきでない**: 既に上表にある数値 (適性)、**上の前走戦績にある確定成績 "
+        "(着順/距離/馬場/頭数/人気/上り/通過) の再取得**、市場の人気/オッズ (= 市場の鏡で edge に"
+        "ならない)、競馬の基本ルール、1か月以上前の汎用情報、「単に人気だから強い」という類の確認。"
+        if has_past else
+        "**検索すべきでない**: 既に上表にある数値 (適性)、市場の人気/オッズ (= 市場の鏡で edge にならない)、"
+        "競馬の基本ルール、1か月以上前の汎用情報、「単に人気だから強い」という類の確認。"
+    )
     lines += [
         "",
         "## 検索 MCP の運用ルール (CLAUDE.md 準拠)",
+        ("**前走戦績は上の公式データで判明済み**。検索は **それ以外** (①直前情報・②軟情報・騎手成績) "
+         "に全予算を充てる。" if has_past else ""),
         "**検索すべき情報 (優先度順 — 上の ①直前情報 / ②軟情報 を最優先)**: ",
         "  1. 取消・除外・出走取消、当日馬体重(増減)、馬場の急変発表 (= ①直前情報、最優先)",
         "  2. 前走の不利メモ・厩舎の勝負気配・パドック/返し馬気配・展開の言語予想 (= ②軟情報)",
-        "  3. 直近5走の着順詳細・距離/コース適性 (公開済で市場に入りやすいが波形確認に使う)",
+        bullet3,
         "  4. 騎手の当該コース成績 / 乗り替わりの強化・弱体",
-        "**検索すべきでない**: 既に上表にある数値 (適性)、市場の人気/オッズ (= 市場の鏡で edge にならない)、"
-        "競馬の基本ルール、1か月以上前の汎用情報、「単に人気だから強い」という類の確認。",
+        no_search,
         f"**検索予算**: このレースは {len(horses)} 頭立て。**全馬を 1 頭あたり約 "
         f"{max(1, queries_per_horse)} クエリ (合計 ~{len(horses) * max(1, queries_per_horse)} "
         "クエリ) まで** Tavily で補強してよい。各馬について最低 "
@@ -340,6 +421,7 @@ def score_horses_stream(
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
+    past_source: str = "",
 ) -> Iterator[tuple[str, Any]]:
     """各馬の強さ指数を web 検索付きで出させる stream-json (spawn/event 形式は
     select_trifecta_stream と共通)。出力は parse_horse_scores で {scores,...} に正規化する。
@@ -359,6 +441,7 @@ def score_horses_stream(
     prompt = build_horse_score_prompt(
         rd, aptitudes=aptitudes, market_signals=market_signals,
         horse_best_times=horse_best_times, queries_per_horse=qph,
+        past_source=past_source,
     )
     cmd = [
         "claude", "-p", prompt,
@@ -652,17 +735,20 @@ def build_horse_research_prompt(
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
     queries_per_horse: int = 6,
+    past_source: str = "",
 ) -> str:
     """RESEARCH 専用プロンプト (担当 shard の馬だけ高予算で調べ、事実のみ返す・採点しない)。
 
-    既存 build_horse_score_prompt の **ヘッダ + edge 説明 + 出走馬表** を流用 (文字列手術) し、
-    検索ルール以降を「担当馬のみ・大幅増の検索予算・facts JSON (0-100 なし)」に差し替える。
+    既存 build_horse_score_prompt の **ヘッダ + edge 説明 + 出走馬表 + 前走戦績** を流用 (文字列手術)
+    し、検索ルール以降を「担当馬のみ・大幅増の検索予算・facts JSON (0-100 なし)」に差し替える。
+    前走戦績セクションは `pre` (検索 MCP マーカーより前) に含まれるので RESEARCH 子にも伝わる。
     """
     base = build_horse_score_prompt(
         rd, aptitudes=aptitudes, market_signals=market_signals,
-        horse_best_times=horse_best_times,
+        horse_best_times=horse_best_times, past_source=past_source,
     )
-    pre = base.partition("## 検索 MCP の運用ルール")[0]  # ヘッダ + edge + 出走馬表
+    pre = base.partition("## 検索 MCP の運用ルール")[0]  # ヘッダ + edge + 出走馬表 + 前走戦績
+    has_past = "## 前走戦績" in pre
     shard_set = sorted({int(x) for x in shard})
     nq = len(shard_set) * max(1, queries_per_horse)
     example_no = shard_set[0] if shard_set else 3
@@ -673,14 +759,18 @@ def build_horse_research_prompt(
         "上記 ①直前情報・②軟情報 を中心に事実を集め、構造化して出すのが仕事。担当外の馬は調べない。",
         "",
         "## 検索 MCP の運用ルール",
+        ("**前走戦績は上の「前走戦績」セクション (公式データ) で判明済み — 着順/距離/馬場/頭数/"
+         "人気/上り/通過は検索しない**。検索は担当馬の ①直前情報・②軟情報・騎手成績 (= それ以外) "
+         "に全予算を充てる。" if has_past else ""),
         f"**検索予算 (大幅増)**: 担当 {len(shard_set)} 頭 × 約 {queries_per_horse} クエリ = "
         f"**合計 ~{nq} クエリまで** Tavily で深掘りしてよい (従来の単一セッション 2/頭 より大幅増)。"
         "各馬最低 1 回は ①直前情報 (取消/馬体重) または ②軟情報 (近走の不利/勝負気配) を確認する。",
         "**並列実行 (重要・速度に直結)**: 互いに依存しない検索・WebFetch は **必ず 1 ターンで同時に "
-        "複数 tool_use** で呼ぶ。担当馬の近走を一度に並列発行 → 評価が割れる馬だけ次バッチで深掘り。",
+        "複数 tool_use** で呼ぶ。担当馬の ①直前/②軟情報を一度に並列発行 → 評価が割れる馬だけ次バッチで深掘り。",
         "**時間厳守**: 締切直前処理。timeout すると担当分が失われるので、予算を超えそうなら手元の "
         "根拠で確定し **必ず最後まで JSON を出力する**。",
-        "**検索すべきでない**: 上表の数値 (適性)、市場の人気/オッズ (= 市場の鏡)、競馬の基本ルール、1 か月以上前の汎用情報。",
+        "**検索すべきでない**: 上表の数値 (適性)、**上の前走戦績にある確定成績 (着順/距離/馬場/頭数/"
+        "人気/上り/通過) の再取得**、市場の人気/オッズ (= 市場の鏡)、競馬の基本ルール、1 か月以上前の汎用情報。",
         "",
         "## 出力 (担当馬のみ・facts)",
         "担当馬それぞれについて、調べた ①直前/②軟情報 を構造化して以下の JSON を ```json ... ``` で "
@@ -709,6 +799,7 @@ def build_horse_score_from_research_prompt(
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
+    past_source: str = "",
 ) -> str:
     """収集済みリサーチを使った SCORING プロンプト (全馬を一括で相対 0-100 採点・新規検索ほぼ無し)。
 
@@ -718,7 +809,7 @@ def build_horse_score_from_research_prompt(
     """
     base = build_horse_score_prompt(
         rd, aptitudes=aptitudes, market_signals=market_signals,
-        horse_best_times=horse_best_times,
+        horse_best_times=horse_best_times, past_source=past_source,
     )
     head, sep, tail = base.partition("## 指数の付け方")     # tail = 採点ルール + JSON schema
     pre = head.partition("## 検索 MCP の運用ルール")[0]      # ヘッダ + edge + 出走馬表
@@ -779,7 +870,7 @@ def _merge_research(shard_texts: list[str]) -> dict[int, dict]:
 def _run_research_child(
     *, rd: RaceData, shard: list[int], shard_id: int, model: str, timeout: int,
     queries_per_horse: int, aptitudes, market_signals, horse_best_times,
-    out_queue: "_queue.Queue",
+    out_queue: "_queue.Queue", past_source: str = "",
 ) -> None:
     """1 シャードの RESEARCH を `claude -p` で実行。tool_use は live 転送、本文は最後に集約して
     out_queue へ。例外/timeout でも必ず ('shard_done', id) を出して呼び側を進める。"""
@@ -788,6 +879,7 @@ def _run_research_child(
         prompt = build_horse_research_prompt(
             rd, shard, aptitudes=aptitudes, market_signals=market_signals,
             horse_best_times=horse_best_times, queries_per_horse=queries_per_horse,
+            past_source=past_source,
         )
         proc, err_f = _spawn_claude(_score_cmd(prompt, model))
         timer, timed_out = _start_kill_timer(proc, timeout)
@@ -829,6 +921,7 @@ def score_horses_parallel(
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
+    past_source: str = "",
 ) -> Iterator[tuple[str, Any]]:
     """ARCH-A 並列 score。score_horses_stream と同じ (event_type, payload) を yield する。
 
@@ -869,7 +962,7 @@ def score_horses_parallel(
                 kwargs=dict(
                     rd=rd, shard=shard, shard_id=sid, model=model, timeout=research_timeout,
                     queries_per_horse=qph, aptitudes=aptitudes, market_signals=market_signals,
-                    horse_best_times=horse_best_times, out_queue=out_q,
+                    horse_best_times=horse_best_times, out_queue=out_q, past_source=past_source,
                 ),
                 daemon=True,
             )
@@ -898,7 +991,7 @@ def score_horses_parallel(
     # Phase B: 単一 claude で全馬の相対 0-100 を一括採点 (検索ほぼ無し)。
     prompt = build_horse_score_from_research_prompt(
         rd, research, aptitudes=aptitudes, market_signals=market_signals,
-        horse_best_times=horse_best_times,
+        horse_best_times=horse_best_times, past_source=past_source,
     )
     proc, err_f = _spawn_claude(_score_cmd(prompt, model))
     timer, timed_out = _start_kill_timer(proc, scoring_timeout)
@@ -938,6 +1031,7 @@ def score_horses(
     aptitudes: dict[int, Any] | None = None,
     market_signals: dict[int, Any] | None = None,
     horse_best_times: list[dict] | None = None,
+    past_source: str = "",
 ) -> Iterator[tuple[str, Any]]:
     """score ステージの dispatcher。KEIBA_SCORE_PARALLEL かつ十分な頭数なら並列 score を試し、
     'result' を出せなければ単一セッション score_horses_stream にフォールバック。既定 (env 未設定)
@@ -948,6 +1042,7 @@ def score_horses(
         yield from score_horses_stream(
             rd, model=model, timeout=timeout, aptitudes=aptitudes,
             market_signals=market_signals, horse_best_times=horse_best_times,
+            past_source=past_source,
         )
         return
     # 並列パスを buffer して result の有無で fallback 判定 (二重 result を出さない)。
@@ -957,6 +1052,7 @@ def score_horses(
         for ev in score_horses_parallel(
             rd, model=model, timeout=timeout, aptitudes=aptitudes,
             market_signals=market_signals, horse_best_times=horse_best_times,
+            past_source=past_source,
         ):
             buffered.append(ev)
             if ev[0] == "result" and ev[1]:
@@ -972,6 +1068,7 @@ def score_horses(
     yield from score_horses_stream(
         rd, model=model, timeout=timeout, aptitudes=aptitudes,
         market_signals=market_signals, horse_best_times=horse_best_times,
+        past_source=past_source,
     )
 
 

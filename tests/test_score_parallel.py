@@ -331,3 +331,60 @@ def test_score_prompts_advertise_unbounded_evidence():
         assert "10 件以上" in p, f"{label}: 上限なし (10件以上) の明記が無い"
     assert '"evidence"' in score                    # JSON schema 例に evidence
     assert "EV_MARK" in scoring                      # 収集済み evidence を採点段へ渡す
+
+
+def _mk_race_with_past(n_horses: int = 8):
+    """過去走 (PastRun) 付きの RaceData (前走戦績セクション検証用)。"""
+    from src.models import PastRun
+    rd = _mk_race(n_horses)
+    for h in rd.race.horses:
+        h.past_runs = [
+            PastRun(date="2026.06.15", venue="盛岡", race_no=11, race_class="B1",
+                    surface="ダ", distance=1400, going="良", field_size=12,
+                    popularity=h.number, finish_pos=3, last_3f_sec=37.2, passing="5-5"),
+            PastRun(date="2026.06.01", venue="水沢", race_no=10, race_class="B2",
+                    surface="ダ", distance=1600, going="稍", field_size=11,
+                    popularity=2, finish_pos=1, last_3f_sec=38.1, passing="3-3-2-1"),
+        ]
+    return rd
+
+
+def test_past_runs_section_in_all_prompts():
+    """前走戦績 (公式データ) が score/research/scoring 3 プロンプトに描画され、検索抑止文も入る。"""
+    rd = _mk_race_with_past(8)
+    src = "地方競馬公式(keiba.go.jp)"
+    score = llm.build_horse_score_prompt(rd, past_source=src)
+    research = llm.build_horse_research_prompt(rd, [1, 2], past_source=src)
+    scoring = llm.build_horse_score_from_research_prompt(
+        rd, {1: {"alerts": [], "evidence": ["e"], "support": 1, "digest": "d"}},
+        past_source=src)
+    for label, p in (("score", score), ("research", research), ("scoring", scoring)):
+        assert "## 前走戦績" in p, f"{label}: 前走戦績セクションが無い"
+        assert src in p, f"{label}: 公式ソースのラベルが無い"
+        assert "盛岡11R" in p, f"{label}: 馬柱の内容が描画されていない"
+        assert "検索しない" in p, f"{label}: 前走戦績の検索抑止文が無い"
+
+
+def test_past_runs_section_does_not_break_partition():
+    """前走戦績セクションの本文に partition マーカーを含めない (string-surgery 保護)。"""
+    rd = _mk_race_with_past(8)
+    base = llm.build_horse_score_prompt(rd, past_source="JRA公式(jra.go.jp)")
+    # base の 前走戦績 ～ 検索 MCP マーカー の区間にマーカー文字列が無い。
+    i = base.find("## 前走戦績")
+    j = base.find("## 検索 MCP の運用ルール")
+    assert 0 <= i < j, "前走戦績は 検索 MCP マーカーより前に置く"
+    section = base[i:j]
+    assert "## 検索 MCP の運用ルール" not in section
+    assert "## 指数の付け方" not in section
+    # 派生 2 プロンプトの partition が壊れていない (マーカー/差し替えが従来どおり)。
+    scoring = llm.build_horse_score_from_research_prompt(rd, {})
+    assert "## 指数の付け方" in scoring
+    assert "## 検索 MCP の運用ルール" not in scoring
+
+
+def test_past_runs_absent_keeps_search_for_recent_runs():
+    """過去走が無いレースは 前走戦績 を出さず、近走を検索する従来挙動を維持。"""
+    rd = _mk_race(8)   # past_runs 無し
+    p = llm.build_horse_score_prompt(rd)
+    assert "## 前走戦績" not in p
+    assert "直近5走の着順詳細" in p   # 従来の検索ルール (近走を検索) が残る

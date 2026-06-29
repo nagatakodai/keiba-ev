@@ -334,18 +334,26 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                      score_parallel: bool = False,
                      score_queries_per_horse: int | None = None,
                      llm_max_concurrent: int | None = None,
+                     max_retries: int = 2,
                      on_progress: Callable[[dict[str, Any], int, int], None] | None = None) -> int:
     """対象レースに score ステージ (claude -p) を spawn して Claude 指数を生成。生成成功数を返す。
 
     並列は ThreadPoolExecutor で回すが、実際の claude -p 同時数は src 側の file-slot semaphore
-    (KEIBA_LLM_MAX_CONCURRENT, 既定5) で頭打ちになる (fail-open)。各 race の subprocess 出力は
+    (KEIBA_LLM_MAX_CONCURRENT) で頭打ちになる (fail-open)。各 race の subprocess 出力は
     Popen で 1 行ずつ読み、**検索クエリ行 (🔍) は scan ログへレース名付きで転送** (ユーザ指示
     「クエリもログに出す」)、それ以外の冗長な出力は捨てる。進捗も 1 行ずつ log に流す。
     worker スレッドと as_completed ループの双方から log を呼ぶので Lock で write を直列化する。
 
-    `on_progress(target, completed, total)` を渡すと、1 レース生成が終わるたびに呼ぶ (呼び出し
-    スレッドの as_completed ループ内 = シリアル)。scan が「生成完了レースを再採点して暫定一覧を
-    live 更新する」のに使う。例外は握り潰して生成を止めない。
+    **成功判定は rc ではなく「Claude 指数が実際に付いたか」(2026-06-29 修正)**: 同時実行の
+    輻輳で claude -p / Tavily が早期に死ぬと、scrape は成功したまま llm_fallback=True (指数なし)
+    で **subprocess は rc=0 で正常終了**する (実機: 盛岡8-11R が rc=0 のまま指数なし、12R のみ生成)。
+    rc ゲートでは拾えないので snapshot の claude_index / .llm.json を見て判定し、付かなかった
+    レースを **並列度を段階的に下げて (最終は直列) 最大 max_retries 回リトライ**する。直列リトライは
+    「最後に1レースだけ走って成功した」実機挙動と同条件に収束させるので確実に埋まる。
+
+    `on_progress(target, succeeded, total)` を渡すと、1 レース subprocess が終わるたびに呼ぶ
+    (呼び出しスレッドの as_completed ループ内 = シリアル)。scan が「生成完了レースを再採点して
+    暫定一覧を live 更新する」のに使う。例外は握り潰して生成を止めない。
     """
     if not targets:
         return 0
@@ -495,22 +503,77 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
             pass
         return (t, ok, note)
 
-    done = 0
-    completed = 0
-    with ThreadPoolExecutor(max_workers=max(1, parallel)) as ex:
-        for fut in as_completed([ex.submit(_one, t) for t in targets]):
-            t, ok, note = fut.result()
-            completed += 1
-            if ok:
-                done += 1
-            _safe_log(f"[claude-eval] ({completed}/{total}) {t['venue']}{t['race_no']}R {note}")
-            if on_progress is not None:
-                try:
-                    on_progress(t, completed, total)
-                except Exception:  # noqa: BLE001  進捗更新の失敗で生成を止めない
-                    pass
-    _safe_log(f"[claude-eval] 完了: {done}/{total} 生成成功")
-    return done
+    def _internal(t: dict[str, Any]) -> str:
+        return t.get("race_id") or _internal_id(t["netkeiba_race_id"])
+
+    def _has_index(t: dict[str, Any]) -> bool:
+        """このレースに **Claude 指数が実際に付いたか** を snapshot / .llm.json から判定。
+
+        rc=0 でも llm_fallback (指数なし) で終わるのが実害なので、rc ではなくこれで成否を見る。
+        snapshot の index_compare に claude_index があるか、無ければ .llm.json に scores があるか。
+        """
+        internal = _internal(t)
+        snap = _load_snapshot(internal)
+        if snap:
+            ic = snap.get("index_compare") or []
+            if any(h.get("claude_index") is not None for h in ic):
+                return True
+            if snap.get("llm_fallback") is False:
+                return True
+        p = PRED_DIR / f"{internal}.llm.json"
+        if p.exists():
+            try:
+                return bool(json.loads(p.read_text(encoding="utf-8")).get("scores"))
+            except (OSError, json.JSONDecodeError):
+                return False
+        return False
+
+    succeeded: set[str] = set()
+    pending = list(targets)
+    attempt = 0
+    while pending:
+        # パスごとに across-race 並列度を下げる: 0→parallel, 1→parallel//2, 2+→直列。
+        # 輻輳 (同時 claude -p 過多 → Tavily/API 輻輳で早期死) が失敗原因なので、リトライは
+        # 同時数を減らして輻輳を解く。最終パスは直列 = 1レースだけ走る既知の成功条件。
+        if attempt == 0:
+            pass_parallel = max(1, parallel)
+        elif attempt == 1:
+            pass_parallel = max(1, parallel // 2)
+        else:
+            pass_parallel = 1
+        if attempt > 0:
+            _safe_log(f"[claude-eval] リトライ {attempt}/{max_retries}: 指数未生成 "
+                      f"{len(pending)} レースを並列 {pass_parallel} で再生成 (輻輳回避)…")
+        with ThreadPoolExecutor(max_workers=pass_parallel) as ex:
+            for fut in as_completed([ex.submit(_one, t) for t in pending]):
+                t, _ok_rc, note = fut.result()
+                idx_ok = _has_index(t)
+                if idx_ok:
+                    succeeded.add(_internal(t))
+                status = "OK" if idx_ok else f"指数なし ({note})"
+                _safe_log(f"[claude-eval] ({len(succeeded)}/{total}) "
+                          f"{t['venue']}{t['race_no']}R {status}")
+                if on_progress is not None:
+                    try:
+                        on_progress(t, len(succeeded), total)
+                    except Exception:  # noqa: BLE001  進捗更新の失敗で生成を止めない
+                        pass
+        pending = [t for t in pending if _internal(t) not in succeeded]
+        attempt += 1
+        if not pending:
+            break
+        if attempt > max_retries:
+            labels = ", ".join(f"{t['venue']}{t['race_no']}R" for t in pending)
+            _safe_log(f"[claude-eval] {len(pending)} レースは {max_retries} 回リトライしても "
+                      f"指数生成できず見送り: {labels}")
+            break
+        backoff = 3.0 + attempt * 3.0
+        _safe_log(f"[claude-eval] {len(pending)} レース未生成 → {backoff:.0f}s 待って "
+                  f"並列を下げて再試行…")
+        time.sleep(backoff)
+    _safe_log(f"[claude-eval] 完了: {len(succeeded)}/{total} 生成成功"
+              + (f" ({attempt} パス)" if attempt > 1 else ""))
+    return len(succeeded)
 
 
 # ----------------------------------------------------------------- scan -------
@@ -525,7 +588,7 @@ def scan(
     claude_all: bool = False,
     claude_eval: int = 0,
     claude_eval_timeout: int = 900,
-    claude_eval_parallel: int = 6,
+    claude_eval_parallel: int = 4,
     score_parallel: bool = False,
     score_queries_per_horse: int | None = None,
     llm_max_concurrent: int | None = None,
@@ -858,7 +921,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="各レースの score subprocess の外側 timeout 秒 (既定 900)。下限 210s に"
                          "クランプ — 内側 claude (research 60s + scoring 60s floor + scrape) が"
                          "外側 kill より先に終わるのを保証する")
-    ap.add_argument("--claude-eval-parallel", type=int, default=6)
+    ap.add_argument("--claude-eval-parallel", type=int, default=4,
+                    help="across-race 同時生成数 (既定4)。多いと claude -p/Tavily 輻輳で "
+                         "一部レースが指数なしで終わる → _run_claude_eval が並列を下げて自動リトライ")
     ap.add_argument("--score-parallel", dest="score_parallel", action="store_true",
                     default=True, help="score 段の検索を並列化 (KEIBA_SCORE_PARALLEL=1, 既定 ON)")
     ap.add_argument("--no-score-parallel", dest="score_parallel", action="store_false",

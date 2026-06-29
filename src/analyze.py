@@ -153,7 +153,7 @@ def main(
         _run_score_stage(
             race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
             horse_best_times=best_times_for_score, model=llm_model,
-            no_llm=no_llm,
+            no_llm=no_llm, past_source="netkeiba馬柱",
         )
         # fall through → 下の共通解析 + snapshot 保存へ
 
@@ -520,6 +520,7 @@ def _score_timeout(rd, n_run: int) -> int:
 def _run_score_stage(
     race_id: str, rd, *, aptitudes=None, market_signals=None,
     horse_best_times=None, model: str = "opus", no_llm: bool = False,
+    past_source: str = "",
 ) -> dict | None:
     """score ステージ: Claude に各馬の強さ指数を出させて `<race_id>.llm.json` にキャッシュ。
 
@@ -566,7 +567,7 @@ def _run_score_stage(
         for etype, payload in llm_mod.score_horses(
             rd, model=model, aptitudes=aptitudes,
             market_signals=market_signals, horse_best_times=horse_best_times,
-            timeout=score_timeout,
+            timeout=score_timeout, past_source=past_source,
         ):
             if etype == "text":
                 chunks.append(payload)

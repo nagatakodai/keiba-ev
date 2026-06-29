@@ -608,7 +608,8 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     if phase == "score":
         az_mod._run_score_stage(
             race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
-            horse_best_times=best_times, model="opus", no_llm=not with_llm)
+            horse_best_times=best_times, model="opus", no_llm=not with_llm,
+            past_source=("netkeiba馬柱" if used_cache else "地方競馬公式(keiba.go.jp)"))
         # Claude 指数が出た段階で予想履歴詳細 (snapshot) を作って表示する (ユーザ指示 2026-06-13)。
         # save_snapshot 時は early return せず下の bet 段ロジックへ fall-through し、指数つき
         # 暫定 snapshot (stage="score") を保存する。3連単買い目の Claude 選定は bet 段のみ
