@@ -108,9 +108,17 @@ async def lifespan(app: FastAPI):
         RESULTS_AUTO.start()  # 予測分析履歴の結果を 5 分毎に自動取得する常駐ループ
     except Exception as e:  # noqa: BLE001
         print(f"[lifespan.startup] results auto start failed: {e}")
+    try:
+        SHOBU_RESCORER.start()  # 勝負レース(推奨)を締切5-7分前に自動再score (パドック込み)
+    except Exception as e:  # noqa: BLE001
+        print(f"[lifespan.startup] shobu rescorer start failed: {e}")
     yield
     try:
         await RESULTS_AUTO.stop()  # 結果取得ループを止めてから残 Job を倒す
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await SHOBU_RESCORER.stop()
     except Exception:  # noqa: BLE001
         pass
     await shutdown_all_jobs()
@@ -259,6 +267,137 @@ class ResultAutoFetcher:
 
 
 RESULTS_AUTO = ResultAutoFetcher()
+
+
+class ShobuPaddockRescorer:
+    """make api 常駐: **勝負レース(推奨)を締切5-7分前に自動で再score** し Claude 指数を
+    **パドック評価込みで再生成**する (ユーザ指示 2026-06-30)。
+
+    make api を回しておくだけで、推奨レースが締切に近づいた時に score 段の claude -p が
+    強化済みパドック検索 (締切~5分前のパドック/当日馬体重/気配) を実行し、その結果を取り込んだ
+    指数に更新される。乖離 (基準B) / 市場一致シグナルも snapshot 経由で自動反映。score 段のみで
+    **実弾投票はしない**。watch-auto 非依存 (併走しても snapshot 再生成は idempotent)。
+    **再score が失敗/timeout しても `analyze._run_score_stage` は scores 空なら .llm.json を上書き
+    しない**ので、scan 時点の指数は消えない (= 失敗は無害・最悪「指数据え置き+オッズ更新」)。
+    """
+
+    WINDOW_SEC = 7 * 60      # 締切この秒前から再score 対象に入れる (score に時間が要るので余裕)
+    MIN_LEAD_SEC = 2 * 60    # 締切この秒前を切ったら対象外 (締切間際は撃たない)
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task | None = None
+        self.interval_sec = 60
+        self._fired: set[str] = set()   # 当日 再score 済 race_id (window 内の二重撃ち防止)
+        self._fired_date = ""
+        self.rescored = 0
+        self.attempts = 0
+        self.last_run_at: float | None = None
+        self.last_fired: dict[str, Any] | None = None
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "loop_running": self._task is not None and not self._task.done(),
+            "window": "締切5-7分前",
+            "rescored": self.rescored,
+            "attempts": self.attempts,
+            "last_run_at": self.last_run_at,
+            "last_fired": self.last_fired,
+        }
+
+    def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _due(self) -> list[dict[str, Any]]:
+        """今 締切 MIN_LEAD〜WINDOW 秒前 + 未 fire の **推奨 (recommended) NAR/JRA レース** を返す。"""
+        today = shobu_today_jst()
+        if today != self._fired_date:
+            self._fired = set()
+            self._fired_date = today
+        path = SHOBU_DIR / f"{today}.json"
+        if not path.exists():
+            return []
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        now = time.time()
+        out: list[dict[str, Any]] = []
+        for r in doc.get("races") or []:
+            if not r.get("recommended"):
+                continue
+            rid = r.get("netkeiba_race_id")
+            internal = r.get("race_id") or rid
+            close_at = r.get("close_at") or 0
+            rtype = r.get("race_type")
+            if not rid or not close_at or rtype not in ("nar", "jra") or internal in self._fired:
+                continue
+            lead = close_at - now
+            if self.MIN_LEAD_SEC <= lead <= self.WINDOW_SEC:
+                out.append({
+                    "netkeiba": rid, "internal": internal, "rtype": rtype,
+                    "start_at": int(r.get("start_at") or 0),
+                    "venue": r.get("venue", ""), "race_no": r.get("race_no"),
+                })
+        return out
+
+    @staticmethod
+    def _rescore(race: dict[str, Any]) -> bool:
+        """1 レースを score 段で再生成 (Claude 指数をパドック込みで)。snapshot を上書き。"""
+        import subprocess
+        from api.runner import PY
+        mod = "src.scrape_jra" if race["rtype"] == "jra" else "src.scrape_keibago"
+        cmd = [PY, "-m", mod, race["netkeiba"], "--snapshot", "--phase=score",
+               f"--start-at={race['start_at']}"]
+        env = dict(os.environ)
+        # 締切5分前の素早い再score: パドッククエリが入る予算を確保しつつ window 内に収める。
+        env.setdefault("KEIBA_SCORE_QUERIES_PER_HORSE", "4")
+        env["KEIBA_SCORE_TIMEOUT"] = "200"   # window 内に収める (失敗時は指数据え置きで無害)
+        try:
+            subprocess.run(cmd, timeout=240, capture_output=True, env=env)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _run_once(self) -> None:
+        due = await asyncio.to_thread(self._due)
+        for race in due:
+            self._fired.add(race["internal"])   # 1 度撃ったら window 内で再撃しない (失敗でも)
+            self.attempts += 1
+            ok = await asyncio.to_thread(self._rescore, race)
+            if ok:
+                self.rescored += 1
+                self.last_fired = {"race_id": race["internal"], "venue": race["venue"],
+                                   "race_no": race["race_no"], "at": time.time()}
+        self.last_run_at = time.time()
+
+    async def _loop(self) -> None:
+        first = True
+        while True:
+            try:
+                await asyncio.sleep(25 if first else self.interval_sec)
+            except asyncio.CancelledError:
+                raise
+            first = False
+            try:
+                await self._run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - ループは止めない
+                pass
+
+
+SHOBU_RESCORER = ShobuPaddockRescorer()
 
 
 # --- predictions ---
@@ -637,6 +776,16 @@ def api_results_auto_status() -> dict[str, Any]:
     (watch-auto 非依存)。
     """
     return RESULTS_AUTO.status()
+
+
+@app.get("/api/shobu/paddock-rescore")
+def api_shobu_paddock_rescore_status() -> dict[str, Any]:
+    """勝負レース(推奨)の **締切5-7分前 自動再score (パドック込み)** ループの状態 (ユーザ指示 2026-06-30)。
+
+    make api 稼働中は 1 分毎に当日の推奨レースを見て、締切 5-7 分前に入ったものを score 段で
+    再生成 (Claude 指数をパドック評価込みで更新 → 乖離/市場一致シグナルも自動反映)。実弾投票はしない。
+    """
+    return SHOBU_RESCORER.status()
 
 
 @app.get("/api/jobs")

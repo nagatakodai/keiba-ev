@@ -80,3 +80,40 @@ def test_results_auto_enqueue_filters(monkeypatch):
     assert "race_id=202605010102" in first[1]           # 内部id→netkeiba rid 復元
     assert "race.netkeiba.com" in first[1]              # JRA host (場 01-10)
     assert all(s[3].get("resurrect_failed") is False for s in scheduled)  # 無限リトライ防止
+
+
+def test_paddock_rescorer_due_window(tmp_path, monkeypatch):
+    """ShobuPaddockRescorer._due は **推奨 NAR/JRA で締切5-7分前** のレースだけ返し dedup する。"""
+    import json
+    import time
+    import api.main as m
+
+    monkeypatch.setattr(m, "SHOBU_DIR", tmp_path)
+    monkeypatch.setattr(m, "shobu_today_jst", lambda: "20260630")
+    now = time.time()
+    races = [
+        # 推奨・NAR・締切6分前 → due
+        {"race_id": "due-1", "netkeiba_race_id": "202644063006", "recommended": True,
+         "race_type": "nar", "close_at": now + 360, "start_at": now + 480,
+         "venue": "大井", "race_no": 6},
+        # 締切10分前 → 遠すぎ
+        {"race_id": "far-1", "netkeiba_race_id": "202644063007", "recommended": True,
+         "race_type": "nar", "close_at": now + 600, "start_at": now + 720},
+        # 締切1分前 → 近すぎ (締切間際は撃たない)
+        {"race_id": "near-1", "netkeiba_race_id": "202644063008", "recommended": True,
+         "race_type": "nar", "close_at": now + 60, "start_at": now + 180},
+        # 非推奨 → skip
+        {"race_id": "norec", "netkeiba_race_id": "202644063010", "recommended": False,
+         "race_type": "nar", "close_at": now + 360, "start_at": now + 480},
+        # ばんえい (nar/jra 以外) → skip
+        {"race_id": "banei", "netkeiba_race_id": "202665063001", "recommended": True,
+         "race_type": "banei", "close_at": now + 360, "start_at": now + 480},
+    ]
+    (tmp_path / "20260630.json").write_text(json.dumps({"races": races}), encoding="utf-8")
+    rs = m.ShobuPaddockRescorer()
+    due = rs._due()
+    assert {d["internal"] for d in due} == {"due-1"}
+    assert due[0]["netkeiba"] == "202644063006" and due[0]["rtype"] == "nar"
+    # 1 度 fire したら window 内で再び返さない (二重撃ち防止)
+    rs._fired.add("due-1")
+    assert rs._due() == []
