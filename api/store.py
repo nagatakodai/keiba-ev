@@ -928,8 +928,33 @@ def _place_cutoff(n_runners: int | None) -> int:
     return 3
 
 
+def _snap_leg_odds(snap: dict[str, Any], bet_type: str) -> dict[int, float]:
+    """snapshot の bet_tables から **全馬の馬番→最終オッズ** を取り出す (bet_type="win"/"place")。
+
+    bet_tables は締切直前 (bet 段) のフレッシュオッズを全馬分持つ (実測 win 109/109・place 107/109)
+    ので、「最終オッズが ≤1.1 なら買わない」等の **着順非依存 (買う前) のフィルタ判定** に使える
+    (result の final_odds は in-money 馬のオッズしか無く着順依存になるため不適)。
+    """
+    out: dict[int, float] = {}
+    for row in ((snap.get("bet_tables") or {}).get(bet_type) or []):
+        key = row.get("key") or []
+        odds = row.get("odds")
+        if len(key) == 1 and odds:
+            try:
+                out[int(key[0])] = float(odds)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+# 単勝/複勝は最終オッズが ≤ この値なら買わない (ユーザ指示 2026-06-30: 旨味の無い大本命を除外)。
+_MIN_WIN_PLACE_ODDS = 1.1
+# 単複 (1位単勝+1位複勝) は合成オッズ (= 1位複勝オッズ/2、複勝のみ的中時の回収率) が < この値なら
+# 買わない (ユーザ指示 2026-06-30: 複勝だけ当たっても元本割れ=トリガミになる大本命を除外)。
+_WINPLACE_MIN_SYNTH = 1.0
+
 # 戦略メタ (表示順・ラベル・代表券種)。races_detail / strategies のキー順もこれに従う。
-# 複勝は 2 位 / 3 位 を分けて計測する (ユーザ指示 2026-06-30)。
+# 複勝は 1/2/3 位を分けて計測 (ユーザ指示 2026-06-30)。単複は 1位単勝+1位複勝 に変更。
 STRATEGY_DEFS = [
     ("win1", "単勝 (指数1位)", "win"),
     ("place1", "複勝 (指数1位)", "place"),
@@ -940,7 +965,7 @@ STRATEGY_DEFS = [
     ("trifecta123", "3連単 (指数1→2→3)", "trifecta"),
     ("trio123", "3連複 (指数1-2-3)", "trio"),
     ("trio1234box", "3連複BOX (指数1-2-3-4)", "trio"),
-    ("winplace", "単複 (1位単勝+2,3位複勝)", "mix"),
+    ("winplace", "単複 (1位単勝+1位複勝)", "mix"),
 ]
 
 
@@ -977,6 +1002,9 @@ def _strategy_race_legs(
     placed_set = set(finish[:cutoff]) if cutoff else set()
 
     fo = result.get("final_odds") or {}
+    # 全馬の最終オッズ (締切直前スナップショット)。買う前のフィルタ判定に使う。
+    snap_win = _snap_leg_odds(snap, "win")
+    snap_place = _snap_leg_odds(snap, "place")
 
     def _odds(key: str) -> float | None:
         v = fo.get(key)
@@ -988,31 +1016,37 @@ def _strategy_race_legs(
     top2_set = set(finish[:2])     # 馬連=上位2着 (頭数ルール非依存)
     missing_odds = False
 
-    def _leg(bet_type: str, key_nums: list[int], hit: bool, odds_key: str) -> dict[str, Any]:
-        """1 脚 (stake=point_cost) の {bet_type,key,hit,stake,payout}。的中脚のオッズ欠落は
+    def _leg(bet_type: str, key_nums: list[int], hit: bool, odds_key: str,
+             *, bet: bool = True) -> dict[str, Any]:
+        """1 脚 = {bet_type,key,hit,bet,stake,payout}。`bet=False` は「買わなかった」脚
+        (フィルタで除外、stake/payout=0・集計対象外)。**実際に買った的中脚**のオッズ欠落のみ
         missing_odds を立てる (呼び元が no_odds でレース全体を分母外にする)。"""
         nonlocal missing_odds
         pay = 0
-        if hit:
+        if hit and bet:
             o = _odds(odds_key)
             if o is None:
                 missing_odds = True
             else:
                 pay = int(round(o * point_cost))
-        return {"bet_type": bet_type, "key": key_nums, "hit": hit,
-                "stake": point_cost, "payout": pay}
+        return {"bet_type": bet_type, "key": key_nums, "hit": hit, "bet": bet,
+                "stake": point_cost if bet else 0, "payout": pay}
 
-    # 単勝 (1位) — 頭数に関係なく常に発売。
-    win_leg = _leg("win", [top1], top1 == finish[0], f"win:{top1}")
-    # 複勝 (1位 / 2位 / 3位 を分けて計測) — 複勝が発売される頭数のときだけ。
-    place_leg_1 = (_leg("place", [top1], top1 in placed_set, f"place:{top1}")
-                   if cutoff > 0 else None)
-    place_leg_2 = (_leg("place", [top2], top2 in placed_set, f"place:{top2}")
-                   if cutoff > 0 else None)
-    place_leg_3 = (_leg("place", [top3], top3 in placed_set, f"place:{top3}")
-                   if cutoff > 0 else None)
-    # 単複 (winplace) は 2,3位複勝のみ (ユーザ定義)。place1 は独立戦略。
-    place_legs = [l for l in (place_leg_2, place_leg_3) if l is not None]
+    def _wp_bet(num: int, odds_map: dict[int, float]) -> bool:
+        """単勝/複勝: 最終オッズが ≤ _MIN_WIN_PLACE_ODDS なら買わない (オッズ不明なら買う)。"""
+        o = odds_map.get(num)
+        return not (o is not None and o <= _MIN_WIN_PLACE_ODDS)
+
+    # 単勝 (1位) — 頭数に関係なく常に発売。最終オッズ ≤1.1 は買わない。
+    win_leg = _leg("win", [top1], top1 == finish[0], f"win:{top1}",
+                   bet=_wp_bet(top1, snap_win))
+    # 複勝 (1位 / 2位 / 3位 を分けて計測) — 複勝が発売される頭数 + 最終オッズ >1.1 のときだけ買う。
+    place_leg_1 = (_leg("place", [top1], top1 in placed_set, f"place:{top1}",
+                        bet=_wp_bet(top1, snap_place)) if cutoff > 0 else None)
+    place_leg_2 = (_leg("place", [top2], top2 in placed_set, f"place:{top2}",
+                        bet=_wp_bet(top2, snap_place)) if cutoff > 0 else None)
+    place_leg_3 = (_leg("place", [top3], top3 in placed_set, f"place:{top3}",
+                        bet=_wp_bet(top3, snap_place)) if cutoff > 0 else None)
     # 馬連 (1-2位) — 上位2着に両馬が入れば的中。key は昇順 (final_odds の規約に合わせる)。
     qa, qb = sorted((top1, top2))
     quin_leg = _leg("quinella", [qa, qb], {top1, top2} <= top2_set, f"quinella:{qa}-{qb}")
@@ -1037,16 +1071,27 @@ def _strategy_race_legs(
             box_legs.append(_leg("trio", cs, set(combo) == fin3,
                                  f"trio:{cs[0]}-{cs[1]}-{cs[2]}"))
 
+    # 単複 (winplace) = **1位の単勝 + 1位の複勝** (ユーザ指示 2026-06-30)。
+    # 合成オッズ = 1位複勝の最終オッズ/2 (複勝のみ的中時の回収率) が < 1 なら買わない
+    # (複勝だけ当たっても元本¥200を割る大本命を除外)。複勝非発売 (≤4頭) なら単勝のみ。
+    wp_place_odds = snap_place.get(top1)
+    wp_bet = not (cutoff > 0 and wp_place_odds is not None
+                  and (wp_place_odds / 2.0) < _WINPLACE_MIN_SYNTH)
+    wp_win = _leg("win", [top1], top1 == finish[0], f"win:{top1}", bet=wp_bet)
+    wp_place = (_leg("place", [top1], top1 in placed_set, f"place:{top1}", bet=wp_bet)
+                if cutoff > 0 else None)
+
     if missing_odds:
-        return None, "no_odds"     # 的中脚の払戻不明 → 評価不能
+        return None, "no_odds"     # 実際に買った的中脚の払戻不明 → 評価不能
 
     def _agg(legs: list[dict[str, Any]]) -> dict[str, Any]:
+        bl = [l for l in legs if l["bet"]]   # 実際に買った脚のみ集計
         return {
-            "stake": sum(l["stake"] for l in legs),
-            "payout": sum(l["payout"] for l in legs),
-            "bets": len(legs),
-            "hits": sum(1 for l in legs if l["hit"]),
-            "hit": any(l["payout"] > 0 for l in legs),
+            "stake": sum(l["stake"] for l in bl),
+            "payout": sum(l["payout"] for l in bl),
+            "bets": len(bl),
+            "hits": sum(1 for l in bl if l["hit"]),
+            "hit": any(l["payout"] > 0 for l in bl),
         }
 
     per = {
@@ -1059,7 +1104,7 @@ def _strategy_race_legs(
         "trifecta123": _agg([trifecta_leg]),
         "trio123": _agg([trio_leg]),
         "trio1234box": _agg(box_legs),
-        "winplace": _agg([win_leg, *place_legs]),
+        "winplace": _agg([wp_win, wp_place] if wp_place else [wp_win]),
     }
     detail = {
         "race_id": meta.get("race_id"),
@@ -1083,21 +1128,23 @@ def _strategy_race_legs(
 def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> dict[str, Any]:
     """**shobu 評価レース** の Claude 指数 単純戦略くらべ 仮想収支 (共通コア)。
 
-    各レースで win1 (1位単勝) / place2 (2位複勝) / place3 (3位複勝) / quinella12 (1-2位馬連) /
-    winplace (単複) を仮定し、実着順と final_odds の払戻で **戦略ごとに** 収支を集計する。
-    母集団 (`_shobu_eval_races`) は BOX 収支と共有: `recommended_only=True` = 勝負レース(推奨)のみ /
-    False = 推奨に限らず shobu が評価した全レース。
+    各レースで win1 (1位単勝) / place1,2,3 (1/2/3位複勝) / quinella12 (1-2位馬連) /
+    exacta12 (1→2位馬単) / trifecta123 / trio123 / trio1234box / winplace (1位単勝+1位複勝) を仮定し、
+    実着順と final_odds の払戻で **戦略ごとに** 収支を集計する。母集団 (`_shobu_eval_races`) は BOX 収支と
+    共有: `recommended_only=True` = 勝負レース(推奨)のみ / False = 推奨に限らず shobu が評価した全レース。
 
-    返り値 `strategies` は STRATEGY_DEFS 順の各戦略 {key,label,bet_type, races,bets,hits,hit_rate(+CI),
-    stake,payout,net,roi(+CI)}。winplace の `bets`/`hits` は **脚単位** (最大3脚/レース)、
-    `races` は 1 脚以上賭けたレース数 (place2/place3/winplace は ≤4頭で複勝発売なし=0 脚)。
+    返り値 `strategies` は STRATEGY_DEFS 順の各戦略 {key,label,bet_type, races,races_hit,bets,hits,
+    hit_rate(+CI),stake,payout,net,roi(+CI)}。**hit_rate の母数はレース数** (= races_hit/races・
+    ユーザ指示 2026-06-30)。`bets`/`hits` は脚単位 (winplace=最大2脚・trio1234box=4脚/レース) で stake 算出用。
+    `races` は **実際に 1 脚以上買ったレース数** (フィルタ後): 単勝/複勝は最終オッズ ≤1.1、単複は合成オッズ
+    <1 (1位複勝オッズ/2<1) で買い見送り、複勝は ≤4頭で発売なし → いずれも races から外れる。
     指数<3頭=skipped_no_index、結果未確定=skipped_no_result、的中脚オッズ欠落=skipped_no_odds。
     """
     by_race = _shobu_eval_races(recommended_only)
 
-    # 戦略ごとの集計器。
-    acc = {key: {"races": 0, "bets": 0, "hits": 0, "stake": 0, "payout": 0,
-                 "per_race": []} for key, _label, _bt in STRATEGY_DEFS}
+    # 戦略ごとの集計器。races_hit = レース単位の的中数 (hit_rate の分子)。
+    acc = {key: {"races": 0, "races_hit": 0, "bets": 0, "hits": 0, "stake": 0,
+                 "payout": 0, "per_race": []} for key, _label, _bt in STRATEGY_DEFS}
     races_detail: list[dict[str, Any]] = []
     races_n = 0
     skipped_no_index = skipped_no_result = skipped_no_odds = 0
@@ -1147,10 +1194,11 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> 
         races_n += 1
         for key, _label, _bt in STRATEGY_DEFS:
             s = detail["per"][key]
-            if s["bets"] == 0:       # place23 は ≤4頭で 0 脚 = このレースは賭けない
+            if s["bets"] == 0:       # 0 脚 (≤4頭の複勝 / フィルタ見送り) = このレースは賭けない
                 continue
             a = acc[key]
             a["races"] += 1
+            a["races_hit"] += 1 if s["hit"] else 0      # レース単位の的中 (hit_rate 母数)
             a["bets"] += s["bets"]
             a["hits"] += s["hits"]
             a["stake"] += s["stake"]
@@ -1166,15 +1214,17 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> 
         a = acc[key]
         roi = (a["payout"] / a["stake"]) if a["stake"] else 0.0
         roi_low, roi_high = _bootstrap_roi_ci(a["per_race"])
-        hr_low, hr_high = _wilson_ci(a["hits"], a["bets"])
+        # 的中率の母数は **レース数** (races_hit / races, ユーザ指示 2026-06-30)。
+        hr_low, hr_high = _wilson_ci(a["races_hit"], a["races"])
         strategies.append({
             "key": key,
             "label": label,
             "bet_type": bt,
             "races": a["races"],
+            "races_hit": a["races_hit"],
             "bets": a["bets"],
             "hits": a["hits"],
-            "hit_rate": (a["hits"] / a["bets"]) if a["bets"] else 0.0,
+            "hit_rate": (a["races_hit"] / a["races"]) if a["races"] else 0.0,
             "hit_rate_ci_low": hr_low,
             "hit_rate_ci_high": hr_high,
             "stake": a["stake"],

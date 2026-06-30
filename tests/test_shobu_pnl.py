@@ -15,15 +15,29 @@ import pytest
 import api.store as store
 
 
-def _snap(n_runners: int, idx: dict[int, float]) -> dict:
-    """全馬に Claude 指数を付けた snapshot (index_compare 形式)。"""
-    return {
+def _snap(n_runners: int, idx: dict[int, float], *,
+          win_odds: dict[int, float] | None = None,
+          place_odds: dict[int, float] | None = None) -> dict:
+    """全馬に Claude 指数を付けた snapshot (index_compare 形式)。
+
+    win_odds/place_odds を渡すと bet_tables を作る (単勝/複勝 ≤1.1・単複 合成<1 フィルタの
+    最終オッズ源)。未指定なら bet_tables 無し = フィルタ no-op (= オッズ不明なら買う)。
+    """
+    snap = {
         "n_runners": n_runners,
         "saved_at": "2026-06-28T11:00:00",
         "index_compare": [
             {"number": k, "claude_index": v, "market_index": 50.0} for k, v in idx.items()
         ],
     }
+    bt: dict = {}
+    if win_odds is not None:
+        bt["win"] = [{"key": [n], "odds": o} for n, o in win_odds.items()]
+    if place_odds is not None:
+        bt["place"] = [{"key": [n], "odds": o} for n, o in place_odds.items()]
+    if bt:
+        snap["bet_tables"] = bt
+    return snap
 
 
 def _result(order: list[int], payout: int) -> dict:
@@ -160,13 +174,13 @@ def test_strategies_full_hit_payout(dirs):
     assert r["per"]["place3"]["payout"] == 200 and r["per"]["place3"]["hits"] == 1   # 2.0×100
     assert r["per"]["quinella12"]["payout"] == 400 and r["per"]["quinella12"]["hits"] == 1
     assert r["per"]["exacta12"]["payout"] == 600 and r["per"]["exacta12"]["hits"] == 1   # 1→2 着順一致
-    # winplace は 2,3位複勝のみ (place1 は含まない)
-    assert r["per"]["winplace"]["payout"] == 650 and r["per"]["winplace"]["stake"] == 300
+    # winplace = 1位単勝 + 1位複勝 (bet_tables 無し→合成フィルタ no-op)。300(win) + 110(place#1) = 410。
+    assert r["per"]["winplace"]["payout"] == 410 and r["per"]["winplace"]["stake"] == 200
     # 戦略集計 (1レース)
     assert _strat(d, "win1")["roi"] == 3.0 and _strat(d, "win1")["net"] == 200
     assert _strat(d, "place2")["payout"] == 150 and _strat(d, "place3")["payout"] == 200
     assert _strat(d, "quinella12")["payout"] == 400 and _strat(d, "quinella12")["bets"] == 1
-    assert _strat(d, "winplace")["stake"] == 300 and _strat(d, "winplace")["payout"] == 650
+    assert _strat(d, "winplace")["stake"] == 200 and _strat(d, "winplace")["payout"] == 410
 
 
 def test_strategies_quinella_needs_both_in_top2(dirs):
@@ -253,7 +267,8 @@ def test_strategies_all_miss_counts_without_odds(dirs):
     (rs / "rec-1.json").write_text(json.dumps(_result_fo([6, 7, 8], 12000, {})), encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     assert d["races"] == 1 and d["skipped_no_odds"] == 0
-    assert _strat(d, "winplace")["payout"] == 0 and _strat(d, "winplace")["stake"] == 300
+    # winplace = 1位単勝+1位複勝 = 2脚 ¥200 (全外れ)。
+    assert _strat(d, "winplace")["payout"] == 0 and _strat(d, "winplace")["stake"] == 200
     assert _strat(d, "win1")["hits"] == 0 and _strat(d, "quinella12")["hits"] == 0
 
 
@@ -298,6 +313,70 @@ def test_strategies_trio_box_within_top4_only(dirs):
     assert r["per"]["place2"]["hits"] == 1 and r["per"]["place3"]["hits"] == 0
 
 
+def test_strategies_win_place_skip_low_odds(dirs):
+    """単勝/複勝は最終オッズ ≤1.1 なら買わない (races から外れる)。ユーザ指示 2026-06-30。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
+    # #1 の最終オッズ: 単勝1.1(≤1.1=買わない) / 複勝1.0(≤1.1=買わない)。#2 複勝1.5(>1.1=買う)。
+    (pr / "rec-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, win_odds={1: 1.1, 2: 4.0}, place_odds={1: 1.0, 2: 1.5})), encoding="utf-8")
+    # 着順 2-4-6: 馬連/馬単/3連単/3連複/BOX は全外れ (余計なオッズ不要)。#2 は2着で複勝圏。
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [2, 4, 6], 9999, {"place:2": 1.5})), encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    # win1: #1 単勝1.1 → 買わない → races=0
+    assert _strat(d, "win1")["races"] == 0 and _strat(d, "win1")["bets"] == 0
+    # place1: #1 複勝1.0 → 買わない → races=0
+    assert _strat(d, "place1")["races"] == 0
+    # place2: #2 複勝1.5(>1.1) → 買う・的中 (2着)
+    assert _strat(d, "place2")["races"] == 1 and _strat(d, "place2")["races_hit"] == 1
+    assert _strat(d, "place2")["payout"] == 150
+
+
+def test_strategies_winplace_synth_filter(dirs):
+    """単複=1位単勝+1位複勝。合成オッズ(=1位複勝/2)<1 なら買わない。ユーザ指示 2026-06-30。"""
+    sh, pr, rs = dirs
+    # 着順 1-5-6: #1 勝ち (単複の win/place 両的中) だが 馬連/馬単/3連系は全外れ (余計なオッズ不要)。
+    # ケースA: #1 複勝1.8 → 合成0.9<1 → 買わない。
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
+    (pr / "rec-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, place_odds={1: 1.8})), encoding="utf-8")
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [1, 5, 6], 9999, {"win:1": 3.0, "place:1": 1.8})), encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    assert _strat(d, "winplace")["races"] == 0    # 合成0.9<1 → 見送り
+
+    # ケースB: #1 複勝2.4 → 合成1.2≥1 → 買う。win#1(3.0→300)+place#1(2.4→240)=540, stake200。
+    (pr / "rec-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, place_odds={1: 2.4})), encoding="utf-8")
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [1, 5, 6], 9999, {"win:1": 3.0, "place:1": 2.4})), encoding="utf-8")
+    d2 = store.compute_shobu_strategies_pnl(point_cost=100)
+    wp = next(r["per"]["winplace"] for r in d2["races_detail"])
+    assert wp["bets"] == 2 and wp["stake"] == 200 and wp["payout"] == 540
+    assert _strat(d2, "winplace")["races"] == 1 and _strat(d2, "winplace")["races_hit"] == 1
+
+
+def test_strategies_hit_rate_denominator_is_races(dirs):
+    """単複・3連複BOX の的中率の母数は **レース数** (races_hit/races)。ユーザ指示 2026-06-30。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
+    (pr / "rec-1.json").write_text(json.dumps(_snap(8, _IDX8, place_odds={1: 3.0})), encoding="utf-8")
+    # 着順 1-2-3 完全的中 (BOX 4脚中1脚的中, 単複 win+place とも的中)。
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [1, 2, 3], 9999,
+        {"win:1": 2.0, "place:1": 3.0, "place:2": 1.5, "place:3": 2.0,
+         "quinella:1-2": 3.0, "exacta:1-2": 4.0, "trifecta:1-2-3": 50.0, "trio:1-2-3": 10.0})),
+        encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    box = _strat(d, "trio1234box")
+    # BOX: 4脚/1レース、1脚的中。hit_rate は 1/1 (レース母数) であって 1/4 (脚母数) ではない。
+    assert box["bets"] == 4 and box["races"] == 1 and box["races_hit"] == 1
+    assert box["hit_rate"] == 1.0
+    wp = _strat(d, "winplace")
+    assert wp["bets"] == 2 and wp["races"] == 1 and wp["hit_rate"] == 1.0
+
+
 def test_strategies_indexed_is_superset(dirs):
     """戦略くらべも BOX と同じ母集団スコープ: indexed は recommended の superset・shobu 評価のみ。"""
     sh, pr, rs = dirs
@@ -329,9 +408,9 @@ def test_strategies_indexed_is_superset(dirs):
     assert {r["race_id"] for r in rec["races_detail"]} == {"rec-1"}
     assert {r["race_id"] for r in allr["races_detail"]} == {"rec-1", "non-1"}
     assert allr["recommended_total"] == 2
-    # winplace = win1 + place2 + place3 の整合 (脚数・払戻・賭金が一致)
+    # winplace = win1 + place1 (1位単勝+1位複勝) の整合 (bet_tables 無し=フィルタ no-op なので一致)
     wp = _strat(allr, "winplace")
-    w1, p2, p3 = _strat(allr, "win1"), _strat(allr, "place2"), _strat(allr, "place3")
-    assert wp["bets"] == w1["bets"] + p2["bets"] + p3["bets"]
-    assert wp["payout"] == w1["payout"] + p2["payout"] + p3["payout"]
-    assert wp["stake"] == w1["stake"] + p2["stake"] + p3["stake"]
+    w1, p1 = _strat(allr, "win1"), _strat(allr, "place1")
+    assert wp["bets"] == w1["bets"] + p1["bets"]
+    assert wp["stake"] == w1["stake"] + p1["stake"]
+    assert wp["payout"] == w1["payout"] + p1["payout"]

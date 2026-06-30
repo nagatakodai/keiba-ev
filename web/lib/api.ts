@@ -735,10 +735,11 @@ export type StrategyPnl = {
   key: string;                 // win1 / place1 / place2 / place3 / quinella12 / exacta12 / trifecta123 / trio123 / trio1234box / winplace
   label: string;               // 表示名 (例「単勝 (指数1位)」)
   bet_type: string;            // win / place / quinella / mix
-  races: number;               // 1 脚以上賭けたレース数
-  bets: number;                // 脚数 (place2/place3=1/レース, winplace=最大3/レース)
-  hits: number;                // 的中脚数
-  hit_rate: number;            // hits / bets (脚単位)
+  races: number;               // 実際に1脚以上買ったレース数 (フィルタ後)
+  races_hit: number;           // レース単位の的中数 (hit_rate の分子)
+  bets: number;                // 脚数 (winplace=最大2/レース, trio1234box=4/レース)。stake 算出用
+  hits: number;                // 的中脚数 (脚単位)
+  hit_rate: number;            // races_hit / races (**母数=レース数**)
   hit_rate_ci_low?: number;
   hit_rate_ci_high?: number;
   stake: number;

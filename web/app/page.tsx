@@ -171,8 +171,9 @@ function StrategiesPnlCard({
                     </td>
                     <td className="px-2 py-2 text-right tnum text-(--color-muted) whitespace-nowrap">
                       {hasBets ? fmtPct(s.hit_rate, 1) : "—"}
+                      {/* 母数はレース数 (races_hit / races)。脚数 (bets) は stake 列に反映。 */}
                       <span className="block text-[10px]">
-                        {s.hits}/{s.bets}
+                        {s.races_hit}/{s.races}
                       </span>
                     </td>
                     <td className="px-2 py-2 text-right tnum text-(--color-muted) whitespace-nowrap">
@@ -198,8 +199,9 @@ function StrategiesPnlCard({
           <span>
             ※ 各脚 ¥{data.point_cost}: 単勝=指数1位 / 複勝=指数1位・2位・3位 (頭数ルール: 8頭以上=3着・5-7頭=2着・4頭以下=無)
             / 馬連=指数1-2位 (上位2着) / 馬単=指数1→2位 (着順一致) / 3連単=指数1→2→3 (着順一致)
-            / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点) / 単複=単勝+2,3位複勝。
-            的中率は脚単位 ・ 対象={data.races}R 中の賭けたレース数
+            / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点) / 単複=1位単勝+1位複勝。
+            <strong>単勝・複勝は最終オッズ ≤1.1、単複は合成オッズ (1位複勝/2) &lt;1 のとき買い見送り</strong>。
+            的中率の母数はレース数 (的中R/対象R) ・ 対象={data.races}R 中の賭けたレース数
           </span>
           {data.skipped_no_odds > 0 && (
             <span>・払戻オッズ欠落 {data.skipped_no_odds} 件は分母外</span>
