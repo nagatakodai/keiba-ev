@@ -775,7 +775,8 @@ def _box_race_pnl(
 
 
 def _shobu_box_pnl(
-    point_cost: int = 100, box_size: int = 5, *, recommended_only: bool = True
+    point_cost: int = 100, box_size: int = 5, *, recommended_only: bool = True,
+    version: str | None = None,
 ) -> dict[str, Any]:
     """**shobu スキャンが評価したレース** の Claude 指数上位N頭3連単BOX 仮想収支 (共通コア)。
 
@@ -806,6 +807,7 @@ def _shobu_box_pnl(
     payout_sum = 0
     skipped_no_index = 0
     skipped_no_result = 0
+    pop = 0   # version 指定時の母集団 (= そのバージョンのレース総数)
     last_updated_at: str | None = None
 
     for rid, race in by_race.items():
@@ -814,13 +816,19 @@ def _shobu_box_pnl(
             continue
         snap_path = PRED_DIR / f"{safe}.json"
         if not snap_path.exists():
-            skipped_no_index += 1
+            if version is None:
+                skipped_no_index += 1   # version 指定時はバージョン不明なので集計外
             continue
         try:
             snap = json.loads(snap_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            skipped_no_index += 1
+            if version is None:
+                skipped_no_index += 1
             continue
+        # 補強根拠バージョン (v1/v2) フィルタ (ユーザ指示 2026-06-30: 計測をバージョン毎に分離)。
+        if version is not None and index_version_of(snap) != version:
+            continue
+        pop += 1
         result_path = RESULT_DIR / f"{safe}.json"
         result: dict[str, Any] = {}
         if result_path.exists():
@@ -875,7 +883,9 @@ def _shobu_box_pnl(
         "roi": roi,
         "roi_ci_low": roi_low,
         "roi_ci_high": roi_high,
-        "recommended_total": len(by_race),  # 集約レース総数 (recommended_only なら勝負レース総数 / False なら shobu 評価レース総数)
+        # 集約レース総数 (version 指定時はそのバージョンのレース数 / 未指定は全集約数)。
+        "recommended_total": pop if version is not None else len(by_race),
+        "version": version,
         "skipped_no_index": skipped_no_index,
         "skipped_no_result": skipped_no_result,
         "last_updated_at": last_updated_at,
@@ -884,12 +894,14 @@ def _shobu_box_pnl(
     }
 
 
-def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
+def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5,
+                      version: str | None = None) -> dict[str, Any]:
     """勝負レース (recommended) 専用の仮想収支 (ダッシュボード hero。ユーザ指示 2026-06-21)。"""
-    return _shobu_box_pnl(point_cost, box_size, recommended_only=True)
+    return _shobu_box_pnl(point_cost, box_size, recommended_only=True, version=version)
 
 
-def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
+def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5,
+                        version: str | None = None) -> dict[str, Any]:
     """**shobu が評価した全レース** (recommended に限らない) の仮想収支 (別カード併記)。
 
     ユーザ指示 (2026-06-28): 「Claude 指数が全ての馬についていて結果があればダッシュボードに反映」
@@ -897,8 +909,9 @@ def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, A
     ユーザ指摘で betting pipeline の過去スコア (~06-12〜) が混ざって 153 件に膨れていたのを修正し、
     shobu 評価レース (recommended + 非recommended) に scope。これで「ほとんど推奨」(推奨カードの
     proper superset) になる。指数条件は推奨カードと同じ (BOX 可能=指数3頭以上) で揃える。
+    `version` ("v1"/"v2") を渡すと補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30)。
     """
-    return _shobu_box_pnl(point_cost, box_size, recommended_only=False)
+    return _shobu_box_pnl(point_cost, box_size, recommended_only=False, version=version)
 
 
 # ============================================================
@@ -1125,7 +1138,8 @@ def _strategy_race_legs(
     return detail, "ok"
 
 
-def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> dict[str, Any]:
+def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
+                    version: str | None = None) -> dict[str, Any]:
     """**shobu 評価レース** の Claude 指数 単純戦略くらべ 仮想収支 (共通コア)。
 
     各レースで win1 (1位単勝) / place1,2,3 (1/2/3位複勝) / quinella12 (1-2位馬連) /
@@ -1147,6 +1161,7 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> 
                  "payout": 0, "per_race": []} for key, _label, _bt in STRATEGY_DEFS}
     races_detail: list[dict[str, Any]] = []
     races_n = 0
+    pop = 0   # version 指定時の母集団 (= そのバージョンのレース総数)
     skipped_no_index = skipped_no_result = skipped_no_odds = 0
     last_updated_at: str | None = None
 
@@ -1156,13 +1171,19 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> 
             continue
         snap_path = PRED_DIR / f"{safe}.json"
         if not snap_path.exists():
-            skipped_no_index += 1
+            if version is None:
+                skipped_no_index += 1
             continue
         try:
             snap = json.loads(snap_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            skipped_no_index += 1
+            if version is None:
+                skipped_no_index += 1
             continue
+        # 補強根拠バージョン (v1/v2) フィルタ (ユーザ指示 2026-06-30: 計測をバージョン毎に分離)。
+        if version is not None and index_version_of(snap) != version:
+            continue
+        pop += 1
         result_path = RESULT_DIR / f"{safe}.json"
         result: dict[str, Any] = {}
         if result_path.exists():
@@ -1240,7 +1261,8 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> 
         "point_cost": point_cost,
         "strategies": strategies,
         "races": races_n,
-        "recommended_total": len(by_race),
+        "recommended_total": pop if version is not None else len(by_race),
+        "version": version,
         "skipped_no_index": skipped_no_index,
         "skipped_no_result": skipped_no_result,
         "skipped_no_odds": skipped_no_odds,
@@ -1250,18 +1272,21 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> 
     }
 
 
-def compute_shobu_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+def compute_shobu_strategies_pnl(point_cost: int = 100,
+                                 version: str | None = None) -> dict[str, Any]:
     """勝負レース (recommended) の Claude 指数 単純戦略くらべ 仮想収支 (ユーザ指示 2026-06-30)。"""
-    return _strategies_pnl(point_cost, recommended_only=True)
+    return _strategies_pnl(point_cost, recommended_only=True, version=version)
 
 
-def compute_indexed_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+def compute_indexed_strategies_pnl(point_cost: int = 100,
+                                   version: str | None = None) -> dict[str, Any]:
     """shobu が評価した全レース (recommended に限らない) の Claude 指数 単純戦略くらべ 仮想収支。
 
     ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して表示」。
     母集団は BOX 収支の indexed (compute_indexed_pnl) と揃える (shobu 評価レース全体)。
+    `version` ("v1"/"v2") を渡すと補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30)。
     """
-    return _strategies_pnl(point_cost, recommended_only=False)
+    return _strategies_pnl(point_cost, recommended_only=False, version=version)
 
 
 def _wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:

@@ -722,6 +722,8 @@ export type ShobuPnl = {
   roi_ci_low?: number;
   roi_ci_high?: number;
   recommended_total: number;
+  // 補強根拠バージョン ("v1"/"v2"/null=全体)。version 毎に分離した計測のとき set。
+  version?: string | null;
   skipped_no_index: number;
   skipped_no_result: number;
   last_updated_at: string | null;
@@ -773,6 +775,8 @@ export type StrategiesPnl = {
   strategies: StrategyPnl[];
   races: number;
   recommended_total: number;
+  // 補強根拠バージョン ("v1"/"v2"/null=全体)。version 毎に分離した計測のとき set。
+  version?: string | null;
   skipped_no_index: number;
   skipped_no_result: number;
   skipped_no_odds: number;
@@ -851,14 +855,20 @@ export const api = {
   shobuPnl: (pointCost = 100) =>
     jsonFetch<ShobuPnl>("/api/shobu/pnl?point_cost=" + pointCost),
   // 全 Claude 指数レース (recommended に限らない・全馬指数+結果あり) の仮想収支。
-  indexedPnl: (pointCost = 100) =>
-    jsonFetch<ShobuPnl>("/api/shobu/indexed-pnl?point_cost=" + pointCost),
+  // version ("v1"/"v2") を渡すと補強根拠バージョン毎に分離。
+  indexedPnl: (pointCost = 100, version?: string) =>
+    jsonFetch<ShobuPnl>(
+      `/api/shobu/indexed-pnl?point_cost=${pointCost}${version ? `&version=${version}` : ""}`,
+    ),
   // Claude 指数 単純戦略くらべ (単勝/複勝/馬連/単複) の仮想収支 — 勝負レース(推奨)のみ。
   strategiesPnl: (pointCost = 100) =>
     jsonFetch<StrategiesPnl>("/api/shobu/strategies-pnl?point_cost=" + pointCost),
   // Claude 指数 単純戦略くらべ — shobu 評価レース全体 (過去分全て・recommended に限らない)。
-  indexedStrategiesPnl: (pointCost = 100) =>
-    jsonFetch<StrategiesPnl>("/api/shobu/indexed-strategies-pnl?point_cost=" + pointCost),
+  // version ("v1"/"v2") を渡すと補強根拠バージョン毎に分離。
+  indexedStrategiesPnl: (pointCost = 100, version?: string) =>
+    jsonFetch<StrategiesPnl>(
+      `/api/shobu/indexed-strategies-pnl?point_cost=${pointCost}${version ? `&version=${version}` : ""}`,
+    ),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 

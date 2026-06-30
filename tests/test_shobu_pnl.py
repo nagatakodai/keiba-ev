@@ -17,11 +17,13 @@ import api.store as store
 
 def _snap(n_runners: int, idx: dict[int, float], *,
           win_odds: dict[int, float] | None = None,
-          place_odds: dict[int, float] | None = None) -> dict:
+          place_odds: dict[int, float] | None = None,
+          index_version: str | None = None) -> dict:
     """全馬に Claude 指数を付けた snapshot (index_compare 形式)。
 
     win_odds/place_odds を渡すと bet_tables を作る (単勝/複勝 ≤1.1・単複 合成<1 フィルタの
     最終オッズ源)。未指定なら bet_tables 無し = フィルタ no-op (= オッズ不明なら買う)。
+    index_version を渡すと補強根拠バージョンを明示 (未指定は saved_at 由来で v2)。
     """
     snap = {
         "n_runners": n_runners,
@@ -30,6 +32,8 @@ def _snap(n_runners: int, idx: dict[int, float], *,
             {"number": k, "claude_index": v, "market_index": 50.0} for k, v in idx.items()
         ],
     }
+    if index_version is not None:
+        snap["index_version"] = index_version
     bt: dict = {}
     if win_odds is not None:
         bt["win"] = [{"key": [n], "odds": o} for n, o in win_odds.items()]
@@ -375,6 +379,34 @@ def test_strategies_hit_rate_denominator_is_races(dirs):
     assert box["hit_rate"] == 1.0
     wp = _strat(d, "winplace")
     assert wp["bets"] == 2 and wp["races"] == 1 and wp["hit_rate"] == 1.0
+
+
+def test_strategies_version_split(dirs):
+    """version="v1"/"v2" で補強根拠バージョン毎に母集団を分離する (ユーザ指示 2026-06-30)。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps({
+        "generated_at": "2026-06-28T11:42:00+09:00",
+        "races": [
+            {"race_id": "v2-1", "recommended": True, "venue": "A", "race_no": 1,
+             "race_type": "jra", "n_runners": 8},
+            {"race_id": "v1-1", "recommended": True, "venue": "B", "race_no": 2,
+             "race_type": "nar", "n_runners": 8},
+        ],
+    }), encoding="utf-8")
+    (pr / "v2-1.json").write_text(json.dumps(_snap(8, _IDX8, index_version="v2")), encoding="utf-8")
+    (pr / "v1-1.json").write_text(json.dumps(_snap(8, _IDX8, index_version="v1")), encoding="utf-8")
+    for rid in ("v2-1", "v1-1"):
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo(
+            [6, 7, 8], 9999, {})), encoding="utf-8")   # 全外れ (オッズ不要)
+    v2 = store.compute_shobu_strategies_pnl(version="v2")
+    v1 = store.compute_shobu_strategies_pnl(version="v1")
+    allv = store.compute_shobu_strategies_pnl()
+    assert {r["race_id"] for r in v2["races_detail"]} == {"v2-1"} and v2["version"] == "v2"
+    assert {r["race_id"] for r in v1["races_detail"]} == {"v1-1"} and v1["version"] == "v1"
+    assert allv["races"] == 2 and allv["version"] is None
+    # BOX 側も同様に分離
+    b2 = store.compute_shobu_pnl(version="v2")
+    assert b2["races"] == 1 and b2["recommended_total"] == 1
 
 
 def test_strategies_indexed_is_superset(dirs):

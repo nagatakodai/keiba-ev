@@ -216,6 +216,98 @@ function StrategiesPnlCard({
   );
 }
 
+// shobu 評価レース全体の per-race 明細 (Claude 指数上位N頭3連単BOX)。version 分割で各セクションに置く。
+function BoxDetailTable({ rows }: { rows: ShobuPnlRace[] }) {
+  if (rows.length === 0) {
+    return (
+      <Card>
+        <div className="text-xs text-(--color-muted)">
+          このバージョンの結果確定レースはまだありません。
+        </div>
+      </Card>
+    );
+  }
+  const detailRows = [...rows].sort((a, b) =>
+    (b.saved_at ?? b.date ?? "").localeCompare(a.saved_at ?? a.date ?? ""),
+  );
+  return (
+    <Card>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs table-zebra">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wider text-(--color-muted) border-b border-(--color-line)">
+              <th className="px-2 py-2 font-bold">レース</th>
+              <th className="px-2 py-2 font-bold">日付</th>
+              <th className="px-2 py-2 font-bold">BOX</th>
+              <th className="px-2 py-2 font-bold">上位</th>
+              <th className="px-2 py-2 font-bold">着順</th>
+              <th className="px-2 py-2 font-bold text-right">払戻</th>
+              <th className="px-2 py-2 font-bold">結果</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detailRows.map((r) => (
+              <tr
+                key={r.race_id}
+                className={`border-b border-(--color-line-soft) ${
+                  r.hit ? "bg-emerald-500/10" : ""
+                }`}
+              >
+                <td className="px-2 py-2 whitespace-nowrap">
+                  <Link
+                    href={`/predictions/${r.race_id}`}
+                    className="font-bold hover:text-(--color-accent) transition-colors"
+                  >
+                    {r.venue}
+                    {r.race_no != null ? `${r.race_no}R` : ""}
+                  </Link>
+                </td>
+                <td className="px-2 py-2 text-(--color-muted) tnum whitespace-nowrap">
+                  {r.date}
+                </td>
+                <td className="px-2 py-2 text-(--color-muted) whitespace-nowrap">
+                  {r.box}頭BOX
+                </td>
+                <td className="px-2 py-2 mono whitespace-nowrap">{r.top_horses.join(",")}</td>
+                <td className="px-2 py-2 mono tnum whitespace-nowrap">
+                  {r.finish.length > 0 ? r.finish.join("-") : "—"}
+                </td>
+                <td className="px-2 py-2 mono tnum text-right whitespace-nowrap">
+                  {r.hit ? fmtYen(r.payout) : ""}
+                </td>
+                <td className="px-2 py-2">
+                  <Badge tone={r.hit ? "good" : "muted"}>{r.hit ? "的中" : "不的中"}</Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+// 補強根拠バージョン (v1/v2) の見出し。計測をバージョン毎に分けて表示する (v2が上・v1が下)。
+function VersionHeading({ version }: { version: "v1" | "v2" }) {
+  const desc = version === "v2" ? "補強根拠 無制限 (現行)" : "補強根拠 3件まで (旧)";
+  const current = version === "v2";
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-3">
+      <span
+        className={`px-2 py-0.5 rounded text-xs font-black tnum border ${
+          current
+            ? "bg-(--color-accent)/15 text-(--color-accent) border-(--color-accent)/40"
+            : "bg-(--color-surface-2) text-(--color-muted) border-(--color-line)"
+        }`}
+      >
+        {version}
+      </span>
+      <span className="text-sm font-bold">Claude 指数 {version} の計測</span>
+      <span className="text-[11px] text-(--color-muted)">— {desc}</span>
+    </div>
+  );
+}
+
 // API 未接続時のエラーカード (silent null の代わりに明示表示)
 function ApiDownCard() {
   return (
@@ -239,21 +331,52 @@ function ApiDownCard() {
   );
 }
 
+// 1 バージョン分の計測セクション (BOX 収支 + 戦略くらべ + per-race 明細)。
+function VersionMeasurementSection({
+  version,
+  box,
+  strategies,
+  nowMs,
+}: {
+  version: "v1" | "v2";
+  box: ShobuPnl | null;
+  strategies: StrategiesPnl | null;
+  nowMs: number;
+}) {
+  return (
+    <>
+      <VersionHeading version={version} />
+      {box ? (
+        <IndexedPnlCard data={box} nowMs={nowMs} />
+      ) : (
+        <Card>
+          <div className="text-xs text-(--color-muted)">BOX 収支を取得できませんでした。</div>
+        </Card>
+      )}
+      {strategies && <StrategiesPnlCard data={strategies} nowMs={nowMs} />}
+      {box && <BoxDetailTable rows={box.races_detail} />}
+    </>
+  );
+}
+
 export default async function DashboardPage() {
-  const [indexed, strategies] = await Promise.all([
-    api.indexedPnl().catch(() => null),
-    api.indexedStrategiesPnl().catch(() => null),
+  // 計測を補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30: v2 が上・v1 が下)。
+  const [boxV2, boxV1, stratV2, stratV1] = await Promise.all([
+    api.indexedPnl(100, "v2").catch(() => null),
+    api.indexedPnl(100, "v1").catch(() => null),
+    api.indexedStrategiesPnl(100, "v2").catch(() => null),
+    api.indexedStrategiesPnl(100, "v1").catch(() => null),
   ]);
 
-  // API 未接続: silent null ではなく明示のエラーカードを出す。
-  if (!indexed) {
+  // API 未接続: どのバージョンも取れなければ明示のエラーカードを出す。
+  if (!boxV2 && !boxV1) {
     return (
       <Page>
         <AutoRefresh seconds={15} />
         <PageHeader
           eyebrow="Keiba EV Terminal"
           title="ダッシュボード"
-          subtitle="shobu 評価レース全体の仮想収支 (上位N頭3連単BOX) を俯瞰。15 秒おきに自動更新。"
+          subtitle="shobu 評価レースの仮想収支を Claude 指数バージョン毎に俯瞰。15 秒おきに自動更新。"
         />
         <ApiDownCard />
       </Page>
@@ -263,12 +386,6 @@ export default async function DashboardPage() {
   // RSC はリクエスト毎に 1 回だけ描画されるので、リクエスト時刻の取得は安全。
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
-  const hasRaces = indexed.races > 0;
-
-  // 明細は最新が上 (saved_at / date 降順) — shobu 評価レース全体の per-race。
-  const detailRows: ShobuPnlRace[] = [...indexed.races_detail].sort((a, b) =>
-    (b.saved_at ?? b.date ?? "").localeCompare(a.saved_at ?? a.date ?? ""),
-  );
 
   return (
     <Page>
@@ -276,81 +393,14 @@ export default async function DashboardPage() {
       <PageHeader
         eyebrow="Keiba EV Terminal"
         title="ダッシュボード"
-        subtitle="shobu 評価レース全体の仮想収支 (上位N頭3連単BOX) を俯瞰。15 秒おきに自動更新。"
+        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v2=補強根拠無制限・現行 / v1=3件上限・旧)。15 秒おきに自動更新。"
       />
 
-      {/* ====== 主役: shobu 評価レース全体の仮想収支 (Claude 指数上位N頭3連単BOX) ====== */}
-      <IndexedPnlCard data={indexed} nowMs={nowMs} />
+      {/* ====== v2 (現行・補強根拠無制限) の計測を上に ====== */}
+      <VersionMeasurementSection version="v2" box={boxV2} strategies={stratV2} nowMs={nowMs} />
 
-      {/* ====== Claude 指数 単純戦略くらべ (単勝/複勝/馬連/単複) ====== */}
-      {strategies && <StrategiesPnlCard data={strategies} nowMs={nowMs} />}
-
-      {/* ====== per-race 明細 (shobu 評価レース全体) ====== */}
-      {hasRaces ? (
-        <Card>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs table-zebra">
-              <thead>
-                <tr className="text-left text-[10px] uppercase tracking-wider text-(--color-muted) border-b border-(--color-line)">
-                  <th className="px-2 py-2 font-bold">レース</th>
-                  <th className="px-2 py-2 font-bold">日付</th>
-                  <th className="px-2 py-2 font-bold">BOX</th>
-                  <th className="px-2 py-2 font-bold">上位</th>
-                  <th className="px-2 py-2 font-bold">着順</th>
-                  <th className="px-2 py-2 font-bold text-right">払戻</th>
-                  <th className="px-2 py-2 font-bold">結果</th>
-                </tr>
-              </thead>
-              <tbody>
-                {detailRows.map((r) => (
-                  <tr
-                    key={r.race_id}
-                    className={`border-b border-(--color-line-soft) ${
-                      r.hit ? "bg-emerald-500/10" : ""
-                    }`}
-                  >
-                    <td className="px-2 py-2 whitespace-nowrap">
-                      <Link
-                        href={`/predictions/${r.race_id}`}
-                        className="font-bold hover:text-(--color-accent) transition-colors"
-                      >
-                        {r.venue}
-                        {r.race_no != null ? `${r.race_no}R` : ""}
-                      </Link>
-                    </td>
-                    <td className="px-2 py-2 text-(--color-muted) tnum whitespace-nowrap">
-                      {r.date}
-                    </td>
-                    <td className="px-2 py-2 text-(--color-muted) whitespace-nowrap">
-                      {r.box}頭BOX
-                    </td>
-                    <td className="px-2 py-2 mono whitespace-nowrap">
-                      {r.top_horses.join(",")}
-                    </td>
-                    <td className="px-2 py-2 mono tnum whitespace-nowrap">
-                      {r.finish.length > 0 ? r.finish.join("-") : "—"}
-                    </td>
-                    <td className="px-2 py-2 mono tnum text-right whitespace-nowrap">
-                      {r.hit ? fmtYen(r.payout) : ""}
-                    </td>
-                    <td className="px-2 py-2">
-                      <Badge tone={r.hit ? "good" : "muted"}>
-                        {r.hit ? "的中" : "不的中"}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      ) : (
-        <Card>
-          <div className="text-xs text-(--color-muted)">
-            shobu 評価レースのデータがありません (今日の勝負レースをスキャンしてください)。
-          </div>
-        </Card>
-      )}
+      {/* ====== v1 (旧・補強根拠3件上限) の計測を下に ====== */}
+      <VersionMeasurementSection version="v1" box={boxV1} strategies={stratV1} nowMs={nowMs} />
     </Page>
   );
 }

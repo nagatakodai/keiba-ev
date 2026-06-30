@@ -555,33 +555,39 @@ def api_shobu_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
 
 
 @app.get("/api/shobu/indexed-pnl")
-def api_shobu_indexed_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, Any]:
+def api_shobu_indexed_pnl(point_cost: int = 100, box_size: int = 5,
+                          version: str | None = None) -> dict[str, Any]:
     """**全 Claude 指数レース** (recommended に限らない) の仮想収支 (ユーザ指示 2026-06-28)。
 
     全出走馬に Claude 指数が付いて結果が確定したレースを上位 box_size 頭の3連単 BOX で集計。
     勝負レース(推奨)収支 (/api/shobu/pnl) とは別カードでダッシュボードに併記する全数指標。
+    `version` ("v1"/"v2") で補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30)。
     """
-    return compute_indexed_pnl(point_cost=point_cost, box_size=box_size)
+    return compute_indexed_pnl(point_cost=point_cost, box_size=box_size, version=version)
 
 
 @app.get("/api/shobu/strategies-pnl")
-def api_shobu_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+def api_shobu_strategies_pnl(point_cost: int = 100,
+                             version: str | None = None) -> dict[str, Any]:
     """勝負レース (推奨) の **Claude 指数 単純戦略くらべ** 仮想収支 (ユーザ指示 2026-06-30)。
 
-    各レースで win1(1位単勝) / place23(2,3位複勝) / quinella12(1-2位馬連) / winplace(単複) を
-    仮定し、final_odds の払戻で戦略ごとに収支集計。各戦略の的中率/ROI/収支を並べて返す。
+    各レースで win1(1位単勝) / place1,2,3(複勝) / quinella12(馬連) / exacta12(馬単) /
+    trifecta123 / trio123 / trio1234box / winplace(単複) を仮定し戦略ごとに収支集計。
+    `version` ("v1"/"v2") で補強根拠バージョン毎に分離。
     """
-    return compute_shobu_strategies_pnl(point_cost=point_cost)
+    return compute_shobu_strategies_pnl(point_cost=point_cost, version=version)
 
 
 @app.get("/api/shobu/indexed-strategies-pnl")
-def api_shobu_indexed_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+def api_shobu_indexed_strategies_pnl(point_cost: int = 100,
+                                     version: str | None = None) -> dict[str, Any]:
     """**shobu 評価レース全体** (recommended に限らない) の Claude 指数 単純戦略くらべ 仮想収支。
 
     ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して過去分全て表示」。
     母集団は BOX の indexed-pnl と揃える (shobu 評価レース全体) → ダッシュボードに併記。
+    `version` ("v1"/"v2") で補強根拠バージョン毎に分離 (v2が上・v1が下)。
     """
-    return compute_indexed_strategies_pnl(point_cost=point_cost)
+    return compute_indexed_strategies_pnl(point_cost=point_cost, version=version)
 
 
 @app.get("/api/results/auto")
