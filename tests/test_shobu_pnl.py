@@ -18,6 +18,7 @@ import api.store as store
 def _snap(n_runners: int, idx: dict[int, float], *,
           win_odds: dict[int, float] | None = None,
           place_odds: dict[int, float] | None = None,
+          combo_odds: dict[str, dict[tuple, float]] | None = None,
           index_version: str | None = None) -> dict:
     """全馬に Claude 指数を付けた snapshot (index_compare 形式)。
 
@@ -39,6 +40,9 @@ def _snap(n_runners: int, idx: dict[int, float], *,
         bt["win"] = [{"key": [n], "odds": o} for n, o in win_odds.items()]
     if place_odds is not None:
         bt["place"] = [{"key": [n], "odds": o} for n, o in place_odds.items()]
+    if combo_odds is not None:   # {bet_type: {(a,b,...): odds}} — 全券種フィルタ用
+        for btype, m in combo_odds.items():
+            bt[btype] = [{"key": list(k), "odds": o} for k, o in m.items()]
     if bt:
         snap["bet_tables"] = bt
     return snap
@@ -167,6 +171,7 @@ def test_strategies_full_hit_payout(dirs):
         [1, 2, 3], 12000,
         {"win:1": 3.0, "place:1": 1.1, "place:2": 1.5, "place:3": 2.0,
          "quinella:1-2": 4.0, "exacta:1-2": 6.0,
+         "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5,
          "trifecta:1-2-3": 120.0, "trio:1-2-3": 18.0})), encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
@@ -192,7 +197,8 @@ def test_strategies_quinella_needs_both_in_top2(dirs):
     # 着順 1-5-2 → #1は1着だが #2(=馬番2)は3着 → 馬連{1,2}は上位2着{1,5}に収まらない=外れ。
     # 馬単1→2 も2着が馬番5なので外れ。#1 は1着で複勝圏 → place1 的中 (place:1 が要る)。
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
-        [1, 5, 2], 8000, {"win:1": 2.0, "place:1": 1.2, "place:2": 1.4, "place:3": 9.9})),
+        [1, 5, 2], 8000, {"win:1": 2.0, "place:1": 1.2, "place:2": 1.4, "place:3": 9.9,
+                          "wide:1-2": 3.0})),   # ワイド{1,2} は上位3着 {1,5,2} に収まり的中
         encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
@@ -214,7 +220,8 @@ def test_strategies_headcount_top2_only(dirs):
     # 上位3着 {2,3,4} は top4={1,2,3,4} に収まる → 3連複BOX のみ的中 (trio:2-3-4 が要る)。
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
         [4, 2, 3], 9999,
-        {"win:1": 5.0, "place:2": 1.8, "place:3": 2.5, "trio:2-3-4": 30.0})), encoding="utf-8")
+        {"win:1": 5.0, "place:2": 1.8, "place:3": 2.5, "trio:2-3-4": 30.0,
+         "wide:2-3": 4.0})), encoding="utf-8")   # ワイド{2,3} は上位3着 {4,2,3} に収まり的中
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
     assert r["place_cutoff"] == 2
@@ -234,6 +241,7 @@ def test_strategies_no_place_when_le4(dirs):
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
         [1, 2, 3], 5000,
         {"win:1": 2.0, "quinella:1-2": 3.0, "exacta:1-2": 4.0,
+         "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5,
          "trifecta:1-2-3": 50.0, "trio:1-2-3": 10.0})),
         encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
@@ -280,6 +288,7 @@ def test_strategies_trifecta_trio_box_full_hit(dirs):
         [1, 2, 3], 9999,
         {"win:1": 2.0, "place:1": 1.1, "place:2": 1.2, "place:3": 1.3,
          "quinella:1-2": 3.0, "exacta:1-2": 5.0,
+         "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5,
          "trifecta:1-2-3": 100.0, "trio:1-2-3": 20.0})), encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
@@ -299,7 +308,8 @@ def test_strategies_trio_box_within_top4_only(dirs):
     # 上位3着 {1,2,4} は {1,2,3} と不一致 → trio123 外れ。だが {1,2,3,4} には収まる → BOX 的中。
     # #1(=馬番1) は3着で複勝圏 → place1 的中 (place:1 が要る)。馬単1→2 は1着が馬番4で外れ。
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
-        [4, 2, 1], 9999, {"place:1": 2.2, "place:2": 1.4, "trio:1-2-4": 15.0})), encoding="utf-8")
+        [4, 2, 1], 9999, {"place:1": 2.2, "place:2": 1.4, "trio:1-2-4": 15.0,
+                          "wide:1-2": 2.6})), encoding="utf-8")   # ワイド{1,2} は {4,2,1} に収まり的中
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
     assert r["per"]["trifecta123"]["hit"] is False            # 順序も集合も違う
@@ -310,6 +320,41 @@ def test_strategies_trio_box_within_top4_only(dirs):
     assert r["per"]["exacta12"]["hit"] is False               # 馬単も外れ (1着が馬番4)
     assert r["per"]["place1"]["hits"] == 1                    # #1 は3着 → 複勝圏
     assert r["per"]["place2"]["hits"] == 1 and r["per"]["place3"]["hits"] == 0
+
+
+def test_strategies_wide(dirs):
+    """ワイド (指数1-2位) と ワイドBOX (1-2-3) — 両馬が上位3着で的中。ユーザ指示 2026-06-30。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
+    (pr / "rec-1.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
+    # 着順 1-3-5: 上位3着 {1,3,5}。wide12{1,2}は2が圏外で外れ。
+    # wideBOX: (1,2)外れ / (1,3){1,3}⊆{1,3,5}的中 / (2,3)外れ。→ 1点的中。
+    # #3(=馬番3) は2着で複勝圏 → place3 的中 (place:3 が要る)。
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [1, 3, 5], 9999, {"win:1": 2.0, "place:1": 1.5, "place:3": 1.8, "wide:1-3": 2.2})),
+        encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    r = d["races_detail"][0]
+    assert r["per"]["wide12"]["hit"] is False                 # {1,2}: 2 は圏外
+    box = r["per"]["wide123box"]
+    assert box["bets"] == 3 and box["hits"] == 1 and box["payout"] == 220   # (1,3) のみ的中
+    assert _strat(d, "wide123box")["races_hit"] == 1          # 母数はレース数
+
+
+def test_strategies_all_bets_skip_low_odds(dirs):
+    """**全券種** で最終オッズ ≤1.1 なら買わない (馬連の例)。ユーザ指示 2026-06-30。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
+    # 馬連 {1,2} のスナップ最終オッズ 1.05 (≤1.1) → quinella12 は買わない。
+    (pr / "rec-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, combo_odds={"quinella": {(1, 2): 1.05}})), encoding="utf-8")
+    # 着順 6-7-8: 全戦略外れ (余計なオッズ不要)。
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo([6, 7, 8], 9999, {})), encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    assert _strat(d, "quinella12")["races"] == 0    # 馬連1.05 ≤1.1 → 買わない
+    # ワイド/単勝はスナップに ≤1.1 オッズが無い → 買う (races=1, ただし着順外れ)
+    assert _strat(d, "wide12")["races"] == 1
+    assert _strat(d, "win1")["races"] == 1
 
 
 def test_strategies_win_place_skip_low_odds(dirs):
@@ -341,7 +386,9 @@ def test_strategies_hit_rate_denominator_is_races(dirs):
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
         [1, 2, 3], 9999,
         {"win:1": 2.0, "place:1": 3.0, "place:2": 1.5, "place:3": 2.0,
-         "quinella:1-2": 3.0, "exacta:1-2": 4.0, "trifecta:1-2-3": 50.0, "trio:1-2-3": 10.0})),
+         "quinella:1-2": 3.0, "exacta:1-2": 4.0,
+         "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5,
+         "trifecta:1-2-3": 50.0, "trio:1-2-3": 10.0})),
         encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     box = _strat(d, "trio1234box")
@@ -440,6 +487,7 @@ def test_strategies_indexed_is_superset(dirs):
             [1, 2, 3], 5000,
         {"win:1": 2.0, "place:1": 1.1, "place:2": 1.2, "place:3": 1.3,
          "quinella:1-2": 3.0, "exacta:1-2": 4.0,
+         "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5,
          "trifecta:1-2-3": 60.0, "trio:1-2-3": 12.0})), encoding="utf-8")
     # archive: shobu に無い → 含めない
     (pr / "arch.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
@@ -447,6 +495,7 @@ def test_strategies_indexed_is_superset(dirs):
         [1, 2, 3], 5000,
         {"win:1": 2.0, "place:1": 1.1, "place:2": 1.2, "place:3": 1.3,
          "quinella:1-2": 3.0, "exacta:1-2": 4.0,
+         "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5,
          "trifecta:1-2-3": 60.0, "trio:1-2-3": 12.0})), encoding="utf-8")
     rec = store.compute_shobu_strategies_pnl()
     allr = store.compute_indexed_strategies_pnl()

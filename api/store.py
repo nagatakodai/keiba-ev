@@ -955,27 +955,36 @@ def _place_cutoff(n_runners: int | None) -> int:
     return 3
 
 
-def _snap_leg_odds(snap: dict[str, Any], bet_type: str) -> dict[int, float]:
-    """snapshot の bet_tables から **全馬の馬番→最終オッズ** を取り出す (bet_type="win"/"place")。
+# 順不同券種 (組番を昇順正規化して照合する)。馬単/3連単は着順そのまま。
+_UNORDERED_BETS = {"quinella", "wide", "trio"}
 
-    bet_tables は締切直前 (bet 段) のフレッシュオッズを全馬分持つ (実測 win 109/109・place 107/109)
-    ので、「最終オッズが ≤1.1 なら買わない」等の **着順非依存 (買う前) のフィルタ判定** に使える
-    (result の final_odds は in-money 馬のオッズしか無く着順依存になるため不適)。
+
+def _snap_combo_odds(snap: dict[str, Any], bet_type: str) -> dict[tuple[int, ...], float]:
+    """snapshot の bet_tables から **組番(tuple)→最終オッズ** を取り出す (全券種)。
+
+    bet_tables は締切直前 (bet 段) のフレッシュオッズを持つので、「最終オッズが ≤1.1 なら
+    買わない」等の **着順非依存 (買う前) のフィルタ判定** に使える (result の final_odds は
+    in-money 組のオッズしか無く着順依存になるため不適)。順不同券種 (馬連/ワイド/3連複) は
+    組番を昇順正規化。単勝/複勝は全馬・組合せ券種は経路により疎 (netkeiba 経路は pair 系が空)
+    なので、組番が表に無ければフィルタ no-op (= オッズ不明なら買う)。
     """
-    out: dict[int, float] = {}
+    out: dict[tuple[int, ...], float] = {}
     for row in ((snap.get("bet_tables") or {}).get(bet_type) or []):
         key = row.get("key") or []
         odds = row.get("odds")
-        if len(key) == 1 and odds:
-            try:
-                out[int(key[0])] = float(odds)
-            except (TypeError, ValueError):
-                continue
+        if not key or not odds:
+            continue
+        try:
+            nums = [int(x) for x in key]
+            k = tuple(sorted(nums)) if bet_type in _UNORDERED_BETS else tuple(nums)
+            out[k] = float(odds)
+        except (TypeError, ValueError):
+            continue
     return out
 
 
-# 単勝/複勝は最終オッズが ≤ この値なら買わない (ユーザ指示 2026-06-30: 旨味の無い大本命を除外)。
-_MIN_WIN_PLACE_ODDS = 1.1
+# **全券種** で最終オッズが ≤ この値なら買わない (ユーザ指示 2026-06-30: 旨味の無い大本命を除外)。
+_MIN_ODDS = 1.1
 # 戦略メタ (表示順・ラベル・代表券種)。races_detail / strategies のキー順もこれに従う。
 # 複勝は 1/2/3 位を分けて計測 (ユーザ指示 2026-06-30)。
 # (単複 winplace は 2026-06-30 ユーザ指示で全表示から撤去)。
@@ -985,10 +994,12 @@ STRATEGY_DEFS = [
     ("place2", "複勝 (指数2位)", "place"),
     ("place3", "複勝 (指数3位)", "place"),
     ("quinella12", "馬連 (指数1-2位)", "quinella"),
+    ("wide12", "ワイド (指数1-2位)", "wide"),
     ("exacta12", "馬単 (指数1→2位)", "exacta"),
     ("trifecta123", "3連単 (指数1→2→3)", "trifecta"),
     ("trio123", "3連複 (指数1-2-3)", "trio"),
     ("trio1234box", "3連複BOX (指数1-2-3-4)", "trio"),
+    ("wide123box", "ワイドBOX (指数1-2-3)", "wide"),
 ]
 
 
@@ -1025,9 +1036,9 @@ def _strategy_race_legs(
     placed_set = set(finish[:cutoff]) if cutoff else set()
 
     fo = result.get("final_odds") or {}
-    # 全馬の最終オッズ (締切直前スナップショット)。買う前のフィルタ判定に使う。
-    snap_win = _snap_leg_odds(snap, "win")
-    snap_place = _snap_leg_odds(snap, "place")
+    # 全券種の最終オッズ (締切直前スナップショット, 組番→オッズ)。買う前の ≤1.1 フィルタに使う。
+    snap_odds = {bt: _snap_combo_odds(snap, bt)
+                 for bt in ("win", "place", "quinella", "wide", "exacta", "trio", "trifecta")}
 
     def _odds(key: str) -> float | None:
         v = fo.get(key)
@@ -1039,12 +1050,17 @@ def _strategy_race_legs(
     top2_set = set(finish[:2])     # 馬連=上位2着 (頭数ルール非依存)
     missing_odds = False
 
-    def _leg(bet_type: str, key_nums: list[int], hit: bool, odds_key: str,
-             *, bet: bool = True) -> dict[str, Any]:
-        """1 脚 = {bet_type,key,hit,bet,stake,payout}。`bet=False` は「買わなかった」脚
-        (フィルタで除外、stake/payout=0・集計対象外)。**実際に買った的中脚**のオッズ欠落のみ
-        missing_odds を立てる (呼び元が no_odds でレース全体を分母外にする)。"""
+    def _leg(bet_type: str, key_nums: list[int], hit: bool, odds_key: str) -> dict[str, Any]:
+        """1 脚 = {bet_type,key,hit,bet,stake,payout}。
+
+        **全券種で最終オッズ ≤ _MIN_ODDS(1.1) なら買わない** (bet=False・ユーザ指示 2026-06-30)。
+        判定はスナップショットの bet_tables (買う前の組番別オッズ)。組番が表に無ければ買う
+        (オッズ不明)。`bet=False` 脚は stake/payout=0・集計対象外。**実際に買った的中脚**の
+        払戻 (result final_odds) 欠落のみ missing_odds を立てる (呼び元が no_odds でレース除外)。"""
         nonlocal missing_odds
+        norm = (tuple(sorted(key_nums)) if bet_type in _UNORDERED_BETS else tuple(key_nums))
+        pre = snap_odds.get(bet_type, {}).get(norm)
+        bet = not (pre is not None and pre <= _MIN_ODDS)
         pay = 0
         if hit and bet:
             o = _odds(odds_key)
@@ -1055,21 +1071,15 @@ def _strategy_race_legs(
         return {"bet_type": bet_type, "key": key_nums, "hit": hit, "bet": bet,
                 "stake": point_cost if bet else 0, "payout": pay}
 
-    def _wp_bet(num: int, odds_map: dict[int, float]) -> bool:
-        """単勝/複勝: 最終オッズが ≤ _MIN_WIN_PLACE_ODDS なら買わない (オッズ不明なら買う)。"""
-        o = odds_map.get(num)
-        return not (o is not None and o <= _MIN_WIN_PLACE_ODDS)
-
-    # 単勝 (1位) — 頭数に関係なく常に発売。最終オッズ ≤1.1 は買わない。
-    win_leg = _leg("win", [top1], top1 == finish[0], f"win:{top1}",
-                   bet=_wp_bet(top1, snap_win))
-    # 複勝 (1位 / 2位 / 3位 を分けて計測) — 複勝が発売される頭数 + 最終オッズ >1.1 のときだけ買う。
-    place_leg_1 = (_leg("place", [top1], top1 in placed_set, f"place:{top1}",
-                        bet=_wp_bet(top1, snap_place)) if cutoff > 0 else None)
-    place_leg_2 = (_leg("place", [top2], top2 in placed_set, f"place:{top2}",
-                        bet=_wp_bet(top2, snap_place)) if cutoff > 0 else None)
-    place_leg_3 = (_leg("place", [top3], top3 in placed_set, f"place:{top3}",
-                        bet=_wp_bet(top3, snap_place)) if cutoff > 0 else None)
+    # 単勝 (1位) — 頭数に関係なく常に発売。最終オッズ ≤1.1 は買わない (全券種共通フィルタ)。
+    win_leg = _leg("win", [top1], top1 == finish[0], f"win:{top1}")
+    # 複勝 (1位 / 2位 / 3位 を分けて計測) — 複勝が発売される頭数のときだけ。
+    place_leg_1 = (_leg("place", [top1], top1 in placed_set, f"place:{top1}")
+                   if cutoff > 0 else None)
+    place_leg_2 = (_leg("place", [top2], top2 in placed_set, f"place:{top2}")
+                   if cutoff > 0 else None)
+    place_leg_3 = (_leg("place", [top3], top3 in placed_set, f"place:{top3}")
+                   if cutoff > 0 else None)
     # 馬連 (1-2位) — 上位2着に両馬が入れば的中。key は昇順 (final_odds の規約に合わせる)。
     qa, qb = sorted((top1, top2))
     quin_leg = _leg("quinella", [qa, qb], {top1, top2} <= top2_set, f"quinella:{qa}-{qb}")
@@ -1093,6 +1103,14 @@ def _strategy_race_legs(
             cs = sorted(combo)
             box_legs.append(_leg("trio", cs, set(combo) == fin3,
                                  f"trio:{cs[0]}-{cs[1]}-{cs[2]}"))
+    # ワイド (1-2位) — 両馬とも上位3着なら的中 (順不同)。key 昇順 (final_odds 規約)。
+    wa, wb = sorted((top1, top2))
+    wide12_leg = _leg("wide", [wa, wb], {top1, top2} <= fin3, f"wide:{wa}-{wb}")
+    # ワイドBOX (1-2-3) — C(3,2)=3 点 (各ペアが両馬上位3着で的中。複数同時的中あり)。
+    wide_box_legs: list[dict[str, Any]] = []
+    for a, b in combinations((top1, top2, top3), 2):
+        pa, pb = sorted((a, b))
+        wide_box_legs.append(_leg("wide", [pa, pb], {a, b} <= fin3, f"wide:{pa}-{pb}"))
 
     if missing_odds:
         return None, "no_odds"     # 実際に買った的中脚の払戻不明 → 評価不能
@@ -1113,10 +1131,12 @@ def _strategy_race_legs(
         "place2": _agg([place_leg_2] if place_leg_2 else []),
         "place3": _agg([place_leg_3] if place_leg_3 else []),
         "quinella12": _agg([quin_leg]),
+        "wide12": _agg([wide12_leg]),
         "exacta12": _agg([exacta_leg]),
         "trifecta123": _agg([trifecta_leg]),
         "trio123": _agg([trio_leg]),
         "trio1234box": _agg(box_legs),
+        "wide123box": _agg(wide_box_legs),
     }
     detail = {
         "race_id": meta.get("race_id"),

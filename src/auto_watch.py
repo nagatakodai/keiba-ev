@@ -359,6 +359,7 @@ def discover_today_races(today: str) -> list[dict]:
     (締切前 N 分のオッズ polling) の共通 discovery。
     """
     races: list[dict] = []
+    oddspark_venues: set[str] = set()
     # NAR 公式 (oddspark の当日 race list) で discovery。netkeiba race_list は呼ばない。
     try:
         ops = fetch_race_list_oddspark(today)
@@ -372,8 +373,29 @@ def discover_today_races(today: str) -> list[dict]:
                 "race_no": a["race_no"],
                 "source": "oddspark",
             })
+            oddspark_venues.add(a["venue"])
     except Exception as ex:  # noqa: BLE001
         console.print(f"[red]oddspark NAR discovery 失敗: {ex}[/red]")
+    # oddspark が売らない NAR 場 (南関東=大井/船橋/川崎/浦和・門別 等) を keiba.go.jp (NAR 公式) で補完
+    # (ユーザ指示 2026-06-30)。oddspark で取れた場は skip して無駄な GET / 重複を避ける。
+    try:
+        from .scrape_keibago import fetch_race_list_keibago
+        kgs = fetch_race_list_keibago(today, skip_venues=oddspark_venues)
+        if kgs:
+            vens = sorted({a["venue"] for a in kgs})
+            console.print(f"[cyan]keiba.go.jp NAR discovery (oddspark外): {len(kgs)} races "
+                          f"{vens}[/cyan]")
+        for a in kgs:
+            races.append({
+                "race_id": a["netkeiba_race_id"],
+                "url": a["url"],
+                "start_at": a["start_at"],
+                "venue": a["venue"],
+                "race_no": a["race_no"],
+                "source": "keibago",
+            })
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[red]keiba.go.jp NAR discovery 失敗: {ex}[/red]")
     # JRA discovery: 競馬ブック (発走時刻ソース) × JRA 公式 discover (netkeiba_rid ソース) を
     # (venue_name, race_no) で join。発走時刻と netkeiba_rid の両方が揃った race のみ採用。
     try:

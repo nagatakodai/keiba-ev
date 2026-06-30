@@ -199,9 +199,9 @@ function StrategiesPnlCard({
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
           <span>
             ※ 各脚 ¥{data.point_cost}: 単勝=指数1位 / 複勝=指数1位・2位・3位 (頭数ルール: 8頭以上=3着・5-7頭=2着・4頭以下=無)
-            / 馬連=指数1-2位 (上位2着) / 馬単=指数1→2位 (着順一致) / 3連単=指数1→2→3 (着順一致)
-            / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点)。
-            <strong>単勝・複勝は最終オッズ ≤1.1 のとき買い見送り</strong>。
+            / 馬連=指数1-2位 (上位2着) / ワイド=指数1-2位・ワイドBOX=指数1-2-3 (3点) (両馬が上位3着)
+            / 馬単=指数1→2位 (着順一致) / 3連単=指数1→2→3 / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点)。
+            <strong>全券種とも最終オッズ ≤1.1 のとき買い見送り</strong>。
             的中率の母数はレース数 (的中R/対象R) ・ 対象={data.races}R 中の賭けたレース数
           </span>
           {data.skipped_no_odds > 0 && (

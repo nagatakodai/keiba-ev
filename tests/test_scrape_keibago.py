@@ -298,3 +298,36 @@ def test_time_sec_and_date_key():
 def test_parse_wide_always_lower_bound_even_if_reversed():
     """ワイドは max が先に来ても常に下限を採用 (順序非依存)。"""
     assert kg.parse_wide("<td>1-2</td><td>7.2 - 5.0</td>")[0].odds == 5.0
+
+
+def test_fetch_race_list_keibago_discovers_nankan(monkeypatch):
+    """大井 (南関東・oddspark 非対応) を TodayRaceInfoTop + RaceList から発見し netkeiba_rid を構築。
+
+    oddspark が売らない場 (南関東/門別) を keiba.go.jp NAR 公式で補完する discovery
+    (ユーザ指示 2026-06-30) の純パーステスト (ネット不要)。
+    """
+    top = (
+        '<a href="/KeibaWeb/TodayRaceInfo/RaceList?k_raceDate=2026/06/30&amp;k_babaCode=20">o</a>'
+        '<td><a href="/x?k_babaCode=20">大井</a></td>'
+    )
+    racelist = (
+        '14:15 <a href="/y?k_raceNo=1">1R</a>'
+        '14:52 <a href="/y?k_raceNo=2">2R</a>'
+        '15:25 <a href="/y?k_raceNo=3">3R</a>'
+    )
+
+    def fake_get(url: str) -> str:
+        return racelist if "RaceList" in url else top
+
+    monkeypatch.setattr(kg, "_get", fake_get)
+    out = kg.fetch_race_list_keibago("20260630")
+    assert len(out) == 3
+    r1 = out[0]
+    assert r1["venue"] == "大井" and r1["race_no"] == 1
+    assert r1["netkeiba_race_id"] == "202644063001"   # 2026 + 44(大井) + 0630 + 01
+    assert r1["source"] == "keibago"
+    # 発走時刻 (14:15) が start_at に入る
+    import datetime as _dt
+    assert _dt.datetime.fromtimestamp(r1["start_at"]).strftime("%H:%M") == "14:15"
+    # skip_venues で oddspark 取得済の場は引かない
+    assert kg.fetch_race_list_keibago("20260630", skip_venues={"大井"}) == []

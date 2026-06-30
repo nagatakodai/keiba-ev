@@ -378,6 +378,81 @@ def find_keibago_race(netkeiba_rid: str) -> KeibagoLoc | None:
     return KeibagoLoc(race_date=race_date, race_no=race_no, baba_code=baba, venue=venue)
 
 
+def fetch_race_list_keibago(yyyymmdd: str | None = None,
+                            skip_venues: set[str] | None = None) -> list[dict]:
+    """keiba.go.jp (地方競馬公式) の当日 NAR race list (全場・oddspark 非対応の南関東/門別も含む)。
+
+    oddspark は南関東 (大井/船橋/川崎/浦和) 等を売らないため discover から漏れる。keiba.go.jp の
+    TodayRaceInfoTop は全 NAR 場を載せるので、ここから各場の RaceList を引いて race_no + 発走時刻を
+    取得し netkeiba_rid を構築する。`skip_venues` (oddspark で取得済の場名) は RaceList を引かずに
+    飛ばす (無駄な GET と重複を避ける)。返り値は fetch_race_list_oddspark と同形の dict list。
+    """
+    date = yyyymmdd or datetime.now().strftime("%Y%m%d")
+    if len(date) != 8 or not date.isdigit():
+        return []
+    yyyy, mm, dd = int(date[:4]), int(date[4:6]), int(date[6:8])
+    k_date = f"{date[:4]}/{date[4:6]}/{date[6:8]}"
+    skip = skip_venues or set()
+    try:
+        top = _get(f"{_BASE}/TodayRaceInfoTop")
+    except Exception:  # noqa: BLE001
+        return []
+    name_to_code = {v: k for k, v in VENUE_CODE.items()}   # 場名 → netkeiba 場コード
+
+    # TodayRaceInfoTop の RaceList リンクから当日開催の babaCode を集める。
+    baba_codes: list[str] = []
+    for m in re.finditer(r"RaceList\?k_raceDate=[^\"'&]+(?:&amp;|&)k_babaCode=(\d+)", top):
+        if m.group(1) not in baba_codes:
+            baba_codes.append(m.group(1))
+
+    def _venue_of(baba: str) -> str | None:
+        # babaCode 近傍の場名を VENUE_CODE 値 (先頭2文字一致) で解決。
+        for mm2 in re.finditer(rf"k_babaCode={baba}[^>]*>\s*([^<\s][^<]{{0,8}})", top):
+            nm = _html.unescape(mm2.group(1)).strip()
+            for vname in name_to_code:
+                if nm and nm[:2] == vname[:2]:
+                    return vname
+        return None
+
+    out: list[dict] = []
+    for baba in baba_codes:
+        venue = _venue_of(baba)
+        if not venue or venue in skip:
+            continue
+        code = name_to_code[venue]
+        try:
+            rl = _get(f"{_BASE}/RaceList?k_raceDate={k_date}&k_babaCode={baba}")
+        except Exception:  # noqa: BLE001
+            continue
+        # RaceList は各 race で「発走時刻(HH:MM) → k_raceNo=N (リンク数本)」の順に並ぶ。
+        # 直前に見た時刻を、その後初出の race_no に紐付ける。
+        cur: tuple[int, int] | None = None
+        recorded: set[int] = set()
+        for tk in re.finditer(r"k_raceNo=(\d+)|(\d{1,2}):(\d{2})", rl):
+            if tk.group(2) is not None:
+                cur = (int(tk.group(2)), int(tk.group(3)))
+                continue
+            rn = int(tk.group(1))
+            if rn in recorded or cur is None:
+                continue
+            recorded.add(rn)
+            try:
+                start_at = int(datetime(yyyy, mm, dd, cur[0], cur[1]).timestamp())
+            except (ValueError, OSError):
+                continue
+            rid = f"{date[:4]}{code}{date[4:8]}{rn:02d}"   # YYYY+場+MMDD+RR
+            out.append({
+                "race_id": rid,
+                "netkeiba_race_id": rid,
+                "venue": venue,
+                "race_no": rn,
+                "start_at": start_at,
+                "url": f"https://nar.netkeiba.com/race/shutuba.html?race_id={rid}",
+                "source": "keibago",
+            })
+    return out
+
+
 def _odds_url(loc: KeibagoLoc, ep: str) -> str:
     return (f"{_BASE}/{ep}?k_raceDate={loc.race_date}"
             f"&k_raceNo={loc.race_no}&k_babaCode={loc.baba_code}")
