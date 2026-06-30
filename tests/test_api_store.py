@@ -40,6 +40,33 @@ def test_get_prediction_returns_none_for_bad_race_id():
     assert get_prediction("") is None
 
 
+def test_index_version_explicit_field_wins():
+    """明示の index_version があればそのまま返す (新 snapshot)。"""
+    from api.store import index_version_of
+    assert index_version_of({"index_version": "v2", "index_compare": [{"claude_index": 50}]}) == "v2"
+    assert index_version_of({"index_version": "v1"}) == "v1"
+
+
+def test_index_version_inferred_from_scored_date():
+    """旧 snapshot は採点日時で推定: 2026-06-28 以降=v2 / 以前=v1 (Claude 指数があるとき)。"""
+    from api.store import index_version_of
+    idx = {"index_compare": [{"number": 1, "claude_index": 80.0}]}
+    assert index_version_of({**idx, "llm_scored_at": "2026-06-28T10:00:00"}) == "v2"
+    assert index_version_of({**idx, "llm_scored_at": "2026-06-27T23:59:59"}) == "v1"
+    # llm_scored_at 欠落は saved_at で代替
+    assert index_version_of({**idx, "saved_at": "2026-06-29T12:00:00"}) == "v2"
+    assert index_version_of({**idx, "saved_at": "2026-06-01T12:00:00"}) == "v1"
+
+
+def test_index_version_none_without_index():
+    """Claude 指数が無い snapshot は None (バージョン対象外)。"""
+    from api.store import index_version_of
+    assert index_version_of({"saved_at": "2026-06-29T12:00:00"}) is None
+    assert index_version_of({"index_compare": [], "llm_win_index": {}}) is None
+    # llm_win_index があれば指数あり扱い → 日付推定
+    assert index_version_of({"llm_win_index": {"1": 70.0}, "saved_at": "2026-06-29"}) == "v2"
+
+
 def test_compute_calibration_runs_without_error():
     """compute_calibration がエラーなく終わる (smoke test)。
     現データ (data/predictions / data/results) と PLAN_KEY_FIELDS の構造

@@ -23,6 +23,14 @@ from .models import RaceData
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 補強根拠 (evidence) の方針バージョン (ユーザ指示 2026-06-30):
+#   v1 = 各馬の evidence (補強根拠) を **3 件まで** に制限していた頃 (〜2026-06-27)
+#   v2 = evidence の **上限を撤廃** (無制限・あればあるだけ) した現行 (2026-06-28 commit 78a248c〜)
+# snapshot 保存時に `index_version` を刻む。古い snapshot は scored 日付で推定する
+# (INDEX_V2_SINCE 以降に採点されたものは v2、それ以前は v1)。
+INDEX_VERSION = "v2"
+INDEX_V2_SINCE = "2026-06-28"
+
 
 def _start_kill_timer(proc: "subprocess.Popen", timeout: int):
     """timeout 秒で proc.kill() する watchdog を起動。

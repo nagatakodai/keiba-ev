@@ -179,6 +179,10 @@ function RaceRow({
           )}
           {/* score 段の暫定プレビュー (Claude 指数出力時に早出し)。bet 段で確定版に上書きされる。 */}
           {p.stage === "score" && <Badge tone="muted">暫定</Badge>}
+          {/* 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限)。ユーザ指示 2026-06-30 */}
+          {p.index_version && (
+            <Badge tone={p.index_version === "v2" ? "info" : "muted"}>{p.index_version}</Badge>
+          )}
         </Link>
         {/* **1 ラベル原則** (2026-05-29 ユーザ指示):
             優先順 hit (的中/見送り/不的中) > 補強済 > timing。

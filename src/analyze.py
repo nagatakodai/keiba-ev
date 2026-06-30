@@ -1083,6 +1083,8 @@ def _save_prediction_snapshot(
         "llm_blend": llm_blend,
         "llm_scored_at": llm_scored_at,
         "llm_fallback": llm_win_index is None,
+        # 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限・現行)。Claude 指数があるときのみ刻む。
+        "index_version": (llm_mod.INDEX_VERSION if llm_win_index is not None else None),
         # v2 速度図表 (実データ par+pace+trip) を LightGBM fundamental と並列合成した重みと、
         # 各馬の図表値 (best/wavg/pace/trip/n_runs)。speed_v2_blend=0/None なら未使用。
         "speed_v2_blend": speed_v2_blend,

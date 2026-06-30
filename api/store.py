@@ -42,6 +42,24 @@ def get_shobu_result(date: str | None = None) -> dict[str, Any] | None:
         return None
 
 
+def index_version_of(snap: dict[str, Any]) -> str | None:
+    """snapshot の補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限・現行)。
+
+    明示の `index_version` (2026-06-30〜 保存) があればそれを返す。無い旧 snapshot は
+    **採点日時で推定**: Claude 指数が無ければ None、INDEX_V2_SINCE (2026-06-28) 以降に
+    採点されたものは v2、それ以前は v1。
+    """
+    v = snap.get("index_version")
+    if v:
+        return v
+    has_index = bool(snap.get("index_compare") or snap.get("llm_win_index"))
+    if not has_index:
+        return None
+    from src.llm import INDEX_V2_SINCE
+    scored = snap.get("llm_scored_at") or snap.get("saved_at") or ""
+    return "v2" if scored >= INDEX_V2_SINCE else "v1"
+
+
 def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
     """predictions スナップショットのサマリー一覧。saved_at 降順。"""
     if not PRED_DIR.exists():
@@ -90,6 +108,8 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
                 "plan_f_count": len(d.get("plan_f_keys") or []),
                 "top_aptitude": top_aptitude,
                 "has_evidence": bool(d.get("evidence")),
+                # 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限)。指数なしは null。
+                "index_version": index_version_of(d),
                 "has_result": (RESULT_DIR / f"{path.stem}.json").exists(),
             }
         )
@@ -154,6 +174,8 @@ def get_prediction(race_id: str) -> dict[str, Any] | None:
     # オッズ更新ボタン用: 経路 (netkeiba 経路は欠落=None) と再取得可否 (rid 復元可) を surface。
     d.setdefault("odds_source", None)
     d["can_refresh"] = netkeiba_rid_from_internal(d.get("race_id") or safe) is not None
+    # 補強根拠 (evidence) 方針バージョン (旧 snapshot は採点日時で v1/v2 推定)。
+    d["index_version"] = index_version_of(d)
     return d
 
 

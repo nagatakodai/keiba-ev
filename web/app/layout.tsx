@@ -6,6 +6,7 @@ import { WatchPill } from "@/components/WatchPill";
 import { BackgroundVideo } from "@/components/BackgroundVideo";
 import { WatchStatusProvider } from "@/components/WatchStatusContext";
 import { NavLinks } from "@/components/NavLinks";
+import { INDEX_VERSION, INDEX_VERSION_DESC } from "@/lib/version";
 
 const notoSansJP = Noto_Sans_JP({
   variable: "--font-noto-jp",
@@ -48,6 +49,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 </span>
                 <span className="text-(--color-muted) text-xs font-normal hidden md:inline">
                   競馬予想オーケストレーションAI
+                </span>
+                {/* Claude 指数の補強根拠 (evidence) 方針バージョン (v2=無制限・現行)。ユーザ指示 2026-06-30 */}
+                <span
+                  title={`Claude 指数 ${INDEX_VERSION} — ${INDEX_VERSION_DESC[INDEX_VERSION] ?? ""}`}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-bold tnum bg-(--color-accent)/15 text-(--color-accent) border border-(--color-accent)/30"
+                >
+                  {INDEX_VERSION}
                 </span>
               </Link>
               <div className="ml-auto">

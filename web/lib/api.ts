@@ -58,6 +58,8 @@ export type PredictionSummary = {
   // 適性指数 top 3 (total 降順)。snapshot に horse_aptitude が無いと空配列。
   top_aptitude?: Array<{ number: number; name: string; total: number }>;
   has_evidence: boolean;
+  // 補強根拠 (evidence) 方針バージョン: "v1"=3件上限 / "v2"=無制限 / null=Claude 指数なし。
+  index_version?: string | null;
   has_result: boolean;
 };
 
@@ -239,6 +241,8 @@ export type PredictionDetail = {
   llm_scored_at?: string | null;
   // Claude 指数が無い (score 未完/未実施 = モデルのみ) フォールバックか。
   llm_fallback?: boolean;
+  // 補強根拠 (evidence) 方針バージョン: "v1"=3件上限 / "v2"=無制限 / null=Claude 指数なし。
+  index_version?: string | null;
   // Claude 強さ指数 (0-100) × 市場指数 を per-horse で併記 (差 = Claude − 市場、正 = Claude が強気)。
   // Claude 値降順 (無ければ市場指数降順)。support = 補強根拠件数 (検索で動かした裏付け)。
   index_compare?: Array<{

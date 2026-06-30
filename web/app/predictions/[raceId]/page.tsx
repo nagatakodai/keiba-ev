@@ -18,6 +18,7 @@ import {
   Trophy,
 } from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
+import { indexVersionTitle } from "@/lib/version";
 import { OddsTimelineCard, type LateMoneySnapshot } from "./OddsTimelineCard";
 import { OddsRefreshButton } from "./OddsRefreshButton";
 import { isEvMeasured,
@@ -160,6 +161,14 @@ export default async function PredictionDetailPage({
               </span>
             ) : null}
             {d.evidence && <Badge tone="magenta">補強済</Badge>}
+            {/* 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限)。ユーザ指示 2026-06-30 */}
+            {d.index_version && (
+              <span title={indexVersionTitle(d.index_version)}>
+                <Badge tone={d.index_version === "v2" ? "info" : "muted"}>
+                  指数 {d.index_version}
+                </Badge>
+              </span>
+            )}
             {d.result && <Badge tone="good">結果あり</Badge>}
             {/* score 段の暫定プレビュー (Claude 指数出力時に早出し)。締切直前の bet 段で
                 fresh odds の確定版に上書きされる。実弾投票はまだ行われていない。 */}
