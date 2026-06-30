@@ -725,6 +725,71 @@ export type ShobuPnl = {
   races_detail: ShobuPnlRace[];
 };
 
+// Claude 指数 単複戦略の仮想収支 (GET /api/shobu/winplace-pnl, indexed-winplace-pnl)。
+// Claude 指数 1 位の単勝 + 2,3 位の複勝を買ったと仮定した paper P&L (2026-06-30)。
+export type WinPlacePnlRace = {
+  race_id: string;
+  date: string;
+  venue: string;
+  race_no: number | null;
+  race_type: "jra" | "nar" | "banei" | null;
+  shobu_score: number | null;
+  n_runners: number | null;
+  place_cutoff: number;        // 複勝圏 (3/2/0)
+  top1: number;                // Claude 指数 1 位 (単勝)
+  top2: number;                // Claude 指数 2 位 (複勝)
+  top3: number;                // Claude 指数 3 位 (複勝)
+  finish: number[];            // 実 1-2-3着
+  win_hit: boolean;
+  win_stake: number;
+  win_payout: number;
+  place_legs: { number: number; hit: boolean; payout: number }[];
+  place_stake: number;
+  place_payout: number;
+  place_hits: number;
+  stake: number;
+  payout: number;
+  hit: boolean;
+  saved_at?: string | null;
+};
+export type WinPlacePnl = {
+  point_cost: number;
+  races: number;
+  stake: number;
+  payout: number;
+  net: number;
+  roi: number;
+  roi_ci_low?: number;
+  roi_ci_high?: number;
+  win_bets: number;
+  win_hits: number;
+  win_hit_rate: number;
+  win_hit_rate_ci_low?: number;
+  win_hit_rate_ci_high?: number;
+  win_stake: number;
+  win_payout: number;
+  win_roi: number;
+  win_roi_ci_low?: number;
+  win_roi_ci_high?: number;
+  place_bets: number;
+  place_hits: number;
+  place_hit_rate: number;
+  place_hit_rate_ci_low?: number;
+  place_hit_rate_ci_high?: number;
+  place_stake: number;
+  place_payout: number;
+  place_roi: number;
+  place_roi_ci_low?: number;
+  place_roi_ci_high?: number;
+  recommended_total: number;
+  skipped_no_index: number;
+  skipped_no_result: number;
+  skipped_no_odds: number;
+  last_updated_at: string | null;
+  sample_warning: boolean;
+  races_detail: WinPlacePnlRace[];
+};
+
 export type ShobuScanRequest = {
   date?: string | null;
   race_type?: "all" | "jra" | "nar" | "banei";
@@ -797,6 +862,12 @@ export const api = {
   // 全 Claude 指数レース (recommended に限らない・全馬指数+結果あり) の仮想収支。
   indexedPnl: (pointCost = 100) =>
     jsonFetch<ShobuPnl>("/api/shobu/indexed-pnl?point_cost=" + pointCost),
+  // Claude 指数 単複戦略 (1位=単勝 / 2,3位=複勝) の仮想収支 — 勝負レース(推奨)のみ。
+  winplacePnl: (pointCost = 100) =>
+    jsonFetch<WinPlacePnl>("/api/shobu/winplace-pnl?point_cost=" + pointCost),
+  // Claude 指数 単複戦略 — shobu 評価レース全体 (過去分全て・recommended に限らない)。
+  indexedWinplacePnl: (pointCost = 100) =>
+    jsonFetch<WinPlacePnl>("/api/shobu/indexed-winplace-pnl?point_cost=" + pointCost),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 
