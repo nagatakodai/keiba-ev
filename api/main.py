@@ -62,8 +62,8 @@ from .store import (
     compute_calibration,
     compute_shobu_pnl,
     compute_indexed_pnl,
-    compute_shobu_winplace_pnl,
-    compute_indexed_winplace_pnl,
+    compute_shobu_strategies_pnl,
+    compute_indexed_strategies_pnl,
     get_prediction,
     get_shobu_result,
     list_auto_watch_history,
@@ -564,24 +564,24 @@ def api_shobu_indexed_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str,
     return compute_indexed_pnl(point_cost=point_cost, box_size=box_size)
 
 
-@app.get("/api/shobu/winplace-pnl")
-def api_shobu_winplace_pnl(point_cost: int = 100) -> dict[str, Any]:
-    """勝負レース (推奨) の **Claude 指数 単複戦略** 仮想収支 (ユーザ指示 2026-06-30)。
+@app.get("/api/shobu/strategies-pnl")
+def api_shobu_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+    """勝負レース (推奨) の **Claude 指数 単純戦略くらべ** 仮想収支 (ユーザ指示 2026-06-30)。
 
-    各勝負レースで Claude 指数 1 位の単勝 + 2・3 位の複勝を各 point_cost 買ったと仮定し、
-    final_odds の払戻で収支集計。単勝・複勝の的中率/ROI を分離して返す。
+    各レースで win1(1位単勝) / place23(2,3位複勝) / quinella12(1-2位馬連) / winplace(単複) を
+    仮定し、final_odds の払戻で戦略ごとに収支集計。各戦略の的中率/ROI/収支を並べて返す。
     """
-    return compute_shobu_winplace_pnl(point_cost=point_cost)
+    return compute_shobu_strategies_pnl(point_cost=point_cost)
 
 
-@app.get("/api/shobu/indexed-winplace-pnl")
-def api_shobu_indexed_winplace_pnl(point_cost: int = 100) -> dict[str, Any]:
-    """**shobu 評価レース全体** (recommended に限らない) の Claude 指数 単複戦略 仮想収支。
+@app.get("/api/shobu/indexed-strategies-pnl")
+def api_shobu_indexed_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+    """**shobu 評価レース全体** (recommended に限らない) の Claude 指数 単純戦略くらべ 仮想収支。
 
-    ユーザ指示 (2026-06-30): 「Claude指数1位の単勝 / 2,3位の複勝を仮定して過去分全て計測」。
-    母集団は BOX の indexed-pnl と揃える (shobu 評価レース全体) → ダッシュボードに別カードで併記。
+    ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して過去分全て表示」。
+    母集団は BOX の indexed-pnl と揃える (shobu 評価レース全体) → ダッシュボードに併記。
     """
-    return compute_indexed_winplace_pnl(point_cost=point_cost)
+    return compute_indexed_strategies_pnl(point_cost=point_cost)
 
 
 @app.get("/api/results/auto")

@@ -725,9 +725,26 @@ export type ShobuPnl = {
   races_detail: ShobuPnlRace[];
 };
 
-// Claude 指数 単複戦略の仮想収支 (GET /api/shobu/winplace-pnl, indexed-winplace-pnl)。
-// Claude 指数 1 位の単勝 + 2,3 位の複勝を買ったと仮定した paper P&L (2026-06-30)。
-export type WinPlacePnlRace = {
+// Claude 指数 単純戦略くらべの仮想収支 (GET /api/shobu/strategies-pnl, indexed-strategies-pnl)。
+// win1/place1/place2/place3/quinella12/exacta12/trifecta123/trio123/trio1234box/winplace を比較 (2026-06-30)。
+export type StrategyPnl = {
+  key: string;                 // win1 / place1 / place2 / place3 / quinella12 / exacta12 / trifecta123 / trio123 / trio1234box / winplace
+  label: string;               // 表示名 (例「単勝 (指数1位)」)
+  bet_type: string;            // win / place / quinella / mix
+  races: number;               // 1 脚以上賭けたレース数
+  bets: number;                // 脚数 (place2/place3=1/レース, winplace=最大3/レース)
+  hits: number;                // 的中脚数
+  hit_rate: number;            // hits / bets (脚単位)
+  hit_rate_ci_low?: number;
+  hit_rate_ci_high?: number;
+  stake: number;
+  payout: number;
+  net: number;
+  roi: number;
+  roi_ci_low?: number;
+  roi_ci_high?: number;
+};
+export type StrategyRaceDetail = {
   race_id: string;
   date: string;
   venue: string;
@@ -735,59 +752,28 @@ export type WinPlacePnlRace = {
   race_type: "jra" | "nar" | "banei" | null;
   shobu_score: number | null;
   n_runners: number | null;
-  place_cutoff: number;        // 複勝圏 (3/2/0)
-  top1: number;                // Claude 指数 1 位 (単勝)
-  top2: number;                // Claude 指数 2 位 (複勝)
-  top3: number;                // Claude 指数 3 位 (複勝)
-  finish: number[];            // 実 1-2-3着
-  win_hit: boolean;
-  win_stake: number;
-  win_payout: number;
-  place_legs: { number: number; hit: boolean; payout: number }[];
-  place_stake: number;
-  place_payout: number;
-  place_hits: number;
-  stake: number;
-  payout: number;
-  hit: boolean;
+  place_cutoff: number;
+  top1: number;
+  top2: number;
+  top3: number;
+  finish: number[];
+  per: Record<
+    string,
+    { stake: number; payout: number; bets: number; hits: number; hit: boolean }
+  >;
   saved_at?: string | null;
 };
-export type WinPlacePnl = {
+export type StrategiesPnl = {
   point_cost: number;
+  strategies: StrategyPnl[];
   races: number;
-  stake: number;
-  payout: number;
-  net: number;
-  roi: number;
-  roi_ci_low?: number;
-  roi_ci_high?: number;
-  win_bets: number;
-  win_hits: number;
-  win_hit_rate: number;
-  win_hit_rate_ci_low?: number;
-  win_hit_rate_ci_high?: number;
-  win_stake: number;
-  win_payout: number;
-  win_roi: number;
-  win_roi_ci_low?: number;
-  win_roi_ci_high?: number;
-  place_bets: number;
-  place_hits: number;
-  place_hit_rate: number;
-  place_hit_rate_ci_low?: number;
-  place_hit_rate_ci_high?: number;
-  place_stake: number;
-  place_payout: number;
-  place_roi: number;
-  place_roi_ci_low?: number;
-  place_roi_ci_high?: number;
   recommended_total: number;
   skipped_no_index: number;
   skipped_no_result: number;
   skipped_no_odds: number;
   last_updated_at: string | null;
   sample_warning: boolean;
-  races_detail: WinPlacePnlRace[];
+  races_detail: StrategyRaceDetail[];
 };
 
 export type ShobuScanRequest = {
@@ -862,12 +848,12 @@ export const api = {
   // 全 Claude 指数レース (recommended に限らない・全馬指数+結果あり) の仮想収支。
   indexedPnl: (pointCost = 100) =>
     jsonFetch<ShobuPnl>("/api/shobu/indexed-pnl?point_cost=" + pointCost),
-  // Claude 指数 単複戦略 (1位=単勝 / 2,3位=複勝) の仮想収支 — 勝負レース(推奨)のみ。
-  winplacePnl: (pointCost = 100) =>
-    jsonFetch<WinPlacePnl>("/api/shobu/winplace-pnl?point_cost=" + pointCost),
-  // Claude 指数 単複戦略 — shobu 評価レース全体 (過去分全て・recommended に限らない)。
-  indexedWinplacePnl: (pointCost = 100) =>
-    jsonFetch<WinPlacePnl>("/api/shobu/indexed-winplace-pnl?point_cost=" + pointCost),
+  // Claude 指数 単純戦略くらべ (単勝/複勝/馬連/単複) の仮想収支 — 勝負レース(推奨)のみ。
+  strategiesPnl: (pointCost = 100) =>
+    jsonFetch<StrategiesPnl>("/api/shobu/strategies-pnl?point_cost=" + pointCost),
+  // Claude 指数 単純戦略くらべ — shobu 評価レース全体 (過去分全て・recommended に限らない)。
+  indexedStrategiesPnl: (pointCost = 100) =>
+    jsonFetch<StrategiesPnl>("/api/shobu/indexed-strategies-pnl?point_cost=" + pointCost),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 

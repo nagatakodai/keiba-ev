@@ -5,7 +5,7 @@ import {
   api,
   type ShobuPnl,
   type ShobuPnlRace,
-  type WinPlacePnl,
+  type StrategiesPnl,
 } from "@/lib/api";
 import {
   Badge,
@@ -117,18 +117,15 @@ function IndexedPnlCard({ data, nowMs }: { data: ShobuPnl; nowMs: number }) {
   );
 }
 
-// Claude 指数 単複戦略 (1位=単勝 / 2,3位=複勝) の仮想収支カード。
-// data = shobu 評価レース全体 (過去分全て)、rec = うち勝負レース(推奨) のサブ行 (任意)。
-function WinPlacePnlCard({
+// Claude 指数 単純戦略くらべ (単勝#1 / 複勝#2,3 / 馬連#1-2 / 単複) の仮想収支カード (比較テーブル)。
+// data = shobu 評価レース全体 (過去分全て)。各戦略を横並びで ROI / 的中率 / 収支 比較する。
+function StrategiesPnlCard({
   data,
-  rec,
   nowMs,
 }: {
-  data: WinPlacePnl;
-  rec?: WinPlacePnl | null;
+  data: StrategiesPnl;
   nowMs: number;
 }) {
-  const has = data.races > 0;
   const lastUpdated = data.last_updated_at
     ? fmtRelativeFromNow(data.last_updated_at, nowMs)
     : "—";
@@ -138,64 +135,72 @@ function WinPlacePnlCard({
         <div className="flex flex-wrap items-center gap-2">
           <Coins className="w-4 h-4 text-amber-300" />
           <span className="text-[10px] font-bold tracking-[0.22em] uppercase text-(--color-muted)">
-            参考 — Claude 指数 単複戦略 (1位=単勝 ／ 2・3位=複勝・shobu 評価レース全体)
+            Live P/L — Claude 指数 単純戦略くらべ (shobu 評価レース全体)
           </span>
           {data.sample_warning && <Badge tone="muted">サンプル少</Badge>}
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-5 gap-x-6 gap-y-4">
-          <KpiCell
-            label="収支"
-            value={has ? fmtSignedYen(data.net) : "—"}
-            valueClass={!has ? "" : data.net < 0 ? "text-rose-300" : "text-emerald-300"}
-            sub={has ? `賭金 ${fmtYen(data.stake)} → 払戻 ${fmtYen(data.payout)}` : "—"}
-          />
-          <KpiCell
-            label="回収率 (単複合計)"
-            value={has ? fmtRoiPct(data.roi) : "—"}
-            valueClass={!has ? "" : data.roi >= 1 ? "text-emerald-300" : "text-rose-300"}
-            sub={
-              data.roi_ci_low != null && data.roi_ci_high != null
-                ? `95%CI ${Math.round(data.roi_ci_low * 100)}–${Math.round(data.roi_ci_high * 100)}%`
-                : "—"
-            }
-          />
-          <KpiCell
-            label="単勝 #1"
-            value={has ? fmtRoiPct(data.win_roi) : "—"}
-            valueClass={!has ? "" : data.win_roi >= 1 ? "text-emerald-300" : "text-rose-300"}
-            sub={
-              has
-                ? `的中 ${fmtPct(data.win_hit_rate, 1)} (${data.win_hits}/${data.win_bets})`
-                : "—"
-            }
-          />
-          <KpiCell
-            label="複勝 #2,3"
-            value={has ? fmtRoiPct(data.place_roi) : "—"}
-            valueClass={!has ? "" : data.place_roi >= 1 ? "text-emerald-300" : "text-rose-300"}
-            sub={
-              has
-                ? `的中 ${fmtPct(data.place_hit_rate, 1)} (${data.place_hits}/${data.place_bets})`
-                : "—"
-            }
-          />
-          <KpiCell
-            label="対象レース"
-            value={data.races}
-            sub={`shobu評価 ${data.recommended_total} / 結果待ち ${data.skipped_no_result} / 指数なし ${data.skipped_no_index}`}
-          />
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs table-zebra">
+            <thead>
+              <tr className="text-left text-[10px] uppercase tracking-wider text-(--color-muted) border-b border-(--color-line)">
+                <th className="px-2 py-2 font-bold">戦略</th>
+                <th className="px-2 py-2 font-bold text-right">回収率</th>
+                <th className="px-2 py-2 font-bold text-right">的中率</th>
+                <th className="px-2 py-2 font-bold text-right">賭金 → 払戻</th>
+                <th className="px-2 py-2 font-bold text-right">収支</th>
+                <th className="px-2 py-2 font-bold text-right">対象</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.strategies.map((s) => {
+                const hasBets = s.bets > 0;
+                return (
+                  <tr key={s.key} className="border-b border-(--color-line-soft)">
+                    <td className="px-2 py-2 font-bold whitespace-nowrap">{s.label}</td>
+                    <td
+                      className={`px-2 py-2 text-right tnum font-bold ${
+                        !hasBets ? "" : s.roi >= 1 ? "text-emerald-300" : "text-rose-300"
+                      }`}
+                    >
+                      {hasBets ? fmtRoiPct(s.roi) : "—"}
+                      {hasBets && s.roi_ci_low != null && s.roi_ci_high != null && (
+                        <span className="block text-[10px] font-normal text-(--color-muted)">
+                          CI {Math.round(s.roi_ci_low * 100)}–{Math.round(s.roi_ci_high * 100)}%
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2 text-right tnum text-(--color-muted) whitespace-nowrap">
+                      {hasBets ? fmtPct(s.hit_rate, 1) : "—"}
+                      <span className="block text-[10px]">
+                        {s.hits}/{s.bets}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-right tnum text-(--color-muted) whitespace-nowrap">
+                      {hasBets ? `${fmtYen(s.stake)} → ${fmtYen(s.payout)}` : "—"}
+                    </td>
+                    <td
+                      className={`px-2 py-2 text-right tnum font-bold whitespace-nowrap ${
+                        !hasBets ? "" : s.net < 0 ? "text-rose-300" : "text-emerald-300"
+                      }`}
+                    >
+                      {hasBets ? fmtSignedYen(s.net) : "—"}
+                    </td>
+                    <td className="px-2 py-2 text-right tnum text-(--color-muted)">
+                      {s.races}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
           <span>
-            ※ 各レース ¥{data.point_cost} ずつ: Claude 指数1位の単勝 + 2・3位の複勝 (複勝は頭数ルール
-            適用: 8頭以上=3着まで / 5-7頭=2着まで / 4頭以下=発売なし)
+            ※ 各脚 ¥{data.point_cost}: 単勝=指数1位 / 複勝=指数1位・2位・3位 (頭数ルール: 8頭以上=3着・5-7頭=2着・4頭以下=無)
+            / 馬連=指数1-2位 (上位2着) / 馬単=指数1→2位 (着順一致) / 3連単=指数1→2→3 (着順一致)
+            / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点) / 単複=単勝+2,3位複勝。
+            的中率は脚単位 ・ 対象={data.races}R 中の賭けたレース数
           </span>
-          {rec && rec.races > 0 && (
-            <span>
-              ・うち勝負レース(推奨){rec.races}R: 回収率 {fmtRoiPct(rec.roi)} (収支{" "}
-              {fmtSignedYen(rec.net)})
-            </span>
-          )}
           {data.skipped_no_odds > 0 && (
             <span>・払戻オッズ欠落 {data.skipped_no_odds} 件は分母外</span>
           )}
@@ -233,10 +238,9 @@ function ApiDownCard() {
 }
 
 export default async function DashboardPage() {
-  const [indexed, winplace, winplaceRec] = await Promise.all([
+  const [indexed, strategies] = await Promise.all([
     api.indexedPnl().catch(() => null),
-    api.indexedWinplacePnl().catch(() => null),
-    api.winplacePnl().catch(() => null),
+    api.indexedStrategiesPnl().catch(() => null),
   ]);
 
   // API 未接続: silent null ではなく明示のエラーカードを出す。
@@ -276,10 +280,8 @@ export default async function DashboardPage() {
       {/* ====== 主役: shobu 評価レース全体の仮想収支 (Claude 指数上位N頭3連単BOX) ====== */}
       <IndexedPnlCard data={indexed} nowMs={nowMs} />
 
-      {/* ====== Claude 指数 単複戦略 (1位=単勝 / 2,3位=複勝) ====== */}
-      {winplace && (
-        <WinPlacePnlCard data={winplace} rec={winplaceRec} nowMs={nowMs} />
-      )}
+      {/* ====== Claude 指数 単純戦略くらべ (単勝/複勝/馬連/単複) ====== */}
+      {strategies && <StrategiesPnlCard data={strategies} nowMs={nowMs} />}
 
       {/* ====== per-race 明細 (shobu 評価レース全体) ====== */}
       {hasRaces ? (

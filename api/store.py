@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -879,11 +880,15 @@ def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5) -> dict[str, A
 
 
 # ============================================================
-# Claude 指数 単複戦略の仮想収支 (ユーザ指示 2026-06-30)
-#   - Claude 指数 1 位の馬の **単勝** を point_cost 買う
-#   - Claude 指数 2 位・3 位の馬の **複勝** を各 point_cost 買う
-# 払戻は result["final_odds"] の win:/place: (= ×100 オッズ。例 win:7=19.2 → ¥100→¥1920)。
-# 複勝は頭数ルール (4頭以下=発売なし / 5-7頭=2着まで / 8頭以上=3着まで) を適用。
+# Claude 指数の単純戦略くらべ (ユーザ指示 2026-06-30)
+#   - win1       : 指数1位の単勝
+#   - place23    : 指数2,3位の複勝 (各 point_cost)
+#   - quinella12 : 指数1-2位の馬連
+#   - winplace   : 単複 (1位単勝 + 2,3位複勝) = win1 + place23
+# 払戻は result["final_odds"] の win:/place:/quinella: (= ×100 オッズ。例 win:7=19.2 → ¥1920)。
+# 複勝は頭数ルール (_place_cutoff)、馬連は上位2着で判定。final_odds は all-or-nothing
+# (実測 489件は全券種揃い / 98件は全欠落) なので no_odds は「final_odds 無し + どこかの脚が的中」の
+# レース全体スキップで扱い、全戦略の母集団を揃える (的中脚のみオッズを要求・外れ脚は¥0)。
 # ============================================================
 
 def _place_cutoff(n_runners: int | None) -> int:
@@ -901,21 +906,38 @@ def _place_cutoff(n_runners: int | None) -> int:
     return 3
 
 
-def _winplace_race_pnl(
+# 戦略メタ (表示順・ラベル・代表券種)。races_detail / strategies のキー順もこれに従う。
+# 複勝は 2 位 / 3 位 を分けて計測する (ユーザ指示 2026-06-30)。
+STRATEGY_DEFS = [
+    ("win1", "単勝 (指数1位)", "win"),
+    ("place1", "複勝 (指数1位)", "place"),
+    ("place2", "複勝 (指数2位)", "place"),
+    ("place3", "複勝 (指数3位)", "place"),
+    ("quinella12", "馬連 (指数1-2位)", "quinella"),
+    ("exacta12", "馬単 (指数1→2位)", "exacta"),
+    ("trifecta123", "3連単 (指数1→2→3)", "trifecta"),
+    ("trio123", "3連複 (指数1-2-3)", "trio"),
+    ("trio1234box", "3連複BOX (指数1-2-3-4)", "trio"),
+    ("winplace", "単複 (1位単勝+2,3位複勝)", "mix"),
+]
+
+
+def _strategy_race_legs(
     snap: dict[str, Any],
     result: dict[str, Any],
     *,
     point_cost: int,
     meta: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str]:
-    """1 レースの **Claude 指数1位=単勝 / 2,3位=複勝** 仮想収支を計算する共通ヘルパ。
+    """1 レースの Claude 指数戦略 (win1/place23/quinella12/winplace) の脚を計算する共通ヘルパ。
 
     返り値 `(detail | None, reason)`。reason は "ok"/"no_index"/"no_result"/"no_odds":
       - "no_index": Claude 指数が 3 頭未満 (1・2・3 位を決められない)。
       - "no_result": 着順が 3 着まで未確定。
-      - "no_odds": **的中した脚** の払戻オッズ (final_odds の win:/place:) が欠落
+      - "no_odds": **的中した脚** の払戻オッズ (final_odds の win:/place:/quinella:) が欠落
         (keiba.go.jp fallback 等で final_odds 未保存) → 払戻を評価できないので分母外。
         外れ脚は払戻 0 なのでオッズ欠落でも問題ない (的中脚のみオッズを要求する)。
+    detail["per"][戦略key] = {stake, payout, hit, bets, hits}。
     """
     idx = _claude_index_by_number(snap)
     if len(idx) < 3:
@@ -941,37 +963,82 @@ def _winplace_race_pnl(
         except (TypeError, ValueError):
             return None
 
-    # --- 単勝 (Claude 1 位) — 頭数に関係なく常に発売 ---
-    win_stake = point_cost
-    win_hit = top1 == finish[0]
-    win_payout = 0
-    if win_hit:
-        o = _odds(f"win:{top1}")
-        if o is None:
-            return None, "no_odds"     # 的中なのに払戻不明 → 評価不能
-        win_payout = int(round(o * point_cost))
+    top2_set = set(finish[:2])     # 馬連=上位2着 (頭数ルール非依存)
+    missing_odds = False
 
-    # --- 複勝 (Claude 2,3 位) — 複勝が発売される頭数のときだけ賭ける ---
-    place_legs: list[dict[str, Any]] = []
-    place_stake = 0
-    place_payout = 0
-    place_hits = 0
-    if cutoff > 0:
-        for num in (top2, top3):
-            place_stake += point_cost
-            hit = num in placed_set
-            pay = 0
-            if hit:
-                o = _odds(f"place:{num}")
-                if o is None:
-                    return None, "no_odds"
+    def _leg(bet_type: str, key_nums: list[int], hit: bool, odds_key: str) -> dict[str, Any]:
+        """1 脚 (stake=point_cost) の {bet_type,key,hit,stake,payout}。的中脚のオッズ欠落は
+        missing_odds を立てる (呼び元が no_odds でレース全体を分母外にする)。"""
+        nonlocal missing_odds
+        pay = 0
+        if hit:
+            o = _odds(odds_key)
+            if o is None:
+                missing_odds = True
+            else:
                 pay = int(round(o * point_cost))
-                place_hits += 1
-            place_payout += pay
-            place_legs.append({"number": num, "hit": hit, "payout": pay})
+        return {"bet_type": bet_type, "key": key_nums, "hit": hit,
+                "stake": point_cost, "payout": pay}
 
-    stake = win_stake + place_stake
-    payout = win_payout + place_payout
+    # 単勝 (1位) — 頭数に関係なく常に発売。
+    win_leg = _leg("win", [top1], top1 == finish[0], f"win:{top1}")
+    # 複勝 (1位 / 2位 / 3位 を分けて計測) — 複勝が発売される頭数のときだけ。
+    place_leg_1 = (_leg("place", [top1], top1 in placed_set, f"place:{top1}")
+                   if cutoff > 0 else None)
+    place_leg_2 = (_leg("place", [top2], top2 in placed_set, f"place:{top2}")
+                   if cutoff > 0 else None)
+    place_leg_3 = (_leg("place", [top3], top3 in placed_set, f"place:{top3}")
+                   if cutoff > 0 else None)
+    # 単複 (winplace) は 2,3位複勝のみ (ユーザ定義)。place1 は独立戦略。
+    place_legs = [l for l in (place_leg_2, place_leg_3) if l is not None]
+    # 馬連 (1-2位) — 上位2着に両馬が入れば的中。key は昇順 (final_odds の規約に合わせる)。
+    qa, qb = sorted((top1, top2))
+    quin_leg = _leg("quinella", [qa, qb], {top1, top2} <= top2_set, f"quinella:{qa}-{qb}")
+    # 馬単 (1→2位) — 1着=top1 かつ 2着=top2 の着順一致。key は着順そのまま。
+    exacta_leg = _leg("exacta", [top1, top2],
+                      finish[0] == top1 and finish[1] == top2, f"exacta:{top1}-{top2}")
+
+    # 3連単 (1→2→3) — 着順完全一致。final_odds の trifecta key は着順そのまま。
+    fin3 = set(finish[:3])
+    tri_hit = finish[:3] == [top1, top2, top3]
+    trifecta_leg = _leg("trifecta", [top1, top2, top3], tri_hit,
+                        f"trifecta:{top1}-{top2}-{top3}")
+    # 3連複 (1-2-3) — 上位3着が {1,2,3} と一致 (順不同)。key は昇順。
+    t3 = sorted((top1, top2, top3))
+    trio_leg = _leg("trio", t3, {top1, top2, top3} == fin3, f"trio:{t3[0]}-{t3[1]}-{t3[2]}")
+    # 3連複 BOX (1-2-3-4) — 上位3着が {1,2,3,4} に収まれば的中。C(4,3)=4 点。
+    box_legs: list[dict[str, Any]] = []
+    if len(ranked) >= 4:
+        top4 = ranked[:4]
+        for combo in combinations(top4, 3):
+            cs = sorted(combo)
+            box_legs.append(_leg("trio", cs, set(combo) == fin3,
+                                 f"trio:{cs[0]}-{cs[1]}-{cs[2]}"))
+
+    if missing_odds:
+        return None, "no_odds"     # 的中脚の払戻不明 → 評価不能
+
+    def _agg(legs: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "stake": sum(l["stake"] for l in legs),
+            "payout": sum(l["payout"] for l in legs),
+            "bets": len(legs),
+            "hits": sum(1 for l in legs if l["hit"]),
+            "hit": any(l["payout"] > 0 for l in legs),
+        }
+
+    per = {
+        "win1": _agg([win_leg]),
+        "place1": _agg([place_leg_1] if place_leg_1 else []),
+        "place2": _agg([place_leg_2] if place_leg_2 else []),
+        "place3": _agg([place_leg_3] if place_leg_3 else []),
+        "quinella12": _agg([quin_leg]),
+        "exacta12": _agg([exacta_leg]),
+        "trifecta123": _agg([trifecta_leg]),
+        "trio123": _agg([trio_leg]),
+        "trio1234box": _agg(box_legs),
+        "winplace": _agg([win_leg, *place_legs]),
+    }
     detail = {
         "race_id": meta.get("race_id"),
         "date": meta.get("date") or "",
@@ -985,43 +1052,32 @@ def _winplace_race_pnl(
         "top2": top2,
         "top3": top3,
         "finish": finish,
-        "win_hit": win_hit,
-        "win_stake": win_stake,
-        "win_payout": win_payout,
-        "place_legs": place_legs,
-        "place_stake": place_stake,
-        "place_payout": place_payout,
-        "place_hits": place_hits,
-        "stake": stake,
-        "payout": payout,
-        "hit": payout > 0,
+        "per": per,
         "saved_at": snap.get("saved_at"),
     }
     return detail, "ok"
 
 
-def _winplace_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> dict[str, Any]:
-    """**shobu 評価レース** の Claude 指数 単複戦略 仮想収支 (共通コア)。
+def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> dict[str, Any]:
+    """**shobu 評価レース** の Claude 指数 単純戦略くらべ 仮想収支 (共通コア)。
 
-    各レースで Claude 指数 1 位の単勝 + 2・3 位の複勝を各 point_cost 買ったと仮定し、
-    実着順と final_odds の払戻で収支を集計する。母集団 (`_shobu_eval_races`) は BOX 収支と共有:
-    `recommended_only=True` (compute_shobu_winplace_pnl) = 勝負レース(推奨)のみ /
-    False (compute_indexed_winplace_pnl) = 推奨に限らず shobu が評価した全レース。
+    各レースで win1 (1位単勝) / place2 (2位複勝) / place3 (3位複勝) / quinella12 (1-2位馬連) /
+    winplace (単複) を仮定し、実着順と final_odds の払戻で **戦略ごとに** 収支を集計する。
+    母集団 (`_shobu_eval_races`) は BOX 収支と共有: `recommended_only=True` = 勝負レース(推奨)のみ /
+    False = 推奨に限らず shobu が評価した全レース。
 
-    返り値は全体 (stake/payout/roi/net + CI) に加え、単勝・複勝それぞれの
-    bets/hits/hit_rate/stake/payout/roi (+CI) を分離して持つ。指数<3頭=skipped_no_index、
-    結果未確定=skipped_no_result、的中脚の払戻オッズ欠落=skipped_no_odds (いずれも分母外)。
+    返り値 `strategies` は STRATEGY_DEFS 順の各戦略 {key,label,bet_type, races,bets,hits,hit_rate(+CI),
+    stake,payout,net,roi(+CI)}。winplace の `bets`/`hits` は **脚単位** (最大3脚/レース)、
+    `races` は 1 脚以上賭けたレース数 (place2/place3/winplace は ≤4頭で複勝発売なし=0 脚)。
+    指数<3頭=skipped_no_index、結果未確定=skipped_no_result、的中脚オッズ欠落=skipped_no_odds。
     """
     by_race = _shobu_eval_races(recommended_only)
 
+    # 戦略ごとの集計器。
+    acc = {key: {"races": 0, "bets": 0, "hits": 0, "stake": 0, "payout": 0,
+                 "per_race": []} for key, _label, _bt in STRATEGY_DEFS}
     races_detail: list[dict[str, Any]] = []
-    per_race: list[tuple[int, int]] = []     # (stake, payout) 全体 ROI CI 用
-    win_per: list[tuple[int, int]] = []      # 単勝のみ (1レース1脚)
-    place_per: list[tuple[int, int]] = []    # 複勝のみ (1レース最大2脚 → 脚単位)
     races_n = 0
-    stake_sum = payout_sum = 0
-    win_bets = win_hits = win_stake_sum = win_payout_sum = 0
-    place_bets = place_hits = place_stake_sum = place_payout_sum = 0
     skipped_no_index = skipped_no_result = skipped_no_odds = 0
     last_updated_at: str | None = None
 
@@ -1054,7 +1110,7 @@ def _winplace_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> di
             "shobu_score": race.get("shobu_score"),
             "n_runners": race.get("n_runners"),
         }
-        detail, reason = _winplace_race_pnl(
+        detail, reason = _strategy_race_legs(
             snap, result, point_cost=point_cost, meta=meta)
         if reason == "no_index":
             skipped_no_index += 1
@@ -1067,67 +1123,51 @@ def _winplace_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> di
             continue
 
         races_n += 1
-        stake_sum += detail["stake"]
-        payout_sum += detail["payout"]
-        per_race.append((detail["stake"], detail["payout"]))
-        # 単勝
-        win_bets += 1
-        win_hits += 1 if detail["win_hit"] else 0
-        win_stake_sum += detail["win_stake"]
-        win_payout_sum += detail["win_payout"]
-        win_per.append((detail["win_stake"], detail["win_payout"]))
-        # 複勝 (脚単位)
-        for leg in detail["place_legs"]:
-            place_bets += 1
-            place_hits += 1 if leg["hit"] else 0
-            place_stake_sum += point_cost
-            place_payout_sum += leg["payout"]
-            place_per.append((point_cost, leg["payout"]))
+        for key, _label, _bt in STRATEGY_DEFS:
+            s = detail["per"][key]
+            if s["bets"] == 0:       # place23 は ≤4頭で 0 脚 = このレースは賭けない
+                continue
+            a = acc[key]
+            a["races"] += 1
+            a["bets"] += s["bets"]
+            a["hits"] += s["hits"]
+            a["stake"] += s["stake"]
+            a["payout"] += s["payout"]
+            a["per_race"].append((s["stake"], s["payout"]))
         r_ts = result.get("recorded_at")
         if isinstance(r_ts, str) and (last_updated_at is None or r_ts > last_updated_at):
             last_updated_at = r_ts
         races_detail.append(detail)
 
-    roi = (payout_sum / stake_sum) if stake_sum else 0.0
-    roi_low, roi_high = _bootstrap_roi_ci(per_race)
-    win_roi = (win_payout_sum / win_stake_sum) if win_stake_sum else 0.0
-    win_roi_low, win_roi_high = _bootstrap_roi_ci(win_per)
-    place_roi = (place_payout_sum / place_stake_sum) if place_stake_sum else 0.0
-    place_roi_low, place_roi_high = _bootstrap_roi_ci(place_per)
-    win_hr_low, win_hr_high = _wilson_ci(win_hits, win_bets)
-    place_hr_low, place_hr_high = _wilson_ci(place_hits, place_bets)
+    strategies: list[dict[str, Any]] = []
+    for key, label, bt in STRATEGY_DEFS:
+        a = acc[key]
+        roi = (a["payout"] / a["stake"]) if a["stake"] else 0.0
+        roi_low, roi_high = _bootstrap_roi_ci(a["per_race"])
+        hr_low, hr_high = _wilson_ci(a["hits"], a["bets"])
+        strategies.append({
+            "key": key,
+            "label": label,
+            "bet_type": bt,
+            "races": a["races"],
+            "bets": a["bets"],
+            "hits": a["hits"],
+            "hit_rate": (a["hits"] / a["bets"]) if a["bets"] else 0.0,
+            "hit_rate_ci_low": hr_low,
+            "hit_rate_ci_high": hr_high,
+            "stake": a["stake"],
+            "payout": a["payout"],
+            "net": a["payout"] - a["stake"],
+            "roi": roi,
+            "roi_ci_low": roi_low,
+            "roi_ci_high": roi_high,
+        })
+
     races_detail.sort(key=lambda r: (r.get("saved_at") or r.get("date") or ""), reverse=True)
     return {
         "point_cost": point_cost,
+        "strategies": strategies,
         "races": races_n,
-        "stake": stake_sum,
-        "payout": payout_sum,
-        "net": payout_sum - stake_sum,
-        "roi": roi,
-        "roi_ci_low": roi_low,
-        "roi_ci_high": roi_high,
-        # 単勝 (Claude 1 位)
-        "win_bets": win_bets,
-        "win_hits": win_hits,
-        "win_hit_rate": (win_hits / win_bets) if win_bets else 0.0,
-        "win_hit_rate_ci_low": win_hr_low,
-        "win_hit_rate_ci_high": win_hr_high,
-        "win_stake": win_stake_sum,
-        "win_payout": win_payout_sum,
-        "win_roi": win_roi,
-        "win_roi_ci_low": win_roi_low,
-        "win_roi_ci_high": win_roi_high,
-        # 複勝 (Claude 2,3 位 / 脚単位)
-        "place_bets": place_bets,
-        "place_hits": place_hits,
-        "place_hit_rate": (place_hits / place_bets) if place_bets else 0.0,
-        "place_hit_rate_ci_low": place_hr_low,
-        "place_hit_rate_ci_high": place_hr_high,
-        "place_stake": place_stake_sum,
-        "place_payout": place_payout_sum,
-        "place_roi": place_roi,
-        "place_roi_ci_low": place_roi_low,
-        "place_roi_ci_high": place_roi_high,
         "recommended_total": len(by_race),
         "skipped_no_index": skipped_no_index,
         "skipped_no_result": skipped_no_result,
@@ -1138,18 +1178,18 @@ def _winplace_pnl(point_cost: int = 100, *, recommended_only: bool = True) -> di
     }
 
 
-def compute_shobu_winplace_pnl(point_cost: int = 100) -> dict[str, Any]:
-    """勝負レース (recommended) の Claude 指数 単複戦略 仮想収支 (ユーザ指示 2026-06-30)。"""
-    return _winplace_pnl(point_cost, recommended_only=True)
+def compute_shobu_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+    """勝負レース (recommended) の Claude 指数 単純戦略くらべ 仮想収支 (ユーザ指示 2026-06-30)。"""
+    return _strategies_pnl(point_cost, recommended_only=True)
 
 
-def compute_indexed_winplace_pnl(point_cost: int = 100) -> dict[str, Any]:
-    """shobu が評価した全レース (recommended に限らない) の Claude 指数 単複戦略 仮想収支。
+def compute_indexed_strategies_pnl(point_cost: int = 100) -> dict[str, Any]:
+    """shobu が評価した全レース (recommended に限らない) の Claude 指数 単純戦略くらべ 仮想収支。
 
-    ユーザ指示 (2026-06-30): 「Claude指数1位の単勝 / 2,3位の複勝を買ったと仮定して過去分全て計測」。
+    ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して表示」。
     母集団は BOX 収支の indexed (compute_indexed_pnl) と揃える (shobu 評価レース全体)。
     """
-    return _winplace_pnl(point_cost, recommended_only=False)
+    return _strategies_pnl(point_cost, recommended_only=False)
 
 
 def _wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
