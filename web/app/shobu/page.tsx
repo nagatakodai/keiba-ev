@@ -284,7 +284,7 @@ export default function ShobuPage() {
   // ボタン押下で全レースの Claude 指数を一括生成 (claude -p)。既定 ON (ユーザ指示 2026-06-20)。
   const [claudeAll, setClaudeAll] = useState(true);
   const [claudeEval, setClaudeEval] = useState("0");
-  // 取得レース数の上限 ("" = 全件)。発走日時が遅い (最新) 順に N 件だけ評価する。
+  // 取得レース数の上限 ("" = 全件)。発走日時が近い (早い) 順に N 件だけ評価する。
   const [maxRaces, setMaxRaces] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
@@ -325,7 +325,7 @@ export default function ShobuPage() {
       const v = parseInt(claudeEval, 10);
       return Number.isFinite(v) && v >= 0 ? Math.min(50, v) : 0;
     })(),
-    // 取得レース数の上限 ("" = 全件 → undefined)。発走が遅い (最新) 順に N 件。
+    // 取得レース数の上限 ("" = 全件 → undefined)。発走が近い (早い) 順に N 件。
     max_races: (() => {
       const v = parseInt(maxRaces, 10);
       return Number.isFinite(v) && v > 0 ? Math.min(300, v) : undefined;
@@ -627,14 +627,14 @@ export default function ShobuPage() {
                     <option value="banei">ばんえい のみ</option>
                   </Select>
                   <Select label="取得レース数" value={maxRaces} onChange={(e) => setMaxRaces(e.target.value)} disabled={scanning}
-                    hint="発走日時が遅い (最新) 順にこの数だけ評価。全件=制限なし">
+                    hint="発走日時が近い (早い) 順にこの数だけ評価。全件=制限なし">
                     <option value="">全件 (制限なし)</option>
-                    <option value="5">最新 5 件</option>
-                    <option value="10">最新 10 件</option>
-                    <option value="15">最新 15 件</option>
-                    <option value="20">最新 20 件</option>
-                    <option value="30">最新 30 件</option>
-                    <option value="50">最新 50 件</option>
+                    <option value="5">発走が近い 5 件</option>
+                    <option value="10">発走が近い 10 件</option>
+                    <option value="15">発走が近い 15 件</option>
+                    <option value="20">発走が近い 20 件</option>
+                    <option value="30">発走が近い 30 件</option>
+                    <option value="50">発走が近い 50 件</option>
                   </Select>
                   {!claudeAll && (
                     <Input label="Claude 指数を生成 (発走が近い順 N件)" type="number" min="0" max="50" step="1"

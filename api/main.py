@@ -458,7 +458,7 @@ class ShobuScanRequest(BaseModel):
     claude_all: bool = True
     # claude_all=False のとき、発走が近い順 N 件だけ score ステージで指数を新規生成 (0=しない)。
     claude_eval: int = Field(default=0, ge=0, le=50)
-    # 評価レース数の上限 (デバッグ/負荷制御)。None=全件。
+    # 評価レース数の上限。発走が近い (早い) 順に N 件だけ評価。None=全件。
     max_races: int | None = Field(default=None, ge=1, le=300)
     # Claude 指数一括生成の across-race 並列数 (= 同時にスクレイプ+score する **レース数**)。
     # **keiba.go.jp / JRA公式は 1 IP からの同時アクセスをレート制限**し、~20 並列だと odds が
