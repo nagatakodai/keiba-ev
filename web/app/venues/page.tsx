@@ -153,10 +153,10 @@ function ApiDownCard() {
 }
 
 export default async function VenuesPage() {
-  const [v2, v1, beta] = await Promise.all([
+  // β (市場由来・〜2026-06-21) は対象が少ないため表示しない (ユーザ指示で撤去)。
+  const [v2, v1] = await Promise.all([
     api.venueBreakdown("v2").catch(() => null),
     api.venueBreakdown("v1").catch(() => null),
-    api.venueBreakdown("β").catch(() => null),
   ]);
 
   return (
@@ -165,15 +165,14 @@ export default async function VenuesPage() {
       <PageHeader
         eyebrow="Venue Breakdown"
         title="競馬場別の内訳"
-        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 各戦略) を競馬場 (venue) 毎に内訳表示。Claude 指数バージョン毎 (v2=現行 / v1=旧 / β=市場由来) に分離。市場由来の頃 (〜2026-06-21) は β。30 秒おきに自動更新。"
+        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 各戦略) を競馬場 (venue) 毎に内訳表示。Claude 指数バージョン毎 (v2=現行 / v1=旧) に分離。30 秒おきに自動更新。"
       />
-      {!v2 && !v1 && !beta ? (
+      {!v2 && !v1 ? (
         <ApiDownCard />
       ) : (
         <>
           <VenueVersionSection version="v2" data={v2} />
           <VenueVersionSection version="v1" data={v1} />
-          <VenueVersionSection version="β" data={beta} />
         </>
       )}
     </Page>

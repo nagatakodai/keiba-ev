@@ -353,18 +353,17 @@ function VersionMeasurementSection({
 }
 
 export default async function DashboardPage() {
-  // 計測を補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30: v2 が上・v1 が中・β が下)。
-  const [boxV2, boxV1, boxB, stratV2, stratV1, stratB] = await Promise.all([
+  // 計測を補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30: v2 が上・v1 が下)。
+  // β (市場由来・〜2026-06-21) は対象が少ないため表示しない (ユーザ指示で撤去)。
+  const [boxV2, boxV1, stratV2, stratV1] = await Promise.all([
     api.indexedPnl(100, "v2").catch(() => null),
     api.indexedPnl(100, "v1").catch(() => null),
-    api.indexedPnl(100, "β").catch(() => null),
     api.indexedStrategiesPnl(100, "v2").catch(() => null),
     api.indexedStrategiesPnl(100, "v1").catch(() => null),
-    api.indexedStrategiesPnl(100, "β").catch(() => null),
   ]);
 
   // API 未接続: どのバージョンも取れなければ明示のエラーカードを出す。
-  if (!boxV2 && !boxV1 && !boxB) {
+  if (!boxV2 && !boxV1) {
     return (
       <Page>
         <AutoRefresh seconds={15} />
@@ -388,13 +387,12 @@ export default async function DashboardPage() {
       <PageHeader
         eyebrow="Keiba EV Terminal"
         title="ダッシュボード"
-        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v2=無制限・現行 / v1=3件上限・旧 / β=市場由来・実験)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。"
+        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v2=無制限・現行 / v1=3件上限・旧)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。"
       />
 
-      {/* ====== v2 (現行・補強根拠無制限) → v1 (旧) → β (市場由来・実験) の順 ====== */}
+      {/* ====== v2 (現行・補強根拠無制限) を上・v1 (旧) を下 ====== */}
       <VersionMeasurementSection version="v2" box={boxV2} strategies={stratV2} nowMs={nowMs} />
       <VersionMeasurementSection version="v1" box={boxV1} strategies={stratV1} nowMs={nowMs} />
-      <VersionMeasurementSection version="β" box={boxB} strategies={stratB} nowMs={nowMs} />
     </Page>
   );
 }
