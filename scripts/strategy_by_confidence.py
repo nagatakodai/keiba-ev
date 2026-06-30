@@ -59,12 +59,30 @@ def _load() -> list[dict]:
         if reason != "ok" or detail is None:
             continue
         vals = sorted(idx.values(), reverse=True)
+
+        def _g(i: int, j: int) -> float | None:
+            return (vals[i] - vals[j]) if len(vals) > j else None
+
         out.append({
+            "n_runners": snap.get("n_runners") or len(idx),
             "top1": vals[0],
+            "top3": vals[2],
+            "top4": vals[3] if len(vals) > 3 else None,
             "gap12": vals[0] - vals[1],
+            "gap23": vals[1] - vals[2],
+            "gap34": _g(2, 3),
+            "gap45": _g(3, 4),
             "per": detail["per"],
         })
     return out
+
+
+# 頭数バケット (3連複BOX は少頭数ほど当たる — 頭数交絡の確認用)。
+FIELD_BUCKETS: list[tuple[str, "callable"]] = [
+    ("≤9頭", lambda nr: nr <= 9),
+    ("10-11頭", lambda nr: 10 <= nr <= 11),
+    ("12頭+", lambda nr: nr >= 12),
+]
 
 
 def _agg(rows: list[dict], key: str) -> tuple[int, int, int, int, float]:
@@ -148,8 +166,47 @@ def main() -> None:
             print(f"  {LABEL[key]:<20}{hroi*100:>6.0f}%{f'({hh}/{hr})':>8}"
                   f"{lroi*100:>7.0f}%{f'({lh}/{lr})':>8}")
 
+    # ---- ④ 頭数別 の券種別 ROI / 的中率 ----
+    print("\n④ 頭数別の券種 ROI / 的中率 (3連複BOX 等は少頭数ほど当たる=頭数交絡)")
+    hdr = "".join(f"{lab:>14}" for lab, _ in FIELD_BUCKETS)
+    print(f"  {'戦略':<20}{hdr}")
+    for key, _lbl, _bt in STRATEGY_DEFS:
+        cells = []
+        any_data = False
+        for _lab, pred in FIELD_BUCKETS:
+            sub = [r for r in rows if pred(r["n_runners"])]
+            races, hit, _s, _p, roi = _agg(sub, key)
+            if races == 0:
+                cells.append(f"{'-':>14}")
+            else:
+                any_data = True
+                cells.append(f"{f'{roi*100:.0f}%({hit}/{races})':>14}")
+        if any_data:
+            print(f"  {LABEL[key]:<20}" + "".join(cells))
+
+    # ---- ⑤ 頭数 × 自信度(gap12 median) の 3連複BOX/ワイドBOX 的中率・ROI ----
+    gmed = median(r["gap12"] for r in rows)
+    for key in ("trio1234box", "wide123box"):
+        print(f"\n⑤ 頭数 × 1-2位差 (median={gmed:.0f}) の {LABEL[key]} 的中率/ROI")
+        print(f"  {'頭数':<8}{'1-2位差 高 (的中/R・ROI)':>26}{'1-2位差 低 (的中/R・ROI)':>26}")
+        for lab, pred in FIELD_BUCKETS:
+            band = [r for r in rows if pred(r["n_runners"])]
+            hi = [r for r in band if r["gap12"] >= gmed]
+            lo = [r for r in band if r["gap12"] < gmed]
+            hr, hh, _hs, _hp, hroi = _agg(hi, key)
+            lr, lh, _ls, _lp, lroi = _agg(lo, key)
+            if hr == 0 and lr == 0:
+                continue
+            hcell = f"{hh}/{hr} ({hroi*100:.0f}%)" if hr else "-"
+            lcell = f"{lh}/{lr} ({lroi*100:.0f}%)" if lr else "-"
+            print(f"  {lab:<8}{hcell:>26}{lcell:>26}")
+
     print("\n※ 標本 ~70R と小。3連単/3連複系は的中稀で ROI は1発で振れる → CI と的中Rを併読。"
-          " 単発の高 ROI を戦略採用根拠にしない (CLAUDE.md の overfit 戒め)。")
+          " 単発の高 ROI を戦略採用根拠にしない (CLAUDE.md の overfit 戒め)。"
+          "\n※ 3連複BOX の的中は **頭数 と #1の抜け具合 の両方** が効き交互作用がある:"
+          " ≤9頭は自信度に関係なく当たりやすい(小フィールド) / 12頭+はほぼ当たらない(0/20) /"
+          " その間の 10-11頭で 1-2位差が大きい(=#1が抜けている)と的中が集中 (例 5/24 vs 0/10)。"
+          " 3位以下の指数値・BOX境界(#4-#5差)は的中とほぼ無相関。")
 
 
 if __name__ == "__main__":
