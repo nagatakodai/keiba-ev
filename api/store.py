@@ -1389,6 +1389,199 @@ def compute_venue_breakdown(point_cost: int = 100,
     }
 
 
+# ============================================================
+# 市場一致シグナルの自動蓄積 (ユーザ指示 2026-06-30)
+#   Claude#1 が市場1番人気と一致するか (consensus) で券種 ROI を分割し、
+#   一致時の組合せ系(馬連等)・不一致時の3連複BOX が伸びる傾向を **時系列で蓄積** して
+#   bootstrap CI が 0 から離れる (=確証) まで追う。結果取得ループから毎回 append される。
+# ============================================================
+
+MARKET_AGREEMENT_HISTORY = ROOT / "data" / "cache" / "market_agreement_history.jsonl"
+_COMBO_KEYS = ["quinella12", "exacta12", "wide12"]          # 組合せ系
+_HONMEI_KEYS = ["win1", "place1", "trio123", "trio1234box"]  # 本命系
+# 追跡対象 (key, label, 構成戦略)。市場一致の効果を見たい少数に絞る (ユーザ「市場一致一本」)。
+_AGREEMENT_TARGETS = [
+    ("quinella12", "馬連 (指数1-2位)", ["quinella12"]),
+    ("combo", "組合せ系 (馬連/馬単/ワイド)", _COMBO_KEYS),
+    ("trio1234box", "3連複BOX (指数1-2-3-4)", ["trio1234box"]),
+    ("honmei", "本命系 (単勝1/複勝1/3連複/BOX)", _HONMEI_KEYS),
+]
+
+
+def _market_by_number(snap: dict[str, Any]) -> dict[int, float]:
+    """snapshot から 馬番→市場指数 (index_compare.market_index 優先・無ければ market_win_index)。"""
+    out: dict[int, float] = {}
+    for r in (snap.get("index_compare") or []):
+        m = r.get("market_index")
+        num = r.get("number")
+        if m is not None and num is not None:
+            try:
+                out[int(num)] = float(m)
+            except (TypeError, ValueError):
+                continue
+    if out:
+        return out
+    for k, v in (snap.get("market_win_index") or {}).items():
+        try:
+            out[int(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _roi_of(pairs: list[tuple[int, int]]) -> float:
+    s = sum(p[0] for p in pairs)
+    return sum(p[1] for p in pairs) / s if s else 0.0
+
+
+def _roi_delta_ci(high: list[tuple[int, int]], low: list[tuple[int, int]],
+                  n_iter: int = 2000, seed: int = 42) -> tuple[float, float, float]:
+    """ROI 差 Δ = ROI(high) − ROI(low) と bootstrap 95%CI (各群を再標本化・固定 seed で決定的)。"""
+    if not high or not low:
+        return (0.0, 0.0, 0.0)
+    import random
+    rng = random.Random(seed)
+    base = _roi_of(high) - _roi_of(low)
+    nh, nl = len(high), len(low)
+    deltas = []
+    for _ in range(n_iter):
+        hs = [high[rng.randrange(nh)] for _ in range(nh)]
+        ls = [low[rng.randrange(nl)] for _ in range(nl)]
+        deltas.append(_roi_of(hs) - _roi_of(ls))
+    deltas.sort()
+    return base, deltas[int(0.025 * n_iter)], deltas[int(0.975 * n_iter)]
+
+
+def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
+    """**市場一致シグナル**: Claude#1==市場1番人気 (一致) か否かで券種 ROI を分割した現在値。
+
+    市場非依存 (β除外) の shobu 評価レースで、各レースを「Claude 1位の馬が市場1番人気か」で
+    agree/disagree に分け、`_AGREEMENT_TARGETS` の券種/スタイル毎に ROI と、その差 Δ の bootstrap
+    95%CI を出す。`delta = agree_roi − disagree_roi` (組合せ系は正=一致で伸びる仮説)。CI が 0 を
+    跨がなければ `significant`。`append_market_agreement_history` が結果取得ごとにこれを時系列保存。
+    """
+    by_race = _shobu_eval_races(False)
+    agree_rows: list[dict[str, Any]] = []
+    disagree_rows: list[dict[str, Any]] = []
+    last_updated_at: str | None = None
+    for rid, race in by_race.items():
+        safe = _safe_race_id(rid)
+        if safe is None:
+            continue
+        snap_path = PRED_DIR / f"{safe}.json"
+        result_path = RESULT_DIR / f"{safe}.json"
+        if not snap_path.exists() or not result_path.exists():
+            continue
+        try:
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _scored_at(snap) < MARKET_INDEPENDENT_CUTOFF_ISO_JST:
+            continue   # 市場由来 (β) は除外
+        idx = _claude_index_by_number(snap)
+        mkt = _market_by_number(snap)
+        if len(idx) < 3 or len(mkt) < 2:
+            continue
+        detail, reason = _strategy_race_legs(snap, result, point_cost=point_cost,
+                                             meta={"race_id": rid})
+        if reason != "ok" or detail is None:
+            continue
+        agree = (max(idx, key=idx.get) == max(mkt, key=mkt.get))
+        (agree_rows if agree else disagree_rows).append(detail["per"])
+        r_ts = result.get("recorded_at")
+        if isinstance(r_ts, str) and (last_updated_at is None or r_ts > last_updated_at):
+            last_updated_at = r_ts
+
+    def _pairs(rows: list[dict[str, Any]], keys: list[str]) -> list[tuple[int, int]]:
+        out: list[tuple[int, int]] = []
+        for per in rows:
+            for k in keys:
+                s = per.get(k) or {}
+                if s.get("bets"):
+                    out.append((s["stake"], s["payout"]))
+        return out
+
+    metrics = []
+    for key, label, keys in _AGREEMENT_TARGETS:
+        ap = _pairs(agree_rows, keys)
+        dp = _pairs(disagree_rows, keys)
+        delta, lo, hi = _roi_delta_ci(ap, dp)
+        metrics.append({
+            "key": key, "label": label,
+            "agree_roi": _roi_of(ap), "disagree_roi": _roi_of(dp),
+            "agree_legs": len(ap), "disagree_legs": len(dp),
+            "delta": delta, "delta_ci_low": lo, "delta_ci_high": hi,
+            "significant": bool(ap and dp and (lo > 0 or hi < 0)),
+        })
+    return {
+        "races": len(agree_rows) + len(disagree_rows),
+        "agree_n": len(agree_rows),
+        "disagree_n": len(disagree_rows),
+        "metrics": metrics,
+        "last_updated_at": last_updated_at,
+        "sample_warning": (len(agree_rows) + len(disagree_rows)) < 50,
+    }
+
+
+def append_market_agreement_history() -> dict[str, Any] | None:
+    """現在の市場一致シグナルを計算し、レース数が前回より増えていれば history (jsonl) に追記。
+
+    結果取得ループ (api/main.py ResultAutoFetcher._run_once) から毎回呼ばれ、レースが溜まるごとに
+    シグナル (ROI 差と CI) の推移を残す → CI が 0 から離れれば確証。`races` が前回 entry と同じなら
+    no-op (新しい結果が無い)。返り値は追記した row (no-op は None)。
+    """
+    m = compute_market_agreement()
+    if m["races"] == 0:
+        return None
+    last_races = None
+    if MARKET_AGREEMENT_HISTORY.exists():
+        try:
+            lines = MARKET_AGREEMENT_HISTORY.read_text(encoding="utf-8").splitlines()
+            if lines:
+                last_races = json.loads(lines[-1]).get("races")
+        except (OSError, json.JSONDecodeError, ValueError):
+            last_races = None
+    if last_races == m["races"]:
+        return None
+    import datetime as _dt
+    row = {
+        "recorded_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "races": m["races"], "agree_n": m["agree_n"], "disagree_n": m["disagree_n"],
+        "metrics": [
+            {"key": x["key"], "agree_roi": round(x["agree_roi"], 4),
+             "disagree_roi": round(x["disagree_roi"], 4),
+             "delta": round(x["delta"], 4),
+             "delta_ci_low": round(x["delta_ci_low"], 4),
+             "delta_ci_high": round(x["delta_ci_high"], 4),
+             "significant": x["significant"]}
+            for x in m["metrics"]
+        ],
+    }
+    MARKET_AGREEMENT_HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    with open(MARKET_AGREEMENT_HISTORY, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return row
+
+
+def market_agreement_history(limit: int = 200) -> list[dict[str, Any]]:
+    """蓄積済の市場一致シグナル時系列 (古→新、最大 limit 件)。"""
+    if not MARKET_AGREEMENT_HISTORY.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in MARKET_AGREEMENT_HISTORY.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
 def _wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """二項分布の Wilson 95% 信頼区間。
     n=0 は (0, 0)、n が小さいほど区間は広い。"""

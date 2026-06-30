@@ -154,6 +154,7 @@ class ResultAutoFetcher:
         self.next_run_at: float | None = None
         self.last_summary: dict[str, Any] | None = None
         self.runs: int = 0
+        self.market_agreement_appends: int = 0   # 市場一致シグナルを history に追記した回数
 
     def status(self) -> dict[str, Any]:
         return {
@@ -163,6 +164,7 @@ class ResultAutoFetcher:
             "next_run_at": self.next_run_at,
             "runs": self.runs,
             "last_summary": self.last_summary,
+            "market_agreement_appends": self.market_agreement_appends,
         }
 
     def start(self) -> None:
@@ -218,6 +220,15 @@ class ResultAutoFetcher:
         # blocking (file IO + HTTP) なので別スレッドへ。
         enq = await asyncio.to_thread(self._enqueue_finished)
         summary = await asyncio.to_thread(process_pending)
+        # 市場一致シグナルを蓄積 (ユーザ指示 2026-06-30): 新しい結果が増えていれば history に追記し
+        # CI が 0 から離れる (=確証) まで時系列で追う。dedup 済 (races 不変なら no-op)。例外は呑む。
+        try:
+            from api.store import append_market_agreement_history
+            row = await asyncio.to_thread(append_market_agreement_history)
+            if row:
+                self.market_agreement_appends += 1
+        except Exception:  # noqa: BLE001 - 計測は結果取得ループを止めない
+            pass
         self.last_run_at = time.time()
         self.runs += 1
         self.last_summary = {
@@ -600,6 +611,21 @@ def api_shobu_venue_breakdown(point_cost: int = 100,
     計測対象外。`version` ("v1"/"v2") で補強根拠バージョン毎に分離。
     """
     return compute_venue_breakdown(point_cost=point_cost, version=version)
+
+
+@app.get("/api/shobu/market-agreement")
+def api_shobu_market_agreement() -> dict[str, Any]:
+    """**市場一致シグナル** の現在値 + 蓄積履歴 (ユーザ指示 2026-06-30)。
+
+    Claude#1==市場1番人気 (一致) か否かで券種 ROI を分割し、差Δの bootstrap CI が 0 から
+    離れる (=確証) まで結果取得ループが自動蓄積する。current=現在値・history=時系列。
+    """
+    from api.store import compute_market_agreement, market_agreement_history
+    return {
+        "current": compute_market_agreement(),
+        "history": market_agreement_history(),
+        "appends": RESULTS_AUTO.market_agreement_appends,
+    }
 
 
 @app.get("/api/results/auto")

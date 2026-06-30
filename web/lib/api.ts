@@ -809,6 +809,40 @@ export type VenueBreakdown = {
   last_updated_at: string | null;
 };
 
+// 市場一致シグナル (GET /api/shobu/market-agreement)。Claude#1==市場1番人気で券種ROIを分割し
+// 差Δの bootstrap CI が 0 から離れる (=確証) まで結果取得ループが自動蓄積する (2026-06-30)。
+export type MarketAgreementMetric = {
+  key: string;
+  label: string;
+  agree_roi: number;
+  disagree_roi: number;
+  agree_legs: number;
+  disagree_legs: number;
+  delta: number; // agree_roi − disagree_roi
+  delta_ci_low: number;
+  delta_ci_high: number;
+  significant: boolean; // CI が 0 を跨がない
+};
+export type MarketAgreement = {
+  races: number;
+  agree_n: number;
+  disagree_n: number;
+  metrics: MarketAgreementMetric[];
+  last_updated_at: string | null;
+  sample_warning: boolean;
+};
+export type MarketAgreementResponse = {
+  current: MarketAgreement;
+  history: Array<{
+    recorded_at: string;
+    races: number;
+    agree_n: number;
+    disagree_n: number;
+    metrics: Array<{ key: string; delta: number; significant: boolean }>;
+  }>;
+  appends: number;
+};
+
 export type ShobuScanRequest = {
   date?: string | null;
   race_type?: "all" | "jra" | "nar" | "banei";
@@ -904,6 +938,9 @@ export const api = {
         version ? `&version=${encodeURIComponent(version)}` : ""
       }`,
     ),
+  // 市場一致シグナル (Claude#1==市場1番人気で券種ROI分割) の現在値 + 蓄積履歴。
+  marketAgreement: () =>
+    jsonFetch<MarketAgreementResponse>("/api/shobu/market-agreement"),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 

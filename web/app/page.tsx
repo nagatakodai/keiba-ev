@@ -1,8 +1,9 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { Coins, History, Layers, ServerOff } from "lucide-react";
+import { Coins, History, Layers, Scale, ServerOff } from "lucide-react";
 import {
   api,
+  type MarketAgreementResponse,
   type ShobuPnl,
   type ShobuPnlRace,
   type StrategiesPnl,
@@ -288,6 +289,80 @@ function BoxDetailTable({ rows }: { rows: ShobuPnlRace[] }) {
   );
 }
 
+// 市場一致シグナル (Claude#1==市場1番人気 で券種ROIを分割) の蓄積カード。確証まで自動更新。
+function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
+  const c = data.current;
+  const has = c.races > 0;
+  return (
+    <Card>
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Scale className="w-4 h-4 text-teal-300" />
+          <span className="text-[10px] font-bold tracking-[0.22em] uppercase text-(--color-muted)">
+            研究中シグナル — 市場一致 (Claude#1 == 市場1番人気) で券種 ROI を分割・確証まで自動蓄積
+          </span>
+          {c.sample_warning && <Badge tone="muted">サンプル少</Badge>}
+        </div>
+        {has ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs table-zebra">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wider text-(--color-muted) border-b border-(--color-line)">
+                  <th className="px-2 py-2 font-bold">券種 / スタイル</th>
+                  <th className="px-2 py-2 font-bold text-right">一致 ROI</th>
+                  <th className="px-2 py-2 font-bold text-right">不一致 ROI</th>
+                  <th className="px-2 py-2 font-bold text-right">Δ(一致−不一致)</th>
+                  <th className="px-2 py-2 font-bold text-right">95%CI(Δ)</th>
+                  <th className="px-2 py-2 font-bold">状態</th>
+                </tr>
+              </thead>
+              <tbody>
+                {c.metrics.map((m) => (
+                  <tr key={m.key} className="border-b border-(--color-line-soft)">
+                    <td className="px-2 py-2 font-bold whitespace-nowrap">{m.label}</td>
+                    <td className="px-2 py-2 text-right tnum">{fmtRoiPct(m.agree_roi)}</td>
+                    <td className="px-2 py-2 text-right tnum">{fmtRoiPct(m.disagree_roi)}</td>
+                    <td
+                      className={`px-2 py-2 text-right tnum font-bold ${
+                        m.delta < 0 ? "text-rose-300" : "text-emerald-300"
+                      }`}
+                    >
+                      {m.delta >= 0 ? "+" : ""}
+                      {Math.round(m.delta * 100)}pt
+                    </td>
+                    <td className="px-2 py-2 text-right tnum text-(--color-muted) whitespace-nowrap">
+                      {Math.round(m.delta_ci_low * 100)}〜{Math.round(m.delta_ci_high * 100)}
+                    </td>
+                    <td className="px-2 py-2">
+                      <Badge tone={m.significant ? "good" : "muted"}>
+                        {m.significant ? "★確証" : "蓄積中"}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-xs text-(--color-muted)">
+            市場指数付きの結果確定レースがまだありません。
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
+          <span>
+            対象 {c.races}R (一致 {c.agree_n} / 不一致 {c.disagree_n}) ・ 自動蓄積 {data.appends} 回 ・
+            結果取得 (make api) ごとに更新
+          </span>
+          <span>
+            ※ Δの95%CIが0を跨がなくなれば確証(★)。仮説: 馬連/組合せ系は一致時(consensus)に伸び、
+            3連複BOXは不一致(Claude contrarian)時に伸びる。{data.history.length}件 蓄積。
+          </span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // API 未接続時のエラーカード (silent null の代わりに明示表示)
 function ApiDownCard() {
   return (
@@ -355,11 +430,12 @@ function VersionMeasurementSection({
 export default async function DashboardPage() {
   // 計測を補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30: v2 が上・v1 が下)。
   // β (市場由来・〜2026-06-21) は対象が少ないため表示しない (ユーザ指示で撤去)。
-  const [boxV2, boxV1, stratV2, stratV1] = await Promise.all([
+  const [boxV2, boxV1, stratV2, stratV1, marketAgree] = await Promise.all([
     api.indexedPnl(100, "v2").catch(() => null),
     api.indexedPnl(100, "v1").catch(() => null),
     api.indexedStrategiesPnl(100, "v2").catch(() => null),
     api.indexedStrategiesPnl(100, "v1").catch(() => null),
+    api.marketAgreement().catch(() => null),
   ]);
 
   // API 未接続: どのバージョンも取れなければ明示のエラーカードを出す。
@@ -389,6 +465,9 @@ export default async function DashboardPage() {
         title="ダッシュボード"
         subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v2=無制限・現行 / v1=3件上限・旧)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。"
       />
+
+      {/* ====== 研究中シグナル: 市場一致 (自動蓄積・確証まで) ====== */}
+      {marketAgree && <MarketAgreementCard data={marketAgree} />}
 
       {/* ====== v2 (現行・補強根拠無制限) を上・v1 (旧) を下 ====== */}
       <VersionMeasurementSection version="v2" box={boxV2} strategies={stratV2} nowMs={nowMs} />

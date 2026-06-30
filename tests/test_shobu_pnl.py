@@ -19,6 +19,7 @@ def _snap(n_runners: int, idx: dict[int, float], *,
           win_odds: dict[int, float] | None = None,
           place_odds: dict[int, float] | None = None,
           combo_odds: dict[str, dict[tuple, float]] | None = None,
+          market: dict[int, float] | None = None,
           index_version: str | None = None) -> dict:
     """全馬に Claude 指数を付けた snapshot (index_compare 形式)。
 
@@ -30,7 +31,8 @@ def _snap(n_runners: int, idx: dict[int, float], *,
         "n_runners": n_runners,
         "saved_at": "2026-06-28T11:00:00",
         "index_compare": [
-            {"number": k, "claude_index": v, "market_index": 50.0} for k, v in idx.items()
+            {"number": k, "claude_index": v,
+             "market_index": (market or {}).get(k, 50.0)} for k, v in idx.items()
         ],
     }
     if index_version is not None:
@@ -441,6 +443,41 @@ def test_index_version_beta_for_market_derived(dirs):
     v2 = store.compute_shobu_strategies_pnl(version="v2")
     assert {r["race_id"] for r in beta["races_detail"]} == {"b-1"}
     assert v2["races"] == 0   # β レースは v2 に含めない
+
+
+def test_market_agreement_splits_by_consensus(dirs):
+    """Claude#1==市場1番人気か で agree/disagree に分割される (ユーザ指示 2026-06-30)。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps({
+        "generated_at": "2026-06-28T11:42:00+09:00",
+        "races": [
+            {"race_id": "ag-1", "recommended": True, "venue": "A", "race_no": 1,
+             "race_type": "nar", "n_runners": 8},
+            {"race_id": "dis-1", "recommended": True, "venue": "B", "race_no": 2,
+             "race_type": "nar", "n_runners": 8},
+        ],
+    }), encoding="utf-8")
+    # ag-1: Claude#1=馬番1 / 市場#1も馬番1 → 一致。
+    (pr / "ag-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, market={1: 95.0, 2: 60.0})), encoding="utf-8")
+    # dis-1: Claude#1=馬番1 だが 市場#1=馬番2 → 不一致 (Claude contrarian)。
+    (pr / "dis-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, market={1: 40.0, 2: 95.0})), encoding="utf-8")
+    for rid in ("ag-1", "dis-1"):
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo([6, 7, 8], 9999, {})), encoding="utf-8")
+    m = store.compute_market_agreement()
+    assert m["races"] == 2 and m["agree_n"] == 1 and m["disagree_n"] == 1
+    # 各 metric は agree/disagree 双方の脚数を持つ
+    quin = next(x for x in m["metrics"] if x["key"] == "quinella12")
+    assert quin["agree_legs"] == 1 and quin["disagree_legs"] == 1
+
+    # history 追記 + dedup (races 不変なら no-op)
+    import api.store as st
+    st.MARKET_AGREEMENT_HISTORY = rs / "mkt_hist.jsonl"   # tmp に向ける
+    row = store.append_market_agreement_history()
+    assert row is not None and row["races"] == 2
+    assert store.append_market_agreement_history() is None   # dedup
+    assert len(store.market_agreement_history()) == 1
 
 
 def test_venue_breakdown_groups_by_venue(dirs):
