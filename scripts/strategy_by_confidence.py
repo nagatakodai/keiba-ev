@@ -85,6 +85,30 @@ FIELD_BUCKETS: list[tuple[str, "callable"]] = [
     ("12頭+", lambda nr: nr >= 12),
 ]
 
+# 買い方スタイル (UI `web/lib/betGuide.ts` の本命系/組合せ系と対応)。脚を pool して style ROI を見る。
+BUY_STYLES: dict[str, list[str]] = {
+    "本命系 (単勝1/複勝1/3連複/BOX)": ["win1", "place1", "trio123", "trio1234box"],
+    "組合せ系 (馬連/馬単/ワイド)": ["quinella12", "exacta12", "wide12"],
+}
+
+
+def _terciles(vals: list[float]) -> tuple[float, float]:
+    """3分位境界 (低<lo ≤ 中 < hi ≤ 高)。"""
+    s = sorted(vals)
+    n = len(s)
+    return s[n // 3], s[(2 * n) // 3]
+
+
+def _style_pairs(rows: list[dict], keys: list[str]) -> list[tuple[int, int]]:
+    """スタイルの全戦略の全脚 (実際に賭けた) の (stake, payout) を pool。"""
+    out: list[tuple[int, int]] = []
+    for r in rows:
+        for k in keys:
+            s = r["per"].get(k) or {}
+            if s.get("bets"):
+                out.append((s["stake"], s["payout"]))
+    return out
+
 
 def _agg(rows: list[dict], key: str) -> tuple[int, int, int, int, float]:
     """戦略 key の (races, races_hit, stake, payout, roi) を rows から集計 (bets>0 のみ)。"""
@@ -248,8 +272,48 @@ def main() -> None:
             lcell = f"{lh}/{lr} ({lroi*100:.0f}%)" if lr else "-"
             print(f"  {lab:<8}{hcell:>26}{lcell:>26}")
 
+    # ---- ⑥ 買い方スタイル × 自信度 tercile の ROI (UIガイド「本命系/組合せ系」の検証) ----
+    print("\n⑥ 買い方スタイル別 ROI を 自信度 3分位で比較 (UIガイドの検証=どっちの買い方が良いか)")
+    for feat, fname in (("gap12", "1-2位差(#1の抜け)"), ("top1", "1位の指数値")):
+        lo_b, hi_b = _terciles([r[feat] for r in rows])
+        bands = [("低", lambda v: v < lo_b), ("中", lambda v: lo_b <= v < hi_b),
+                 ("高", lambda v: v >= hi_b)]
+        print(f"  [{fname}] 3分位境界: 低 < {lo_b:.0f} ≤ 中 < {hi_b:.0f} ≤ 高")
+        print(f"    {'スタイル':<28}{'低 ROI(R)':>12}{'中 ROI(R)':>12}{'高 ROI(R)':>12}")
+        for style, keys in BUY_STYLES.items():
+            cells = []
+            for _name, sel in bands:
+                sub = [r for r in rows if sel(r[feat])]
+                pairs = _style_pairs(sub, keys)
+                cells.append(f"{_roi(pairs)*100:.0f}%({len(sub)})")
+            print(f"    {style:<26}" + "".join(f"{c:>12}" for c in cells))
+        print("    → 期待: 本命系は自信高で上昇 / 組合せ系は自信低(拮抗)で上昇 (傾向・有意でない)")
+
+    # ---- ⑦ 各券種の ROI を 自信度 tercile で (細分化・単調性を見る) ----
+    print("\n⑦ 各券種 ROI の 1-2位差 3分位推移 (低→中→高・単調なら傾向が信頼しやすい)")
+    lo_b, hi_b = _terciles([r["gap12"] for r in rows])
+    bands = [("低", lambda v: v < lo_b), ("中", lambda v: lo_b <= v < hi_b),
+             ("高", lambda v: v >= hi_b)]
+    print(f"    {'戦略':<20}{'低':>8}{'中':>8}{'高':>8}")
+    for key, _lbl, _bt in STRATEGY_DEFS:
+        cells = []
+        seen = False
+        for _name, sel in bands:
+            sub = [r for r in rows if sel(r["gap12"])]
+            pairs = _per_race_pairs(sub, key)
+            if pairs:
+                seen = True
+                cells.append(f"{_roi(pairs)*100:.0f}%")
+            else:
+                cells.append("-")
+        if seen:
+            print(f"    {LABEL[key]:<18}" + "".join(f"{c:>8}" for c in cells))
+
     print("\n※ 標本 ~70R と小。3連単/3連複系は的中稀で ROI は1発で振れる → CI と的中Rを併読。"
           " 単発の高 ROI を戦略採用根拠にしない (CLAUDE.md の overfit 戒め)。"
+          "\n※ ⑥⑦ で **本命系 (特に3連複BOX) の ROI は #1の抜け具合 (1-2位差) に対し単調増加**"
+          " (本命系 19%→57%→75% / 3連複BOX 7%→51%→94%) — 単調なので最も信頼しやすい傾向。"
+          " 組合せ系は拮抗(自信低)で高いが非単調=ノイズ大。UIガイド (本命系/組合せ系) は本命側で裏付くが組合せ側は弱い。"
           "\n※ 3連複BOX の的中は **頭数 と #1の抜け具合 の両方** が効き交互作用がある:"
           " ≤9頭は自信度に関係なく当たりやすい(小フィールド) / 12頭+はほぼ当たらない(0/20) /"
           " その間の 10-11頭で 1-2位差が大きい(=#1が抜けている)と的中が集中 (例 5/24 vs 0/10)。"

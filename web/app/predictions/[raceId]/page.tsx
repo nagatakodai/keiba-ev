@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
 import { indexVersionTitle } from "@/lib/version";
+import { betStyleGuide } from "@/lib/betGuide";
 import { OddsTimelineCard, type LateMoneySnapshot } from "./OddsTimelineCard";
 import { OddsRefreshButton } from "./OddsRefreshButton";
 import { isEvMeasured,
@@ -1230,6 +1231,10 @@ function IndexCompareCard({
   hasClaude?: boolean;
 }) {
   const finishSet = new Set(finish ?? []);
+  // 買い方ガイド (Claude 指数の自信度 → 本命系/組合せ系)。傾向ベースの参考 (有意ではない)。
+  const guide = hasClaude
+    ? betStyleGuide(items.map((i) => i.claude_index))
+    : null;
   return (
     <Card
       title={
@@ -1244,6 +1249,35 @@ function IndexCompareCard({
         </span>
       }
     >
+      {guide && (
+        <div
+          className={`mb-3 rounded-lg border px-3 py-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm ${
+            guide.kind === "dominant"
+              ? "border-(--color-accent)/40 bg-(--color-accent)/10"
+              : "border-amber-400/40 bg-amber-400/10"
+          }`}
+        >
+          <span
+            className={`px-1.5 py-0.5 rounded text-xs font-black ${
+              guide.kind === "dominant"
+                ? "bg-(--color-accent)/20 text-(--color-accent)"
+                : "bg-amber-400/20 text-amber-300"
+            }`}
+          >
+            {guide.styleLabel}
+          </span>
+          <span className="text-(--color-muted) text-xs tnum">
+            指数1位 {guide.top1.toFixed(0)} / 2位との差 {guide.gap12.toFixed(0)}pt
+          </span>
+          <span className="font-bold">
+            {guide.reason} → <span className="text-(--color-foreground)">{guide.recommend}</span> 向き
+          </span>
+          <span className="text-[10px] text-(--color-muted) basis-full">
+            ※ Claude 指数の自信度に基づく傾向ガイド (参考)。#1が抜けるほど本命系・拮抗ほど組合せ系の回収率が
+            上がる傾向 (scripts/strategy_by_confidence.py)。標本小で統計的有意ではない。
+          </span>
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm tnum table-zebra">
           <thead className="text-left text-(--color-muted) text-xs">
