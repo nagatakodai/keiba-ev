@@ -178,13 +178,10 @@ def test_strategies_full_hit_payout(dirs):
     assert r["per"]["place3"]["payout"] == 200 and r["per"]["place3"]["hits"] == 1   # 2.0×100
     assert r["per"]["quinella12"]["payout"] == 400 and r["per"]["quinella12"]["hits"] == 1
     assert r["per"]["exacta12"]["payout"] == 600 and r["per"]["exacta12"]["hits"] == 1   # 1→2 着順一致
-    # winplace = 1位単勝 + 1位複勝 (bet_tables 無し→合成フィルタ no-op)。300(win) + 110(place#1) = 410。
-    assert r["per"]["winplace"]["payout"] == 410 and r["per"]["winplace"]["stake"] == 200
     # 戦略集計 (1レース)
     assert _strat(d, "win1")["roi"] == 3.0 and _strat(d, "win1")["net"] == 200
     assert _strat(d, "place2")["payout"] == 150 and _strat(d, "place3")["payout"] == 200
     assert _strat(d, "quinella12")["payout"] == 400 and _strat(d, "quinella12")["bets"] == 1
-    assert _strat(d, "winplace")["stake"] == 200 and _strat(d, "winplace")["payout"] == 410
 
 
 def test_strategies_quinella_needs_both_in_top2(dirs):
@@ -245,7 +242,6 @@ def test_strategies_no_place_when_le4(dirs):
     # 複勝は発売なし → place1/place2/place3 とも 0 脚
     assert r["per"]["place1"]["bets"] == 0
     assert r["per"]["place2"]["bets"] == 0 and r["per"]["place3"]["bets"] == 0
-    assert r["per"]["winplace"]["stake"] == 100               # 単勝のみ (複勝なし)
     # place2/place3 はこのレースで 0 脚 → 戦略の対象レースにカウントしない
     assert _strat(d, "place2")["races"] == 0 and _strat(d, "place3")["races"] == 0
     assert _strat(d, "win1")["races"] == 1 and _strat(d, "quinella12")["races"] == 1
@@ -271,9 +267,8 @@ def test_strategies_all_miss_counts_without_odds(dirs):
     (rs / "rec-1.json").write_text(json.dumps(_result_fo([6, 7, 8], 12000, {})), encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     assert d["races"] == 1 and d["skipped_no_odds"] == 0
-    # winplace = 1位単勝+1位複勝 = 2脚 ¥200 (全外れ)。
-    assert _strat(d, "winplace")["payout"] == 0 and _strat(d, "winplace")["stake"] == 200
     assert _strat(d, "win1")["hits"] == 0 and _strat(d, "quinella12")["hits"] == 0
+    assert _strat(d, "trio1234box")["payout"] == 0
 
 
 def test_strategies_trifecta_trio_box_full_hit(dirs):
@@ -337,36 +332,12 @@ def test_strategies_win_place_skip_low_odds(dirs):
     assert _strat(d, "place2")["payout"] == 150
 
 
-def test_strategies_winplace_synth_filter(dirs):
-    """単複=1位単勝+1位複勝。合成オッズ(=1位複勝/2)<1 なら買わない。ユーザ指示 2026-06-30。"""
-    sh, pr, rs = dirs
-    # 着順 1-5-6: #1 勝ち (単複の win/place 両的中) だが 馬連/馬単/3連系は全外れ (余計なオッズ不要)。
-    # ケースA: #1 複勝1.8 → 合成0.9<1 → 買わない。
-    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
-    (pr / "rec-1.json").write_text(json.dumps(_snap(
-        8, _IDX8, place_odds={1: 1.8})), encoding="utf-8")
-    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
-        [1, 5, 6], 9999, {"win:1": 3.0, "place:1": 1.8})), encoding="utf-8")
-    d = store.compute_shobu_strategies_pnl(point_cost=100)
-    assert _strat(d, "winplace")["races"] == 0    # 合成0.9<1 → 見送り
-
-    # ケースB: #1 複勝2.4 → 合成1.2≥1 → 買う。win#1(3.0→300)+place#1(2.4→240)=540, stake200。
-    (pr / "rec-1.json").write_text(json.dumps(_snap(
-        8, _IDX8, place_odds={1: 2.4})), encoding="utf-8")
-    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
-        [1, 5, 6], 9999, {"win:1": 3.0, "place:1": 2.4})), encoding="utf-8")
-    d2 = store.compute_shobu_strategies_pnl(point_cost=100)
-    wp = next(r["per"]["winplace"] for r in d2["races_detail"])
-    assert wp["bets"] == 2 and wp["stake"] == 200 and wp["payout"] == 540
-    assert _strat(d2, "winplace")["races"] == 1 and _strat(d2, "winplace")["races_hit"] == 1
-
-
 def test_strategies_hit_rate_denominator_is_races(dirs):
-    """単複・3連複BOX の的中率の母数は **レース数** (races_hit/races)。ユーザ指示 2026-06-30。"""
+    """3連複BOX の的中率の母数は **レース数** (races_hit/races) であって脚数ではない。ユーザ指示 2026-06-30。"""
     sh, pr, rs = dirs
     (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
-    (pr / "rec-1.json").write_text(json.dumps(_snap(8, _IDX8, place_odds={1: 3.0})), encoding="utf-8")
-    # 着順 1-2-3 完全的中 (BOX 4脚中1脚的中, 単複 win+place とも的中)。
+    (pr / "rec-1.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
+    # 着順 1-2-3 完全的中 (BOX 4脚中1脚的中)。
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
         [1, 2, 3], 9999,
         {"win:1": 2.0, "place:1": 3.0, "place:2": 1.5, "place:3": 2.0,
@@ -377,8 +348,6 @@ def test_strategies_hit_rate_denominator_is_races(dirs):
     # BOX: 4脚/1レース、1脚的中。hit_rate は 1/1 (レース母数) であって 1/4 (脚母数) ではない。
     assert box["bets"] == 4 and box["races"] == 1 and box["races_hit"] == 1
     assert box["hit_rate"] == 1.0
-    wp = _strat(d, "winplace")
-    assert wp["bets"] == 2 and wp["races"] == 1 and wp["hit_rate"] == 1.0
 
 
 def test_strategies_version_split(dirs):
@@ -407,6 +376,50 @@ def test_strategies_version_split(dirs):
     # BOX 側も同様に分離
     b2 = store.compute_shobu_pnl(version="v2")
     assert b2["races"] == 1 and b2["recommended_total"] == 1
+
+
+def test_index_version_beta_for_market_derived(dirs):
+    """市場由来 cutoff (2026-06-21 19:04) 以前に採点した snapshot は β に分類される。"""
+    sh, pr, rs = dirs
+    (sh / "20260620.json").write_text(json.dumps({
+        "generated_at": "2026-06-20T11:00:00+09:00",
+        "races": [{"race_id": "b-1", "recommended": True, "venue": "C", "race_no": 1,
+                   "race_type": "nar", "n_runners": 8}],
+    }), encoding="utf-8")
+    snap = _snap(8, _IDX8)
+    snap["llm_scored_at"] = "2026-06-20T15:00:00"   # cutoff より前 → β
+    (pr / "b-1.json").write_text(json.dumps(snap), encoding="utf-8")
+    (rs / "b-1.json").write_text(json.dumps(_result_fo([6, 7, 8], 9999, {})), encoding="utf-8")
+    beta = store.compute_shobu_strategies_pnl(version="β")
+    v2 = store.compute_shobu_strategies_pnl(version="v2")
+    assert {r["race_id"] for r in beta["races_detail"]} == {"b-1"}
+    assert v2["races"] == 0   # β レースは v2 に含めない
+
+
+def test_venue_breakdown_groups_by_venue(dirs):
+    """compute_venue_breakdown が per-race を venue で集計する (ユーザ指示 2026-06-30)。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps({
+        "generated_at": "2026-06-28T11:42:00+09:00",
+        "races": [
+            {"race_id": "kn-1", "recommended": True, "venue": "金沢", "race_no": 1,
+             "race_type": "nar", "n_runners": 8},
+            {"race_id": "kn-2", "recommended": True, "venue": "金沢", "race_no": 2,
+             "race_type": "nar", "n_runners": 8},
+            {"race_id": "ng-1", "recommended": True, "venue": "名古屋", "race_no": 1,
+             "race_type": "nar", "n_runners": 8},
+        ],
+    }), encoding="utf-8")
+    for rid in ("kn-1", "kn-2", "ng-1"):
+        (pr / f"{rid}.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo([6, 7, 8], 9999, {})), encoding="utf-8")
+    vb = store.compute_venue_breakdown(version="v2")
+    by = {v["venue"]: v for v in vb["venues"]}
+    assert by["金沢"]["box"]["races"] == 2 and by["名古屋"]["box"]["races"] == 1
+    # venues は対象レース数の多い順 → 金沢 (2) が先頭
+    assert vb["venues"][0]["venue"] == "金沢"
+    # winplace は撤去済 → 戦略内訳に存在しない
+    assert all(s["key"] != "winplace" for s in by["金沢"]["strategies"])
 
 
 def test_strategies_indexed_is_superset(dirs):
@@ -440,9 +453,5 @@ def test_strategies_indexed_is_superset(dirs):
     assert {r["race_id"] for r in rec["races_detail"]} == {"rec-1"}
     assert {r["race_id"] for r in allr["races_detail"]} == {"rec-1", "non-1"}
     assert allr["recommended_total"] == 2
-    # winplace = win1 + place1 (1位単勝+1位複勝) の整合 (bet_tables 無し=フィルタ no-op なので一致)
-    wp = _strat(allr, "winplace")
-    w1, p1 = _strat(allr, "win1"), _strat(allr, "place1")
-    assert wp["bets"] == w1["bets"] + p1["bets"]
-    assert wp["stake"] == w1["stake"] + p1["stake"]
-    assert wp["payout"] == w1["payout"] + p1["payout"]
+    # winplace (単複) は全戦略から撤去済み (ユーザ指示 2026-06-30)。
+    assert all(s["key"] != "winplace" for s in allr["strategies"])

@@ -48,14 +48,17 @@ def test_index_version_explicit_field_wins():
 
 
 def test_index_version_inferred_from_scored_date():
-    """旧 snapshot は採点日時で推定: 2026-06-28 以降=v2 / 以前=v1 (Claude 指数があるとき)。"""
+    """旧 snapshot は採点日時で推定: 市場由来 cutoff(2026-06-21 19:04)以前=β /
+    〜2026-06-28未満=v1 / 2026-06-28以降=v2 (Claude 指数があるとき)。"""
     from api.store import index_version_of
     idx = {"index_compare": [{"number": 1, "claude_index": 80.0}]}
     assert index_version_of({**idx, "llm_scored_at": "2026-06-28T10:00:00"}) == "v2"
     assert index_version_of({**idx, "llm_scored_at": "2026-06-27T23:59:59"}) == "v1"
-    # llm_scored_at 欠落は saved_at で代替
+    assert index_version_of({**idx, "llm_scored_at": "2026-06-21T19:04:26"}) == "β"   # cutoff 直前
+    assert index_version_of({**idx, "llm_scored_at": "2026-06-21T19:04:27"}) == "v1"   # cutoff 丁度
+    # llm_scored_at 欠落は saved_at で代替。市場由来 (〜06-21) は β。
     assert index_version_of({**idx, "saved_at": "2026-06-29T12:00:00"}) == "v2"
-    assert index_version_of({**idx, "saved_at": "2026-06-01T12:00:00"}) == "v1"
+    assert index_version_of({**idx, "saved_at": "2026-06-01T12:00:00"}) == "β"
 
 
 def test_index_version_none_without_index():

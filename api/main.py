@@ -64,6 +64,7 @@ from .store import (
     compute_indexed_pnl,
     compute_shobu_strategies_pnl,
     compute_indexed_strategies_pnl,
+    compute_venue_breakdown,
     get_prediction,
     get_shobu_result,
     list_auto_watch_history,
@@ -588,6 +589,17 @@ def api_shobu_indexed_strategies_pnl(point_cost: int = 100,
     `version` ("v1"/"v2") で補強根拠バージョン毎に分離 (v2が上・v1が下)。
     """
     return compute_indexed_strategies_pnl(point_cost=point_cost, version=version)
+
+
+@app.get("/api/shobu/venue-breakdown")
+def api_shobu_venue_breakdown(point_cost: int = 100,
+                              version: str | None = None) -> dict[str, Any]:
+    """**競馬場 (venue) 毎の内訳** 仮想収支 (ユーザ指示 2026-06-30: 競馬場毎にカードで内訳)。
+
+    BOX収支 + 戦略くらべ を venue で group 集計。市場由来 Claude 指数 (〜2026-06-21 19:04) は
+    計測対象外。`version` ("v1"/"v2") で補強根拠バージョン毎に分離。
+    """
+    return compute_venue_breakdown(point_cost=point_cost, version=version)
 
 
 @app.get("/api/results/auto")

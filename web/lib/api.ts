@@ -785,6 +785,30 @@ export type StrategiesPnl = {
   races_detail: StrategyRaceDetail[];
 };
 
+// 競馬場 (venue) 毎の内訳 (GET /api/shobu/venue-breakdown)。BOX + 各戦略を venue で集計 (2026-06-30)。
+export type VenueRoiBlock = {
+  races: number;
+  races_hit: number;
+  hit_rate: number;
+  stake: number;
+  payout: number;
+  net: number;
+  roi: number;
+};
+export type VenueStrategy = VenueRoiBlock & { key: string; label: string };
+export type VenueBreakdownItem = {
+  venue: string;
+  n_races: number;
+  box: VenueRoiBlock;
+  strategies: VenueStrategy[];
+};
+export type VenueBreakdown = {
+  point_cost: number;
+  version?: string | null;
+  venues: VenueBreakdownItem[];
+  last_updated_at: string | null;
+};
+
 export type ShobuScanRequest = {
   date?: string | null;
   race_type?: "all" | "jra" | "nar" | "banei";
@@ -858,7 +882,9 @@ export const api = {
   // version ("v1"/"v2") を渡すと補強根拠バージョン毎に分離。
   indexedPnl: (pointCost = 100, version?: string) =>
     jsonFetch<ShobuPnl>(
-      `/api/shobu/indexed-pnl?point_cost=${pointCost}${version ? `&version=${version}` : ""}`,
+      `/api/shobu/indexed-pnl?point_cost=${pointCost}${
+        version ? `&version=${encodeURIComponent(version)}` : ""
+      }`,
     ),
   // Claude 指数 単純戦略くらべ (単勝/複勝/馬連/単複) の仮想収支 — 勝負レース(推奨)のみ。
   strategiesPnl: (pointCost = 100) =>
@@ -867,7 +893,16 @@ export const api = {
   // version ("v1"/"v2") を渡すと補強根拠バージョン毎に分離。
   indexedStrategiesPnl: (pointCost = 100, version?: string) =>
     jsonFetch<StrategiesPnl>(
-      `/api/shobu/indexed-strategies-pnl?point_cost=${pointCost}${version ? `&version=${version}` : ""}`,
+      `/api/shobu/indexed-strategies-pnl?point_cost=${pointCost}${
+        version ? `&version=${encodeURIComponent(version)}` : ""
+      }`,
+    ),
+  // 競馬場 (venue) 毎の内訳 仮想収支 (BOX + 戦略くらべ)。version で v2/v1/β 分離。
+  venueBreakdown: (version?: string, pointCost = 100) =>
+    jsonFetch<VenueBreakdown>(
+      `/api/shobu/venue-breakdown?point_cost=${pointCost}${
+        version ? `&version=${encodeURIComponent(version)}` : ""
+      }`,
     ),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),

@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   FlaskConical,
   ListOrdered,
+  MapPin,
   Radio,
   Swords,
   Target,
@@ -16,6 +17,7 @@ import {
 // layout.tsx (server) からはこのコンポーネントを mount するだけ。
 const NAV: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/", label: "ダッシュボード", icon: LayoutDashboard },
+  { href: "/venues", label: "競馬場別", icon: MapPin },
   { href: "/shobu", label: "今日の勝負レース", icon: Swords },
   { href: "/analyze", label: "レース予測分析", icon: FlaskConical },
   { href: "/predictions", label: "予測分析履歴", icon: ListOrdered },

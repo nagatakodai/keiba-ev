@@ -4,9 +4,14 @@
 // ユーザ指示 (2026-06-30): 「補強根拠が3件だったのをv1 / 無制限を v2 として表示。左上タイトルの横にも」。
 export const INDEX_VERSION = "v2";
 
+// 表示順 (新しい/現行が先頭、市場由来 β が末尾)。ダッシュボード/競馬場別ページのセクション順。
+export const INDEX_VERSIONS = ["v2", "v1", "β"] as const;
+
 export const INDEX_VERSION_DESC: Record<string, string> = {
   v1: "補強根拠 3件まで",
   v2: "補強根拠 無制限",
+  // β = score プロンプトに単勝オッズ列があり Claude 指数が市場由来だった頃 (〜2026-06-21 19:04)。
+  "β": "市場由来 (旧・実験)",
 };
 
 export function indexVersionTitle(v: string | null | undefined): string {

@@ -17,6 +17,7 @@ import {
   fmtYen,
 } from "@/components/ui";
 import { AutoRefresh } from "@/components/AutoRefresh";
+import { VersionHeading } from "@/components/VersionHeading";
 
 export const dynamic = "force-dynamic";
 
@@ -199,8 +200,8 @@ function StrategiesPnlCard({
           <span>
             ※ 各脚 ¥{data.point_cost}: 単勝=指数1位 / 複勝=指数1位・2位・3位 (頭数ルール: 8頭以上=3着・5-7頭=2着・4頭以下=無)
             / 馬連=指数1-2位 (上位2着) / 馬単=指数1→2位 (着順一致) / 3連単=指数1→2→3 (着順一致)
-            / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点) / 単複=1位単勝+1位複勝。
-            <strong>単勝・複勝は最終オッズ ≤1.1、単複は合成オッズ (1位複勝/2) &lt;1 のとき買い見送り</strong>。
+            / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点)。
+            <strong>単勝・複勝は最終オッズ ≤1.1 のとき買い見送り</strong>。
             的中率の母数はレース数 (的中R/対象R) ・ 対象={data.races}R 中の賭けたレース数
           </span>
           {data.skipped_no_odds > 0 && (
@@ -287,27 +288,6 @@ function BoxDetailTable({ rows }: { rows: ShobuPnlRace[] }) {
   );
 }
 
-// 補強根拠バージョン (v1/v2) の見出し。計測をバージョン毎に分けて表示する (v2が上・v1が下)。
-function VersionHeading({ version }: { version: "v1" | "v2" }) {
-  const desc = version === "v2" ? "補強根拠 無制限 (現行)" : "補強根拠 3件まで (旧)";
-  const current = version === "v2";
-  return (
-    <div className="flex flex-wrap items-center gap-2 pt-3">
-      <span
-        className={`px-2 py-0.5 rounded text-xs font-black tnum border ${
-          current
-            ? "bg-(--color-accent)/15 text-(--color-accent) border-(--color-accent)/40"
-            : "bg-(--color-surface-2) text-(--color-muted) border-(--color-line)"
-        }`}
-      >
-        {version}
-      </span>
-      <span className="text-sm font-bold">Claude 指数 {version} の計測</span>
-      <span className="text-[11px] text-(--color-muted)">— {desc}</span>
-    </div>
-  );
-}
-
 // API 未接続時のエラーカード (silent null の代わりに明示表示)
 function ApiDownCard() {
   return (
@@ -338,11 +318,24 @@ function VersionMeasurementSection({
   strategies,
   nowMs,
 }: {
-  version: "v1" | "v2";
+  version: "v1" | "v2" | "β";
   box: ShobuPnl | null;
   strategies: StrategiesPnl | null;
   nowMs: number;
 }) {
+  // β など対象レースが 0 のバージョンは「計測なし」の薄い表示に畳む。
+  if (box && box.races === 0 && (!strategies || strategies.races === 0)) {
+    return (
+      <>
+        <VersionHeading version={version} />
+        <Card>
+          <div className="text-xs text-(--color-muted)">
+            このバージョンの結果確定レースはまだありません。
+          </div>
+        </Card>
+      </>
+    );
+  }
   return (
     <>
       <VersionHeading version={version} />
@@ -360,16 +353,18 @@ function VersionMeasurementSection({
 }
 
 export default async function DashboardPage() {
-  // 計測を補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30: v2 が上・v1 が下)。
-  const [boxV2, boxV1, stratV2, stratV1] = await Promise.all([
+  // 計測を補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30: v2 が上・v1 が中・β が下)。
+  const [boxV2, boxV1, boxB, stratV2, stratV1, stratB] = await Promise.all([
     api.indexedPnl(100, "v2").catch(() => null),
     api.indexedPnl(100, "v1").catch(() => null),
+    api.indexedPnl(100, "β").catch(() => null),
     api.indexedStrategiesPnl(100, "v2").catch(() => null),
     api.indexedStrategiesPnl(100, "v1").catch(() => null),
+    api.indexedStrategiesPnl(100, "β").catch(() => null),
   ]);
 
   // API 未接続: どのバージョンも取れなければ明示のエラーカードを出す。
-  if (!boxV2 && !boxV1) {
+  if (!boxV2 && !boxV1 && !boxB) {
     return (
       <Page>
         <AutoRefresh seconds={15} />
@@ -393,14 +388,13 @@ export default async function DashboardPage() {
       <PageHeader
         eyebrow="Keiba EV Terminal"
         title="ダッシュボード"
-        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v2=補強根拠無制限・現行 / v1=3件上限・旧)。15 秒おきに自動更新。"
+        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v2=無制限・現行 / v1=3件上限・旧 / β=市場由来・実験)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。"
       />
 
-      {/* ====== v2 (現行・補強根拠無制限) の計測を上に ====== */}
+      {/* ====== v2 (現行・補強根拠無制限) → v1 (旧) → β (市場由来・実験) の順 ====== */}
       <VersionMeasurementSection version="v2" box={boxV2} strategies={stratV2} nowMs={nowMs} />
-
-      {/* ====== v1 (旧・補強根拠3件上限) の計測を下に ====== */}
       <VersionMeasurementSection version="v1" box={boxV1} strategies={stratV1} nowMs={nowMs} />
+      <VersionMeasurementSection version="β" box={boxB} strategies={stratB} nowMs={nowMs} />
     </Page>
   );
 }

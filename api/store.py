@@ -19,6 +19,17 @@ TIMELINE_DIR = ROOT / "data" / "cache" / "odds_timeline"
 # 今日の勝負レース スキャン結果 (src/shobu.py が <date>.json を書く)。
 SHOBU_DIR = ROOT / "data" / "cache" / "shobu"
 
+# **市場非依存 Claude 指数の開始時刻** (commit 022b003, 2026-06-21 19:04 JST)。
+# これ以前は score プロンプトに単勝オッズ列があり Claude 指数が市場由来だったので、
+# shobu 仮想収支 (BOX/戦略くらべ) の計測から除外する (ユーザ指示 2026-06-30:
+# 「Claude指数を市場から導出していた頃のデータは計測したくない」)。判定は llm_scored_at→saved_at。
+MARKET_INDEPENDENT_CUTOFF_ISO_JST = "2026-06-21T19:04:27"
+
+
+def _scored_at(snap: dict[str, Any]) -> str:
+    """snapshot の Claude 指数採点時刻 (llm_scored_at 優先・無ければ saved_at)。市場由来 cutoff 判定用。"""
+    return snap.get("llm_scored_at") or snap.get("saved_at") or ""
+
 
 def shobu_today_jst() -> str:
     """当日 (JST) を YYYYMMDD で返す (shobu の out path / 既定 date 用)。"""
@@ -43,11 +54,12 @@ def get_shobu_result(date: str | None = None) -> dict[str, Any] | None:
 
 
 def index_version_of(snap: dict[str, Any]) -> str | None:
-    """snapshot の補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限・現行)。
+    """snapshot の Claude 指数 方針バージョン (β=市場由来 / v1=市場非依存+補強3件 / v2=無制限・現行)。
 
-    明示の `index_version` (2026-06-30〜 保存) があればそれを返す。無い旧 snapshot は
-    **採点日時で推定**: Claude 指数が無ければ None、INDEX_V2_SINCE (2026-06-28) 以降に
-    採点されたものは v2、それ以前は v1。
+    明示の `index_version` (2026-06-30〜 保存) があればそれを返す。無い旧 snapshot は **採点日時で推定**:
+    Claude 指数が無ければ None、市場由来 cutoff (2026-06-21 19:04) 以前は **β** (score プロンプトに
+    単勝オッズ列があり市場由来だった頃・ユーザ指示 2026-06-30「β版として残して表示」)、それ以降
+    INDEX_V2_SINCE (2026-06-28) 未満は v1、以降は v2。
     """
     v = snap.get("index_version")
     if v:
@@ -56,7 +68,9 @@ def index_version_of(snap: dict[str, Any]) -> str | None:
     if not has_index:
         return None
     from src.llm import INDEX_V2_SINCE
-    scored = snap.get("llm_scored_at") or snap.get("saved_at") or ""
+    scored = _scored_at(snap)
+    if scored < MARKET_INDEPENDENT_CUTOFF_ISO_JST:
+        return "β"
     return "v2" if scored >= INDEX_V2_SINCE else "v1"
 
 
@@ -825,7 +839,7 @@ def _shobu_box_pnl(
             if version is None:
                 skipped_no_index += 1
             continue
-        # 補強根拠バージョン (v1/v2) フィルタ (ユーザ指示 2026-06-30: 計測をバージョン毎に分離)。
+        # 補強根拠バージョン (β/v1/v2) フィルタ (ユーザ指示 2026-06-30: 計測をバージョン毎に分離)。
         if version is not None and index_version_of(snap) != version:
             continue
         pop += 1
@@ -962,12 +976,9 @@ def _snap_leg_odds(snap: dict[str, Any], bet_type: str) -> dict[int, float]:
 
 # 単勝/複勝は最終オッズが ≤ この値なら買わない (ユーザ指示 2026-06-30: 旨味の無い大本命を除外)。
 _MIN_WIN_PLACE_ODDS = 1.1
-# 単複 (1位単勝+1位複勝) は合成オッズ (= 1位複勝オッズ/2、複勝のみ的中時の回収率) が < この値なら
-# 買わない (ユーザ指示 2026-06-30: 複勝だけ当たっても元本割れ=トリガミになる大本命を除外)。
-_WINPLACE_MIN_SYNTH = 1.0
-
 # 戦略メタ (表示順・ラベル・代表券種)。races_detail / strategies のキー順もこれに従う。
-# 複勝は 1/2/3 位を分けて計測 (ユーザ指示 2026-06-30)。単複は 1位単勝+1位複勝 に変更。
+# 複勝は 1/2/3 位を分けて計測 (ユーザ指示 2026-06-30)。
+# (単複 winplace は 2026-06-30 ユーザ指示で全表示から撤去)。
 STRATEGY_DEFS = [
     ("win1", "単勝 (指数1位)", "win"),
     ("place1", "複勝 (指数1位)", "place"),
@@ -978,7 +989,6 @@ STRATEGY_DEFS = [
     ("trifecta123", "3連単 (指数1→2→3)", "trifecta"),
     ("trio123", "3連複 (指数1-2-3)", "trio"),
     ("trio1234box", "3連複BOX (指数1-2-3-4)", "trio"),
-    ("winplace", "単複 (1位単勝+1位複勝)", "mix"),
 ]
 
 
@@ -1084,16 +1094,6 @@ def _strategy_race_legs(
             box_legs.append(_leg("trio", cs, set(combo) == fin3,
                                  f"trio:{cs[0]}-{cs[1]}-{cs[2]}"))
 
-    # 単複 (winplace) = **1位の単勝 + 1位の複勝** (ユーザ指示 2026-06-30)。
-    # 合成オッズ = 1位複勝の最終オッズ/2 (複勝のみ的中時の回収率) が < 1 なら買わない
-    # (複勝だけ当たっても元本¥200を割る大本命を除外)。複勝非発売 (≤4頭) なら単勝のみ。
-    wp_place_odds = snap_place.get(top1)
-    wp_bet = not (cutoff > 0 and wp_place_odds is not None
-                  and (wp_place_odds / 2.0) < _WINPLACE_MIN_SYNTH)
-    wp_win = _leg("win", [top1], top1 == finish[0], f"win:{top1}", bet=wp_bet)
-    wp_place = (_leg("place", [top1], top1 in placed_set, f"place:{top1}", bet=wp_bet)
-                if cutoff > 0 else None)
-
     if missing_odds:
         return None, "no_odds"     # 実際に買った的中脚の払戻不明 → 評価不能
 
@@ -1117,7 +1117,6 @@ def _strategy_race_legs(
         "trifecta123": _agg([trifecta_leg]),
         "trio123": _agg([trio_leg]),
         "trio1234box": _agg(box_legs),
-        "winplace": _agg([wp_win, wp_place] if wp_place else [wp_win]),
     }
     detail = {
         "race_id": meta.get("race_id"),
@@ -1180,7 +1179,7 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
             if version is None:
                 skipped_no_index += 1
             continue
-        # 補強根拠バージョン (v1/v2) フィルタ (ユーザ指示 2026-06-30: 計測をバージョン毎に分離)。
+        # 補強根拠バージョン (β/v1/v2) フィルタ (ユーザ指示 2026-06-30: 計測をバージョン毎に分離)。
         if version is not None and index_version_of(snap) != version:
             continue
         pop += 1
@@ -1287,6 +1286,87 @@ def compute_indexed_strategies_pnl(point_cost: int = 100,
     `version` ("v1"/"v2") を渡すと補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30)。
     """
     return _strategies_pnl(point_cost, recommended_only=False, version=version)
+
+
+def _roi_block(races: int, races_hit: int, stake: int, payout: int) -> dict[str, Any]:
+    """venue 内訳の 1 集計ブロック (races/races_hit/hit_rate/stake/payout/net/roi)。"""
+    return {
+        "races": races,
+        "races_hit": races_hit,
+        "hit_rate": (races_hit / races) if races else 0.0,
+        "stake": stake,
+        "payout": payout,
+        "net": payout - stake,
+        "roi": (payout / stake) if stake else 0.0,
+    }
+
+
+def compute_venue_breakdown(point_cost: int = 100,
+                            version: str | None = None) -> dict[str, Any]:
+    """**競馬場 (venue) 毎の内訳** 仮想収支 (ユーザ指示 2026-06-30: 競馬場毎にカードで内訳)。
+
+    全体計測 (`compute_indexed_pnl` BOX + `compute_indexed_strategies_pnl` 戦略くらべ) の per-race
+    detail を **venue で group 集計**して返す。市場由来 cutoff / version フィルタは下層が適用済。
+    返り値: `{point_cost, version, venues: [{venue, n_races, box, strategies:[{key,label,...}]}]}`。
+    venues は対象レース数の多い順。`box`/各 `strategies[]` は `_roi_block` 形 (races/hit_rate/roi/net 等)。
+    的中率の母数はレース数 (BOX/戦略くらべ本体と同じ規約)。
+    """
+    box = _shobu_box_pnl(point_cost, recommended_only=False, version=version)
+    strat = _strategies_pnl(point_cost, recommended_only=False, version=version)
+
+    # venue → BOX 集計。
+    box_by_venue: dict[str, dict[str, int]] = {}
+    for r in box["races_detail"]:
+        v = r.get("venue") or "(不明)"
+        b = box_by_venue.setdefault(v, {"races": 0, "races_hit": 0, "stake": 0, "payout": 0})
+        b["races"] += 1
+        b["races_hit"] += 1 if r.get("hit") else 0
+        b["stake"] += int(r.get("stake") or 0)
+        b["payout"] += int(r.get("payout") or 0)
+
+    # venue → 戦略 → 集計。
+    strat_by_venue: dict[str, dict[str, dict[str, int]]] = {}
+    venue_race_n: dict[str, int] = {}
+    for r in strat["races_detail"]:
+        v = r.get("venue") or "(不明)"
+        venue_race_n[v] = venue_race_n.get(v, 0) + 1
+        per = r.get("per") or {}
+        sd = strat_by_venue.setdefault(v, {})
+        for key, _label, _bt in STRATEGY_DEFS:
+            s = per.get(key) or {}
+            if not s.get("bets"):
+                continue
+            a = sd.setdefault(key, {"races": 0, "races_hit": 0, "stake": 0, "payout": 0})
+            a["races"] += 1
+            a["races_hit"] += 1 if s.get("hit") else 0
+            a["stake"] += int(s.get("stake") or 0)
+            a["payout"] += int(s.get("payout") or 0)
+
+    label_of = {key: label for key, label, _bt in STRATEGY_DEFS}
+    venues_all = set(box_by_venue) | set(strat_by_venue)
+    venues: list[dict[str, Any]] = []
+    for v in venues_all:
+        b = box_by_venue.get(v, {"races": 0, "races_hit": 0, "stake": 0, "payout": 0})
+        sd = strat_by_venue.get(v, {})
+        strategies = [
+            {"key": key, "label": label_of[key],
+             **_roi_block(a["races"], a["races_hit"], a["stake"], a["payout"])}
+            for key, _label, _bt in STRATEGY_DEFS
+            if (a := sd.get(key)) is not None
+        ]
+        venues.append({
+            "venue": v,
+            "n_races": max(b["races"], venue_race_n.get(v, 0)),
+            "box": _roi_block(b["races"], b["races_hit"], b["stake"], b["payout"]),
+            "strategies": strategies,
+        })
+    venues.sort(key=lambda x: (x["n_races"], x["box"]["races"]), reverse=True)
+    return {
+        "point_cost": point_cost,
+        "version": version,
+        "venues": venues,
+        "last_updated_at": box.get("last_updated_at") or strat.get("last_updated_at"),
+    }
 
 
 def _wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
