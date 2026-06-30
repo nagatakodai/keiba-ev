@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import random
 from statistics import median
 
 from api.store import (
@@ -105,6 +106,31 @@ def _per_race_pairs(rows: list[dict], key: str) -> list[tuple[int, int]]:
             for row in rows if row["per"].get(key, {}).get("bets")]
 
 
+def _roi(pairs: list[tuple[int, int]]) -> float:
+    s = sum(p[0] for p in pairs)
+    return sum(p[1] for p in pairs) / s if s else 0.0
+
+
+def _roi_delta_ci(high: list[tuple[int, int]], low: list[tuple[int, int]],
+                  n_iter: int = 2000, seed: int = 42) -> tuple[float, float, float]:
+    """ROI 差 Δ = ROI(high) − ROI(low) と、その bootstrap 95%CI (高低を各々再標本化)。
+
+    Δ の CI が 0 を跨がなければ「自信度で回収率が有意に変わる」候補 (小標本なので参考)。
+    """
+    if not high or not low:
+        return (0.0, 0.0, 0.0)
+    rng = random.Random(seed)
+    base = _roi(high) - _roi(low)
+    nh, nl = len(high), len(low)
+    deltas = []
+    for _ in range(n_iter):
+        hs = [high[rng.randrange(nh)] for _ in range(nh)]
+        ls = [low[rng.randrange(nl)] for _ in range(nl)]
+        deltas.append(_roi(hs) - _roi(ls))
+    deltas.sort()
+    return base, deltas[int(0.025 * n_iter)], deltas[int(0.975 * n_iter)]
+
+
 def _corr(xs: list[float], ys: list[float]) -> float:
     """Pearson 相関 (n<3 や分散0は 0)。"""
     n = len(xs)
@@ -137,6 +163,27 @@ def main() -> None:
         summ.append((key, races, hit, roi, lo, hi))
     for key, races, hit, roi, lo, hi in sorted(summ, key=lambda x: x[3], reverse=True):
         print(f"  {LABEL[key]:<20}{races:>6}{hit:>6}{roi*100:>6.0f}%   {lo*100:.0f}-{hi*100:.0f}%")
+
+    # ---- ①' 自信度 高/低 で全券種の ROI がどう変わるか (回収率重視・差Δ降順) ----
+    for feat, fname in (("gap12", "1-2位差(#1の抜け)"), ("top1", "1位の指数値")):
+        med = median(r[feat] for r in rows)
+        hi_rows = [r for r in rows if r[feat] >= med]
+        lo_rows = [r for r in rows if r[feat] < med]
+        print(f"\n①' {fname} 高/低 の券種別 ROI と差Δ (median={med:.0f}・高{len(hi_rows)}R/低{len(lo_rows)}R)"
+              "  ★=Δの95%CIが0を跨がない")
+        print(f"  {'戦略':<20}{'高ROI':>7}{'低ROI':>8}{'Δ(高-低)':>10}   95%CI(Δ)")
+        res = []
+        for key, _lbl, _bt in STRATEGY_DEFS:
+            hp = _per_race_pairs(hi_rows, key)
+            lp = _per_race_pairs(lo_rows, key)
+            if len(hp) < 3 or len(lp) < 3:
+                continue
+            delta, dlo, dhi = _roi_delta_ci(hp, lp)
+            res.append((key, _roi(hp), _roi(lp), delta, dlo, dhi))
+        for key, hroi, lroi, delta, dlo, dhi in sorted(res, key=lambda x: x[3], reverse=True):
+            sig = "★" if (dlo > 0 or dhi < 0) else " "
+            print(f"  {LABEL[key]:<20}{hroi*100:>6.0f}%{lroi*100:>7.0f}%{delta*100:>+9.0f}pt"
+                  f"   {dlo*100:+.0f}〜{dhi*100:+.0f}pt {sig}")
 
     # ---- ② 自信度 (top1 / gap12) と per-race net の相関 ----
     print("\n② 自信度と per-race 純益 (payout-stake) の相関 (正=自信高でその券種が伸びる)")
