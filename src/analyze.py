@@ -407,6 +407,51 @@ def _llm_scores_path(race_id: str) -> Path:
     return ROOT / "data" / "predictions" / f"{race_id}.llm.json"
 
 
+_TOOL_USAGE_DIR = ROOT / "data" / "cache" / "tool_usage"
+
+
+def _classify_tool(name: str) -> str:
+    """score 段ツール名 → 種別 (search/extract/fetch/websearch/read/other)。比較集計のキー。"""
+    n = name or ""
+    if "tavily_search" in n or "tavily-search" in n:
+        return "search"          # Tavily 検索
+    if "tavily_extract" in n or "tavily-extract" in n:
+        return "extract"         # Tavily 抽出
+    if n == "WebFetch":
+        return "fetch"           # 既知URL取得
+    if n == "WebSearch":
+        return "websearch"       # 現状 allowlist 外 (将来 A/B 用)
+    if n == "Read":
+        return "read"            # ローカル読み (学習データ等)
+    return "other"
+
+
+def _append_tool_usage(race_id: str, name: str, query: str) -> None:
+    """score 段の tool_use (どの検索/取得ツールを何のクエリで使ったか) を per-race jsonl に永続化。
+
+    従来 tool_use は Job の in-memory deque にしか残らず「Tavily vs WebFetch をどれだけ使ったか」を
+    後から検証できなかった (ユーザ指摘 2026-06-30) ので、ツール別の利用を `data/cache/tool_usage/
+    <race_id>.jsonl` に蓄積し、後で頻度/種別を比較できるようにする。失敗は呑む (score を止めない)。
+    """
+    if not race_id:
+        return
+    safe = "".join(c for c in race_id if c.isalnum() or c in "-_")
+    if not safe:
+        return
+    try:
+        _TOOL_USAGE_DIR.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": dt.datetime.now().isoformat(timespec="seconds"),
+            "tool": name or "?",
+            "kind": _classify_tool(name or ""),
+            "query": (query or "")[:300],
+        }
+        with open(_TOOL_USAGE_DIR / f"{safe}.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - 計測は score を止めない
+        pass
+
+
 def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
     """score ステージの Claude 指数を `<race_id>.llm.json` に保存 (bet ステージが読む)。"""
     out = _llm_scores_path(race_id)
@@ -582,6 +627,8 @@ def _run_score_stage(
                 inp = (payload or {}).get("input") or {}
                 q = inp.get("query") or inp.get("q") or inp.get("url") or ""
                 label = name.replace("mcp__", "").replace("__", "/")
+                # ツール別利用を永続化 (Tavily vs WebFetch 等の比較を後で取れるように・2026-06-30)。
+                _append_tool_usage(race_id, name, q)
                 # クエリは全文をログに出す (ユーザ指示: クエリもログに出す・truncate しない)。
                 # style="dim"+markup=False で q 内の角括弧による rich MarkupError を回避し、
                 # soft_wrap=True で 80 桁折返しを抑止 (captured pipe でも 1 行 = shobu が拾える)。

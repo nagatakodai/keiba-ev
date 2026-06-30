@@ -388,3 +388,26 @@ def test_past_runs_absent_keeps_search_for_recent_runs():
     p = llm.build_horse_score_prompt(rd)
     assert "## 前走戦績" not in p
     assert "直近5走の着順詳細" in p   # 従来の検索ルール (近走を検索) が残る
+
+
+def test_classify_and_persist_tool_usage(tmp_path, monkeypatch):
+    """score 段ツール利用の種別判定 + per-race jsonl 永続化 (ユーザ指示 2026-06-30)。"""
+    import json
+    import src.analyze as a
+
+    assert a._classify_tool("mcp__tavily__tavily_search") == "search"
+    assert a._classify_tool("mcp__tavily__tavily_extract") == "extract"
+    assert a._classify_tool("WebFetch") == "fetch"
+    assert a._classify_tool("WebSearch") == "websearch"
+    assert a._classify_tool("Read") == "read"
+    assert a._classify_tool("Bash") == "other"
+
+    monkeypatch.setattr(a, "_TOOL_USAGE_DIR", tmp_path)
+    a._append_tool_usage("2026440630-630-6", "mcp__tavily__tavily_search", "馬A パドック")
+    a._append_tool_usage("2026440630-630-6", "WebFetch", "https://x/y")
+    a._append_tool_usage("../evil", "WebFetch", "x")   # path traversal は安全化される
+    rows = [json.loads(l) for l in (tmp_path / "2026440630-630-6.jsonl").read_text().splitlines()]
+    assert [r["kind"] for r in rows] == ["search", "fetch"]
+    assert rows[0]["query"] == "馬A パドック"
+    # traversal 文字は除去され ".." 単体パスは作らない
+    assert not (tmp_path / ".." / "evil.jsonl").exists()
