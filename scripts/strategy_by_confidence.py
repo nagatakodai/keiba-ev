@@ -35,8 +35,29 @@ from api.store import (
 LABEL = {k: lbl for k, lbl, _bt in STRATEGY_DEFS}
 
 
+def _market_by_number(snap: dict) -> dict[int, float]:
+    """snapshot から 馬番→市場指数 (index_compare.market_index 優先、無ければ market_win_index)。"""
+    out: dict[int, float] = {}
+    for r in (snap.get("index_compare") or []):
+        m = r.get("market_index")
+        num = r.get("number")
+        if m is not None and num is not None:
+            try:
+                out[int(num)] = float(m)
+            except (TypeError, ValueError):
+                continue
+    if out:
+        return out
+    for k, v in (snap.get("market_win_index") or {}).items():
+        try:
+            out[int(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _load() -> list[dict]:
-    """市場非依存レースを [{top1, gap12, per:{strategy:(stake,payout,hit)}}] で集める。"""
+    """市場非依存レースを [{top1, gap12, agree1(市場#1一致), mgap12, per:{...}}] で集める。"""
     out: list[dict] = []
     for rid in _shobu_eval_races(False):
         safe = _safe_race_id(rid)
@@ -64,8 +85,21 @@ def _load() -> list[dict]:
         def _g(i: int, j: int) -> float | None:
             return (vals[i] - vals[j]) if len(vals) > j else None
 
+        # 市場側: Claude#1 が市場1番人気か (一致) / 市場の1-2位差。
+        mkt = _market_by_number(snap)
+        agree1: bool | None = None
+        mgap12: float | None = None
+        if len(mkt) >= 2:
+            claude_top1 = max(idx, key=idx.get)
+            market_top1 = max(mkt, key=mkt.get)
+            agree1 = (claude_top1 == market_top1)
+            mvals = sorted(mkt.values(), reverse=True)
+            mgap12 = mvals[0] - mvals[1]
+
         out.append({
             "n_runners": snap.get("n_runners") or len(idx),
+            "agree1": agree1,
+            "mgap12": mgap12,
             "top1": vals[0],
             "top3": vals[2],
             "top4": vals[3] if len(vals) > 3 else None,
@@ -308,6 +342,26 @@ def main() -> None:
                 cells.append("-")
         if seen:
             print(f"    {LABEL[key]:<18}" + "".join(f"{c:>8}" for c in cells))
+
+    # ---- ⑧ 市場との一致 (Claude#1 == 市場1番人気) で買い方スタイル/券種 ROI を分割 ----
+    mrows = [r for r in rows if r["agree1"] is not None]
+    if mrows:
+        ag = [r for r in mrows if r["agree1"]]
+        dis = [r for r in mrows if not r["agree1"]]
+        print(f"\n⑧ 市場との一致で分割: Claude#1==市場1番人気 {len(ag)}R / 不一致(Claude独自#1) {len(dis)}R")
+        print(f"    {'スタイル/券種':<28}{'一致 ROI(R)':>13}{'不一致 ROI(R)':>14}")
+        for style, keys in BUY_STYLES.items():
+            ra = _roi(_style_pairs(ag, keys))
+            rd = _roi(_style_pairs(dis, keys))
+            print(f"    {style:<26}{f'{ra*100:.0f}%({len(ag)})':>13}{f'{rd*100:.0f}%({len(dis)})':>14}")
+        for key, _lbl, _bt in STRATEGY_DEFS:
+            pa = _per_race_pairs(ag, key)
+            pd = _per_race_pairs(dis, key)
+            if len(pa) < 3 or len(pd) < 3:
+                continue
+            print(f"    {LABEL[key]:<26}{f'{_roi(pa)*100:.0f}%({len(pa)})':>13}{f'{_roi(pd)*100:.0f}%({len(pd)})':>14}")
+        print("    → 一致=市場もClaudeも#1本命(本命系が効くはず) / 不一致=Claude contrarian"
+              " (市場#1を絡める組合せ系 or Claude#1の妙味、を検証)")
 
     print("\n※ 標本 ~70R と小。3連単/3連複系は的中稀で ROI は1発で振れる → CI と的中Rを併読。"
           " 単発の高 ROI を戦略採用根拠にしない (CLAUDE.md の overfit 戒め)。"
