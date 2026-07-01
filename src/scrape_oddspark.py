@@ -782,7 +782,8 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
             return {"rd": rd, "loc": loc, "used_cache": used_cache, "phase": "score"}
 
     # bet ステージ: キャッシュ指数を合成して estimate_probs。
-    llm_index, llm_support, llm_scale, llm_scored_at, llm_alerts, llm_evidence = az_mod._load_llm_scores(race_id)
+    (llm_index, llm_support, llm_scale, llm_scored_at,
+     llm_alerts, llm_evidence, llm_paddock) = az_mod._load_llm_scores(race_id)
 
     mwp = market_win_probs_from_tanfuku(bets.tanfuku)
     probs = ev_mod.estimate_probs(rd, market_blend=market_blend, market_win_override=mwp,
@@ -827,7 +828,7 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
                 hit_points=3, probs=probs, probs_t=probs_t,
                 llm_win_index=llm_index, llm_blend=llm_blend, llm_scored_at=llm_scored_at,
                 llm_support=llm_support, llm_scale=llm_scale, llm_alerts=llm_alerts,
-                llm_evidence=llm_evidence,
+                llm_evidence=llm_evidence, llm_paddock=llm_paddock,
                 # 3連単買い目の Claude 選定は **bet 段のみ** (score 段の暫定 snapshot は機械
                 # フォーメーション)。指数キャッシュ無しなら内部で機械フォーメーションに fallback。
                 claude_trifecta_select=(with_llm and phase == "bet"),

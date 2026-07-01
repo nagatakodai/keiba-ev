@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
 import { indexVersionTitle } from "@/lib/version";
-import { betStyleGuide } from "@/lib/betGuide";
+import { betStyleGuide, marketAgreementGuide } from "@/lib/betGuide";
 import { OddsTimelineCard, type LateMoneySnapshot } from "./OddsTimelineCard";
 import { OddsRefreshButton } from "./OddsRefreshButton";
 import { isEvMeasured,
@@ -29,6 +29,7 @@ import { isEvMeasured,
   type DroppedLeg,
   type HorseAptitude,
   type HorseBestTime,
+  type MarketAgreement,
   type MarketSignal,
   type PredictionDetail,
   type PredictionRow,
@@ -123,6 +124,12 @@ export default async function PredictionDetailPage({
   } catch {
     notFound();
   }
+  // 市場一致シグナル (Claude#1==市場1番人気で券種ROIを分割した蓄積値)。このレースが一致/不一致の
+  // どちら側か + その状態で伸びる傾向の券種を Claude 指数カードのガイドに出す。取得失敗は無視。
+  const marketAgreement: MarketAgreement | null = await api
+    .marketAgreement()
+    .then((r) => r.current)
+    .catch(() => null);
 
   const topByPxo = [...d.rows].sort((a, b) => b.px_o - a.px_o).slice(0, 30);
   // 推定当選率ランキング: 3連単 (d.rows) から推定P上位20。
@@ -228,6 +235,7 @@ export default async function PredictionDetailPage({
           finish={finish}
           scoredAt={d.llm_scored_at}
           hasClaude={!d.llm_fallback}
+          agreement={marketAgreement}
         />
       )}
 
@@ -1219,22 +1227,35 @@ function alertTone(label: string): BadgeTone {
   return "warn";
 }
 
+// パドック評価 rating (◎○△✕) の色分け。◎=絶好/good、○=良/info、△=平凡/warn、✕=マイナス/bad。
+function paddockTone(rating: string): BadgeTone {
+  if (/◎/.test(rating)) return "good";
+  if (/[○◯]/.test(rating)) return "info";
+  if (/[△▲]/.test(rating)) return "warn";
+  if (/[✕✖×]/.test(rating)) return "bad";
+  return "muted";
+}
+
 function IndexCompareCard({
   items,
   finish,
   scoredAt,
   hasClaude,
+  agreement,
 }: {
   items: NonNullable<PredictionDetail["index_compare"]>;
   finish?: number[];
   scoredAt?: string | null;
   hasClaude?: boolean;
+  agreement?: MarketAgreement | null;
 }) {
   const finishSet = new Set(finish ?? []);
   // 買い方ガイド (Claude 指数の自信度 → 本命系/組合せ系)。傾向ベースの参考 (有意ではない)。
   const guide = hasClaude
     ? betStyleGuide(items.map((i) => i.claude_index))
     : null;
+  // 市場一致/不一致ガイド (Claude#1 == 市場1番人気 か + 蓄積データでその状態が伸びる券種)。
+  const mkt = hasClaude ? marketAgreementGuide(items, agreement) : null;
   return (
     <Card
       title={
@@ -1243,7 +1264,7 @@ function IndexCompareCard({
           <span className="text-violet-300">Claude 指数 vs 市場指数 (参考)</span>
           <span className="text-xs text-(--color-muted) font-normal">
             {hasClaude
-              ? "Claude 強さ指数と市場指数の乖離を見る参考表 · 確率 P は Claude 指数 ⊗ モデル指数(GBM⊗速度図表) で合成し市場指数は P に未合成 (市場無視) · 市場は P×O の O として効く · 差 = Claude − 市場 (正 = Claude 強気 = contrarian 狙い) · 根=補強根拠件数 · 直前/軟情報=取消/馬体重/前走不利/勝負気配 等のフラグ"
+              ? "Claude 強さ指数と市場指数の乖離を見る参考表 · 確率 P は Claude 指数 ⊗ モデル指数(GBM⊗速度図表) で合成し市場指数は P に未合成 (市場無視) · 市場は P×O の O として効く · 差 = Claude − 市場 (正 = Claude 強気 = contrarian 狙い) · 根=補強根拠件数 · パドック=締切5分前の気配/馬体/歩様/発汗 · 直前/軟情報=取消/馬体重/前走不利/勝負気配 等のフラグ"
               : "Claude 指数なし (score 未実施) · 市場指数のみ (オッズ由来 0-100、1.0倍で100、参考)"}
           </span>
         </span>
@@ -1278,6 +1299,51 @@ function IndexCompareCard({
           </span>
         </div>
       )}
+      {mkt && (
+        <div
+          className={`mb-3 rounded-lg border px-3 py-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm ${
+            mkt.agree
+              ? "border-sky-400/40 bg-sky-400/10"
+              : "border-fuchsia-400/40 bg-fuchsia-400/10"
+          }`}
+        >
+          <span
+            className={`px-1.5 py-0.5 rounded text-xs font-black ${
+              mkt.agree
+                ? "bg-sky-400/20 text-sky-300"
+                : "bg-fuchsia-400/20 text-fuchsia-300"
+            }`}
+          >
+            {mkt.stateLabel}
+          </span>
+          <span className="font-bold">{mkt.reason}</span>
+          {mkt.favored.length > 0 ? (
+            <span className="basis-full text-xs text-(--color-muted)">
+              蓄積{mkt.races}戦 · この状態で伸びる傾向:{" "}
+              {mkt.favored.slice(0, 3).map((f, i) => (
+                <span key={f.label} className="text-(--color-foreground)">
+                  {i > 0 && " ・ "}
+                  {f.label}
+                  <span className="text-(--color-muted) tnum">
+                    {" "}(この状態 {(f.roi * 100).toFixed(0)}% vs 反対{" "}
+                    {(f.otherRoi * 100).toFixed(0)}%
+                    {f.significant ? " ★確証" : " · 蓄積中"})
+                  </span>
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span className="basis-full text-[11px] text-(--color-muted)">
+              蓄積{mkt.races}戦 · この状態で有意に伸びる券種はまだ無し (蓄積中)
+            </span>
+          )}
+          <span className="text-[10px] text-(--color-muted) basis-full">
+            ※ Claude 本命が市場1番人気と一致 (consensus) か否かで券種 ROI を分割した蓄積シグナル
+            (compute_market_agreement)。Δの95%CIが0を跨がなくなれば★確証。
+            {mkt.sampleWarning ? " 現状は標本<50で参考程度。" : ""}
+          </span>
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm tnum table-zebra">
           <thead className="text-left text-(--color-muted) text-xs">
@@ -1288,6 +1354,7 @@ function IndexCompareCard({
               <th className="py-2 pr-3 text-right" title="市場指数 = 100·(1/オッズ)^(1/1.5) (1.0倍で100、温度T=1.5で0-100に分布)。参考: 確率 P には未合成 (市場無視)、P×O の O として効く">市場指数<span className="text-(--color-muted)"> (参考)</span></th>
               <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
               <th className="py-2 pr-3 text-right" title="補強根拠件数 (上限なし・あるだけ全部)。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)。各馬の行の下に根拠の詳細を展開表示">根</th>
+              <th className="py-2 pr-3" title="パドック評価 (締切~5分前の周回中に検索した気配・馬体・歩様・発汗・返し馬)。◎絶好/○良/△平凡/✕マイナス。直前情報として指数に反映">パドック</th>
               <th className="py-2 pr-2" title="直前/軟情報フラグ (取消・馬体重増減・前走不利・厩舎勝負気配・展開 等)。市場がまだ織り込みきれない情報。表示/記録用 (確率には未反映)">直前/軟情報</th>
             </tr>
           </thead>
@@ -1327,6 +1394,22 @@ function IndexCompareCard({
                         <span className="text-(--color-muted)">{r.support === 0 ? "0" : "—"}</span>
                       )}
                     </td>
+                    <td className="py-1.5 pr-3 align-top">
+                      {r.paddock && (r.paddock.rating || r.paddock.note) ? (
+                        <span className="flex flex-col gap-0.5 max-w-[16rem]">
+                          {r.paddock.rating && (
+                            <Badge tone={paddockTone(r.paddock.rating)}>{r.paddock.rating}</Badge>
+                          )}
+                          {r.paddock.note && (
+                            <span className="text-[11px] text-(--color-muted) leading-snug break-words">
+                              {r.paddock.note}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-(--color-muted)">—</span>
+                      )}
+                    </td>
                     <td className="py-1.5 pr-2">
                       {r.alerts && r.alerts.length > 0 ? (
                         <span className="flex flex-wrap gap-1">
@@ -1344,7 +1427,7 @@ function IndexCompareCard({
                       className={`border-b border-(--color-line)/60 ${hit ? HIT_ROW_BG : ""}`}
                     >
                       <td className="pb-2 pt-0" />
-                      <td colSpan={6} className="pb-2 pt-0 align-top">
+                      <td colSpan={7} className="pb-2 pt-0 align-top">
                         <details open className="text-xs">
                           <summary className="cursor-pointer select-none text-violet-300/80 marker:text-violet-300/50">
                             補強根拠 {evidence.length}件{evidence.length >= 10 ? "（充実）" : ""}

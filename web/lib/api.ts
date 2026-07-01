@@ -256,6 +256,8 @@ export type PredictionDetail = {
     alerts?: string[] | null;
     // 補強根拠の詳細 (検索で見つけた裏付けを 1 件ずつ・上限なし)。無ければ空配列。
     evidence?: string[] | null;
+    // パドック評価 (締切~5分前の直前情報)。rating=◎○△✕ / note=所見。無ければ null。
+    paddock?: { rating: string; note: string } | null;
   }>;
   // 各馬の直前/軟情報フラグ (score ステージ由来)。記録/表示用 (確率には未使用)。
   llm_alerts?: Record<string, string[]> | null;

@@ -333,6 +333,78 @@ def test_score_prompts_advertise_unbounded_evidence():
     assert "EV_MARK" in scoring                      # 収集済み evidence を採点段へ渡す
 
 
+def test_normalize_paddock_dict_and_string_forms():
+    """_normalize_paddock が dict 形 / 文字列形 (先頭記号を rating に分離) 両方を正規化する。"""
+    out = llm._normalize_paddock({
+        "7": {"rating": "◎", "note": "トモ充実・毛艶◎"},
+        "2": "△ 発汗やや多・イレ込み気味",       # 文字列 → 先頭記号を rating へ
+        "3": "気配は平凡",                        # 記号なし → note のみ
+        "9": {"rating": "", "note": ""},          # 空は落とす
+        "x": {"rating": "○", "note": "n"},        # 非数値キーは無視
+    })
+    assert out[7] == {"rating": "◎", "note": "トモ充実・毛艶◎"}
+    assert out[2] == {"rating": "△", "note": "発汗やや多・イレ込み気味"}
+    assert out[3] == {"rating": "", "note": "気配は平凡"}
+    assert 9 not in out and "x" not in out and 0 not in out
+    assert llm._normalize_paddock(None) == {} and llm._normalize_paddock("nope") == {}
+
+
+def test_parse_horse_scores_carries_paddock():
+    """parse_horse_scores が paddock フィールドを正規化して返す (壊れ出力は空 dict)。"""
+    text = ('```json\n{"scores": {"7": 80},'
+            ' "paddock": {"7": {"rating": "◎", "note": "気配良・チャカつき無"}},'
+            ' "summary": "s", "confidence": "high"}\n```')
+    parsed = llm.parse_horse_scores(text)
+    assert parsed["paddock"][7] == {"rating": "◎", "note": "気配良・チャカつき無"}
+    assert llm.parse_horse_scores("no json")["paddock"] == {}
+
+
+def test_merge_research_carries_paddock():
+    """_merge_research が facts.paddock を馬番キーへ union する (並列リサーチ→採点段の橋渡し)。"""
+    txt = ('```json\n{"facts": {"5": {"alerts": [], "evidence": ["e1"], "support": 1,'
+           ' "paddock": {"rating": "○", "note": "トモの張り良"}, "digest": "d"}}}\n```')
+    out = llm._merge_research([txt])
+    assert out[5]["paddock"] == {"rating": "○", "note": "トモの張り良"}
+    # scoring プロンプトが収集済みパドックを採点段へ渡し、paddock schema も明記する。
+    scoring = llm.build_horse_score_from_research_prompt(_mk_race(6), out)
+    assert "トモの張り良" in scoring and "paddock" in scoring
+
+
+def test_score_prompts_advertise_paddock():
+    """score / research プロンプトがパドック評価 (専用クエリ + paddock schema) を明記。"""
+    rd = _mk_race(6)
+    for label, p in (("score", llm.build_horse_score_prompt(rd)),
+                     ("research", llm.build_horse_research_prompt(rd, [1, 2, 3]))):
+        assert "パドック" in p, f"{label}: パドック指示が無い"
+        assert "paddock" in p, f"{label}: paddock フィールドの明記が無い"
+
+
+def test_paddock_persists_to_llm_json_and_index_compare(tmp_path, monkeypatch):
+    """paddock が .llm.json → _load_llm_scores(7-tuple) → index_compare[].paddock まで伝わる。"""
+    from src import analyze as az
+    monkeypatch.setattr(az, "ROOT", tmp_path)
+    (tmp_path / "data" / "predictions").mkdir(parents=True)
+    rid = "T-1-11"
+    parsed = llm.parse_horse_scores(
+        '```json\n{"scores": {"1": 90, "2": 60}, "support": {"1": 1},'
+        ' "evidence": {"1": ["根拠A"]},'
+        ' "paddock": {"1": {"rating": "◎", "note": "気配良・トモ充実"},'
+        ' "2": {"rating": "△", "note": "イレ込み気味"}}}\n```')
+    az._save_llm_scores(rid, parsed, model="test")
+    # 7-tuple の末尾に paddock。
+    loaded = az._load_llm_scores(rid, max_age_sec=10**9)
+    assert len(loaded) == 7
+    scores, support, scale, at, alerts, evidence, paddock = loaded
+    assert paddock[1] == {"rating": "◎", "note": "気配良・トモ充実"}
+    # index_compare 行に paddock が乗る (馬1=◎、馬2=△)。
+    rd = _mk_race(2)
+    rd.race.horses[0].number, rd.race.horses[1].number = 1, 2
+    ic = az._build_index_compare(rd, scores, support, alerts, evidence, paddock)
+    by_num = {r["number"]: r for r in ic}
+    assert by_num[1]["paddock"] == {"rating": "◎", "note": "気配良・トモ充実"}
+    assert by_num[2]["paddock"] == {"rating": "△", "note": "イレ込み気味"}
+
+
 def _mk_race_with_past(n_horses: int = 8):
     """過去走 (PastRun) 付きの RaceData (前走戦績セクション検証用)。"""
     from src.models import PastRun
