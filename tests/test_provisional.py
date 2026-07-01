@@ -121,7 +121,22 @@ def test_going_aptitude_prefers_today_going_record():
 
 
 def test_weights_sum_to_one():
-    assert abs(sum(P.WEIGHTS.values()) - 1.0) < 1e-9
+    for name, w in (("NAR", P.WEIGHTS_NAR), ("JRA", P.WEIGHTS_JRA),
+                    ("BANEI", P.WEIGHTS_BANEI), ("default", P.WEIGHTS)):
+        assert abs(sum(w.values()) - 1.0) < 1e-6, f"{name} 重み合計 != 1"
+        assert set(w) == set(P._FACTORS), f"{name} の因子キーが不一致"
+
+
+def test_segment_weight_selection():
+    """venue_id で NAR/JRA/banei の重みが切り替わる。"""
+    def _rd(vid):
+        rd = _race([_horse(1, "A", _strong_runs())])
+        rd.race.venue_id = vid
+        return rd
+    assert P.weights_for(_rd(5)) is P.WEIGHTS_JRA        # 中央 (05=東京)
+    assert P.weights_for(_rd(30)) is P.WEIGHTS_NAR       # 地方
+    assert P.weights_for(_rd(65)) is P.WEIGHTS_BANEI     # 帯広ばんえい
+    assert P._segment_of_rd(_rd(0)) == "nar"             # 未知は NAR
 
 
 def test_all_scores_in_range_and_absent_excluded():

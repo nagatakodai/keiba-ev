@@ -33,21 +33,68 @@ from typing import Optional
 from .models import PastRun, RaceData
 from .speed_index import class_index, speed_index
 
-# ── 因子の重み (合計 1.00) ────────────────────────────────────────────
-# 初期は「適性フィット厚め」(ユーザ選択) だったが、実結果バックテスト (scripts/provisional_validity.py,
-# 700R) の因子別 AUC で **performance_quality(着差の質)=0.728 / form_momentum(連勝)=0.700 が最強、
-# class_context=0.502≒ランダム、similar_race=0.605/distance=0.563 は中位** と判明。適性フィット
-# (similar/distance/going=0.45) を残しつつ強因子へ寄せ・class をノイズ床(0.03)に落とした
-# 「現行×AUC比例」の 50/50 ブレンド (2026-07-01)。in-sample top1 は 24.4%→~26%。要 OOS 再検証。
-WEIGHTS: dict[str, float] = {
-    "similar_race": 0.19,        # 似レース好走 (AUC 0.605)
-    "form_momentum": 0.20,       # 連勝・上昇度 (AUC 0.700)
-    "performance_quality": 0.17,  # 着差×相手強度の質 (AUC 0.728 = 最強)
-    "going": 0.15,               # 馬場適性 (AUC 0.632)
-    "base_speed": 0.15,          # 絶対能力=西田式SI (AUC 0.630)
-    "distance": 0.11,            # 距離適性 (AUC 0.563)
-    "class_context": 0.03,       # クラス昇降 (AUC 0.502≒ノイズ → 昇降の希少ケース用に床のみ)
+# ── 因子の重み (合計 1.00) — セグメント別に分岐 (ユーザ指示 2026-07-01 ①) ──────
+# 実結果バックテスト (scripts/provisional_validity.py, 各800R) の因子別 AUC を根拠に
+# 「現行×セグメントAUC比例」の 50/50 ブレンドで NAR/JRA/banei に分けた。共通して
+# performance_quality(着差の質)・form_momentum(連勝) が最強、class_context はほぼノイズ。
+# セグメント差: JRA は similar_race(似条件)が効き(AUC .652)going 弱、NAR は going/base が効く。
+#   実測 top1: NAR 29.2%(rand9.9%) / JRA 21.2%(rand7.4%) / banei 20.2%(rand11.1%)。
+# **banei は par-time テーブルが無く SI 系4因子(similar/distance/going/base)が全馬 None** に
+# なるため form_momentum/performance_quality/class のみが実効 (form 偏重が正しい)。要 OOS 再検証。
+WEIGHTS_NAR: dict[str, float] = {
+    "similar_race": 0.141,        # AUC 0.576
+    "form_momentum": 0.220,       # AUC 0.700
+    "performance_quality": 0.230,  # AUC 0.742 (最強)
+    "going": 0.155,               # AUC 0.634
+    "base_speed": 0.155,          # AUC 0.633
+    "distance": 0.084,            # AUC 0.549
+    "class_context": 0.015,       # AUC 0.485 (ノイズ床)
 }
+WEIGHTS_JRA: dict[str, float] = {
+    "similar_race": 0.181,        # AUC 0.652 (JRAで効く)
+    "form_momentum": 0.214,       # AUC 0.700
+    "performance_quality": 0.210,  # AUC 0.719
+    "going": 0.127,               # AUC 0.592 (NARより弱い)
+    "base_speed": 0.134,          # AUC 0.603
+    "distance": 0.107,            # AUC 0.591
+    "class_context": 0.027,       # AUC 0.521
+}
+# banei: SI 系(similar/distance/going/base)は par-time 不在で全馬 None=実効ゼロ (重みは付けても
+# 各馬の加重平均から除外される)。実効は form_momentum(AUC .626)/performance_quality/class のみ。
+WEIGHTS_BANEI: dict[str, float] = {
+    "similar_race": 0.095,        # (SI不能→実質未使用)
+    "form_momentum": 0.420,       # AUC 0.626 (banei 唯一の強信号)
+    "performance_quality": 0.265,  # AUC 0.571
+    "going": 0.075,               # (SI不能→実質未使用)
+    "base_speed": 0.075,          # (SI不能→実質未使用)
+    "distance": 0.055,            # (SI不能→実質未使用)
+    "class_context": 0.015,       # AUC 0.494
+}
+# 未知セグメントのフォールバック (= NAR。live の主戦場)。
+WEIGHTS: dict[str, float] = dict(WEIGHTS_NAR)
+
+_SEGMENT_WEIGHTS: dict[str, dict[str, float]] = {
+    "nar": WEIGHTS_NAR, "jra": WEIGHTS_JRA, "banei": WEIGHTS_BANEI,
+}
+
+
+def _segment_of_rd(rd) -> str:
+    """venue_id → jra(中央01-10)/banei(帯広65)/nar(平地地方)。ev.segment_of_rd と同規約
+    (循環 import 回避のためローカルに複製)。"""
+    try:
+        vid = int(getattr(rd.race, "venue_id", 0) or 0)
+    except (TypeError, ValueError):
+        return "nar"
+    if 1 <= vid <= 10:
+        return "jra"
+    if vid == 65:
+        return "banei"
+    return "nar"
+
+
+def weights_for(rd) -> dict[str, float]:
+    """当該レースのセグメントに対応する仮指数の重み (未知は NAR フォールバック)。"""
+    return _SEGMENT_WEIGHTS.get(_segment_of_rd(rd), WEIGHTS)
 
 _RECENT = 6            # 各因子で見る過去走の上限 (直近6走)
 _RECENCY = 0.72        # index ベース減衰 (runs[0]=最新)。日付非依存で決定論。
@@ -337,10 +384,12 @@ def provisional_index(rd: RaceData, feats=None) -> dict[int, float]:
         raws = {h.number: fn(h, ctx) for h in horses}
         factor_scores[name] = _robust_scores(raws)
     # 各馬 = 計算できた因子だけの加重平均 (欠損因子は分母から除外)。全欠損は中立50。
+    # 重みはセグメント別 (NAR/JRA/banei)。
+    weights = weights_for(rd)
     out: dict[int, float] = {}
     for h in horses:
         num = den = 0.0
-        for name, w in WEIGHTS.items():
+        for name, w in weights.items():
             s = factor_scores[name].get(h.number)
             if s is not None:
                 num += w * s
@@ -365,5 +414,6 @@ def provisional_breakdown(rd: RaceData) -> dict[int, dict[str, Optional[float]]]
     for name, fn in _FACTORS.items():
         raws = {h.number: fn(h, ctx) for h in horses}
         factor_scores[name] = _robust_scores(raws)
-    return {h.number: {name: factor_scores[name].get(h.number) for name in WEIGHTS}
+    # 全 7 因子を返す (表示/検証用・セグメント重みに依存しない安定キー)。
+    return {h.number: {name: factor_scores[name].get(h.number) for name in _FACTORS}
             for h in horses}
