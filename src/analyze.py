@@ -30,6 +30,7 @@ from . import ev as ev_mod
 from . import llm as llm_mod
 from . import odds_timeline as odds_tl_mod
 from . import portfolio as pf_mod
+from . import provisional as _provisional_mod
 from . import speed_chart as _speed_chart_mod
 from .aptitude import AptitudeIndex, compute_aptitudes
 from .ev import PXO_FLOOR
@@ -614,13 +615,20 @@ def _run_score_stage(
     score_timeout = _score_timeout(rd, n_run)
     console.print(f"[dim]score timeout = {score_timeout}s ({n_run}頭, "
                   f"締切={_fmt_ts(rd.race.close_at) if rd.race.close_at else '不明'})[/dim]")
+    # 仮指数 (公式出走表だけの市場非依存な叩き台) を計算し Claude に anchor として渡す。
+    # Claude は出走表外の検索情報でこれを ±調整する (二段パイプライン第一段, 2026-07-01)。
+    try:
+        provisional = _provisional_mod.provisional_index(rd)
+    except Exception as ex:  # noqa: BLE001
+        console.print(f"[yellow]仮指数の計算に失敗 (Claude はゼロから採点): {_mk_escape(str(ex))}[/yellow]")
+        provisional = None
     try:
         # score_horses = dispatcher: KEIBA_SCORE_PARALLEL で並列 score (検索大幅増)、
         # それ以外/失敗時は従来の単一セッション score_horses_stream にフォールバック。
         for etype, payload in llm_mod.score_horses(
             rd, model=model, aptitudes=aptitudes,
             market_signals=market_signals, horse_best_times=horse_best_times,
-            timeout=score_timeout, past_source=past_source,
+            timeout=score_timeout, past_source=past_source, provisional=provisional,
         ):
             if etype == "text":
                 chunks.append(payload)

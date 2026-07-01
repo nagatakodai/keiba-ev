@@ -379,6 +379,23 @@ def test_score_prompts_advertise_paddock():
         assert "paddock" in p, f"{label}: paddock フィールドの明記が無い"
 
 
+def test_provisional_threads_into_all_score_prompts():
+    """仮指数 (provisional) が 出走馬表列 + anchor→±調整 の framing として3プロンプトに伝播する。"""
+    rd = _mk_race(8)
+    prov = {i: 55.0 + i for i in range(1, 9)}   # 馬8 = 63
+    score = llm.build_horse_score_prompt(rd, provisional=prov)
+    research = llm.build_horse_research_prompt(rd, [1, 2, 3], provisional=prov)
+    scoring = llm.build_horse_score_from_research_prompt(
+        rd, {1: {"evidence": ["e"], "support": 1}}, provisional=prov)
+    for label, p in (("score", score), ("research", research), ("scoring", scoring)):
+        assert "| 仮指数 |" in p, f"{label}: 仮指数列が無い"
+    assert "## 仮指数の扱い (anchor → ± 調整)" in score
+    assert "| 63 |" in score                       # 仮指数値がテーブルに載る
+    assert "| 適性 |" not in score                 # 適性列は仮指数に置換
+    # provisional 無しでも壊れない (適性 or '-' でフォールバック)。
+    assert "| 仮指数 |" in llm.build_horse_score_prompt(rd)
+
+
 def test_paddock_persists_to_llm_json_and_index_compare(tmp_path, monkeypatch):
     """paddock が .llm.json → _load_llm_scores(7-tuple) → index_compare[].paddock まで伝わる。"""
     from src import analyze as az
