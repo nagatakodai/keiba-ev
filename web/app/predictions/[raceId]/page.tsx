@@ -19,7 +19,12 @@ import {
 } from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
 import { indexVersionTitle } from "@/lib/version";
-import { betStyleGuide, marketAgreementGuide } from "@/lib/betGuide";
+import {
+  betStyleGuide,
+  combinedGuide,
+  fieldSizeGuide,
+  marketAgreementGuide,
+} from "@/lib/betGuide";
 import { OddsTimelineCard, type LateMoneySnapshot } from "./OddsTimelineCard";
 import { OddsRefreshButton } from "./OddsRefreshButton";
 import { isEvMeasured,
@@ -236,6 +241,7 @@ export default async function PredictionDetailPage({
           scoredAt={d.llm_scored_at}
           hasClaude={!d.llm_fallback}
           agreement={marketAgreement}
+          nRunners={d.n_runners ?? d.index_compare.length}
         />
       )}
 
@@ -1242,12 +1248,14 @@ function IndexCompareCard({
   scoredAt,
   hasClaude,
   agreement,
+  nRunners,
 }: {
   items: NonNullable<PredictionDetail["index_compare"]>;
   finish?: number[];
   scoredAt?: string | null;
   hasClaude?: boolean;
   agreement?: MarketAgreement | null;
+  nRunners?: number | null;
 }) {
   const finishSet = new Set(finish ?? []);
   // 買い方ガイド (Claude 指数の自信度 → 本命系/組合せ系)。傾向ベースの参考 (有意ではない)。
@@ -1256,6 +1264,16 @@ function IndexCompareCard({
     : null;
   // 市場一致/不一致ガイド (Claude#1 == 市場1番人気 か + 蓄積データでその状態が伸びる券種)。
   const mkt = hasClaude ? marketAgreementGuide(items, agreement) : null;
+  // 頭数ガイド (出走頭数 → 効きやすい券種)。Claude 指数が無くても頭数だけで出せる。
+  const field = fieldSizeGuide(nRunners);
+  // 総合ガイド (#1抜け × 市場一致 × 頭数 → 1行の推奨券種 or 見送り)。3信号を統合した結論。
+  const combined = hasClaude ? combinedGuide(items, nRunners) : null;
+  const combinedToneClass: Record<string, string> = {
+    good: "border-emerald-400/50 bg-emerald-400/10",
+    info: "border-sky-400/50 bg-sky-400/10",
+    warn: "border-amber-400/50 bg-amber-400/10",
+    bad: "border-rose-500/50 bg-rose-500/10",
+  };
   return (
     <Card
       title={
@@ -1270,6 +1288,41 @@ function IndexCompareCard({
         </span>
       }
     >
+      {combined && (
+        <div
+          className={`mb-3 rounded-lg border-2 px-3 py-2 ${
+            combinedToneClass[combined.tone] ?? "border-(--color-line) bg-(--color-line)/10"
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <span className="px-1.5 py-0.5 rounded text-xs font-black bg-(--color-foreground)/10">
+              総合
+            </span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-xs font-black ${
+                combined.state === "skip"
+                  ? "bg-rose-500/20 text-rose-300"
+                  : combined.state === "conflict"
+                    ? "bg-amber-400/20 text-amber-300"
+                    : combined.state === "combo"
+                      ? "bg-sky-400/20 text-sky-300"
+                      : "bg-emerald-400/20 text-emerald-300"
+              }`}
+            >
+              {combined.stateLabel}
+            </span>
+            <span className="font-black text-(--color-foreground)">{combined.headline}</span>
+            <span className="text-(--color-muted) text-xs tnum basis-full sm:basis-auto">
+              [{combined.signals}]
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-(--color-muted)">{combined.reason}</p>
+          <p className="mt-0.5 text-[10px] text-(--color-muted)">
+            ※ #1抜け(指数1-2位差) × 市場一致 × 頭数 の 2×2+頭数 実測 (市場非依存73R) を統合した結論。
+            n小 (12〜22R/セル) で確証は 3連複BOX×不一致 のみ。過信せずサイズ調整の目安に。
+          </p>
+        </div>
+      )}
       {guide && (
         <div
           className={`mb-3 rounded-lg border px-3 py-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm ${
@@ -1341,6 +1394,23 @@ function IndexCompareCard({
             ※ Claude 本命が市場1番人気と一致 (consensus) か否かで券種 ROI を分割した蓄積シグナル
             (compute_market_agreement)。Δの95%CIが0を跨がなくなれば★確証。
             {mkt.sampleWarning ? " 現状は標本<50で参考程度。" : ""}
+          </span>
+        </div>
+      )}
+      {field && (
+        <div className="mb-3 rounded-lg border border-(--color-line) bg-(--color-line)/5 px-3 py-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
+          <span className="px-1.5 py-0.5 rounded text-xs font-black bg-(--color-foreground)/10">
+            頭数
+          </span>
+          <Badge tone={field.tone}>{field.bucketLabel}</Badge>
+          <span className="font-bold">
+            → <span className="text-(--color-foreground)">{field.recommend}</span> 向き
+          </span>
+          <span className="text-[10px] text-(--color-muted) basis-full">
+            ※ 出走頭数別の券種 ROI (市場非依存73R)。{field.note}。
+            {field.n >= 12
+              ? " 多頭数の BOX 回避 (的中0/21) が最も確度が高い。"
+              : " n 小で参考。"}
           </span>
         </div>
       )}

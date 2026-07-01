@@ -6,6 +6,7 @@
 // ただし標本が小さく **統計的に有意ではない** (Δ の 95%CI が 0 を跨ぐものが大半)。あくまで参考。
 
 import type { MarketAgreement } from "@/lib/api";
+import type { BadgeTone } from "@/components/ui";
 
 // この pt 以上の「1位−2位 指数差」で本命型とみなす (分析の median=8 を閾値に採用)。
 export const DOMINANT_GAP12 = 8;
@@ -121,5 +122,138 @@ export function marketAgreementGuide(
     favored,
     races: agreement?.races ?? 0,
     sampleWarning: agreement?.sample_warning ?? true,
+  };
+}
+
+// ── 頭数ガイド (出走頭数 → 効きやすい券種) ─────────────────────────────────
+// 出典: 市場非依存 73R を出走頭数でバケットした券種別 ROI (2×2 分析の頭数版):
+//   ≤7頭  単勝#1 180% / 複勝#1 130% (本命が素直・標本2Rで極小)
+//   8-9頭 馬連#1-2 101% / 組合せ系 90% (組合せ優勢・本命も水準56%)
+//   10-11頭 3連複BOX 79% / 単勝#1 108% (BOXの稼ぎどき・#1が抜けていれば的中集中)
+//   12+頭 馬連#1-2 131% / 組合せ系 117% / **3連複BOX 的中 0/21・本命系 9%** (BOX/本命は壊滅)
+// いずれも n 小 (2〜34R) で参考。12+頭の「BOX 買うな」(0/21) が最も確度が高い。
+export type FieldSizeGuide = {
+  n: number;
+  bucketLabel: string;
+  recommend: string;
+  note: string;
+  tone: BadgeTone;
+};
+
+export function fieldSizeGuide(n: number | null | undefined): FieldSizeGuide | null {
+  if (!n || n <= 0) return null;
+  if (n >= 12)
+    return {
+      n,
+      bucketLabel: "多頭数 (12頭+)",
+      recommend: "馬連#1-2 ・ 組合せ系 (ワイド/馬単)",
+      note: "多頭数は3連複BOX・本命系が壊滅 (BOX 的中0/21・本命系9%)。組合せ系が伸びる (馬連131%)",
+      tone: "magenta",
+    };
+  if (n >= 10)
+    return {
+      n,
+      bucketLabel: "中頭数 (10-11頭)",
+      recommend: "3連複BOX (指数1-2-3-4) ・ 単勝#1",
+      note: "3連複BOXの稼ぎどき (79%) + 単勝#1 (108%)。#1が抜けていれば的中集中",
+      tone: "good",
+    };
+  if (n >= 8)
+    return {
+      n,
+      bucketLabel: "中頭数 (8-9頭)",
+      recommend: "馬連#1-2 ・ 組合せ系 (本命も可)",
+      note: "組合せ系/馬連が優勢 (101%/90%)。本命系も水準 (56%)",
+      tone: "info",
+    };
+  return {
+    n,
+    bucketLabel: "少頭数 (≤7頭)",
+    recommend: "単勝#1 ・ 複勝#1 (本命が素直)",
+    note: "少頭数は本命が来やすい (単勝180%/複勝130%・ただし標本2Rで極小)",
+    tone: "warn",
+  };
+}
+
+// ── 総合ガイド (#1抜け × 市場一致 × 頭数 → 1行の推奨券種 or 見送り) ────────────
+// 出典: 市場非依存 73R の 2×2 (自信度 × 市場一致) 同時 ROI + 頭数ゲート。要点:
+//   #1抜け × 不一致 (Claude自信×逆張り) = 最強セル (3連複BOX 126% / 単勝#1 98%)
+//   拮抗 × 一致 = 組合せ系 (馬連 153-264%)
+//   #1抜け × 一致 = 衝突 (本命系vs組合せ)。BOXは一致時18%で不振 → 単勝#1/馬連で折衷
+//   拮抗 × 不一致 = 死にセル (全券種<55%) → 見送り
+//   頭数ゲート: 12頭+ は BOX 的中0/21 なので 3連複BOX を出さず馬連/組合せへ降格
+// いずれも n 小 (12〜22R/セル) の傾向であり確証ではない (★確証は 3連複BOX×不一致 のみ)。
+export type CombinedGuide = {
+  state: "sweet" | "combo" | "conflict" | "skip";
+  stateLabel: string;
+  headline: string; // 本線券種 or 見送り
+  reason: string;
+  signals: string; // 判定に使った3信号
+  tone: BadgeTone;
+};
+
+export function combinedGuide(
+  items: IdxItem[],
+  nRunners: number | null | undefined,
+): CombinedGuide | null {
+  const style = betStyleGuide(items.map((i) => i.claude_index));
+  const mkt = marketAgreementGuide(items);
+  if (!style || !mkt) return null;
+  const dom = style.kind === "dominant";
+  const agree = mkt.agree;
+  const n = nRunners && nRunners > 0 ? nRunners : null;
+  const bigField = n != null && n >= 12;
+  const signals = `${dom ? "#1抜け" : "上位拮抗"} Δ${style.gap12.toFixed(0)}pt · ${
+    agree ? "市場一致" : "市場不一致"
+  }${n ? ` · ${n}頭` : ""}`;
+
+  if (dom && !agree) {
+    // 最強セル (Claude自信 × 市場逆張り)。BOX は頭数ゲート (12頭+は的中0/21)。
+    return bigField
+      ? {
+          state: "combo",
+          stateLabel: "狙い目 (多頭数)",
+          headline: "馬連#1-2 ・ 単勝#1",
+          reason: "Claude自信×市場逆張りだが多頭数のため3連複BOXは回避 (12頭+ BOX 的中0/21)",
+          signals,
+          tone: "good",
+        }
+      : {
+          state: "sweet",
+          stateLabel: "狙い目",
+          headline: "3連複BOX (1-2-3-4) ・ 単勝#1",
+          reason: "Claude自信 (#1抜け) × 市場逆張り = 最も回収が伸びるセル (BOX126%/単勝98%)",
+          signals,
+          tone: "good",
+        };
+  }
+  if (!dom && agree) {
+    return {
+      state: "combo",
+      stateLabel: "組合せ",
+      headline: "馬連#1-2 ・ ワイド#1-2",
+      reason: "上位拮抗 × 市場一致 = 組合せ系が伸びる (馬連153-264%)",
+      signals,
+      tone: "info",
+    };
+  }
+  if (dom && agree) {
+    return {
+      state: "conflict",
+      stateLabel: "折衷 (ガイド衝突)",
+      headline: "単勝#1 or 馬連#1-2 (3連複BOXは不可)",
+      reason: "#1抜け(本命寄り)と市場一致(組合せ寄り)が衝突。BOXは一致時18%で不振 → 単勝#1/馬連で折衷",
+      signals,
+      tone: "warn",
+    };
+  }
+  // !dom && !agree
+  return {
+    state: "skip",
+    stateLabel: "見送り推奨",
+    headline: "無理に賭けない",
+    reason: "上位拮抗 × 市場逆張り = 全券種が不振の死にセル (全て<55%)",
+    signals,
+    tone: "bad",
   };
 }
