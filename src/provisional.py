@@ -33,15 +33,20 @@ from typing import Optional
 from .models import PastRun, RaceData
 from .speed_index import class_index, speed_index
 
-# ── 因子の重み (適性フィット厚め・合計 1.00) ─────────────────────────────
+# ── 因子の重み (合計 1.00) ────────────────────────────────────────────
+# 初期は「適性フィット厚め」(ユーザ選択) だったが、実結果バックテスト (scripts/provisional_validity.py,
+# 700R) の因子別 AUC で **performance_quality(着差の質)=0.728 / form_momentum(連勝)=0.700 が最強、
+# class_context=0.502≒ランダム、similar_race=0.605/distance=0.563 は中位** と判明。適性フィット
+# (similar/distance/going=0.45) を残しつつ強因子へ寄せ・class をノイズ床(0.03)に落とした
+# 「現行×AUC比例」の 50/50 ブレンド (2026-07-01)。in-sample top1 は 24.4%→~26%。要 OOS 再検証。
 WEIGHTS: dict[str, float] = {
-    "similar_race": 0.26,
-    "distance": 0.16,
-    "form_momentum": 0.16,
-    "going": 0.14,
-    "base_speed": 0.14,
-    "performance_quality": 0.08,
-    "class_context": 0.06,
+    "similar_race": 0.19,        # 似レース好走 (AUC 0.605)
+    "form_momentum": 0.20,       # 連勝・上昇度 (AUC 0.700)
+    "performance_quality": 0.17,  # 着差×相手強度の質 (AUC 0.728 = 最強)
+    "going": 0.15,               # 馬場適性 (AUC 0.632)
+    "base_speed": 0.15,          # 絶対能力=西田式SI (AUC 0.630)
+    "distance": 0.11,            # 距離適性 (AUC 0.563)
+    "class_context": 0.03,       # クラス昇降 (AUC 0.502≒ノイズ → 昇降の希少ケース用に床のみ)
 }
 
 _RECENT = 6            # 各因子で見る過去走の上限 (直近6走)
