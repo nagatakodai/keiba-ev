@@ -43,6 +43,9 @@ def test_list_due_races_uses_close_at_window(monkeypatch):
                 for r in races]
     monkeypatch.setattr(auto_watch, "fetch_race_list_oddspark", lambda *a, **k: op_races)
     monkeypatch.setattr(auto_watch, "fetch_race_list_keibabook", lambda *a, **k: [])
+    # keiba.go.jp の南関東/門別 discovery (2026-06-30 追加) も mock して hermetic に保つ
+    # (関数内 import なので auto_watch でなく scrape_keibago 側を差し替える)。
+    monkeypatch.setattr("src.scrape_keibago.fetch_race_list_keibago", lambda *a, **k: [])
     out, future_all = auto_watch._list_due_races(window_min=5, tolerance_min=2, now_ts=now)
     detected = {r["race_no"] for r in out}
     assert detected == {2, 3}, f"5〜7分(締切基準)圏内は 7/9分前(発走基準) のみ、got {detected}"
