@@ -251,6 +251,10 @@ export type PredictionDetail = {
     claude_index: number | null;
     market_index: number | null;
     diff: number | null;
+    // 仮指数 = 公式出走表だけの市場非依存な叩き台 (0-100)。prov_delta = Claude − 仮指数
+    // (Claude が検索でどれだけ動かしたか)。無ければ null。
+    provisional?: number | null;
+    prov_delta?: number | null;
     support?: number | null;
     // 直前/軟情報フラグ (取消/馬体重増減/前走不利/厩舎勝負気配 等)。無ければ空配列。
     alerts?: string[] | null;

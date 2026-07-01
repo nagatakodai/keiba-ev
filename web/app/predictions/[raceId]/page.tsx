@@ -1420,7 +1420,8 @@ function IndexCompareCard({
             <tr className="border-b border-(--color-line)">
               <th className="py-2 pr-3 text-right">馬</th>
               <th className="py-2 pr-3">馬名</th>
-              <th className="py-2 pr-3 text-right text-violet-300/90" title="Claude 強さ指数 0-100 (市場独立の相対評価、検索補強で上下)">Claude 指数</th>
+              <th className="py-2 pr-3 text-right text-sky-300/90" title="仮指数 = 公式出走表(過去成績・タイム・距離/馬場適性・連勝)だけから機械的に付けた叩き台 0-100。市場・過去人気に一切触れない決定論値。past 0走等は50(中立)">仮指数<span className="text-(--color-muted)"> (出走表)</span></th>
+              <th className="py-2 pr-3 text-right text-violet-300/90" title="Claude 強さ指数 0-100。仮指数を anchor に、出走表外の検索情報(直前/軟情報/パドック/騎手)で±調整した最終値。市場は見ない。△印=仮指数からの調整量">Claude 指数<span className="text-(--color-muted)"> (調整後)</span></th>
               <th className="py-2 pr-3 text-right" title="市場指数 = 100·(1/オッズ)^(1/1.5) (1.0倍で100、温度T=1.5で0-100に分布)。参考: 確率 P には未合成 (市場無視)、P×O の O として効く">市場指数<span className="text-(--color-muted)"> (参考)</span></th>
               <th className="py-2 pr-3 text-right" title="Claude − 市場。正 = Claude が市場より強気、負 = 弱気">差</th>
               <th className="py-2 pr-3 text-right" title="補強根拠件数 (上限なし・あるだけ全部)。多い馬ほどモデルが Claude 勝率を厚く採用 (0=市場どおり)。各馬の行の下に根拠の詳細を展開表示">根</th>
@@ -1442,8 +1443,22 @@ function IndexCompareCard({
                       {r.name}
                       {hit && finish && <HitMark place={finish.indexOf(r.number) + 1} />}
                     </td>
+                    <td className="py-1.5 pr-3 text-right text-sky-300/90">
+                      {r.provisional != null ? r.provisional.toFixed(0) : "—"}
+                    </td>
                     <td className="py-1.5 pr-3 text-right">
                       {r.claude_index != null ? r.claude_index.toFixed(1) : "—"}
+                      {r.prov_delta != null && Math.abs(r.prov_delta) >= 0.5 && (
+                        <span
+                          className={`ml-1 text-[10px] tnum ${
+                            r.prov_delta > 0 ? "text-emerald-300/80" : "text-rose-300/80"
+                          }`}
+                          title={`Claude が仮指数から ${r.prov_delta > 0 ? "+" : ""}${r.prov_delta.toFixed(1)} 調整`}
+                        >
+                          {r.prov_delta > 0 ? "▲" : "▼"}
+                          {Math.abs(r.prov_delta).toFixed(0)}
+                        </span>
+                      )}
                     </td>
                     <td className="py-1.5 pr-3 text-right">
                       {r.market_index != null ? r.market_index.toFixed(1) : "—"}
@@ -1497,7 +1512,7 @@ function IndexCompareCard({
                       className={`border-b border-(--color-line)/60 ${hit ? HIT_ROW_BG : ""}`}
                     >
                       <td className="pb-2 pt-0" />
-                      <td colSpan={7} className="pb-2 pt-0 align-top">
+                      <td colSpan={8} className="pb-2 pt-0 align-top">
                         <details open className="text-xs">
                           <summary className="cursor-pointer select-none text-violet-300/80 marker:text-violet-300/50">
                             補強根拠 {evidence.length}件{evidence.length >= 10 ? "（充実）" : ""}

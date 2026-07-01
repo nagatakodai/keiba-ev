@@ -839,24 +839,29 @@ def _build_index_compare(
     llm_alerts: dict[int, list[str]] | None = None,
     llm_evidence: dict[int, list[str]] | None = None,
     llm_paddock: dict[int, dict] | None = None,
+    provisional: dict[int, float] | None = None,
 ) -> list[dict]:
     """Claude 指数 × 市場指数 を per-horse で並べた配列 (frontend 表示用)。両指数は独立。
     Claude 値降順 (無ければ市場指数降順)。どちらか一方しか無い馬も含める。support は補強根拠件数、
     alerts は直前/軟情報フラグ配列 (無ければ空)、evidence は補強根拠の詳細配列 (無ければ空)、
-    paddock はパドック評価 {"rating","note"} (無ければ null)。"""
+    paddock はパドック評価 {"rating","note"} (無ければ null)、provisional は仮指数 (出走表だけの
+    市場非依存な叩き台) と prov_delta (Claude − 仮指数 = Claude が検索でどれだけ動かしたか)。"""
     market = _market_win_index(rd)
     claude = llm_win_index or {}
     support = llm_support or {}
     alerts = llm_alerts or {}
     evidence = llm_evidence or {}
     paddock = llm_paddock or {}
+    prov = provisional or {}
     names = {h.number: (h.name or "") for h in rd.race.horses if not h.absent}
-    # alerts/evidence/paddock は Claude/市場いずれの指数も無い取消馬でも出したいので nums に含める。
-    nums = (set(claude) | set(market) | set(alerts) | set(evidence) | set(paddock)) & set(names)
+    # alerts/evidence/paddock/prov は Claude/市場いずれの指数も無い取消馬でも出したいので nums に含める。
+    nums = (set(claude) | set(market) | set(alerts) | set(evidence)
+            | set(paddock) | set(prov)) & set(names)
     rows_out: list[dict] = []
     for n in nums:
         c = claude.get(n)
         mk = market.get(n)
+        pv = prov.get(n)
         ev_n = list(evidence[n]) if n in evidence and evidence[n] else []
         # evidence がある馬は「根」(support) を **evidence 件数そのもの** にする (UI の根バッジと
         # 展開リストの件数を一致させる)。LLM が support を多めに返しても展開行と食い違わせない。
@@ -869,6 +874,10 @@ def _build_index_compare(
             "claude_index": (round(float(c), 1) if c is not None else None),
             "market_index": (mk if mk is not None else None),
             "diff": (round(float(c) - mk, 1) if (c is not None and mk is not None) else None),
+            # 仮指数 (出走表だけの叩き台) と Claude が検索で動かした量 (Claude − 仮指数)。
+            "provisional": (round(float(pv), 1) if pv is not None else None),
+            "prov_delta": (round(float(c) - float(pv), 1)
+                           if (c is not None and pv is not None) else None),
             "support": (int(sup_n) if sup_n is not None else None),
             "alerts": (list(alerts[n]) if n in alerts and alerts[n] else []),
             "evidence": ev_n,
@@ -1066,6 +1075,12 @@ def _save_prediction_snapshot(
              "prob": r.prob, "px_o": r.px_o, "tier": r.tier}
             for r in rows[:30]
         ]
+    # 仮指数 (公式出走表だけの市場非依存な叩き台)。Claude 最終指数と併記して「叩き台→調整後」を
+    # 可視化する (2026-07-01)。決定論・安価なので snapshot 保存時に計算。失敗は無害 (None)。
+    try:
+        _prov = _provisional_mod.provisional_index(rd)
+    except Exception:  # noqa: BLE001
+        _prov = {}
     snapshot = {
         "race_id": race_id,
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1169,10 +1184,12 @@ def _save_prediction_snapshot(
         # 市場指数 (= 100 / 単勝オッズ、1.0倍で100、Claude 独立)。
         "market_win_index": ({str(k): v for k, v in _market_win_index(rd).items()}
                              or None),
-        # Claude 指数 × 市場指数 を per-horse で併記した表 (差 = Claude − 市場、support=補強件数、
-        # alerts=直前/軟情報フラグ)。
+        # 仮指数 (公式出走表だけの市場非依存な叩き台, 0-100)。Claude 最終指数の anchor。
+        "provisional_index": ({str(k): v for k, v in _prov.items()} or None),
+        # Claude 指数 × 市場指数 × 仮指数 を per-horse で併記した表 (差 = Claude − 市場、
+        # prov_delta = Claude − 仮指数、support=補強件数、alerts=直前/軟情報フラグ)。
         "index_compare": _build_index_compare(rd, llm_win_index, llm_support, llm_alerts,
-                                               llm_evidence, llm_paddock),
+                                               llm_evidence, llm_paddock, _prov),
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

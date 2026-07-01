@@ -422,6 +422,21 @@ def test_paddock_persists_to_llm_json_and_index_compare(tmp_path, monkeypatch):
     assert by_num[2]["paddock"] == {"rating": "△", "note": "イレ込み気味"}
 
 
+def test_index_compare_threads_provisional_and_delta():
+    """_build_index_compare が仮指数 (provisional) と prov_delta (Claude − 仮) を各行に載せる。"""
+    from src import analyze as az
+    rd = _mk_race(2)
+    rd.race.horses[0].number, rd.race.horses[1].number = 1, 2
+    ic = az._build_index_compare(rd, {1: 80.0, 2: 40.0}, None, None, None, None,
+                                 {1: 70.0, 2: 55.0})
+    by = {r["number"]: r for r in ic}
+    assert by[1]["provisional"] == 70.0 and by[1]["prov_delta"] == 10.0   # Claude 80 − 仮 70
+    assert by[2]["provisional"] == 55.0 and by[2]["prov_delta"] == -15.0  # Claude 40 − 仮 55
+    # 仮指数が無ければ None (旧 snapshot 互換)。
+    ic0 = az._build_index_compare(rd, {1: 80.0}, None, None, None, None, None)
+    assert all(r["provisional"] is None and r["prov_delta"] is None for r in ic0)
+
+
 def _mk_race_with_past(n_horses: int = 8):
     """過去走 (PastRun) 付きの RaceData (前走戦績セクション検証用)。"""
     from src.models import PastRun
