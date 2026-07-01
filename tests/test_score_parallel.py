@@ -422,6 +422,26 @@ def test_paddock_persists_to_llm_json_and_index_compare(tmp_path, monkeypatch):
     assert by_num[2]["paddock"] == {"rating": "△", "note": "イレ込み気味"}
 
 
+def test_resolve_provisional_freezes_after_first_save(tmp_path, monkeypatch):
+    """仮指数は既存 snapshot にあれば再利用して凍結 (オッズ更新/再score で揺れない)。"""
+    from src import analyze as az
+    monkeypatch.setattr(az, "ROOT", tmp_path)
+    (tmp_path / "data" / "predictions").mkdir(parents=True)
+    rid = "T-9-9"
+    rd = _mk_race(3)
+    # snapshot 未保存 → rd から計算 (dict を返す・raise しない)。
+    assert isinstance(az._resolve_provisional(rid, rd), dict)
+    # 既存 snapshot を書くと以後はそれを再利用する。
+    (tmp_path / "data" / "predictions" / f"{rid}.json").write_text(
+        __import__("json").dumps({"provisional_index": {"1": 71.0, "2": 42.0, "3": 55.0}}),
+        encoding="utf-8")
+    assert az._resolve_provisional(rid, rd) == {1: 71.0, 2: 42.0, 3: 55.0}
+    # rd の past_runs を空にしても (=別 rd) 凍結値は不変 = 市場更新に対する安定性。
+    for h in rd.race.horses:
+        h.past_runs = []
+    assert az._resolve_provisional(rid, rd) == {1: 71.0, 2: 42.0, 3: 55.0}
+
+
 def test_index_compare_threads_provisional_and_delta():
     """_build_index_compare が仮指数 (provisional) と prov_delta (Claude − 仮) を各行に載せる。"""
     from src import analyze as az

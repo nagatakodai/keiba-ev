@@ -124,7 +124,8 @@ def test_weights_sum_to_one():
     for name, w in (("NAR", P.WEIGHTS_NAR), ("JRA", P.WEIGHTS_JRA),
                     ("BANEI", P.WEIGHTS_BANEI), ("default", P.WEIGHTS)):
         assert abs(sum(w.values()) - 1.0) < 1e-6, f"{name} 重み合計 != 1"
-        assert set(w) == set(P._FACTORS), f"{name} の因子キーが不一致"
+        # 重みは既知因子の部分集合 (計測中の因子は _FACTORS に居るが未採用でよい)。
+        assert set(w).issubset(set(P._FACTORS)), f"{name} に未知因子キー"
 
 
 def test_segment_weight_selection():

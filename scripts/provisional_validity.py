@@ -96,7 +96,7 @@ def _report_segment(seg: str, pool, prov_pool, race_cache, top1_hit, top3_cov, n
         aw = _auc(sc, [x[1] for x in pool[f]])
         a3 = _auc(sc, [x[2] for x in pool[f]])
         auc_win[f] = aw if aw == aw else 0.5
-        print(f"   {f:<20} {segw[f]:>6.2f} {aw:>9.3f} {a3:>9.3f} {len(sc):>7}")
+        print(f"   {f:<20} {segw.get(f, 0.0):>6.2f} {aw:>9.3f} {a3:>9.3f} {len(sc):>7}")
 
     pw = _auc([x[0] for x in prov_pool], [x[1] for x in prov_pool])
     pw3 = _auc([x[0] for x in prov_pool], [x[2] for x in prov_pool])
@@ -109,7 +109,7 @@ def _report_segment(seg: str, pool, prov_pool, race_cache, top1_hit, top3_cov, n
     edge = {f: max(0.0, auc_win[f] - 0.5) for f in factors}
     tot = sum(edge.values()) or 1.0
     aucw = {f: edge[f] / tot for f in factors}
-    blend = {f: 0.5 * segw[f] + 0.5 * aucw[f] for f in factors}
+    blend = {f: 0.5 * segw.get(f, 0.0) + 0.5 * aucw[f] for f in factors}
     bt = sum(blend.values()) or 1.0
     blend = {f: round(blend[f] / bt, 3) for f in factors}
     # 丸め誤差を最大重み因子に寄せて合計 1.000 に
@@ -156,12 +156,13 @@ def main() -> None:
     df["race_id"] = df["race_id"].astype(str)
     fin = {(r.race_id, int(r.horse_number)): (int(r.finish_pos) if pd.notna(r.finish_pos) else None)
            for r in df.itertuples()}
+
     rid_date = (df.groupby("race_id")["race_date"].max().reset_index()
                 .sort_values("race_date", ascending=False))
     all_rids = [r for r in rid_date["race_id"].tolist()
                 if (RAW / f"{r}-past.html.gz").exists()]
 
-    factors = list(P.WEIGHTS.keys())
+    factors = list(P._FACTORS.keys())   # 全因子 (未採用の計測中因子=freshness も含む)
     # セグメント毎の accumulator
     acc = {s: dict(pool={f: [] for f in factors}, prov=[], race_cache=[],
                    top1=0, top3=0, n=0) for s in segs}

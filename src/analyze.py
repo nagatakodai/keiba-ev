@@ -615,13 +615,10 @@ def _run_score_stage(
     score_timeout = _score_timeout(rd, n_run)
     console.print(f"[dim]score timeout = {score_timeout}s ({n_run}頭, "
                   f"締切={_fmt_ts(rd.race.close_at) if rd.race.close_at else '不明'})[/dim]")
-    # 仮指数 (公式出走表だけの市場非依存な叩き台) を計算し Claude に anchor として渡す。
+    # 仮指数 (公式出走表だけの市場非依存な叩き台) を解決し Claude に anchor として渡す。
     # Claude は出走表外の検索情報でこれを ±調整する (二段パイプライン第一段, 2026-07-01)。
-    try:
-        provisional = _provisional_mod.provisional_index(rd)
-    except Exception as ex:  # noqa: BLE001
-        console.print(f"[yellow]仮指数の計算に失敗 (Claude はゼロから採点): {_mk_escape(str(ex))}[/yellow]")
-        provisional = None
+    # 既存 snapshot にあれば再利用 = 一度計算したら凍結 (オッズ更新で揺れない, ユーザ指摘 2026-07-01)。
+    provisional = _resolve_provisional(race_id, rd) or None
     try:
         # score_horses = dispatcher: KEIBA_SCORE_PARALLEL で並列 score (検索大幅増)、
         # それ以外/失敗時は従来の単一セッション score_horses_stream にフォールバック。
@@ -831,6 +828,44 @@ def _market_win_index(rd) -> dict[int, float]:
         p = 1.0 / float(wo)
         out[h.number] = round(max(0.0, min(100.0, 100.0 * (p ** exp))), 1)
     return out
+
+
+def _load_saved_provisional(race_id: str) -> dict[int, float]:
+    """既存 snapshot に保存済みの仮指数 {馬番: 0-100} を読む (無ければ空)。"""
+    p = ROOT / "data" / "predictions" / f"{race_id}.json"
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: dict[int, float] = {}
+    pp = d.get("provisional_index")
+    if isinstance(pp, dict):
+        for k, v in pp.items():
+            try:
+                out[int(k)] = float(v)
+            except (ValueError, TypeError):
+                continue
+    return out
+
+
+def _resolve_provisional(race_id: str, rd) -> dict[int, float]:
+    """仮指数を解決 — **既存 snapshot にあれば再利用**、無ければ rd から計算。
+
+    仮指数は公式出走表 (past_runs + 出走条件) だけの決定論値で一日を通して不変。だが
+    provisional_index はレース内ロバスト正規化 (median/MAD) を使うため、オッズ更新/再score で
+    rd の馬集合や past_runs 源が僅かに変わると再正規化で値が揺れうる。ユーザ指摘 (2026-07-01):
+    「オッズ更新で仮指数が変わるのはおかしい・出走表のみで決めるべき」に対し、**最初の score 段で
+    一度計算したら snapshot に凍結**し以後は再利用して市場更新に対する不変性を保証する。
+    """
+    prev = _load_saved_provisional(race_id)
+    if prev:
+        return prev
+    try:
+        return _provisional_mod.provisional_index(rd)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _build_index_compare(
@@ -1076,11 +1111,9 @@ def _save_prediction_snapshot(
             for r in rows[:30]
         ]
     # 仮指数 (公式出走表だけの市場非依存な叩き台)。Claude 最終指数と併記して「叩き台→調整後」を
-    # 可視化する (2026-07-01)。決定論・安価なので snapshot 保存時に計算。失敗は無害 (None)。
-    try:
-        _prov = _provisional_mod.provisional_index(rd)
-    except Exception:  # noqa: BLE001
-        _prov = {}
+    # 可視化する (2026-07-01)。**既存 snapshot にあれば再利用して凍結** — オッズ更新/再score で
+    # レース内再正規化により値が揺れるのを防ぐ (ユーザ指摘 2026-07-01: 出走表のみで決めるべき)。
+    _prov = _resolve_provisional(race_id, rd)
     snapshot = {
         "race_id": race_id,
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
