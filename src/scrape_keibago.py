@@ -114,6 +114,45 @@ def parse_tanfuku(html: str) -> tuple[list[BetOdds], list[BetOdds]]:
     return (_to_bets(wins, "win"), _to_bets(places, "place"))
 
 
+def _parse_weight_cell(cell: str) -> tuple[int, int]:
+    """"487 （+1）" / "487（-4）" / "487（±0）" / "計不" / "487" → (馬体重, 増減)。
+
+    体重不明 (計不/数字なし) は (0, 0)。増減が無い (初出走等) は diff=0。全角/半角の括弧・符号に対応。
+    """
+    m = re.search(r"(\d{2,3})", cell)
+    if not m:
+        return (0, 0)
+    bw = int(m.group(1))
+    diff = 0
+    dm = re.search(r"[（(]\s*([+\-±＋－]?\s*\d+)\s*[)）]", cell)
+    if dm:
+        s = (dm.group(1).replace("＋", "+").replace("－", "-")
+             .replace("±", "").replace(" ", ""))
+        try:
+            diff = int(s)
+        except ValueError:
+            diff = 0
+    return (bw, diff)
+
+
+def parse_body_weights(html: str) -> dict[int, tuple[int, int]]:
+    """単複ページ (OddsTanFuku) から {馬番: (馬体重, 増減)} を抽出 (追加リクエスト不要)。
+
+    行 = [枠, 馬番, 馬名, 単勝, 複勝min, 複勝max, 性齢, **馬体重(増減)**, 重量, 騎手, 場, 調教師]。
+    馬体重は発走約60分前に公表される直前情報 (keiba.go.jp 実機確認 2026-07-01: "487 （+1）")。
+    計不/取消 (体重0) は除外。Claude score の①直前情報 (±10kg超で減点) が NAR でも効くようになる。
+    """
+    out: dict[int, tuple[int, int]] = {}
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL):
+        c = _cells(row)
+        if len(c) < 8 or not c[1].isdigit():
+            continue
+        bw, diff = _parse_weight_cell(c[7])
+        if bw > 0:
+            out[int(c[1])] = (bw, diff)
+    return out
+
+
 _COMBO_RE = re.compile(
     r"<td[^>]*>\s*(\d+(?:-\d+){1,2})\s*</td>\s*<td[^>]*>(.*?)</td>", re.DOTALL
 )
@@ -466,7 +505,9 @@ def fetch_keibago_bets(loc: KeibagoLoc) -> dict:
     other_bets: {"win","place","quinella","wide","exacta","trio"} → [BetOdds]。
     consistency: 内部整合チェック (ワイド≤馬連 / 件数 = C(n,2) 等)。**誤オッズ検知用**。
     """
-    win, place = parse_tanfuku(_get(_odds_url(loc, _EP["tanfuku"])))
+    tan_html = _get(_odds_url(loc, _EP["tanfuku"]))
+    win, place = parse_tanfuku(tan_html)
+    body_weights = parse_body_weights(tan_html)   # 単複HTMLから馬体重(増減)も抽出 (追加GET無し)
     quinella = parse_quinella(_get(_odds_url(loc, _EP["quinella"])))
     wide = parse_wide(_get(_odds_url(loc, _EP["wide"])))
     exacta = parse_exacta(_get(_odds_url(loc, _EP["exacta"])))
@@ -480,6 +521,7 @@ def fetch_keibago_bets(loc: KeibagoLoc) -> dict:
     return {
         "other_bets": other_bets,
         "trifecta": trifecta,
+        "body_weights": body_weights,
         "consistency": check_consistency(other_bets, trifecta),
     }
 
@@ -652,6 +694,14 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
 
     rd.other_bets = {bt: v for bt, v in other.items() if v}
     rd.trifecta = trifecta
+
+    # 馬体重(増減) を単複ページから overlay (発走~60分前公表の直前情報)。NAR は従来 build_keibago_racedata
+    # が馬体重を set せず欠落していた (ユーザ指示 2026-07-01)。cache/DebaTable どちらの馬にも fresh 値を
+    # 載せ、Claude score の①直前情報 (当日馬体重±10kg超で減点) が NAR でも効くようにする。
+    bw_map = res.get("body_weights") or {}
+    for _h in rd.race.horses:
+        if _h.number in bw_map and bw_map[_h.number][0] > 0:
+            _h.body_weight, _h.body_weight_diff = bw_map[_h.number]
 
     # 取消/除外の二段ガード (2026-06-10 bughunt): fresh 単勝オッズ (発売中) に無い馬は
     # 取消・除外とみなして absent に昇格する。DebaTable の absent 検出 (一段目) の保険 +

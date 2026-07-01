@@ -331,3 +331,33 @@ def test_fetch_race_list_keibago_discovers_nankan(monkeypatch):
     assert _dt.datetime.fromtimestamp(r1["start_at"]).strftime("%H:%M") == "14:15"
     # skip_venues で oddspark 取得済の場は引かない
     assert kg.fetch_race_list_keibago("20260630", skip_venues={"大井"}) == []
+
+
+# 馬体重(増減) — 単複ページ c[7] に "487 （+1）" 形式で載る (実機確認 2026-07-01, 大井)
+_TANFUKU_BW = """
+<table>
+<tr><th>枠</th><th>馬番</th><th>馬名</th><th>単勝</th><th>複勝</th><th></th><th>性齢</th><th>馬体重</th><th>重量</th><th>騎手</th></tr>
+<tr><td>1</td><td>1</td><td>アミフジ</td><td>141.0</td><td>20.3-</td><td>35.4</td><td>牝5</td><td>487 （+1）</td><td>54.0</td><td>菅原涼</td></tr>
+<tr><td>2</td><td>2</td><td>ブラボー</td><td>2.3</td><td>1.2-</td><td>1.7</td><td>牡4</td><td>500（-4）</td><td>56.0</td><td>J</td></tr>
+<tr><td>3</td><td>3</td><td>ゼロゾウ</td><td>10.0</td><td>2.0-</td><td>3.0</td><td>牝3</td><td>460（±0）</td><td>54.0</td><td>K</td></tr>
+<tr><td>4</td><td>4</td><td>計不馬</td><td>30.0</td><td>4.0-</td><td>6.0</td><td>牡6</td><td>計不</td><td>55.0</td><td>L</td></tr>
+</table>
+"""
+
+
+def test_parse_weight_cell_formats():
+    p = kg._parse_weight_cell
+    assert p("487 （+1）") == (487, 1)
+    assert p("512（-4）") == (512, -4)
+    assert p("460（±0）") == (460, 0)
+    assert p("500 （＋12）") == (500, 12)     # 全角＋
+    assert p("計不") == (0, 0)                # 体重不明
+    assert p("487") == (487, 0)               # 増減表記なし
+
+
+def test_parse_body_weights():
+    out = kg.parse_body_weights(_TANFUKU_BW)
+    assert out[1] == (487, 1)
+    assert out[2] == (500, -4)
+    assert out[3] == (460, 0)
+    assert 4 not in out                       # 計不は除外 (体重0)
