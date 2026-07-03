@@ -738,14 +738,14 @@ export type ShobuPnl = {
 };
 
 // Claude 指数 単純戦略くらべの仮想収支 (GET /api/shobu/strategies-pnl, indexed-strategies-pnl)。
-// win1/place1/place2/place3/quinella12/exacta12/trifecta123/trio123/trio1234box/winplace を比較 (2026-06-30)。
+// win1/place1/place2/place3/quinella12/wide12/wide13/exacta12/trifecta123/trio123/trio1234box/wide123box を比較 (2026-06-30)。
 export type StrategyPnl = {
-  key: string;                 // win1 / place1 / place2 / place3 / quinella12 / exacta12 / trifecta123 / trio123 / trio1234box / winplace
+  key: string;                 // win1 / place1 / place2 / place3 / quinella12 / wide12 / wide13 / exacta12 / trifecta123 / trio123 / trio1234box / wide123box
   label: string;               // 表示名 (例「単勝 (指数1位)」)
-  bet_type: string;            // win / place / quinella / mix
+  bet_type: string;            // win / place / quinella / wide / exacta / trifecta / trio
   races: number;               // 実際に1脚以上買ったレース数 (フィルタ後)
   races_hit: number;           // レース単位の的中数 (hit_rate の分子)
-  bets: number;                // 脚数 (winplace=最大2/レース, trio1234box=4/レース)。stake 算出用
+  bets: number;                // 脚数 (trio1234box=4/レース, wide123box=3/レース)。stake 算出用
   hits: number;                // 的中脚数 (脚単位)
   hit_rate: number;            // races_hit / races (**母数=レース数**)
   hit_rate_ci_low?: number;

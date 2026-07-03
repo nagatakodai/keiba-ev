@@ -185,6 +185,7 @@ def test_strategies_full_hit_payout(dirs):
     assert r["per"]["place3"]["payout"] == 200 and r["per"]["place3"]["hits"] == 1   # 2.0×100
     assert r["per"]["quinella12"]["payout"] == 400 and r["per"]["quinella12"]["hits"] == 1
     assert r["per"]["exacta12"]["payout"] == 600 and r["per"]["exacta12"]["hits"] == 1   # 1→2 着順一致
+    assert r["per"]["wide13"]["payout"] == 200 and r["per"]["wide13"]["hits"] == 1   # wide:1-3=2.0
     # 戦略集計 (1レース)
     assert _strat(d, "win1")["roi"] == 3.0 and _strat(d, "win1")["net"] == 200
     assert _strat(d, "place2")["payout"] == 150 and _strat(d, "place3")["payout"] == 200
@@ -325,11 +326,11 @@ def test_strategies_trio_box_within_top4_only(dirs):
 
 
 def test_strategies_wide(dirs):
-    """ワイド (指数1-2位) と ワイドBOX (1-2-3) — 両馬が上位3着で的中。ユーザ指示 2026-06-30。"""
+    """ワイド (指数1-2位 / 1-3位) と ワイドBOX (1-2-3) — 両馬が上位3着で的中。ユーザ指示 2026-06-30 / wide13 は 2026-07-02。"""
     sh, pr, rs = dirs
     (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 8)), encoding="utf-8")
     (pr / "rec-1.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
-    # 着順 1-3-5: 上位3着 {1,3,5}。wide12{1,2}は2が圏外で外れ。
+    # 着順 1-3-5: 上位3着 {1,3,5}。wide12{1,2}は2が圏外で外れ。wide13{1,3}は両方圏内で的中。
     # wideBOX: (1,2)外れ / (1,3){1,3}⊆{1,3,5}的中 / (2,3)外れ。→ 1点的中。
     # #3(=馬番3) は2着で複勝圏 → place3 的中 (place:3 が要る)。
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
@@ -338,6 +339,9 @@ def test_strategies_wide(dirs):
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
     assert r["per"]["wide12"]["hit"] is False                 # {1,2}: 2 は圏外
+    w13 = r["per"]["wide13"]
+    assert w13["hit"] is True and w13["payout"] == 220        # {1,3} 両方圏内・2.2×100
+    assert _strat(d, "wide13")["races_hit"] == 1 and _strat(d, "wide13")["stake"] == 100
     box = r["per"]["wide123box"]
     assert box["bets"] == 3 and box["hits"] == 1 and box["payout"] == 220   # (1,3) のみ的中
     assert _strat(d, "wide123box")["races_hit"] == 1          # 母数はレース数

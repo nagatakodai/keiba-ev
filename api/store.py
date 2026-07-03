@@ -995,6 +995,7 @@ STRATEGY_DEFS = [
     ("place3", "複勝 (指数3位)", "place"),
     ("quinella12", "馬連 (指数1-2位)", "quinella"),
     ("wide12", "ワイド (指数1-2位)", "wide"),
+    ("wide13", "ワイド (指数1-3位)", "wide"),
     ("exacta12", "馬単 (指数1→2位)", "exacta"),
     ("trifecta123", "3連単 (指数1→2→3)", "trifecta"),
     ("trio123", "3連複 (指数1-2-3)", "trio"),
@@ -1010,7 +1011,7 @@ def _strategy_race_legs(
     point_cost: int,
     meta: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str]:
-    """1 レースの Claude 指数戦略 (win1/place23/quinella12/winplace) の脚を計算する共通ヘルパ。
+    """1 レースの Claude 指数戦略 (STRATEGY_DEFS の各戦略) の脚を計算する共通ヘルパ。
 
     返り値 `(detail | None, reason)`。reason は "ok"/"no_index"/"no_result"/"no_odds":
       - "no_index": Claude 指数が 3 頭未満 (1・2・3 位を決められない)。
@@ -1106,6 +1107,9 @@ def _strategy_race_legs(
     # ワイド (1-2位) — 両馬とも上位3着なら的中 (順不同)。key 昇順 (final_odds 規約)。
     wa, wb = sorted((top1, top2))
     wide12_leg = _leg("wide", [wa, wb], {top1, top2} <= fin3, f"wide:{wa}-{wb}")
+    # ワイド (1-3位) — 指数1位×3位 (ユーザ指示 2026-07-02)。判定は wide12 と同型。
+    wc, wd = sorted((top1, top3))
+    wide13_leg = _leg("wide", [wc, wd], {top1, top3} <= fin3, f"wide:{wc}-{wd}")
     # ワイドBOX (1-2-3) — C(3,2)=3 点 (各ペアが両馬上位3着で的中。複数同時的中あり)。
     wide_box_legs: list[dict[str, Any]] = []
     for a, b in combinations((top1, top2, top3), 2):
@@ -1132,6 +1136,7 @@ def _strategy_race_legs(
         "place3": _agg([place_leg_3] if place_leg_3 else []),
         "quinella12": _agg([quin_leg]),
         "wide12": _agg([wide12_leg]),
+        "wide13": _agg([wide13_leg]),
         "exacta12": _agg([exacta_leg]),
         "trifecta123": _agg([trifecta_leg]),
         "trio123": _agg([trio_leg]),
@@ -1162,7 +1167,8 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
     """**shobu 評価レース** の Claude 指数 単純戦略くらべ 仮想収支 (共通コア)。
 
     各レースで win1 (1位単勝) / place1,2,3 (1/2/3位複勝) / quinella12 (1-2位馬連) /
-    exacta12 (1→2位馬単) / trifecta123 / trio123 / trio1234box / winplace (1位単勝+1位複勝) を仮定し、
+    wide12,13 (1-2位/1-3位ワイド) / exacta12 (1→2位馬単) / trifecta123 / trio123 /
+    trio1234box / wide123box を仮定し、
     実着順と final_odds の払戻で **戦略ごとに** 収支を集計する。母集団 (`_shobu_eval_races`) は BOX 収支と
     共有: `recommended_only=True` = 勝負レース(推奨)のみ / False = 推奨に限らず shobu が評価した全レース。
 
