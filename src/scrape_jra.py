@@ -567,11 +567,52 @@ def parse_jra_result(html: str) -> dict:
     return {"finish_order": order, "payout": payout}
 
 
+# accessS 結果ページの払戻 <li class="..."> → 内部 bet_type (final_odds の leg_id prefix)。
+# wakuren (枠連) は扱わない。実機 DOM 確認 2026-07-04 (福島11R 6/28):
+#   <li class="wide"><dl><dt>ワイド</dt><dd><div class="line">
+#     <div class="num">8-13</div><div class="yen">1,520<span>円</span></div>...</dd></dl></li>
+_JRA_PAYOUT_CLASSES = {
+    "win": "win", "place": "place", "umaren": "quinella", "wide": "wide",
+    "umatan": "exacta", "trio": "trio", "tierce": "trifecta",
+}
+
+
+def parse_jra_payouts(html: str) -> dict[str, float]:
+    """結果ページの払戻セクション → **実払戻ベース** の {leg_id: odds} (100円払戻円 ÷ 100)。
+
+    オッズページ snapshot と違い確定払戻そのものなので、複勝/ワイドのレンジ下限問題
+    (実払戻の過小計上) が原理的に起きない。複勝/ワイドは複数 line (同着時は他券種も複数)。
+    順不同券種 (place/quinella/wide/trio) の key は昇順に正規化 (final_odds 規約)、
+    exacta/trifecta は着順のまま。
+    """
+    out: dict[str, float] = {}
+    for m in re.finditer(r'<li class="([a-z]+)">(.*?)</li>', html, re.DOTALL):
+        bt = _JRA_PAYOUT_CLASSES.get(m.group(1))
+        if bt is None:
+            continue
+        expected = {"win": 1, "place": 1, "quinella": 2, "exacta": 2,
+                    "wide": 2, "trio": 3, "trifecta": 3}[bt]
+        for lm in re.finditer(
+            r'<div class="num">\s*([\d\s-]+?)\s*</div>\s*'
+            r'<div class="yen">\s*([\d,]+)', m.group(2), re.DOTALL,
+        ):
+            nums = [int(x) for x in re.findall(r"\d+", lm.group(1))]
+            yen = int(lm.group(2).replace(",", ""))
+            if yen <= 0 or len(nums) != expected:
+                continue
+            if bt in ("place", "quinella", "wide", "trio"):
+                nums = sorted(nums)
+            out[f"{bt}:{'-'.join(str(n) for n in nums)}"] = yen / 100.0
+    return out
+
+
 def fetch_jra_result(netkeiba_rid: str) -> dict | None:
     """netkeiba JRA race_id → JRA 公式の確定結果 {finish_order, payout} (accessS walk)。
 
     netkeiba block 中でも JRA の結果を取得できる (result fetch の fallback)。直近開催のみ。
-    1-2-3 が揃う (len>=3) 確定結果のみ返す。
+    1-2-3 が揃う (len>=3) 確定結果のみ返す。`final_odds` の in-money 組は結果ページの
+    **実払戻** (parse_jra_payouts) を採用し、オッズページ snapshot は lookup 被覆用の補完
+    (2026-07-04 修正: 旧実装は複勝/ワイドのレンジ下限を実払戻として保存していた)。
     """
     if len(netkeiba_rid) < 12 or netkeiba_rid[4:6] not in {f"{i:02d}" for i in range(1, 11)}:
         return None
@@ -611,16 +652,21 @@ def fetch_jra_result(netkeiba_rid: str) -> dict | None:
     res = parse_jra_result(page)
     if len(res["finish_order"]) < 3:
         return None
-    # 最終オッズも追加で取得 (calibration の 実払戻 ROI 計算用)。失敗しても result は返す。
+    # 最終オッズ snapshot を補完として取得 (calibration の lookup 被覆用)。失敗しても result は返す。
+    final: dict[str, float] = {}
     try:
         loc = find_jra_race(netkeiba_rid)
         if loc is not None:
             bets = fetch_jra_bets(loc)
-            res["final_odds"] = _flatten_final_odds_jra(bets)
-        else:
-            res["final_odds"] = {}
+            final = _flatten_final_odds_jra(bets)
     except Exception:  # noqa: BLE001
-        res["final_odds"] = {}
+        final = {}
+    # 実払戻 (結果ページの払戻セクション、追加 fetch なし) で上書き。
+    try:
+        final.update(parse_jra_payouts(page))
+    except Exception:  # noqa: BLE001
+        pass
+    res["final_odds"] = final
     return res
 
 

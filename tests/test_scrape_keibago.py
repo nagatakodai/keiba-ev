@@ -361,3 +361,37 @@ def test_parse_body_weights():
     assert out[2] == (500, -4)
     assert out[3] == (460, 0)
     assert 4 not in out                       # 計不は除外 (体重0)
+
+
+def test_parse_refund_payouts_all_types():
+    """RefundMoneyList の実払戻を全券種パース (2026-07-04)。馬連複=馬連 / 馬連単=馬単、
+    枠連複/枠連単は無視、順不同券種は key 昇順、複勝/ワイドは複数組。"""
+    def td(*cells):
+        return "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+    html = (
+        "<table>"
+        + td("単勝", "9", "600円", "5人気")
+        + td("複勝", "9", "200円", "5人気")
+        + td("", "2", "140円", "1人気")
+        + td("", "5", "170円", "3人気")
+        + td("枠連複", "2-7", "750円", "1人気")
+        + td("馬連複", "2-9", "930円", "2人気")
+        + td("枠連単", "7-2", "2,460円", "12人気")
+        + td("馬連単", "9-2", "2,720円", "9人気")
+        + td("ワイド", "2-9", "400円", "3人気")
+        + td("", "5-9", "650円", "10人気")
+        + td("三連複", "2-5-9", "1,940円", "6人気")
+        + td("三連単", "9-2-5", "14,020円", "42人気")
+        + "</table>"
+    )
+    p = kg.parse_refund_payouts(html)
+    assert p["win:9"] == 6.0
+    assert p["place:9"] == 2.0 and p["place:2"] == 1.4 and p["place:5"] == 1.7
+    assert p["quinella:2-9"] == 9.3           # 馬連複 → quinella
+    assert p["exacta:9-2"] == 27.2            # 馬連単 → exacta (着順のまま)
+    assert p["wide:2-9"] == 4.0 and p["wide:5-9"] == 6.5
+    assert p["trio:2-5-9"] == 19.4
+    assert p["trifecta:9-2-5"] == 140.2
+    # 枠連複 (2-7) / 枠連単 (7-2) は quinella/exacta に化けない
+    assert "quinella:2-7" not in p and "exacta:7-2" not in p
+    assert len(p) == 10

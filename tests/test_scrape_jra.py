@@ -209,3 +209,42 @@ def test_parse_wide_always_lower_bound_even_if_reversed():
     h=('<caption>1</caption><tbody><tr><th scope="row">2</th>'
        '<td class="odds"><span class="max">7.2</span>-<span class="min">5.0</span></td></tr></tbody>')
     assert jra.parse_wide(h)[0].odds == 5.0
+
+
+def test_parse_jra_payouts_all_types():
+    """結果ページの払戻 (実払戻) を全券種パース (2026-07-04)。複勝/ワイドは複数 line、
+    順不同券種は key 昇順、exacta/trifecta は着順のまま、枠連 (wakuren) は無視。"""
+    html = (
+        '<li class="win"><dl><dt>単勝</dt><dd><div class="line">'
+        '<div class="num">13</div><div class="yen">540<span class="unit">円</span></div>'
+        '</div></dd></dl></li>'
+        '<li class="place"><dl><dt>複勝</dt><dd>'
+        '<div class="line"><div class="num">13</div><div class="yen">200<span>円</span></div></div>'
+        '<div class="line"><div class="num">8</div><div class="yen">360<span>円</span></div></div>'
+        '<div class="line"><div class="num">5</div><div class="yen">200<span>円</span></div></div>'
+        '</dd></dl></li>'
+        '<li class="wakuren"><dl><dt>枠連</dt><dd><div class="line">'
+        '<div class="num">4-7</div><div class="yen">3,150<span>円</span></div></div></dd></dl></li>'
+        '<li class="wide"><dl><dt>ワイド</dt><dd>'
+        '<div class="line"><div class="num">8-13</div><div class="yen">1,520<span>円</span></div></div>'
+        '<div class="line"><div class="num">5-13</div><div class="yen">710<span>円</span></div></div>'
+        '</dd></dl></li>'
+        '<li class="umaren"><dl><dt>馬連</dt><dd><div class="line">'
+        '<div class="num">8-13</div><div class="yen">4,550<span>円</span></div></div></dd></dl></li>'
+        '<li class="umatan"><dl><dt>馬単</dt><dd><div class="line">'
+        '<div class="num">13-8</div><div class="yen">8,360<span>円</span></div></div></dd></dl></li>'
+        '<li class="trio"><dl><dt>3連複</dt><dd><div class="line">'
+        '<div class="num">5-8-13</div><div class="yen">8,250<span>円</span></div></div></dd></dl></li>'
+        '<li class="tierce"><dl><dt>3連単</dt><dd><div class="line">'
+        '<div class="num">13-8-5</div><div class="yen">52,690<span>円</span></div></div></dd></dl></li>'
+    )
+    p = jra.parse_jra_payouts(html)
+    assert p["win:13"] == 5.4
+    assert p["place:13"] == 2.0 and p["place:8"] == 3.6 and p["place:5"] == 2.0
+    assert p["wide:8-13"] == 15.2 and p["wide:5-13"] == 7.1
+    assert p["quinella:8-13"] == 45.5
+    assert p["exacta:13-8"] == 83.6            # 着順のまま
+    assert p["trio:5-8-13"] == 82.5
+    assert p["trifecta:13-8-5"] == 526.9       # 着順のまま
+    assert not any(k.startswith("wakuren") for k in p)   # 枠連は保存しない
+    assert len(p) == 10   # 1+3+2+1+1+1+1

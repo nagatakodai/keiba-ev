@@ -907,12 +907,76 @@ def _parse_finish_order(html: str) -> list[int]:
     return [best[p] for p in sorted(best)] if best else []
 
 
+# RefundMoneyList の券種名 → 内部 bet_type (final_odds の leg_id prefix)。
+# 「馬連複」= 馬連 / 「馬連単」= 馬単 (地方競馬公式の表記)。枠連複/枠連単 は扱わない。
+_REFUND_BET_NAMES = {
+    "単勝": "win", "複勝": "place",
+    "馬連複": "quinella", "馬複": "quinella",
+    "馬連単": "exacta", "馬単": "exacta",
+    "ワイド": "wide",
+    "三連複": "trio", "3連複": "trio", "３連複": "trio",
+    "三連単": "trifecta", "3連単": "trifecta", "３連単": "trifecta",
+}
+_REFUND_SKIP_NAMES = {"枠連複", "枠連単", "枠複", "枠単", "枠連"}
+
+
+def parse_refund_payouts(refund_html: str, race_no: int | None = None) -> dict[str, float]:
+    """RefundMoneyList → **実払戻ベース** の {leg_id: odds} (100円あたり払戻円 ÷ 100)。
+
+    セル列は `券種名, (組番, 金額円, 人気)×n, 次の券種名, ...` の繰り返し (複勝/ワイドは
+    複数組・同着時は他券種も複数組)。オッズページ snapshot と違い **確定払戻そのもの** なので、
+    複勝/ワイドのレンジ下限問題 (実払戻を最大 -54% 過小計上) が原理的に起きない。
+    race_no があれば当該レースのセクションに限定 (別レースの同一組番衝突を排除)。
+    順不同券種 (place/quinella/wide/trio) の key は昇順に正規化 (final_odds 規約)。
+    """
+    search_html = refund_html
+    if race_no is not None:
+        seg = _refund_segment_for_race(refund_html, race_no)
+        if seg is not None:
+            search_html = seg
+    cells = [c for c in (
+        re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
+        for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", search_html, re.DOTALL)
+    ) if c]
+    out: dict[str, float] = {}
+    bt: str | None = None
+    i = 0
+    while i < len(cells):
+        c = cells[i]
+        if c in _REFUND_BET_NAMES:
+            bt = _REFUND_BET_NAMES[c]
+            i += 1
+            continue
+        if c in _REFUND_SKIP_NAMES:
+            bt = None
+            i += 1
+            continue
+        combo = re.fullmatch(r"\d{1,2}(?:-\d{1,2}){0,2}", c)
+        if bt and combo and i + 1 < len(cells) and "円" in cells[i + 1]:
+            yen = int(re.sub(r"\D", "", cells[i + 1]) or 0)
+            nums = [int(x) for x in c.split("-")]
+            if bt in ("place", "quinella", "wide", "trio"):
+                nums = sorted(nums)
+            expected = {"win": 1, "place": 1, "quinella": 2, "exacta": 2,
+                        "wide": 2, "trio": 3, "trifecta": 3}[bt]
+            if yen > 0 and len(nums) == expected:
+                out[f"{bt}:{'-'.join(str(n) for n in nums)}"] = yen / 100.0
+            i += 2
+            # 続く "N人気" セルは読み飛ばす (無い形式にも耐える)
+            if i < len(cells) and re.fullmatch(r"\d+\s*人気", cells[i]):
+                i += 1
+            continue
+        i += 1
+    return out
+
+
 def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
     """netkeiba NAR race_id → keiba.go.jp の確定結果 {finish_order, payout, final_odds}。
 
-    `final_odds` は各 bet type の **最終確定オッズ** を `bet_type:key` 形式 (例
-    `"trifecta:6-7-11"`) で flat dict 化したもの。calibration で実払戻ベースの ROI を
-    計算するために使う。取得失敗時は最終オッズだけ {} で続行。
+    `final_odds` は `bet_type:key` 形式 (例 `"trifecta:6-7-11"`) の flat dict。
+    **in-money 組は RefundMoneyList の実払戻** (÷100) を採用し、オッズページ snapshot は
+    lookup 被覆用の補完に留める (2026-07-04 修正: 旧実装はオッズページの複勝/ワイド
+    レンジ下限を実払戻として保存し、的中払戻を最大 -54% 過小計上していた)。
     netkeiba block 中でも NAR の結果を取得できる (result fetch の fallback)。当日確定
     レースのみ (find_keibago_race が TodayRaceInfo ベース)。未確定/未解決は None。
     """
@@ -929,12 +993,19 @@ def fetch_keibago_result(netkeiba_rid: str) -> dict | None:
     # 揃わない / 未確定は None を返し、不完全な結果を save しない (loop は pending 維持)。
     if len(res["finish_order"]) < 3:
         return None
-    # 最終オッズ (全6券種) を追加取得。失敗しても結果自体は返す (finish_order があれば save 可)。
+    # 最終オッズ (全6券種 snapshot) を補完として取得。失敗しても結果自体は返す。
+    final: dict[str, float] = {}
     try:
         bets = fetch_keibago_bets(loc)
-        res["final_odds"] = _flatten_final_odds(bets)
+        final = _flatten_final_odds(bets)
     except Exception:  # noqa: BLE001
-        res["final_odds"] = {}
+        final = {}
+    # 実払戻 (RefundMoneyList) で上書き — 的中組は常に確定払戻を持つ。
+    try:
+        final.update(parse_refund_payouts(rf, race_no=loc.race_no))
+    except Exception:  # noqa: BLE001
+        pass
+    res["final_odds"] = final
     return res
 
 
