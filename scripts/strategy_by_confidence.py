@@ -17,7 +17,11 @@ from __future__ import annotations
 
 import json
 import random
+import sys
+from pathlib import Path
 from statistics import median
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # リポジトリルートを import path に
 
 from api.store import (
     MARKET_INDEPENDENT_CUTOFF_ISO_JST,

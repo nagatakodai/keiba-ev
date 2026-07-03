@@ -43,29 +43,52 @@ def test_get_prediction_returns_none_for_bad_race_id():
 def test_index_version_explicit_field_wins():
     """明示の index_version があればそのまま返す (新 snapshot)。"""
     from api.store import index_version_of
-    assert index_version_of({"index_version": "v2", "index_compare": [{"claude_index": 50}]}) == "v2"
+    assert index_version_of({"index_version": "v2", "index_compare": [{"claude_index": 50}],
+                             "llm_scored_at": "2026-06-29T10:00:00"}) == "v2"
     assert index_version_of({"index_version": "v1"}) == "v1"
+    assert index_version_of({"index_version": "v3"}) == "v3"
+
+
+def test_index_version_v2_stamp_corrected_to_v3():
+    """仮指数アンカー移行 (07-01 15:13) 〜 INDEX_VERSION="v3" 反映の間に "v2" が誤刻印された
+    snapshot は採点日時で v3 に矯正する。cutoff 前の真の v2 はそのまま。"""
+    from api.store import index_version_of
+    assert index_version_of({"index_version": "v2",
+                             "llm_scored_at": "2026-07-01T15:13:17"}) == "v3"   # cutoff 丁度
+    assert index_version_of({"index_version": "v2",
+                             "llm_scored_at": "2026-07-02T09:00:00"}) == "v3"
+    assert index_version_of({"index_version": "v2",
+                             "llm_scored_at": "2026-07-01T15:13:16"}) == "v2"   # cutoff 直前
 
 
 def test_index_version_inferred_from_scored_date():
     """旧 snapshot は採点日時で推定: 市場由来 cutoff(2026-06-21 19:04)以前=β /
-    〜2026-06-28未満=v1 / 2026-06-28以降=v2 (Claude 指数があるとき)。"""
+    〜2026-06-28未満=v1 / 〜07-01 15:13未満=v2 / 以降=v3 (Claude 指数があるとき)。"""
     from api.store import index_version_of
     idx = {"index_compare": [{"number": 1, "claude_index": 80.0}]}
     assert index_version_of({**idx, "llm_scored_at": "2026-06-28T10:00:00"}) == "v2"
     assert index_version_of({**idx, "llm_scored_at": "2026-06-27T23:59:59"}) == "v1"
     assert index_version_of({**idx, "llm_scored_at": "2026-06-21T19:04:26"}) == "β"   # cutoff 直前
     assert index_version_of({**idx, "llm_scored_at": "2026-06-21T19:04:27"}) == "v1"   # cutoff 丁度
+    assert index_version_of({**idx, "llm_scored_at": "2026-07-01T15:13:17"}) == "v3"   # 仮指数アンカー〜
     # llm_scored_at 欠落は saved_at で代替。市場由来 (〜06-21) は β。
     assert index_version_of({**idx, "saved_at": "2026-06-29T12:00:00"}) == "v2"
     assert index_version_of({**idx, "saved_at": "2026-06-01T12:00:00"}) == "β"
+    assert index_version_of({**idx, "saved_at": "2026-07-02T12:00:00"}) == "v3"
 
 
 def test_index_version_none_without_index():
-    """Claude 指数が無い snapshot は None (バージョン対象外)。"""
+    """Claude 指数が無い snapshot は None (バージョン対象外)。
+    index_compare の行があっても claude_index が全 null (market-only refresh) なら None
+    (行の存在だけで判定すると version 母数が指数ゼロレースで過大になる)。"""
     from api.store import index_version_of
     assert index_version_of({"saved_at": "2026-06-29T12:00:00"}) is None
     assert index_version_of({"index_compare": [], "llm_win_index": {}}) is None
+    # market-only: 行はあるが claude_index が全て None → None
+    assert index_version_of({
+        "index_compare": [{"number": 1, "market_index": 40.0, "claude_index": None},
+                          {"number": 2, "market_index": 30.0}],
+        "saved_at": "2026-06-29T12:00:00"}) is None
     # llm_win_index があれば指数あり扱い → 日付推定
     assert index_version_of({"llm_win_index": {"1": 70.0}, "saved_at": "2026-06-29"}) == "v2"
 

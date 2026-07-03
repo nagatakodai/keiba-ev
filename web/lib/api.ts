@@ -822,7 +822,7 @@ export type MarketAgreementMetric = {
   label: string;
   agree_roi: number;
   disagree_roi: number;
-  agree_legs: number;
+  agree_legs: number;   // 1脚以上買ったレース数 (2026-07-04 レース単位合算化)
   disagree_legs: number;
   delta: number; // agree_roi − disagree_roi
   delta_ci_low: number;

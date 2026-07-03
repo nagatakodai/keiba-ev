@@ -474,6 +474,10 @@ def test_market_agreement_splits_by_consensus(dirs):
     # 各 metric は agree/disagree 双方の脚数を持つ
     quin = next(x for x in m["metrics"] if x["key"] == "quinella12")
     assert quin["agree_legs"] == 1 and quin["disagree_legs"] == 1
+    # pooled ターゲット (combo=馬連+馬単+ワイド) は **レース単位合算** (2026-07-04):
+    # 1 レース 3 脚でも bootstrap の再標本化単位は 1 点 (レース内相関で CI が過小になるのを防ぐ)。
+    combo = next(x for x in m["metrics"] if x["key"] == "combo")
+    assert combo["agree_legs"] == 1 and combo["disagree_legs"] == 1
 
     # history 追記 + dedup (races 不変なら no-op)
     import api.store as st
@@ -545,3 +549,41 @@ def test_strategies_indexed_is_superset(dirs):
     assert allr["recommended_total"] == 2
     # winplace (単複) は全戦略から撤去済み (ユーザ指示 2026-06-30)。
     assert all(s["key"] != "winplace" for s in allr["strategies"])
+
+
+def test_eval_races_dedup_before_recommended_filter(dirs):
+    """同一 race_id が複数 shobu file にあるとき、recommended 判定は generated_at 後勝ちの
+    **最新コピー** で行う (2026-07-04 修正)。旧実装はフィルタが dedup より先で、最新スキャンで
+    非推奨化されたレースの古い recommended=True コピーが母集団に残留した。"""
+    sh, pr, rs = dirs
+    idx = {1: 90.0, 2: 80.0, 3: 70.0}
+    # file A (古い): recommended=True / file B (新しい): 同一 race_id が recommended=False に降格
+    (sh / "20260701.json").write_text(json.dumps({
+        "generated_at": "2026-07-01T10:00:00+09:00",
+        "races": [{"race_id": "demoted-1", "recommended": True, "venue": "A",
+                   "race_no": 1, "race_type": "nar", "n_runners": 8}],
+    }), encoding="utf-8")
+    (sh / "20260702.json").write_text(json.dumps({
+        "generated_at": "2026-07-02T10:00:00+09:00",
+        "races": [{"race_id": "demoted-1", "recommended": False, "venue": "A",
+                   "race_no": 1, "race_type": "nar", "n_runners": 8}],
+    }), encoding="utf-8")
+    (pr / "demoted-1.json").write_text(json.dumps(_snap(8, idx)), encoding="utf-8")
+    (rs / "demoted-1.json").write_text(json.dumps(_result([1, 2, 3], 5000)), encoding="utf-8")
+    assert store._shobu_eval_races(True) == {}                   # 最新は非推奨 → 推奨母集団外
+    assert set(store._shobu_eval_races(False)) == {"demoted-1"}  # 全体母集団には居る
+
+
+def test_strategy_index_tie_breaks_by_number(dirs):
+    """Claude 指数同点は **馬番昇順** で明示タイブレーク (index_compare の行順に依存しない)。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("tie-1", 8)), encoding="utf-8")
+    # 馬5 と馬1 が同点1位。行順を馬番降順で書いても top1 は馬番昇順の馬1。
+    snap = _snap(8, {5: 90.0, 1: 90.0, 3: 70.0, 7: 70.0})
+    snap["index_compare"] = list(reversed(snap["index_compare"]))
+    (pr / "tie-1.json").write_text(json.dumps(snap), encoding="utf-8")
+    # 着順は全戦略外れ (的中脚の final_odds 欠落で no_odds skip にならないように)。
+    (rs / "tie-1.json").write_text(json.dumps(_result_fo([8, 6, 4], 9999, {})), encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    r = d["races_detail"][0]
+    assert (r["top1"], r["top2"], r["top3"]) == (1, 5, 3)   # 同点 90.0 は 1<5、70.0 は 3<7

@@ -200,7 +200,7 @@ function StrategiesPnlCard({
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
           <span>
             ※ 各脚 ¥{data.point_cost}: 単勝=指数1位 / 複勝=指数1位・2位・3位 (頭数ルール: 8頭以上=3着・5-7頭=2着・4頭以下=無)
-            / 馬連=指数1-2位 (上位2着) / ワイド=指数1-2位・ワイドBOX=指数1-2-3 (3点) (両馬が上位3着)
+            / 馬連=指数1-2位 (上位2着) / ワイド=指数1-2位・指数1-3位・ワイドBOX=指数1-2-3 (3点) (両馬が上位3着)
             / 馬単=指数1→2位 (着順一致) / 3連単=指数1→2→3 / 3連複=指数1-2-3 (順不同) / 3連複BOX=指数1-2-3-4 (4点)。
             <strong>全券種とも最終オッズ ≤1.1 のとき買い見送り</strong>。
             的中率の母数はレース数 (的中R/対象R) ・ 対象={data.races}R 中の賭けたレース数
@@ -393,7 +393,7 @@ function VersionMeasurementSection({
   strategies,
   nowMs,
 }: {
-  version: "v1" | "v2" | "β";
+  version: "v1" | "v2" | "v3" | "β";
   box: ShobuPnl | null;
   strategies: StrategiesPnl | null;
   nowMs: number;
@@ -428,18 +428,20 @@ function VersionMeasurementSection({
 }
 
 export default async function DashboardPage() {
-  // 計測を補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30: v2 が上・v1 が下)。
+  // 計測を Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30: 新しい/現行が上)。
   // β (市場由来・〜2026-06-21) は対象が少ないため表示しない (ユーザ指示で撤去)。
-  const [boxV2, boxV1, stratV2, stratV1, marketAgree] = await Promise.all([
+  const [boxV3, boxV2, boxV1, stratV3, stratV2, stratV1, marketAgree] = await Promise.all([
+    api.indexedPnl(100, "v3").catch(() => null),
     api.indexedPnl(100, "v2").catch(() => null),
     api.indexedPnl(100, "v1").catch(() => null),
+    api.indexedStrategiesPnl(100, "v3").catch(() => null),
     api.indexedStrategiesPnl(100, "v2").catch(() => null),
     api.indexedStrategiesPnl(100, "v1").catch(() => null),
     api.marketAgreement().catch(() => null),
   ]);
 
   // API 未接続: どのバージョンも取れなければ明示のエラーカードを出す。
-  if (!boxV2 && !boxV1) {
+  if (!boxV3 && !boxV2 && !boxV1) {
     return (
       <Page>
         <AutoRefresh seconds={15} />
@@ -463,13 +465,14 @@ export default async function DashboardPage() {
       <PageHeader
         eyebrow="Keiba EV Terminal"
         title="ダッシュボード"
-        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v2=無制限・現行 / v1=3件上限・旧)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。"
+        subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v3=仮指数アンカー・現行 / v2=補強根拠無制限 / v1=3件上限)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。"
       />
 
       {/* ====== 研究中シグナル: 市場一致 (自動蓄積・確証まで) ====== */}
       {marketAgree && <MarketAgreementCard data={marketAgree} />}
 
-      {/* ====== v2 (現行・補強根拠無制限) を上・v1 (旧) を下 ====== */}
+      {/* ====== v3 (現行・仮指数アンカー) を上、v2 / v1 (旧) を下 ====== */}
+      <VersionMeasurementSection version="v3" box={boxV3} strategies={stratV3} nowMs={nowMs} />
       <VersionMeasurementSection version="v2" box={boxV2} strategies={stratV2} nowMs={nowMs} />
       <VersionMeasurementSection version="v1" box={boxV1} strategies={stratV1} nowMs={nowMs} />
     </Page>

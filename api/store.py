@@ -54,24 +54,36 @@ def get_shobu_result(date: str | None = None) -> dict[str, Any] | None:
 
 
 def index_version_of(snap: dict[str, Any]) -> str | None:
-    """snapshot の Claude 指数 方針バージョン (β=市場由来 / v1=市場非依存+補強3件 / v2=無制限・現行)。
+    """snapshot の Claude 指数 方針バージョン (β=市場由来 / v1=補強3件 / v2=無制限 / v3=仮指数アンカー・現行)。
 
     明示の `index_version` (2026-06-30〜 保存) があればそれを返す。無い旧 snapshot は **採点日時で推定**:
     Claude 指数が無ければ None、市場由来 cutoff (2026-06-21 19:04) 以前は **β** (score プロンプトに
     単勝オッズ列があり市場由来だった頃・ユーザ指示 2026-06-30「β版として残して表示」)、それ以降
-    INDEX_V2_SINCE (2026-06-28) 未満は v1、以降は v2。
+    INDEX_V2_SINCE (2026-06-28) 未満は v1、INDEX_V3_SINCE (2026-07-01 15:13 = 仮指数アンカー移行
+    dbff5b2) 未満は v2、以降は v3。
+
+    「Claude 指数あり」は index_compare の行に **claude_index が実際に入っているか** で判定する
+    (market-only refresh の snapshot は market_index のみの行を持つため、行の存在だけ見ると
+    指数ゼロのレースが β/v1/v2 に誤分類され version 母数が過大になる)。
     """
+    from src.llm import INDEX_V2_SINCE, INDEX_V3_SINCE
     v = snap.get("index_version")
     if v:
+        # 仮指数アンカー移行 (07-01 15:13) 〜 INDEX_VERSION="v3" 反映までの間に保存された
+        # snapshot は "v2" が誤刻印されている → 採点日時で v3 に矯正 (真の v2 は cutoff 前のみ)。
+        if v == "v2" and _scored_at(snap) >= INDEX_V3_SINCE:
+            return "v3"
         return v
-    has_index = bool(snap.get("index_compare") or snap.get("llm_win_index"))
+    has_index = any(r.get("claude_index") is not None
+                    for r in (snap.get("index_compare") or [])) or bool(snap.get("llm_win_index"))
     if not has_index:
         return None
-    from src.llm import INDEX_V2_SINCE
     scored = _scored_at(snap)
     if scored < MARKET_INDEPENDENT_CUTOFF_ISO_JST:
         return "β"
-    return "v2" if scored >= INDEX_V2_SINCE else "v1"
+    if scored < INDEX_V2_SINCE:
+        return "v1"
+    return "v3" if scored >= INDEX_V3_SINCE else "v2"
 
 
 def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
@@ -709,7 +721,7 @@ def _shobu_eval_races(recommended_only: bool) -> dict[str, dict[str, Any]]:
 
     再スキャンの重複は generated_at の後勝ち。`recommended_only=True` は推奨 (勝負レース) のみ、
     False は推奨に限らず shobu が評価した全レース (= 当日スキャンの母集団)。
-    BOX 収支 (`_shobu_box_pnl`) と 単複収支 (`_winplace_pnl`) が同じ母集団定義を共有する。
+    BOX 収支 (`_shobu_box_pnl`) と 戦略くらべ (`_strategies_pnl`) が同じ母集団定義を共有する。
     値には `_generated_at` を付与 (date 推定/後勝ち判定用)。
     """
     by_race: dict[str, dict[str, Any]] = {}
@@ -721,14 +733,17 @@ def _shobu_eval_races(recommended_only: bool) -> dict[str, dict[str, Any]]:
                 continue
             gen = doc.get("generated_at") or ""
             for race in doc.get("races") or []:
-                if recommended_only and not race.get("recommended"):
-                    continue
                 rid = race.get("race_id")
                 if not rid:
                     continue
                 prev = by_race.get(rid)
                 if prev is None or gen >= (prev.get("_generated_at") or ""):
                     by_race[rid] = {**race, "_generated_at": gen}
+    # recommended フィルタは dedup (generated_at 後勝ち) の **後** に最新コピーで判定する。
+    # 先にフィルタすると、同一 race_id が複数 file にあり最新スキャンで recommended=False に
+    # 落ちた場合に古い recommended=True のコピーが母集団に残留する (latent、2026-07-04 修正)。
+    if recommended_only:
+        by_race = {rid: r for rid, r in by_race.items() if r.get("recommended")}
     return by_race
 
 
@@ -755,7 +770,9 @@ def _box_race_pnl(
         return None, "no_index"
     n_runners = snap.get("n_runners") or meta.get("n_runners") or len(idx)
     box = _shobu_box_size(n_runners, base=box_size)
-    top = [num for num, _ci in sorted(idx.items(), key=lambda kv: kv[1], reverse=True)][:box]
+    # 同点指数は馬番昇順で明示タイブレーク (従来の実効挙動と同一。index_compare の
+    # 行順依存を排し、行構築順の将来変更で過去計測の対象馬が入れ替わらないようにする)。
+    top = [num for num, _ci in sorted(idx.items(), key=lambda kv: (-kv[1], kv[0]))][:box]
     top_set = set(top)
     finish = [x for x in (result.get("finish_order") or [])[:3]
               if isinstance(x, int) and x > 0]
@@ -923,7 +940,7 @@ def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5,
     ユーザ指摘で betting pipeline の過去スコア (~06-12〜) が混ざって 153 件に膨れていたのを修正し、
     shobu 評価レース (recommended + 非recommended) に scope。これで「ほとんど推奨」(推奨カードの
     proper superset) になる。指数条件は推奨カードと同じ (BOX 可能=指数3頭以上) で揃える。
-    `version` ("v1"/"v2") を渡すと補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30)。
+    `version` ("v1"/"v2"/"v3"/"β") を渡すと Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30)。
     """
     return _shobu_box_pnl(point_cost, box_size, recommended_only=False, version=version)
 
@@ -1024,7 +1041,8 @@ def _strategy_race_legs(
     idx = _claude_index_by_number(snap)
     if len(idx) < 3:
         return None, "no_index"
-    ranked = [num for num, _ci in sorted(idx.items(), key=lambda kv: kv[1], reverse=True)]
+    # 同点指数は馬番昇順で明示タイブレーク (_box_race_pnl と同じ理由)。
+    ranked = [num for num, _ci in sorted(idx.items(), key=lambda kv: (-kv[1], kv[0]))]
     top1, top2, top3 = ranked[0], ranked[1], ranked[2]
 
     finish = [x for x in (result.get("finish_order") or [])[:3]
@@ -1174,7 +1192,7 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
 
     返り値 `strategies` は STRATEGY_DEFS 順の各戦略 {key,label,bet_type, races,races_hit,bets,hits,
     hit_rate(+CI),stake,payout,net,roi(+CI)}。**hit_rate の母数はレース数** (= races_hit/races・
-    ユーザ指示 2026-06-30)。`bets`/`hits` は脚単位 (winplace=最大2脚・trio1234box=4脚/レース) で stake 算出用。
+    ユーザ指示 2026-06-30)。`bets`/`hits` は脚単位 (trio1234box=4脚・wide123box=3脚/レース) で stake 算出用。
     `races` は **実際に 1 脚以上買ったレース数** (フィルタ後): 単勝/複勝は最終オッズ ≤1.1、単複は合成オッズ
     <1 (1位複勝オッズ/2<1) で買い見送り、複勝は ≤4頭で発売なし → いずれも races から外れる。
     指数<3頭=skipped_no_index、結果未確定=skipped_no_result、的中脚オッズ欠落=skipped_no_odds。
@@ -1309,7 +1327,7 @@ def compute_indexed_strategies_pnl(point_cost: int = 100,
 
     ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して表示」。
     母集団は BOX 収支の indexed (compute_indexed_pnl) と揃える (shobu 評価レース全体)。
-    `version` ("v1"/"v2") を渡すと補強根拠バージョン毎に分離 (ユーザ指示 2026-06-30)。
+    `version` ("v1"/"v2"/"v3"/"β") を渡すと Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30)。
     """
     return _strategies_pnl(point_cost, recommended_only=False, version=version)
 
@@ -1500,12 +1518,23 @@ def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
             last_updated_at = r_ts
 
     def _pairs(rows: list[dict[str, Any]], keys: list[str]) -> list[tuple[int, int]]:
+        """レース毎に対象戦略の (Σstake, Σpayout) を1点に合算して返す。
+
+        pooled ターゲット (combo/honmei) を脚単位で並べると、同一レースの脚は同じ
+        top1/top2/着順を共有し強相関 (馬連が当たればワイドも当たりやすい) なのに bootstrap が
+        iid 再標本化してしまい CI が過小 → 偽の★確証が出うる (2026-07-04 修正)。レース単位に
+        合算すれば再標本化の単位=独立に近いレースになる。単一戦略ターゲットは 1 脚/レースなので
+        数値は従来と同じ。"""
         out: list[tuple[int, int]] = []
         for per in rows:
+            stake = payout = 0
             for k in keys:
                 s = per.get(k) or {}
                 if s.get("bets"):
-                    out.append((s["stake"], s["payout"]))
+                    stake += s["stake"]
+                    payout += s["payout"]
+            if stake:
+                out.append((stake, payout))
         return out
 
     metrics = []
@@ -1516,6 +1545,7 @@ def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
         metrics.append({
             "key": key, "label": label,
             "agree_roi": _roi_of(ap), "disagree_roi": _roi_of(dp),
+            # _pairs がレース単位合算になった (2026-07-04) ため legs = 1脚以上買ったレース数。
             "agree_legs": len(ap), "disagree_legs": len(dp),
             "delta": delta, "delta_ci_low": lo, "delta_ci_high": hi,
             "significant": bool(ap and dp and (lo > 0 or hi < 0)),

@@ -23,13 +23,17 @@ from .models import RaceData
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# 補強根拠 (evidence) の方針バージョン (ユーザ指示 2026-06-30):
+# Claude 指数の方針バージョン (ユーザ指示 2026-06-30「方針バージョン毎に計測を分離」):
 #   v1 = 各馬の evidence (補強根拠) を **3 件まで** に制限していた頃 (〜2026-06-27)
-#   v2 = evidence の **上限を撤廃** (無制限・あればあるだけ) した現行 (2026-06-28 commit 78a248c〜)
-# snapshot 保存時に `index_version` を刻む。古い snapshot は scored 日付で推定する
-# (INDEX_V2_SINCE 以降に採点されたものは v2、それ以前は v1)。
-INDEX_VERSION = "v2"
+#   v2 = evidence の **上限を撤廃** (無制限・あればあるだけ) (2026-06-28 commit 78a248c〜)
+#   v3 = **仮指数アンカー方式** — 市場非依存の仮指数 (出走表ベース機械計算) を anchor に
+#        Claude が ±調整する二段パイプライン (2026-07-01 commit dbff5b2〜、±20 クランプ 78612b4)。
+#        根拠の無い馬は仮指数据え置きになるため生成分布が v2 と別物 = 系列を分離する。
+# snapshot 保存時に `index_version` を刻む。古い snapshot は scored 日時で推定する
+# (INDEX_V3_SINCE 以降 v3 / INDEX_V2_SINCE 以降 v2 / それ以前は v1)。
+INDEX_VERSION = "v3"
 INDEX_V2_SINCE = "2026-06-28"
+INDEX_V3_SINCE = "2026-07-01T15:13:17"   # dbff5b2 のコミット時刻 (JST)
 
 
 def _start_kill_timer(proc: "subprocess.Popen", timeout: int):
