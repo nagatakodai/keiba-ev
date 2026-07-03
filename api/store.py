@@ -992,13 +992,19 @@ _UNORDERED_BETS = {"quinella", "wide", "trio"}
 
 
 def _snap_combo_odds(snap: dict[str, Any], bet_type: str) -> dict[tuple[int, ...], float]:
-    """snapshot の bet_tables から **組番(tuple)→最終オッズ** を取り出す (全券種)。
+    """snapshot の bet_tables から **組番(tuple)→snapshot 時点オッズ** を取り出す (全券種)。
 
-    bet_tables は締切直前 (bet 段) のフレッシュオッズを持つので、「最終オッズが ≤1.1 なら
-    買わない」等の **着順非依存 (買う前) のフィルタ判定** に使える (result の final_odds は
-    in-money 組のオッズしか無く着順依存になるため不適)。順不同券種 (馬連/ワイド/3連複) は
-    組番を昇順正規化。単勝/複勝は全馬・組合せ券種は経路により疎 (netkeiba 経路は pair 系が空)
-    なので、組番が表に無ければフィルタ no-op (= オッズ不明なら買う)。
+    「オッズ ≤1.1 なら買わない」等の **着順非依存 (買う前) のフィルタ判定** に使う
+    (result の final_odds は in-money 組のオッズしか無く着順依存になるため不適)。
+    **実態の注意 (2026-07-04 実測)**: ①shobu 経路の snapshot は全て stage="score" で、
+    オッズは **スキャン時 / 自動再score 時 (推奨レースは締切2-7分前, 06-30〜) のもの** —
+    「締切直前の最終オッズ」ではない (旧 docstring は誤り。stale 判定は実測で fired 脚の
+    realized>1.1 が 41%)。②複勝/ワイドは全 writer がレンジ **下限** のみ保存するため
+    フィルタは下限判定 = 保守的に過剰発動する (place1 の母集団を ~44% 削る)。いずれも
+    系列の定義安定を優先して仕様として維持 (閾値 sweep は非単調で改善の裏付け無し、
+    CLAUDE.md 2026-07-04 の記録参照)。順不同券種 (馬連/ワイド/3連複) は組番を昇順正規化。
+    単勝/複勝は全馬・組合せ券種は経路により疎 (netkeiba 経路は pair 系が空) なので、
+    組番が表に無ければフィルタ no-op (= オッズ不明なら買う)。
     """
     out: dict[tuple[int, ...], float] = {}
     for row in ((snap.get("bet_tables") or {}).get(bet_type) or []):
