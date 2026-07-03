@@ -780,9 +780,24 @@ def _box_race_pnl(
         return None, "no_result"
     n_points = len(list(permutations(top, 3)))     # = P(len(top), 3)
     stake = n_points * point_cost
-    hit = all(f in top_set for f in finish)
+    # 同着対応 (2026-07-04): 的中3連単組 (同着時は複数) のうち BOX が覆う組を数える。
+    # 同着なしは従来と同値 (的中組 = finish そのもの 1 組)。BOX が同着の両組を覆えば両方の
+    # 払戻を得る。finish 組は trifecta_payout、他の同着組は final_odds から payout を引く。
+    ranks = _finish_ranks(result)
+    covered = [c for c in _winning_trifectas(ranks) if all(x in top_set for x in c)]
+    hit = bool(covered)
     tri = int(result.get("trifecta_payout") or 0)
-    payout = int(round(tri * point_cost / 100.0)) if hit else 0
+    fo = result.get("final_odds") or {}
+    payout = 0
+    for c in covered:
+        if list(c) == finish[:3] and tri:
+            payout += int(round(tri * point_cost / 100.0))
+        else:
+            try:
+                o = float(fo.get(f"trifecta:{c[0]}-{c[1]}-{c[2]}") or 0)
+            except (TypeError, ValueError):
+                o = 0.0
+            payout += int(round(o * point_cost))
     detail = {
         "race_id": meta.get("race_id"),
         "date": meta.get("date") or "",
@@ -1002,6 +1017,50 @@ def _snap_combo_odds(snap: dict[str, Any], bet_type: str) -> dict[tuple[int, ...
 
 # **全券種** で最終オッズが ≤ この値なら買わない (ユーザ指示 2026-06-30: 旨味の無い大本命を除外)。
 _MIN_ODDS = 1.1
+
+
+def _finish_ranks(result: dict[str, Any]) -> dict[int, int]:
+    """result → 着順 1-3 の全馬 {馬番: 着順}。**同着 (dead heat) 対応** (2026-07-04)。
+
+    `finish_positions` (writer が着順表の全行から構築・同着は複数馬が同じ着順) を優先。
+    整合チェック: 各着順 r は「r より上位の馬の数 + 1」に一致するはず (例 [1,2,2]・[1,1,3]・
+    [1,2,3,3] は valid、[1,3,3]・[2,3,3] は invalid)。invalid / 欠落の旧 result は
+    finish_order から一意着順を構成する (従来と同値)。
+    """
+    pos = result.get("finish_positions") or {}
+    out: dict[int, int] = {}
+    for k, v in pos.items():
+        try:
+            n, r = int(k), int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and 1 <= r <= 3:
+            out[n] = r
+    vals = sorted(out.values())
+    if len(vals) >= 3 and all(r == 1 + sum(1 for x in vals if x < r) for r in set(vals)):
+        return out
+    return {x: i + 1 for i, x in enumerate((result.get("finish_order") or [])[:3])
+            if isinstance(x, int) and x > 0}
+
+
+def _winning_trifectas(ranks: dict[int, int]) -> list[tuple[int, int, int]]:
+    """的中3連単組の列挙 (同着対応)。同着なしなら着順どおりの 1 組。
+
+    的中組 = 3頭の rank が非減少かつ top3 パターン (上位3ポジション) と一致する順列。
+    例: 3着同着 [1,2,3,3] → (1着,2着,3着a) と (1着,2着,3着b) の 2 組 /
+    2着同着 [1,2,2] → 1着→2着a→2着b と 1着→2着b→2着a の 2 組。
+    """
+    from itertools import permutations
+    inm = [n for n, r in ranks.items() if r <= 3]
+    if len(inm) < 3:
+        return []
+    pat = sorted(ranks[n] for n in inm)[:3]
+    out: list[tuple[int, int, int]] = []
+    for c in permutations(sorted(inm), 3):
+        rs = [ranks[x] for x in c]
+        if rs[0] <= rs[1] <= rs[2] and sorted(rs) == pat:
+            out.append(c)
+    return out
 # 戦略メタ (表示順・ラベル・代表券種)。races_detail / strategies のキー順もこれに従う。
 # 複勝は 1/2/3 位を分けて計測 (ユーザ指示 2026-06-30)。
 # (単複 winplace は 2026-06-30 ユーザ指示で全表示から撤去)。
@@ -1052,7 +1111,17 @@ def _strategy_race_legs(
 
     n_runners = snap.get("n_runners") or meta.get("n_runners") or len(idx)
     cutoff = _place_cutoff(n_runners)
-    placed_set = set(finish[:cutoff]) if cutoff else set()
+    # 同着対応 (2026-07-04): 的中判定は finish_order (一意3頭) でなく着順 rank {馬番: 着順}
+    # で行う。同着が無ければ ranks == {finish[i]: i+1} で従来と完全同値。
+    ranks = _finish_ranks(result)
+    inmoney = sorted(ranks.values())          # 例 [1,2,3] / 3着同着 [1,2,3,3] / 2着同着 [1,2,2]
+    top2_pat = inmoney[:2]                    # 馬連/馬単の的中 rank パターン
+    top3_pat = inmoney[:3]                    # 3連複/3連単の的中 rank パターン
+
+    def _r(n: int) -> int:
+        return ranks.get(n, 99)
+
+    placed_set = {n for n, r in ranks.items() if r <= cutoff} if cutoff else set()
 
     fo = result.get("final_odds") or {}
     # 全券種の最終オッズ (締切直前スナップショット, 組番→オッズ)。買う前の ≤1.1 フィルタに使う。
@@ -1066,7 +1135,6 @@ def _strategy_race_legs(
         except (TypeError, ValueError):
             return None
 
-    top2_set = set(finish[:2])     # 馬連=上位2着 (頭数ルール非依存)
     missing_odds = False
 
     def _leg(bet_type: str, key_nums: list[int], hit: bool, odds_key: str) -> dict[str, Any]:
@@ -1090,8 +1158,29 @@ def _strategy_race_legs(
         return {"bet_type": bet_type, "key": key_nums, "hit": hit, "bet": bet,
                 "stake": point_cost if bet else 0, "payout": pay}
 
+    # --- 的中判定 (rank ベース・同着対応) -------------------------------------
+    # 同着なしでは従来判定と完全同値。同着時は JRA/NAR の払戻ルールに一致:
+    #   馬連/馬単 = ペアの rank が top2_pat と一致 (2着同着の 2-2 は不的中・1着同着の 1-1 は的中)
+    #   3連複/3連単 = 3頭の rank が top3_pat と一致 (3着同着 [1,3,3] は不的中)
+    #   ワイド = 両馬 rank≤3、ただし 3着同着同士 (3,3) は不的中
+    def _quinella_hit(a: int, b: int) -> bool:
+        return sorted((_r(a), _r(b))) == top2_pat
+
+    def _exacta_hit(a: int, b: int) -> bool:
+        return _r(a) <= _r(b) and sorted((_r(a), _r(b))) == top2_pat
+
+    def _wide_hit(a: int, b: int) -> bool:
+        ra, rb = _r(a), _r(b)
+        return ra <= 3 and rb <= 3 and not (ra == 3 and rb == 3 and len(inmoney) > 3)
+
+    def _trio_hit(a: int, b: int, c: int) -> bool:
+        return sorted((_r(a), _r(b), _r(c))) == top3_pat
+
+    def _trifecta_hit(a: int, b: int, c: int) -> bool:
+        return _r(a) <= _r(b) <= _r(c) and _trio_hit(a, b, c)
+
     # 単勝 (1位) — 頭数に関係なく常に発売。最終オッズ ≤1.1 は買わない (全券種共通フィルタ)。
-    win_leg = _leg("win", [top1], top1 == finish[0], f"win:{top1}")
+    win_leg = _leg("win", [top1], _r(top1) == 1, f"win:{top1}")
     # 複勝 (1位 / 2位 / 3位 を分けて計測) — 複勝が発売される頭数のときだけ。
     place_leg_1 = (_leg("place", [top1], top1 in placed_set, f"place:{top1}")
                    if cutoff > 0 else None)
@@ -1099,40 +1188,38 @@ def _strategy_race_legs(
                    if cutoff > 0 else None)
     place_leg_3 = (_leg("place", [top3], top3 in placed_set, f"place:{top3}")
                    if cutoff > 0 else None)
-    # 馬連 (1-2位) — 上位2着に両馬が入れば的中。key は昇順 (final_odds の規約に合わせる)。
+    # 馬連 (1-2位)。key は昇順 (final_odds の規約に合わせる)。
     qa, qb = sorted((top1, top2))
-    quin_leg = _leg("quinella", [qa, qb], {top1, top2} <= top2_set, f"quinella:{qa}-{qb}")
-    # 馬単 (1→2位) — 1着=top1 かつ 2着=top2 の着順一致。key は着順そのまま。
+    quin_leg = _leg("quinella", [qa, qb], _quinella_hit(top1, top2), f"quinella:{qa}-{qb}")
+    # 馬単 (1→2位)。key は着順そのまま。
     exacta_leg = _leg("exacta", [top1, top2],
-                      finish[0] == top1 and finish[1] == top2, f"exacta:{top1}-{top2}")
+                      _exacta_hit(top1, top2), f"exacta:{top1}-{top2}")
 
-    # 3連単 (1→2→3) — 着順完全一致。final_odds の trifecta key は着順そのまま。
-    fin3 = set(finish[:3])
-    tri_hit = finish[:3] == [top1, top2, top3]
-    trifecta_leg = _leg("trifecta", [top1, top2, top3], tri_hit,
+    # 3連単 (1→2→3)。final_odds の trifecta key は着順そのまま。
+    trifecta_leg = _leg("trifecta", [top1, top2, top3], _trifecta_hit(top1, top2, top3),
                         f"trifecta:{top1}-{top2}-{top3}")
-    # 3連複 (1-2-3) — 上位3着が {1,2,3} と一致 (順不同)。key は昇順。
+    # 3連複 (1-2-3)。key は昇順。
     t3 = sorted((top1, top2, top3))
-    trio_leg = _leg("trio", t3, {top1, top2, top3} == fin3, f"trio:{t3[0]}-{t3[1]}-{t3[2]}")
-    # 3連複 BOX (1-2-3-4) — 上位3着が {1,2,3,4} に収まれば的中。C(4,3)=4 点。
+    trio_leg = _leg("trio", t3, _trio_hit(top1, top2, top3), f"trio:{t3[0]}-{t3[1]}-{t3[2]}")
+    # 3連複 BOX (1-2-3-4) — C(4,3)=4 点。
     box_legs: list[dict[str, Any]] = []
     if len(ranked) >= 4:
         top4 = ranked[:4]
         for combo in combinations(top4, 3):
             cs = sorted(combo)
-            box_legs.append(_leg("trio", cs, set(combo) == fin3,
+            box_legs.append(_leg("trio", cs, _trio_hit(*combo),
                                  f"trio:{cs[0]}-{cs[1]}-{cs[2]}"))
-    # ワイド (1-2位) — 両馬とも上位3着なら的中 (順不同)。key 昇順 (final_odds 規約)。
+    # ワイド (1-2位)。key 昇順 (final_odds 規約)。
     wa, wb = sorted((top1, top2))
-    wide12_leg = _leg("wide", [wa, wb], {top1, top2} <= fin3, f"wide:{wa}-{wb}")
+    wide12_leg = _leg("wide", [wa, wb], _wide_hit(top1, top2), f"wide:{wa}-{wb}")
     # ワイド (1-3位) — 指数1位×3位 (ユーザ指示 2026-07-02)。判定は wide12 と同型。
     wc, wd = sorted((top1, top3))
-    wide13_leg = _leg("wide", [wc, wd], {top1, top3} <= fin3, f"wide:{wc}-{wd}")
-    # ワイドBOX (1-2-3) — C(3,2)=3 点 (各ペアが両馬上位3着で的中。複数同時的中あり)。
+    wide13_leg = _leg("wide", [wc, wd], _wide_hit(top1, top3), f"wide:{wc}-{wd}")
+    # ワイドBOX (1-2-3) — C(3,2)=3 点 (複数同時的中あり)。
     wide_box_legs: list[dict[str, Any]] = []
     for a, b in combinations((top1, top2, top3), 2):
         pa, pb = sorted((a, b))
-        wide_box_legs.append(_leg("wide", [pa, pb], {a, b} <= fin3, f"wide:{pa}-{pb}"))
+        wide_box_legs.append(_leg("wide", [pa, pb], _wide_hit(a, b), f"wide:{pa}-{pb}"))
 
     if missing_odds:
         return None, "no_odds"     # 実際に買った的中脚の払戻不明 → 評価不能

@@ -828,6 +828,10 @@ def parse_result(html: str) -> dict | None:
     if not table:
         return None
     finish_order: list[int] = []
+    # 同着 (dead heat) 対応 (2026-07-04): 同じ着順の行が複数あり得るので 3 行で打ち切らず、
+    # 着順 1-3 の **全馬** を {馬番: 着順} で finish_positions に残す (reader が同着側の
+    # 的中を取りこぼさないため)。finish_order は従来互換の先勝ち 3 頭。
+    finish_positions: dict[int, int] = {}
     # NAR (門別等) は着順データ行が class 無しの <tr>、取消馬だけ <tr class="HorseList Torikeshi">
     # になる場合がある。`tr.HorseList` を優先すると取消馬1行だけ拾って finish_order が
     # 空になり結果が落ちる (753 race 未ラベル化の原因) → 全 tr を走査して order セルで判定。
@@ -841,9 +845,9 @@ def parse_result(html: str) -> dict | None:
         if order_text in ("1", "2", "3"):
             n = _to_int(num_text)
             if n:
-                finish_order.append(n)
-        if len(finish_order) >= 3:
-            break
+                finish_positions.setdefault(n, int(order_text))
+                if len(finish_order) < 3:
+                    finish_order.append(n)
 
     if len(finish_order) < 3:
         return None
@@ -869,6 +873,8 @@ def parse_result(html: str) -> dict | None:
 
     return {
         "finish_order": finish_order[:3],
+        # 着順 1-3 の全馬 {馬番: 着順}。同着があると 4 頭以上になる (reader の同着判定用)。
+        "finish_positions": finish_positions,
         "payout": payout,
         "final_odds": final_odds,
         "source": "netkeiba-html",

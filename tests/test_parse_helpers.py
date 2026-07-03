@@ -111,3 +111,18 @@ def test_tanfuku_to_bets_popularity_by_odds_asc():
     assert by_pop[1] == (3,)  # 2.5 が最安
     assert by_pop[2] == (1,)  # 5.0
     assert by_pop[3] == (2,)  # 12.0
+
+
+def test_parse_result_dead_heat_positions():
+    """netkeiba 結果: 3着同着で finish_positions に 4 頭全て残る (2026-07-04)。
+    finish_order は従来互換の先勝ち 3 頭。"""
+    from src.parse import parse_result
+    rows = "".join(
+        f'<tr class="HorseList"><td>{o}</td><td>{w}</td><td>{n}</td><td>馬{n}</td></tr>'
+        for o, w, n in [("1", "5", "9"), ("2", "2", "7"), ("3", "4", "8"), ("3", "6", "10")]
+    )
+    html = f'<html><body><table class="RaceTable01">{rows}</table></body></html>'
+    r = parse_result(html)
+    assert r is not None
+    assert r["finish_order"] == [9, 7, 8]
+    assert r["finish_positions"] == {9: 1, 7: 2, 8: 3, 10: 3}

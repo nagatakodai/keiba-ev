@@ -587,3 +587,91 @@ def test_strategy_index_tie_breaks_by_number(dirs):
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
     assert (r["top1"], r["top2"], r["top3"]) == (1, 5, 3)   # 同点 90.0 は 1<5、70.0 は 3<7
+
+
+def test_dead_heat_third_place_hits(dirs):
+    """3着同着 (finish_positions が 4 頭): 同着側の的中を取りこぼさない (2026-07-04)。
+
+    実例 (data/results/2026360622-622-7 型): 着順 9-7-{8,10}。finish_order は先勝ちで
+    [9,7,8] だが、Claude top3=(9,7,10) の 3連単/3連複/ワイド/複勝 は 10 側でも的中。
+    ワイドの 3着同着同士 (8-10) は不的中。
+    """
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("dh-1", 10)), encoding="utf-8")
+    # Claude 順位: top1=9, top2=7, top3=10, top4=8
+    (pr / "dh-1.json").write_text(json.dumps(_snap(
+        10, {9: 90.0, 7: 80.0, 10: 70.0, 8: 60.0, 1: 10.0})), encoding="utf-8")
+    res = {
+        "finish_order": [9, 7, 8],
+        "finish_positions": {"9": 1, "7": 2, "8": 3, "10": 3},   # 3着同着
+        "trifecta_payout": 4480,
+        "final_odds": {"win:9": 2.0, "place:9": 1.2, "place:7": 1.5, "place:8": 1.6,
+                       "place:10": 1.7, "wide:9-10": 4.0, "wide:7-10": 7.2, "wide:7-9": 2.0,
+                       "quinella:7-9": 5.0, "exacta:9-7": 8.0,
+                       "trio:7-8-9": 15.0, "trio:7-9-10": 17.3, "trifecta:9-7-10": 44.8},
+        "recorded_at": "2026-06-28T17:00:00",
+    }
+    (rs / "dh-1.json").write_text(json.dumps(res), encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    r = d["races_detail"][0]
+    assert (r["top1"], r["top2"], r["top3"]) == (9, 7, 10)
+    assert r["per"]["trifecta123"]["hit"] is True     # 9→7→10 は同着側の的中組
+    assert r["per"]["trifecta123"]["payout"] == 4480  # trifecta:9-7-10=44.8 ×100
+    assert r["per"]["trio123"]["hit"] is True and r["per"]["trio123"]["payout"] == 1730
+    assert r["per"]["wide13"]["hit"] is True and r["per"]["wide13"]["payout"] == 400
+    assert r["per"]["place3"]["hit"] is True and r["per"]["place3"]["payout"] == 170  # 10 は3着
+    # BOX (top4 = 9,7,10,8): 的中組 (9,7,8) と (9,7,10) の両方を含む trio → 2 点的中
+    box = r["per"]["trio1234box"]
+    assert box["hits"] == 2      # trio{7,8,9} と trio{7,9,10} の両方が top3_pat [1,2,3] に一致
+    assert box["payout"] == 1500 + 1730
+
+
+def test_dead_heat_wide_third_pair_misses(dirs):
+    """3着同着同士のワイド (rank 3,3) は不的中 (JRA/NAR 払戻ルール)。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("dh-2", 10)), encoding="utf-8")
+    # Claude top1=8, top2=10 (両方3着同着), top3=9
+    (pr / "dh-2.json").write_text(json.dumps(_snap(
+        10, {8: 90.0, 10: 80.0, 9: 70.0, 7: 60.0})), encoding="utf-8")
+    res = {
+        "finish_order": [9, 7, 8],
+        "finish_positions": {"9": 1, "7": 2, "8": 3, "10": 3},
+        "trifecta_payout": 4480,
+        "final_odds": {"place:8": 1.6, "place:9": 1.2, "place:10": 1.7, "wide:8-9": 3.0,
+                       "wide:9-10": 4.0, "trio:7-8-9": 15.0, "trio:7-9-10": 17.3},
+        "recorded_at": "2026-06-28T17:00:00",
+    }
+    (rs / "dh-2.json").write_text(json.dumps(res), encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    r = d["races_detail"][0]
+    assert r["per"]["wide12"]["hit"] is False    # {8,10} = 3着同着同士 → 不的中
+    assert r["per"]["quinella12"]["hit"] is False
+    # 複勝は両方的中 (8 も 10 も 3着)
+    assert r["per"]["place1"]["hit"] is True and r["per"]["place2"]["hit"] is True
+
+
+def test_dead_heat_second_exacta_both_orders(dirs):
+    """2着同着: 馬単は 1着→2着a / 1着→2着b の両順序が的中、2着a-2着b の馬連は不的中。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("dh-3", 8)), encoding="utf-8")
+    # Claude top1=5, top2=6 (6 は2着同着の片方), top3=4
+    (pr / "dh-3.json").write_text(json.dumps(_snap(
+        8, {5: 90.0, 6: 80.0, 4: 70.0})), encoding="utf-8")
+    res = {
+        "finish_order": [5, 4, 6],
+        "finish_positions": {"5": 1, "4": 2, "6": 2},   # 2着同着 (4 と 6)
+        "trifecta_payout": 3510,
+        "final_odds": {"win:5": 2.0, "place:5": 1.2, "place:4": 1.4, "place:6": 1.5,
+                       "quinella:5-6": 5.7, "exacta:5-6": 10.2,
+                       "wide:4-5": 1.8, "wide:4-6": 2.2, "wide:5-6": 1.9,
+                       "trio:4-5-6": 8.0, "trifecta:5-6-4": 35.1},
+        "recorded_at": "2026-06-28T17:00:00",
+    }
+    (rs / "dh-3.json").write_text(json.dumps(res), encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    r = d["races_detail"][0]
+    assert r["per"]["quinella12"]["hit"] is True     # {5,6} = 1着+2着同着片方 → 的中
+    assert r["per"]["exacta12"]["hit"] is True       # 5→6 (rank 1→2) → 的中
+    assert r["per"]["exacta12"]["payout"] == 1020
+    # 3連単 5→6→4 は rank (1,2,2) 非減少 → 的中 (同着の両順序が払戻対象)
+    assert r["per"]["trifecta123"]["hit"] is True and r["per"]["trifecta123"]["payout"] == 3510

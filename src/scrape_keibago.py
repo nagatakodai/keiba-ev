@@ -857,6 +857,12 @@ def parse_keibago_result(racemark_html: str, refund_html: str = "",
     **finish_order の組番に一致する三連単行** を flat 検索する。
     """
     finish = _parse_finish_order(racemark_html)
+    positions = _parse_finish_positions(racemark_html)
+    # 2着同着 (着順が 1,2,2 で「3着」が存在しない) 等では _parse_finish_order が len<3 になり
+    # fetch 側が永久に None (未確定扱い) だった。positions が完全 (同着を含め上位3ポジションが
+    # 揃う) なら rank 順に展開して finish を再構成する (2026-07-04)。
+    if len(finish) < 3 and _positions_complete(positions):
+        finish = [n for n, _r in sorted(positions.items(), key=lambda kv: kv[1])][:3]
     payout = 0
     if finish and len(finish) >= 3 and refund_html:
         search_html = refund_html
@@ -873,7 +879,7 @@ def parse_keibago_result(racemark_html: str, refund_html: str = "",
             if c in ("三連単", "３連単", "3連単") and i + 2 < len(cells) and cells[i + 1] == combo:
                 payout = int(re.sub(r"\D", "", cells[i + 2]) or 0)
                 break
-    return {"finish_order": finish, "payout": payout}
+    return {"finish_order": finish, "finish_positions": positions, "payout": payout}
 
 
 def _parse_finish_order(html: str) -> list[int]:
@@ -905,6 +911,46 @@ def _parse_finish_order(html: str) -> list[int]:
         if len(order) > len(best):
             best = order
     return [best[p] for p in sorted(best)] if best else []
+
+
+def _positions_complete(pos: dict[int, int]) -> bool:
+    """着順 {馬番: 着順} が上位3ポジションを覆う整合形か (例 [1,2,3]・[1,2,2]・[1,1,3]・[1,2,3,3])。
+
+    各着順 r は「r より上位の馬の数 + 1」に一致するはず ([1,3,3] や [2,3,3] は不整合)。
+    """
+    vals = sorted(pos.values())
+    return len(vals) >= 3 and all(
+        r == 1 + sum(1 for x in vals if x < r) for r in set(vals))
+
+
+def _parse_finish_positions(html: str) -> dict[int, int]:
+    """着順表 → 着順 1-3 の **全馬** {馬番: 着順} (同着は複数馬が同じ着順を持つ)。
+
+    _parse_finish_order は「同着は先勝ち」で 3 頭に切り詰めるため、同着側の的中判定用に
+    こちらを併用する (2026-07-04)。表選択の規約 (decoy 回避) は _parse_finish_order と同じ。
+    """
+    best: dict[int, int] = {}
+    for tbl in re.findall(r"<table[^>]*>(.*?)</table>", html, re.DOTALL):
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, re.DOTALL)
+        if not rows:
+            continue
+        head = [re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
+                for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", rows[0], re.DOTALL)]
+        head = [h for h in head if h]
+        if "着順" not in head or "馬番" not in head:
+            continue
+        ci, ui = head.index("着順"), head.index("馬番")
+        pos: dict[int, int] = {}
+        for r in rows[1:]:
+            c = [x for x in (re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", x)).strip())
+                             for x in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", r, re.DOTALL)) if x]
+            if len(c) > max(ci, ui) and c[ci] in ("1", "2", "3") and c[ui].isdigit():
+                pos.setdefault(int(c[ui]), int(c[ci]))
+        if {1, 2, 3} <= set(pos.values()):
+            return pos
+        if len(pos) > len(best):
+            best = pos
+    return best
 
 
 # RefundMoneyList の券種名 → 内部 bet_type (final_odds の leg_id prefix)。

@@ -119,6 +119,9 @@ def save_result(race_id: str, payload: dict, *, note: str = "") -> Path:
     data = {
         "race_id": race_id,
         "finish_order": payload["finish_order"],
+        # 着順 1-3 の全馬 {馬番: 着順}。同着 (dead heat) があると 4 頭以上になる。
+        # reader (api/store) が同着側の的中を取りこぼさないために保存 (2026-07-04)。
+        "finish_positions": payload.get("finish_positions") or {},
         "trifecta_payout": payload.get("payout", 0),
         "note": note,
         "recorded_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -319,6 +322,7 @@ def process_pending(
                     kr = fetch_keibago_result(nk)
                     if kr and kr.get("finish_order"):
                         result, reason = ({"finish_order": kr["finish_order"],
+                                           "finish_positions": kr.get("finish_positions") or {},
                                            "payout": kr.get("payout", 0),
                                            "final_odds": kr.get("final_odds") or {},
                                            "source": "keibago"}, "")
@@ -331,6 +335,7 @@ def process_pending(
                     jr = fetch_jra_result(nk)
                     if jr and jr.get("finish_order"):
                         result, reason = ({"finish_order": jr["finish_order"],
+                                           "finish_positions": jr.get("finish_positions") or {},
                                            "payout": jr.get("payout", 0),
                                            "final_odds": jr.get("final_odds") or {},
                                            "source": "jra"}, "")

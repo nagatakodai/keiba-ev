@@ -546,6 +546,7 @@ def parse_jra_result(html: str) -> dict:
     accessS 段2 はレース別ページなので tierce はそのレースの確定配当 (組番一致で確認)。
     """
     finish: dict[int, int] = {}
+    positions: dict[int, int] = {}   # 着順 1-3 の全馬 {馬番: 着順} (同着対応 2026-07-04)
     for m in re.finditer(
         r'<td class="place"[^>]*>(.*?)</td>.*?<td class="num"[^>]*>(.*?)</td>',
         html, re.DOTALL,
@@ -554,7 +555,14 @@ def parse_jra_result(html: str) -> dict:
         nu = re.sub(r"<[^>]+>", " ", m.group(2)).strip()
         if pl in ("1", "2", "3") and nu.isdigit():
             finish.setdefault(int(pl), int(nu))
+            positions.setdefault(int(nu), int(pl))
     order = [finish[p] for p in (1, 2, 3) if p in finish]
+    # 2着同着 (着順 1,2,2 で「3着」が無い) 等は order が len<3 → positions が完全なら
+    # rank 順に展開して再構成 (fetch 側の「永久に未確定」を防ぐ、2026-07-04)。
+    if len(order) < 3:
+        vals = sorted(positions.values())
+        if len(vals) >= 3 and all(r == 1 + sum(1 for x in vals if x < r) for r in set(vals)):
+            order = [n for n, _r in sorted(positions.items(), key=lambda kv: kv[1])][:3]
     payout = 0
     tm = re.search(r'class="[^"]*tierce[^"]*"(.*?)</(?:li|tr|td)>', html, re.DOTALL)
     if tm:
@@ -564,7 +572,7 @@ def parse_jra_result(html: str) -> dict:
         if combo and yen and len(order) >= 3 and \
                 [int(combo.group(i)) for i in (1, 2, 3)] == order[:3]:
             payout = int(yen.group(1).replace(",", ""))
-    return {"finish_order": order, "payout": payout}
+    return {"finish_order": order, "finish_positions": positions, "payout": payout}
 
 
 # accessS 結果ページの払戻 <li class="..."> → 内部 bet_type (final_odds の leg_id prefix)。

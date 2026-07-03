@@ -248,3 +248,27 @@ def test_parse_jra_payouts_all_types():
     assert p["trifecta:13-8-5"] == 526.9       # 着順のまま
     assert not any(k.startswith("wakuren") for k in p)   # 枠連は保存しない
     assert len(p) == 10   # 1+3+2+1+1+1+1
+
+
+def test_parse_jra_result_dead_heat():
+    """同着対応 (2026-07-04): finish_positions に着順 1-3 の全馬、2着同着 (3着なし) でも
+    finish_order を rank 順に再構成して確定扱いにする。"""
+    # 3着同着
+    html = (
+        '<tr><td class="place">1</td><td class="num">9</td></tr>'
+        '<tr><td class="place">2</td><td class="num">7</td></tr>'
+        '<tr><td class="place">3</td><td class="num">8</td></tr>'
+        '<tr><td class="place">3</td><td class="num">10</td></tr>'
+    )
+    r = jra.parse_jra_result(html)
+    assert r["finish_order"] == [9, 7, 8]
+    assert r["finish_positions"] == {9: 1, 7: 2, 8: 3, 10: 3}
+    # 2着同着 (3着なし) — 旧実装は len<3 で fetch が永久に None だった
+    html2 = (
+        '<tr><td class="place">1</td><td class="num">5</td></tr>'
+        '<tr><td class="place">2</td><td class="num">4</td></tr>'
+        '<tr><td class="place">2</td><td class="num">6</td></tr>'
+    )
+    r2 = jra.parse_jra_result(html2)
+    assert r2["finish_order"] == [5, 4, 6]
+    assert r2["finish_positions"] == {5: 1, 4: 2, 6: 2}

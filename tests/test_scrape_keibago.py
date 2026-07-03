@@ -277,15 +277,32 @@ def test_parse_finish_order_skips_decoy_table():
     assert kg._parse_finish_order(html) == [8, 3, 6]
 
 
-def test_parse_result_dead_heat_incomplete_len():
-    """同着で 1-2-3 が揃わない場合は finish_order が len<3 (fetch 側で None 化される)。"""
+def test_parse_result_dead_heat_second_place():
+    """2着同着 (着順 1,2,2 で「3着」なし): 旧実装は len<3 で永久に未確定扱いだった。
+    positions から rank 順に finish を再構成し、finish_positions も保存する (2026-07-04)。"""
     html = (
         "<table><tr><th>着順</th><th>枠</th><th>馬番</th></tr>"
         "<tr><td>1</td><td>5</td><td>8</td></tr>"
         "<tr><td>2</td><td>2</td><td>3</td></tr>"
         "<tr><td>2</td><td>4</td><td>6</td></tr></table>"   # 2着同着・3着なし
     )
-    assert len(kg.parse_keibago_result(html, "")["finish_order"]) < 3
+    r = kg.parse_keibago_result(html, "")
+    assert r["finish_order"] == [8, 3, 6]                    # rank 順 (同着は行順)
+    assert r["finish_positions"] == {8: 1, 3: 2, 6: 2}
+
+
+def test_parse_result_dead_heat_third_positions():
+    """3着同着: finish_order は先勝ち 3 頭のまま、finish_positions に 4 頭全て残る。"""
+    html = (
+        "<table><tr><th>着順</th><th>枠</th><th>馬番</th></tr>"
+        "<tr><td>1</td><td>5</td><td>9</td></tr>"
+        "<tr><td>2</td><td>2</td><td>7</td></tr>"
+        "<tr><td>3</td><td>4</td><td>8</td></tr>"
+        "<tr><td>3</td><td>6</td><td>10</td></tr></table>"   # 3着同着
+    )
+    r = kg.parse_keibago_result(html, "")
+    assert r["finish_order"] == [9, 7, 8]
+    assert r["finish_positions"] == {9: 1, 7: 2, 8: 3, 10: 3}
 
 
 def test_time_sec_and_date_key():
