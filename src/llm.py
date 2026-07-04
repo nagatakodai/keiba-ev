@@ -181,6 +181,141 @@ def _claude_env() -> dict[str, str]:
     return env
 
 
+# ============================================================
+# claude -p usage limit → Anthropic API フォールバック (ユーザ指示 2026-07-04)
+#   claude CLI は subscription 認証 (上の _claude_env が API key を除外) なので、
+#   Pro/Max の usage limit に当たると -p が結果を出せない。その場合のみ
+#   ANTHROPIC_API_KEY (.env) で Anthropic API を直接叩いて score/選定を継続する。
+#   通常時は従来どおり claude -p のみ (API 課金なし)。env `KEIBA_API_FALLBACK=0` で無効化。
+# ============================================================
+
+# usage limit / rate limit を示すエラーテキスト (小文字比較)。"claude timeout" は含めない
+# (締切前の時間切れは limit ではない)。CLI の文言は版で揺れるので広めに拾う。
+_RATE_LIMIT_MARKERS = (
+    "usage limit",          # "Claude AI usage limit reached|<epoch>"
+    "rate limit",
+    "rate_limit",
+    "limit reached",
+    "out of usage",
+    "too many requests",
+    "overloaded_error",
+    "hit your limit",
+)
+
+
+def _looks_rate_limited(text: str) -> bool:
+    """claude -p のエラーテキストが usage/rate limit 起因かの判定 (フォールバック発火条件)。"""
+    t = (text or "").lower()
+    return any(m in t for m in _RATE_LIMIT_MARKERS)
+
+
+def _api_key() -> str:
+    """Anthropic API key を OS env → .env の順で解決 (os.environ は汚さない)。"""
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        from dotenv import dotenv_values
+        return ((dotenv_values(ROOT / ".env") or {}).get("ANTHROPIC_API_KEY") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _api_fallback_enabled() -> bool:
+    """API フォールバックの有効判定 (既定 ON、env KEIBA_API_FALLBACK=0/false で OFF)。"""
+    return (os.environ.get("KEIBA_API_FALLBACK") or "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _api_stream(
+    prompt: str,
+    *,
+    use_search: bool,
+    timeout: int,
+    effort: str = "high",
+    max_tokens: int = 32_000,
+) -> Iterator[tuple[str, Any]]:
+    """Anthropic API 直叩きで prompt を実行し claude -p と同じ (event_type, payload) を yield。
+
+    use_search=True なら server-side web search (`web_search_20260209`) を許可
+    (score 段の直前情報検索を API 側で代替。Tavily MCP は API に無いので web_search が担う)。
+    検索回数は env `KEIBA_API_FALLBACK_MAX_SEARCHES` (既定 32) で上限。モデルは
+    env `KEIBA_API_FALLBACK_MODEL` (既定 claude-opus-4-8)。server tool の pause_turn は
+    最大 6 回まで継続。最終テキストを ("result", text) で返す (下流の parse はそのまま効く)。
+    """
+    key = _api_key()
+    if not key:
+        yield ("error", "API fallback 不可: ANTHROPIC_API_KEY が未設定 (.env にも無し)")
+        return
+    try:
+        import anthropic
+    except ImportError:
+        yield ("error", "API fallback 不可: anthropic SDK 未インストール (uv pip install anthropic)")
+        return
+    model = (os.environ.get("KEIBA_API_FALLBACK_MODEL") or "claude-opus-4-8").strip()
+    max_searches = _env_int("KEIBA_API_FALLBACK_MAX_SEARCHES", 32)
+    client = anthropic.Anthropic(api_key=key, timeout=float(max(60, timeout)), max_retries=2)
+    kwargs: dict[str, Any] = dict(
+        model=model,
+        max_tokens=max_tokens,
+        thinking={"type": "adaptive"},
+        output_config={"effort": effort},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    if use_search:
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search",
+                            "max_uses": max_searches}]
+    try:
+        final = None
+        for _turn in range(6):
+            cur_tool: dict[int, dict] = {}
+            with client.messages.stream(**kwargs) as stream:
+                for event in stream:
+                    et = getattr(event, "type", "")
+                    if et == "content_block_start":
+                        cb = event.content_block
+                        if getattr(cb, "type", "") in ("server_tool_use", "tool_use"):
+                            cur_tool[event.index] = {"name": getattr(cb, "name", ""), "json": ""}
+                    elif et == "content_block_delta":
+                        d = event.delta
+                        if getattr(d, "type", "") == "input_json_delta" and event.index in cur_tool:
+                            cur_tool[event.index]["json"] += d.partial_json or ""
+                    elif et == "content_block_stop" and event.index in cur_tool:
+                        t = cur_tool.pop(event.index)
+                        try:
+                            inp = json.loads(t["json"]) if t["json"] else {}
+                        except json.JSONDecodeError:
+                            inp = {}
+                        # claude -p の tool_use イベントと同形 (shobu の 🔍 クエリ転送等が効く)
+                        yield ("tool_use", {"name": t["name"], "input": inp})
+                final = stream.get_final_message()
+            if final.stop_reason == "pause_turn":
+                # server tool の反復上限 → user + assistant(content) を再送して続行
+                kwargs["messages"] = [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": final.content},
+                ]
+                continue
+            break
+        if final is None:
+            yield ("error", "API fallback: 応答なし")
+            return
+        if final.stop_reason == "refusal":
+            yield ("error", "API fallback: refusal (安全側で辞退)")
+            return
+        text = "".join(b.text for b in final.content if getattr(b, "type", "") == "text")
+        yield ("text", f"[API fallback 完了: model={model} stop={final.stop_reason}]")
+        yield ("result", text)
+    except anthropic.RateLimitError:
+        yield ("error", "API fallback も rate limit (429) — 時間を置いて再実行")
+    except anthropic.APIStatusError as e:
+        yield ("error", f"API fallback エラー {e.status_code}: {getattr(e, 'message', '')}")
+    except anthropic.APIConnectionError:
+        yield ("error", "API fallback 接続エラー")
+    except Exception as e:  # noqa: BLE001
+        yield ("error", f"API fallback 例外: {e}")
+
+
 def parse_evidence(text: str) -> dict:
     """LLM 出力の ```json ... ``` ブロック (または JSON オブジェクト) を robust に抽出。"""
     import re
@@ -509,6 +644,8 @@ def score_horses_stream(
     proc, _err_f = _spawn_claude(cmd)
     assert proc.stdout is not None
     timer, timed_out = _start_kill_timer(proc, timeout)
+    saw_result = False
+    limit_hit = False
     try:
         for raw in proc.stdout:
             line = raw.strip()
@@ -526,14 +663,30 @@ def score_horses_stream(
                     elif block.get("type") == "text" and block.get("text"):
                         yield ("text", block["text"])
             elif etype == "result":
-                yield ("result", ev.get("result", "") or "")
+                text = ev.get("result", "") or ""
+                # usage limit 到達時は result に短いエラーメッセージだけが乗ることがある →
+                # 採点 JSON と誤認せず error 化してフォールバック判定に回す。
+                if text and len(text) < 400 and _looks_rate_limited(text):
+                    limit_hit = True
+                    yield ("error", f"claude -p limit: {text[:200]}")
+                else:
+                    saw_result = saw_result or bool(text)
+                    yield ("result", text)
             elif etype == "error":
-                yield ("error", ev.get("message", "unknown error"))
+                msg = ev.get("message", "unknown error")
+                limit_hit = limit_hit or _looks_rate_limited(str(msg))
+                yield ("error", msg)
     except Exception as e:  # noqa: BLE001
         yield ("error", f"stream parse error: {e}")
     finally:
         for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=_err_f):
+            limit_hit = limit_hit or _looks_rate_limited(str(ev[1]))
             yield ev
+    # claude -p が usage limit で結果を出せなかった → Anthropic API へフォールバック
+    # (ユーザ指示 2026-07-04)。timeout 等の limit 以外の失敗では発火しない (従来挙動)。
+    if not saw_result and limit_hit and _api_fallback_enabled():
+        yield ("text", "[claude -p が usage limit → Anthropic API にフォールバック (web_search 付き)]")
+        yield from _api_stream(prompt, use_search=True, timeout=timeout)
 
 
 def _normalize_alerts(raw_alerts: Any) -> dict[int, list[str]]:
@@ -1307,6 +1460,8 @@ def select_trifecta_stream(
     proc, _err_f = _spawn_claude(cmd)
     assert proc.stdout is not None
     timer, timed_out = _start_kill_timer(proc, timeout)
+    saw_result = False
+    limit_hit = False
     try:
         for raw in proc.stdout:
             line = raw.strip()
@@ -1322,14 +1477,27 @@ def select_trifecta_stream(
                     if block.get("type") == "text" and block.get("text"):
                         yield ("text", block["text"])
             elif etype == "result":
-                yield ("result", ev.get("result", "") or "")
+                text = ev.get("result", "") or ""
+                if text and len(text) < 400 and _looks_rate_limited(text):
+                    limit_hit = True
+                    yield ("error", f"claude -p limit: {text[:200]}")
+                else:
+                    saw_result = saw_result or bool(text)
+                    yield ("result", text)
             elif etype == "error":
-                yield ("error", ev.get("message", "unknown error"))
+                msg = ev.get("message", "unknown error")
+                limit_hit = limit_hit or _looks_rate_limited(str(msg))
+                yield ("error", msg)
     except Exception as e:  # noqa: BLE001
         yield ("error", f"stream parse error: {e}")
     finally:
         for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=_err_f):
+            limit_hit = limit_hit or _looks_rate_limited(str(ev[1]))
             yield ev
+    # usage limit で選定が出なかった → API フォールバック (検索なし・純粋推論なので低コスト/高速)。
+    if not saw_result and limit_hit and _api_fallback_enabled():
+        yield ("text", "[claude -p が usage limit → Anthropic API にフォールバック (検索なし)]")
+        yield from _api_stream(prompt, use_search=False, timeout=timeout, max_tokens=8_000)
 
 
 def parse_trifecta_selection(text: str) -> dict:
