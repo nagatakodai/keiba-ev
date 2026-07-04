@@ -838,11 +838,38 @@ export type MarketAgreementMetric = {
   delta_ci_high: number;
   significant: boolean; // CI が 0 を跨がない
 };
+// 買い方マトリクス (2026-07-04): 発走前条件 (一致/型/場) の組合せ × 券種 の ROI。
+// 状況毎の最良の買い方 (best_key) と確証 (roi CI 下限 > 1.0) を読み取る。
+export type MatrixCell = {
+  key: string;
+  label: string;
+  roi: number;
+  legs: number; // このセルのレース数 (1脚以上買ったレース)
+  roi_ci_low: number;
+  roi_ci_high: number;
+  confirmed: boolean; // legs≥floor かつ CI下限>1.0 → 確定的に +EV
+};
+export type MatrixRow = {
+  signature: boolean[]; // 各軸の高(True)/低(False)
+  labels: string[]; // 各軸の選択ラベル (例 ["一致","本命型","NAR"])
+  n: number; // この状況のレース数
+  cells: MatrixCell[];
+  best_key: string | null; // floor 以上で ROI 最大の券種 (サンプル不足なら null)
+};
+export type MarketMatrix = {
+  dims: Array<{ key: string; high_label: string; low_label: string }>;
+  targets: Array<{ key: string; label: string }>;
+  sample_floor: number;
+  rows: MatrixRow[];
+  overall: { n: number; cells: MatrixCell[]; best_key: string | null };
+  market_baseline: { n: number; cells: MatrixCell[] }; // 市場人気順で同じ買い方 (参考)
+};
 export type MarketAgreement = {
   races: number;
   agree_n: number;
   disagree_n: number;
-  metrics: MarketAgreementMetric[];
+  metrics: MarketAgreementMetric[]; // consensus 1次元 (betGuide.ts が参照・後方互換)
+  matrix: MarketMatrix;
   last_updated_at: string | null;
   sample_warning: boolean;
 };

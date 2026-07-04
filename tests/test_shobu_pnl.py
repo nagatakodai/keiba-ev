@@ -471,11 +471,10 @@ def test_market_agreement_splits_by_consensus(dirs):
         (rs / f"{rid}.json").write_text(json.dumps(_result_fo([6, 7, 8], 9999, {})), encoding="utf-8")
     m = store.compute_market_agreement()
     assert m["races"] == 2 and m["agree_n"] == 1 and m["disagree_n"] == 1
-    # 各 metric は agree/disagree 双方の脚数を持つ
+    # consensus 1次元 metrics は betGuide.ts 用に後方互換で残る (agree/disagree 脚数)。
     quin = next(x for x in m["metrics"] if x["key"] == "quinella12")
     assert quin["agree_legs"] == 1 and quin["disagree_legs"] == 1
-    # pooled ターゲット (combo=馬連+馬単+ワイド) は **レース単位合算** (2026-07-04):
-    # 1 レース 3 脚でも bootstrap の再標本化単位は 1 点 (レース内相関で CI が過小になるのを防ぐ)。
+    # pooled ターゲット (combo=馬連+馬単+ワイド) も **レース単位合算** (2026-07-04)。
     combo = next(x for x in m["metrics"] if x["key"] == "combo")
     assert combo["agree_legs"] == 1 and combo["disagree_legs"] == 1
 
@@ -484,8 +483,72 @@ def test_market_agreement_splits_by_consensus(dirs):
     st.MARKET_AGREEMENT_HISTORY = rs / "mkt_hist.jsonl"   # tmp に向ける
     row = store.append_market_agreement_history()
     assert row is not None and row["races"] == 2
+    assert "matrix" in row and "metrics" in row   # マトリクスも history に蓄積 (2026-07-04)
     assert store.append_market_agreement_history() is None   # dedup
     assert len(store.market_agreement_history()) == 1
+
+
+def test_strategy_race_legs_ranking_override(dirs):
+    """_strategy_race_legs(ranking=...) は Claude 指数でなく渡した順位で買い目を組む。
+
+    市場人気ベースライン (市場指数順で同じ買い方をした ROI) を Claude 版と同一ロジックで
+    計算する土台 (2026-07-04)。ここでは Claude top=1,2,3・市場 top=8,7,6 を渡し、
+    選ばれる馬 (top1/2/3) と的中判定が順位で切り替わることを確認する。
+    """
+    _sh, _pr, _rs = dirs
+    snap = _snap(8, _IDX8)                       # Claude 指数 top = 1,2,3
+    # 着順 4-5-3 → 複勝圏 = {3,4,5}。Claude top3(=3) だけ複勝的中・市場 top(8,7,6) は全外れ。
+    result = _result_fo([4, 5, 3], 0, {"place:3": 1.5})
+    d_claude, r1 = store._strategy_race_legs(snap, result, point_cost=100, meta={})
+    d_mkt, r2 = store._strategy_race_legs(snap, result, point_cost=100, meta={},
+                                          ranking=[8, 7, 6, 5, 4])
+    assert r1 == "ok" and r2 == "ok"
+    assert (d_claude["top1"], d_claude["top2"], d_claude["top3"]) == (1, 2, 3)
+    assert (d_mkt["top1"], d_mkt["top2"], d_mkt["top3"]) == (8, 7, 6)
+    # Claude 版は指数3位(馬番3)の複勝が的中・市場版 (top3=馬番6) は外れ。
+    assert d_claude["per"]["place3"]["hit"] is True
+    assert d_mkt["per"]["place3"]["hit"] is False
+
+
+def test_market_agreement_matrix(dirs):
+    """買い方マトリクス: 条件 (一致/型/場) の組合せ毎に各レースが正しいセルへ入る (2026-07-04)。"""
+    sh, pr, rs = dirs
+    (sh / "20260704.json").write_text(json.dumps({
+        "generated_at": "2026-07-04T11:00:00+09:00",
+        "races": [
+            {"race_id": "fav-1", "recommended": True, "venue": "A", "race_no": 1,
+             "race_type": "jra", "n_runners": 8},
+            {"race_id": "comp-1", "recommended": True, "venue": "B", "race_no": 2,
+             "race_type": "nar", "n_runners": 8},
+        ],
+    }), encoding="utf-8")
+    # fav-1 (JRA): Claude#1=1 == 市場#1=1 (一致)・市場1番人気突出 (95 vs 40) → 本命型。
+    (pr / "fav-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, market={1: 95.0, 2: 40.0, 3: 30.0, 4: 25.0, 5: 20.0,
+                          6: 15.0, 7: 12.0, 8: 10.0})), encoding="utf-8")
+    # comp-1 (NAR): Claude#1=1 == 市場#1=1 (一致)・市場 top2 拮抗 (60 vs 58) → 拮抗型。
+    (pr / "comp-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, market={1: 60.0, 2: 58.0, 3: 40.0, 4: 30.0, 5: 25.0,
+                          6: 20.0, 7: 15.0, 8: 10.0})), encoding="utf-8")
+    for rid in ("fav-1", "comp-1"):
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo([6, 7, 8], 9999, {})),
+                                        encoding="utf-8")
+    m = store.compute_market_agreement()
+    assert m["races"] == 2
+    mx = m["matrix"]
+    assert [d["key"] for d in mx["dims"]] == ["consensus", "style", "venue"]
+    assert {t["key"] for t in mx["targets"]} == {"quinella12", "combo",
+                                                 "trio1234box", "honmei"}
+    assert len(mx["rows"]) == 8                      # 2^3 状況すべて出す
+    assert sum(r["n"] for r in mx["rows"]) == 2      # 各レースは 1 セルだけに入る
+    # fav-1 は [一致, 本命型, JRA] セル・comp-1 は [一致, 拮抗型, NAR] セル。
+    fav_row = next(r for r in mx["rows"] if r["labels"] == ["一致", "本命型", "JRA"])
+    comp_row = next(r for r in mx["rows"] if r["labels"] == ["一致", "拮抗型", "NAR"])
+    assert fav_row["n"] == 1 and comp_row["n"] == 1
+    # サンプル不足 (floor 未満) セルは最良を出さない。
+    assert fav_row["best_key"] is None and comp_row["best_key"] is None
+    # 参考行: 全体 (条件なし) と 市場人気。
+    assert mx["overall"]["n"] == 2 and mx["market_baseline"]["n"] == 2
 
 
 def test_venue_breakdown_groups_by_venue(dirs):

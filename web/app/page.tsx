@@ -4,6 +4,7 @@ import { Coins, History, Layers, Scale, ServerOff } from "lucide-react";
 import {
   api,
   type MarketAgreementResponse,
+  type MatrixCell,
   type ShobuPnl,
   type ShobuPnlRace,
   type StrategiesPnl,
@@ -290,16 +291,92 @@ function BoxDetailTable({ rows }: { rows: ShobuPnlRace[] }) {
 }
 
 // 市場一致シグナル (Claude#1==市場1番人気 で券種ROIを分割) の蓄積カード。確証まで自動更新。
+// 券種ラベルの短縮 ("馬連 (指数1-2位)" → "馬連")。マトリクスの列ヘッダ用。
+function shortTargetLabel(label: string): string {
+  return label.split(" (")[0];
+}
+
+// マトリクス 1 セル (状況 × 券種) の ROI 描画。最良=緑背景・確証=★・サンプル不足=淡色。
+function MatrixCellTd({
+  cell,
+  isBest,
+  floor,
+}: {
+  cell: MatrixCell;
+  isBest: boolean;
+  floor: number;
+}) {
+  const enough = cell.legs >= floor;
+  return (
+    <td
+      className={`px-2 py-1.5 text-right tnum align-middle ${
+        isBest ? "bg-emerald-500/15" : ""
+      }`}
+    >
+      <div className="flex items-center justify-end gap-1">
+        <span
+          className={
+            !enough
+              ? "text-(--color-muted)"
+              : isBest
+                ? "font-bold text-emerald-200"
+                : ""
+          }
+        >
+          {cell.legs > 0 ? fmtRoiPct(cell.roi) : "—"}
+        </span>
+        {cell.confirmed && <span className="text-emerald-300 text-[10px]">★</span>}
+      </div>
+      <span className="block text-[9px] text-(--color-muted) leading-tight">{cell.legs}R</span>
+    </td>
+  );
+}
+
+// 買い方マトリクス: 発走前条件 (一致/型/場) の組合せ × 券種 の ROI を1枚の表で。
+// 状況毎の最良の買い方 (best_key=緑ハイライト) と確証 (★=CI下限>100%) を読み取る。
 function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
   const c = data.current;
-  const has = c.races > 0;
+  const mx = c.matrix;
+  const has = c.races > 0 && !!mx;
+  const targets = mx?.targets ?? [];
+  const floor = mx?.sample_floor ?? 8;
+  // 参考行 (全体 / 市場人気) を本体行と同じ列構成で描くヘルパ。
+  const refRow = (
+    label: string,
+    n: number,
+    cells: MatrixCell[],
+    bestKey: string | null,
+    tone: string,
+  ) => (
+    <tr className={`border-t border-(--color-line) ${tone}`}>
+      <td className="px-2 py-1.5">
+        <span className="font-bold whitespace-nowrap">{label}</span>
+        <span className="block text-[9px] text-(--color-muted) leading-tight">{n}R</span>
+      </td>
+      {targets.map((t) => {
+        const cell = cells.find((x) => x.key === t.key);
+        return cell ? (
+          <MatrixCellTd
+            key={t.key}
+            cell={cell}
+            isBest={bestKey === t.key}
+            floor={floor}
+          />
+        ) : (
+          <td key={t.key} className="px-2 py-1.5 text-right text-(--color-muted)">
+            —
+          </td>
+        );
+      })}
+    </tr>
+  );
   return (
     <Card>
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <Scale className="w-4 h-4 text-teal-300" />
           <span className="text-[10px] font-bold tracking-[0.22em] uppercase text-(--color-muted)">
-            研究中シグナル — 市場一致 (Claude#1 == 市場1番人気) で券種 ROI を分割・確証まで自動蓄積
+            研究中シグナル — 買い方マトリクス (市場一致 × 拮抗/本命 × JRA/NAR → 状況毎の最良の買い方)
           </span>
           {c.sample_warning && <Badge tone="muted">サンプル少</Badge>}
         </div>
@@ -308,38 +385,62 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
             <table className="w-full text-xs table-zebra">
               <thead>
                 <tr className="text-left text-[10px] uppercase tracking-wider text-(--color-muted) border-b border-(--color-line)">
-                  <th className="px-2 py-2 font-bold">券種 / スタイル</th>
-                  <th className="px-2 py-2 font-bold text-right">一致 ROI</th>
-                  <th className="px-2 py-2 font-bold text-right">不一致 ROI</th>
-                  <th className="px-2 py-2 font-bold text-right">Δ(一致−不一致)</th>
-                  <th className="px-2 py-2 font-bold text-right">95%CI(Δ)</th>
-                  <th className="px-2 py-2 font-bold">状態</th>
+                  <th className="px-2 py-2 font-bold">状況 (一致 / 型 / 場)</th>
+                  {targets.map((t) => (
+                    <th key={t.key} className="px-2 py-2 font-bold text-right whitespace-nowrap">
+                      {shortTargetLabel(t.label)}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {c.metrics.map((m) => (
-                  <tr key={m.key} className="border-b border-(--color-line-soft)">
-                    <td className="px-2 py-2 font-bold whitespace-nowrap">{m.label}</td>
-                    <td className="px-2 py-2 text-right tnum">{fmtRoiPct(m.agree_roi)}</td>
-                    <td className="px-2 py-2 text-right tnum">{fmtRoiPct(m.disagree_roi)}</td>
-                    <td
-                      className={`px-2 py-2 text-right tnum font-bold ${
-                        m.delta < 0 ? "text-rose-300" : "text-emerald-300"
-                      }`}
+                {mx.rows
+                  .filter((r) => r.n > 0)
+                  .map((r) => (
+                    <tr
+                      key={r.signature.join("-")}
+                      className="border-b border-(--color-line-soft)"
                     >
-                      {m.delta >= 0 ? "+" : ""}
-                      {Math.round(m.delta * 100)}pt
-                    </td>
-                    <td className="px-2 py-2 text-right tnum text-(--color-muted) whitespace-nowrap">
-                      {Math.round(m.delta_ci_low * 100)}〜{Math.round(m.delta_ci_high * 100)}
-                    </td>
-                    <td className="px-2 py-2">
-                      <Badge tone={m.significant ? "good" : "muted"}>
-                        {m.significant ? "★確証" : "蓄積中"}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))}
+                      <td className="px-2 py-1.5">
+                        <div className="flex flex-wrap items-center gap-1">
+                          {r.labels.map((lab, i) => (
+                            <span
+                              key={i}
+                              className="px-1.5 py-0.5 rounded bg-(--color-surface-2) border border-(--color-line) text-[10px] whitespace-nowrap"
+                            >
+                              {lab}
+                            </span>
+                          ))}
+                        </div>
+                        <span className="block text-[9px] text-(--color-muted) leading-tight pt-0.5">
+                          {r.n}R{r.best_key === null && r.n < floor ? " ・サンプル不足" : ""}
+                        </span>
+                      </td>
+                      {targets.map((t) => {
+                        const cell = r.cells.find((x) => x.key === t.key);
+                        return cell ? (
+                          <MatrixCellTd
+                            key={t.key}
+                            cell={cell}
+                            isBest={r.best_key === t.key}
+                            floor={floor}
+                          />
+                        ) : (
+                          <td key={t.key} className="px-2 py-1.5 text-right text-(--color-muted)">
+                            —
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                {refRow(
+                  "全体 (条件なし)",
+                  mx.overall.n,
+                  mx.overall.cells,
+                  mx.overall.best_key,
+                  "text-(--color-muted)",
+                )}
+                {refRow("市場人気 (参考)", mx.market_baseline.n, mx.market_baseline.cells, null, "text-(--color-muted)")}
               </tbody>
             </table>
           </div>
@@ -350,12 +451,14 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
         )}
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
           <span>
-            対象 {c.races}R (一致 {c.agree_n} / 不一致 {c.disagree_n}) ・ 自動蓄積 {data.appends} 回 ・
-            結果取得 (make api) ごとに更新
+            対象 {c.races}R ・ 自動蓄積 {data.appends} 回 ・ 結果取得 (make api) ごとに更新 ・
+            {data.history.length}件 蓄積
           </span>
           <span>
-            ※ Δの95%CIが0を跨がなくなれば確証(★)。仮説: 馬連/組合せ系は一致時(consensus)に伸び、
-            3連複BOXは不一致(Claude contrarian)時に伸びる。{data.history.length}件 蓄積。
+            ※ 各セル = その状況で券種を上位指数馬で買った ROI (下段=レース数)。
+            <span className="text-emerald-200">緑=その状況の最良</span>・
+            ★=ROIの95%CI下限が100%超 (確定的に+EV)。{floor}R 未満のセルは信頼できないため淡色・
+            推奨から除外。「市場人気(参考)」= 各券種を市場指数順の上位馬で買った基準線。
           </span>
         </div>
       </div>

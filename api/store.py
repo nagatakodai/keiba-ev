@@ -1105,22 +1105,31 @@ def _strategy_race_legs(
     *,
     point_cost: int,
     meta: dict[str, Any],
+    ranking: list[int] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """1 レースの Claude 指数戦略 (STRATEGY_DEFS の各戦略) の脚を計算する共通ヘルパ。
 
     返り値 `(detail | None, reason)`。reason は "ok"/"no_index"/"no_result"/"no_odds":
-      - "no_index": Claude 指数が 3 頭未満 (1・2・3 位を決められない)。
+      - "no_index": ランキングが 3 頭未満 (1・2・3 位を決められない)。
       - "no_result": 着順が 3 着まで未確定。
       - "no_odds": **的中した脚** の払戻オッズ (final_odds の win:/place:/quinella:) が欠落
         (keiba.go.jp fallback 等で final_odds 未保存) → 払戻を評価できないので分母外。
         外れ脚は払戻 0 なのでオッズ欠落でも問題ない (的中脚のみオッズを要求する)。
     detail["per"][戦略key] = {stake, payout, hit, bets, hits}。
+
+    `ranking` を渡すと Claude 指数の代わりにその馬番順 (降順・1位が先頭) を「上位」とみなす。
+    市場人気ベースライン (市場指数順で同じ買い方をした場合の ROI) を、オッズ/≤1.1フィルタ/
+    的中判定を Claude 版と**完全に同一のロジック**で計算するために使う (市場一致シグナルの参考値)。
+    未指定 (既定) は従来どおり Claude 指数から順位を決める (挙動不変)。
     """
-    idx = _claude_index_by_number(snap)
-    if len(idx) < 3:
+    if ranking is not None:
+        ranked = [int(n) for n in ranking]
+    else:
+        idx = _claude_index_by_number(snap)
+        # 同点指数は馬番昇順で明示タイブレーク (_box_race_pnl と同じ理由)。
+        ranked = [num for num, _ci in sorted(idx.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if len(ranked) < 3:
         return None, "no_index"
-    # 同点指数は馬番昇順で明示タイブレーク (_box_race_pnl と同じ理由)。
-    ranked = [num for num, _ci in sorted(idx.items(), key=lambda kv: (-kv[1], kv[0]))]
     top1, top2, top3 = ranked[0], ranked[1], ranked[2]
 
     finish = [x for x in (result.get("finish_order") or [])[:3]
@@ -1128,7 +1137,7 @@ def _strategy_race_legs(
     if len(finish) < 3:
         return None, "no_result"
 
-    n_runners = snap.get("n_runners") or meta.get("n_runners") or len(idx)
+    n_runners = snap.get("n_runners") or meta.get("n_runners") or len(ranked)
     cutoff = _place_cutoff(n_runners)
     # 同着対応 (2026-07-04): 的中判定は finish_order (一意3頭) でなく着順 rank {馬番: 着順}
     # で行う。同着が無ければ ranks == {finish[i]: i+1} で従来と完全同値。
@@ -1608,6 +1617,15 @@ _AGREEMENT_TARGETS = [
     ("trio1234box", "3連複BOX (指数1-2-3-4)", ["trio1234box"]),
     ("honmei", "本命系 (単勝1/複勝1/3連複/BOX)", _HONMEI_KEYS),
 ]
+# 市場指数の温度 (shobu._MARKET_INDEX_T / analyze.MARKET_INDEX_T のミラー)。
+# market_index = 100·(1/odds)^(1/T) なので、逆に p_implied = (market_index/100)^T で
+# 単勝オッズ由来の (未正規化) 勝率を復元できる。拮抗型/本命型の判定に使う。
+_MARKET_INDEX_T = 1.5
+# **本命型** (clear-favorite) の判定閾値: 市場1番人気の implied 勝率が2番人気の 2.0 倍以上なら
+# 本命型 (1頭抜けている)、未満なら拮抗型 (competitive)。実測 (114R) で median≈1.76 のため
+# 2.0 は「1番人気が2番人気の倍は堅い」の解釈が効く近-均衡点 (本命47R/拮抗67R)。閾値は固定 =
+# 時系列の再現性を保つ (median split だと母集団増で分割点が動く)。ユーザ指示 2026-07-04。
+_FAVORITE_RATIO_THRESHOLD = 2.0
 
 
 def _market_by_number(snap: dict[str, Any]) -> dict[int, float]:
@@ -1654,17 +1672,125 @@ def _roi_delta_ci(high: list[tuple[int, int]], low: list[tuple[int, int]],
     return base, deltas[int(0.025 * n_iter)], deltas[int(0.975 * n_iter)]
 
 
-def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
-    """**市場一致シグナル**: Claude#1==市場1番人気 (一致) か否かで券種 ROI を分割した現在値。
+def _roi_ci(pairs: list[tuple[int, int]], n_iter: int = 2000,
+            seed: int = 42) -> tuple[float, float]:
+    """1 群の ROI の bootstrap 95%CI (レース単位ペアを再標本化・固定 seed で決定的)。
 
-    市場非依存 (β除外) の shobu 評価レースで、各レースを「Claude 1位の馬が市場1番人気か」で
-    agree/disagree に分け、`_AGREEMENT_TARGETS` の券種/スタイル毎に ROI と、その差 Δ の bootstrap
-    95%CI を出す。`delta = agree_roi − disagree_roi` (組合せ系は正=一致で伸びる仮説)。CI が 0 を
-    跨がなければ `significant`。`append_market_agreement_history` が結果取得ごとにこれを時系列保存。
+    マトリクス各セル (条件 × 券種) の ROI が break-even (=1.0) を超えて確証できるかの判定に使う
+    (CI 下限 > 1.0 なら「その状況ではその買い方が確定的に +EV」)。空群は (0, 0)。
+    """
+    if not pairs:
+        return (0.0, 0.0)
+    import random
+    rng = random.Random(seed)
+    n = len(pairs)
+    rois = []
+    for _ in range(n_iter):
+        s = [pairs[rng.randrange(n)] for _ in range(n)]
+        rois.append(_roi_of(s))
+    rois.sort()
+    return rois[int(0.025 * n_iter)], rois[int(0.975 * n_iter)]
+
+
+def _agreement_pairs(rows: list[dict[str, Any]], keys: list[str]) -> list[tuple[int, int]]:
+    """レース毎に対象戦略の (Σstake, Σpayout) を1点に合算して返す。
+
+    pooled ターゲット (combo/honmei) を脚単位で並べると、同一レースの脚は同じ top1/top2/着順を
+    共有し強相関 (馬連が当たればワイドも当たりやすい) なのに bootstrap が iid 再標本化してしまい
+    CI が過小 → 偽の★確証が出うる (2026-07-04 修正)。レース単位に合算すれば再標本化の単位=
+    独立に近いレースになる。単一戦略ターゲットは 1 脚/レースなので数値は従来と同じ。
+    """
+    out: list[tuple[int, int]] = []
+    for per in rows:
+        stake = payout = 0
+        for k in keys:
+            s = per.get(k) or {}
+            if s.get("bets"):
+                stake += s["stake"]
+                payout += s["payout"]
+        if stake:
+            out.append((stake, payout))
+    return out
+
+
+def _split_metrics(high_rows: list[dict[str, Any]], low_rows: list[dict[str, Any]],
+                   *, high: str = "high", low: str = "low") -> list[dict[str, Any]]:
+    """2 群 (high/low) の各ターゲット券種について ROI と 差Δ の bootstrap 95%CI を出す汎用ヘルパ。
+
+    市場一致 (agree/disagree)・拮抗/本命・JRA/NAR いずれの二分割にも共通で使う。`high`/`low` で
+    出力キーの接頭辞を変える (consensus は agree/disagree で後方互換を保つ)。`delta = high − low`。
+    """
+    metrics: list[dict[str, Any]] = []
+    for key, label, keys in _AGREEMENT_TARGETS:
+        hp = _agreement_pairs(high_rows, keys)
+        lp = _agreement_pairs(low_rows, keys)
+        delta, lo, hi = _roi_delta_ci(hp, lp)
+        metrics.append({
+            "key": key, "label": label,
+            f"{high}_roi": _roi_of(hp), f"{low}_roi": _roi_of(lp),
+            # _agreement_pairs がレース単位合算 (2026-07-04) なので legs = 1脚以上買ったレース数。
+            f"{high}_legs": len(hp), f"{low}_legs": len(lp),
+            "delta": delta, "delta_ci_low": lo, "delta_ci_high": hi,
+            "significant": bool(hp and lp and (lo > 0 or hi < 0)),
+        })
+    return metrics
+
+
+# マトリクスの条件軸 (key, 高ラベル=フラグ True 側, 低ラベル=False 側)。ユーザ指示 2026-07-04:
+# 「①②③で分けるのでなくマトリクス表にして条件を組み合わせ、状況毎の最良の買い方を見る」。
+# 3 軸 = 2^3 = 8 状況 (行)。列は _AGREEMENT_TARGETS (馬連/組合せ/3連複BOX/本命系)。
+_MATRIX_DIMS = [
+    ("consensus", "一致", "不一致"),   # Claude#1 == 市場1番人気 か
+    ("style", "拮抗型", "本命型"),      # 市場 top2 の implied 勝率比 < / ≥ _FAVORITE_RATIO_THRESHOLD
+    ("venue", "JRA", "NAR"),           # 中央 / 地方 (banei は NAR にまとめる)
+]
+# このレース数未満のセルは「最良(推奨)」や「確証★」を出さない (サンプル不足で ROI が信頼できない)。
+# 実測: 3軸 8 セルのうち JRA 系は各 1-5R しか無く、ここを highlight すると overfit になる (honest 表示)。
+_MATRIX_SAMPLE_FLOOR = 8
+
+
+def _matrix_cells(rows: list[dict[str, Any]], floor: int) -> tuple[list[dict[str, Any]], str | None]:
+    """あるセル (条件で絞った per リスト) の各ターゲット券種 ROI + bootstrap CI を出す。
+
+    返り値 `(cells, best_key)`。cells は _AGREEMENT_TARGETS 順。`confirmed` = レース数 ≥ floor かつ
+    ROI CI 下限 > 1.0 (その状況でその買い方が確定的に +EV)。`best_key` = floor 以上のセルの中で
+    ROI 最大の券種 (= その状況の最良の買い方)、floor 以上が無ければ None (サンプル不足)。
+    """
+    cells: list[dict[str, Any]] = []
+    for key, label, keys in _AGREEMENT_TARGETS:
+        pairs = _agreement_pairs(rows, keys)
+        lo, hi = _roi_ci(pairs)
+        cells.append({
+            "key": key, "label": label,
+            "roi": _roi_of(pairs), "legs": len(pairs),
+            "roi_ci_low": lo, "roi_ci_high": hi,
+            "confirmed": bool(len(pairs) >= floor and lo > 1.0),
+        })
+    eligible = [c for c in cells if c["legs"] >= floor]
+    best = max(eligible, key=lambda c: c["roi"])["key"] if eligible else None
+    return cells, best
+
+
+def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
+    """**市場一致シグナル + 買い方マトリクス**: 観測可能な発走前条件の組合せ毎に最良の買い方を見る。
+
+    市場非依存 (β除外) の shobu 評価レースを、3 つの二値条件でタグ付けする:
+      - consensus: Claude 1位 == 市場1番人気 (一致) か
+      - style: 市場 top2 の implied 勝率比が `_FAVORITE_RATIO_THRESHOLD` 倍未満=拮抗型 / 以上=本命型
+      - venue: JRA (中央) か NAR (地方・banei 含む) か
+    `matrix` はこの 2^3=8 状況を行、`_AGREEMENT_TARGETS` (馬連/組合せ/3連複BOX/本命系) を列に、
+    各セルの ROI と bootstrap CI を出し、状況毎の最良の買い方 (`best_key`) と確証 (CI下限>1.0) を示す。
+    参考行として `overall` (条件なし全レース) と `market_baseline` (市場人気順で同じ買い方) を付ける。
+
+    `metrics` (Claude#1==市場1番人気の agree/disagree 1次元スプリット + Δ CI) は後方互換で残す
+    (per-race 買い方ガイド `web/lib/betGuide.ts` が現在値を参照する)。
+    `append_market_agreement_history` が結果取得ごとに現在値を時系列保存し確証まで蓄積する。
     """
     by_race = _shobu_eval_races(False)
     agree_rows: list[dict[str, Any]] = []
     disagree_rows: list[dict[str, Any]] = []
+    tagged: list[tuple[dict[str, bool], dict[str, Any]]] = []   # (条件フラグ, per) 全レース
+    market_rows: list[dict[str, Any]] = []     # 市場人気ベースライン (市場指数順で同じ買い方)
     last_updated_at: str | None = None
     for rid, race in by_race.items():
         safe = _safe_race_id(rid)
@@ -1689,52 +1815,63 @@ def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
                                              meta={"race_id": rid})
         if reason != "ok" or detail is None:
             continue
-        agree = (max(idx, key=idx.get) == max(mkt, key=mkt.get))
-        (agree_rows if agree else disagree_rows).append(detail["per"])
+        per = detail["per"]
+        # 3 条件でタグ付け (フラグ True → 高ラベル側)。
+        agree = max(idx, key=idx.get) == max(mkt, key=mkt.get)
+        ms = sorted(mkt.values(), reverse=True)
+        p1 = (ms[0] / 100.0) ** _MARKET_INDEX_T
+        p2 = (ms[1] / 100.0) ** _MARKET_INDEX_T
+        competitive = not (p2 > 0 and (p1 / p2) >= _FAVORITE_RATIO_THRESHOLD)  # 拮抗型=True
+        jra = race.get("race_type") == "jra"
+        tagged.append(({"consensus": agree, "style": competitive, "venue": jra}, per))
+        (agree_rows if agree else disagree_rows).append(per)
+        # 市場人気ベースライン: 市場指数順の上位馬で同じ買い方 (オッズ/フィルタ/的中は共通ロジック)。
+        market_ranked = [num for num, _mi in sorted(mkt.items(), key=lambda kv: (-kv[1], kv[0]))]
+        if len(market_ranked) >= 3:
+            mdetail, mreason = _strategy_race_legs(
+                snap, result, point_cost=point_cost, meta={"race_id": rid},
+                ranking=market_ranked)
+            if mreason == "ok" and mdetail is not None:
+                market_rows.append(mdetail["per"])
         r_ts = result.get("recorded_at")
         if isinstance(r_ts, str) and (last_updated_at is None or r_ts > last_updated_at):
             last_updated_at = r_ts
 
-    def _pairs(rows: list[dict[str, Any]], keys: list[str]) -> list[tuple[int, int]]:
-        """レース毎に対象戦略の (Σstake, Σpayout) を1点に合算して返す。
-
-        pooled ターゲット (combo/honmei) を脚単位で並べると、同一レースの脚は同じ
-        top1/top2/着順を共有し強相関 (馬連が当たればワイドも当たりやすい) なのに bootstrap が
-        iid 再標本化してしまい CI が過小 → 偽の★確証が出うる (2026-07-04 修正)。レース単位に
-        合算すれば再標本化の単位=独立に近いレースになる。単一戦略ターゲットは 1 脚/レースなので
-        数値は従来と同じ。"""
-        out: list[tuple[int, int]] = []
-        for per in rows:
-            stake = payout = 0
-            for k in keys:
-                s = per.get(k) or {}
-                if s.get("bets"):
-                    stake += s["stake"]
-                    payout += s["payout"]
-            if stake:
-                out.append((stake, payout))
-        return out
-
-    metrics = []
-    for key, label, keys in _AGREEMENT_TARGETS:
-        ap = _pairs(agree_rows, keys)
-        dp = _pairs(disagree_rows, keys)
-        delta, lo, hi = _roi_delta_ci(ap, dp)
-        metrics.append({
-            "key": key, "label": label,
-            "agree_roi": _roi_of(ap), "disagree_roi": _roi_of(dp),
-            # _pairs がレース単位合算になった (2026-07-04) ため legs = 1脚以上買ったレース数。
-            "agree_legs": len(ap), "disagree_legs": len(dp),
-            "delta": delta, "delta_ci_low": lo, "delta_ci_high": hi,
-            "significant": bool(ap and dp and (lo > 0 or hi < 0)),
+    # マトリクス: 全条件組合せ (2^3) を行に。各行は条件で絞った per リストのセル ROI。
+    from itertools import product
+    floor = _MATRIX_SAMPLE_FLOOR
+    matrix_rows: list[dict[str, Any]] = []
+    for combo in product((True, False), repeat=len(_MATRIX_DIMS)):
+        want = {k: v for (k, _hi, _lo), v in zip(_MATRIX_DIMS, combo)}
+        sel = [per for flags, per in tagged if all(flags[k] == v for k, v in want.items())]
+        cells, best = _matrix_cells(sel, floor)
+        matrix_rows.append({
+            "signature": [bool(want[k]) for k, _hi, _lo in _MATRIX_DIMS],
+            "labels": [hi if want[k] else lo for k, hi, lo in _MATRIX_DIMS],
+            "n": len(sel), "cells": cells, "best_key": best,
         })
+    matrix_rows.sort(key=lambda r: -r["n"])   # サンプルの多い状況を上に (JRA 疎な行は下へ)
+    overall_cells, overall_best = _matrix_cells([per for _f, per in tagged], floor)
+    mbase_cells, _mbest = _matrix_cells(market_rows, floor)
+
+    n = len(agree_rows) + len(disagree_rows)
     return {
-        "races": len(agree_rows) + len(disagree_rows),
+        "races": n,
         "agree_n": len(agree_rows),
         "disagree_n": len(disagree_rows),
-        "metrics": metrics,
+        # consensus 1次元スプリット (betGuide.ts が参照・後方互換)。
+        "metrics": _split_metrics(agree_rows, disagree_rows, high="agree", low="disagree"),
+        "matrix": {
+            "dims": [{"key": k, "high_label": hi, "low_label": lo}
+                     for k, hi, lo in _MATRIX_DIMS],
+            "targets": [{"key": k, "label": lbl} for k, lbl, _ in _AGREEMENT_TARGETS],
+            "sample_floor": floor,
+            "rows": matrix_rows,
+            "overall": {"n": len(tagged), "cells": overall_cells, "best_key": overall_best},
+            "market_baseline": {"n": len(market_rows), "cells": mbase_cells},
+        },
         "last_updated_at": last_updated_at,
-        "sample_warning": (len(agree_rows) + len(disagree_rows)) < 50,
+        "sample_warning": n < 50,
     }
 
 
@@ -1770,6 +1907,15 @@ def append_market_agreement_history() -> dict[str, Any] | None:
              "delta_ci_high": round(x["delta_ci_high"], 4),
              "significant": x["significant"]}
             for x in m["metrics"]
+        ],
+        # 買い方マトリクス (2026-07-04): 状況 × 券種 の ROI/確証 を compact に蓄積 (確証 セルの推移を追う)。
+        "matrix": [
+            {"labels": r["labels"], "n": r["n"], "best_key": r["best_key"],
+             "cells": [{"key": c["key"], "roi": round(c["roi"], 4), "legs": c["legs"],
+                        "roi_ci_low": round(c["roi_ci_low"], 4),
+                        "confirmed": c["confirmed"]}
+                       for c in r["cells"]]}
+            for r in m["matrix"]["rows"]
         ],
     }
     MARKET_AGREEMENT_HISTORY.parent.mkdir(parents=True, exist_ok=True)
