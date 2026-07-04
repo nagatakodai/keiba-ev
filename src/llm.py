@@ -157,6 +157,10 @@ ALLOWED_TOOLS = [
     "mcp__tavily__tavily-search",
     "mcp__tavily__tavily_extract",
     "mcp__tavily__tavily-extract",
+    # Tavily が Unauthorized/上限超過のときの検索フォールバック (2026-07-04 実障害:
+    # Tavily 月間クレジット切れで research が空回り)。組込 WebSearch は従来も
+    # bypassPermissions 下で実使用実績あり (今朝の成功セッションで 36 回)。
+    "WebSearch",
     "WebFetch",
     # 学習データ / モデルメタ / 過去 snapshot を読めるように Read を許可
     # (data/datasets, data/models, data/predictions, data/results, etc.)
@@ -517,6 +521,9 @@ def build_horse_score_prompt(
         "「パドック/当日馬体重/気配」を狙う専用クエリを 1 本投げる**こと (落ち着き/イレ込み/発汗/歩様/"
         "馬体重増減を拾い指数に反映)。その上で取消/前走不利/勝負気配 等を確認し、評価が"
         "割れる馬は深掘りする。各クエリ前に「何が決まるか」を 1 行説明。",
+        "**ツール障害時の切替 (重要)**: Tavily (mcp__tavily__*) が Unauthorized / usage limit / "
+        "エラーを返したら、**再試行せず即座に WebSearch (組込 web 検索) に切り替えて**同じクエリを"
+        "投げること。Tavily の失敗で検索を諦めたり同じ失敗を繰り返して時間を浪費しない。",
         "**並列実行 (重要・速度に直結)**: 互いに依存しない検索・WebFetch は **必ず 1 ターンで同時に "
         "(parallel に複数 tool_use を) 呼び出す**こと。馬ごとに 1 つずつ順番 (sequential) に投げると "
         "1 ラウンド 30-50s × 頭数で timeout する。例: 全馬の近走を一度にまとめて並列発行 → 結果が揃って "
@@ -698,9 +705,11 @@ def score_horses_stream(
     # 落ちる挙動を確認 (`_looks_rate_limited` が一切マッチせず fallback が発火しなかった実障害)。
     # テキスト一致に頼らず **timeout 以外で result を得られなかった場合は無条件にフォールバック**する
     # (limit_hit はログの理由表示にのみ使う。API 呼び出し自体は saw_result=False のときだけ = 通常運用の
-    # 課金は増えない)。timeout だけは従来どおり除外 (単に遅いだけの可能性があり、フォールバックしても
-    # 遅さは解決しないため)。
-    if not saw_result and not was_timeout and _api_fallback_enabled():
+    # 課金は増えない)。timeout は原則除外 (単に遅いだけの可能性があり、フォールバックしても遅さは
+    # 解決しない) だが、**limit 信号 (rate_limit_event rejected+overage不可 or limit テキスト) を
+    # 観測済みなら timeout でもフォールバック**する — 実機 12:05-12:09 で「セッション途中で limit 到達
+    # → 検索が止まりストール → kill timer 発火」のケースを確認 (これは遅いのではなく limit 起因)。
+    if not saw_result and (not was_timeout or limit_hit) and _api_fallback_enabled():
         reason = "usage limit" if limit_hit else "result 取得失敗"
         yield ("text", f"[claude -p が{reason}で終了 → Anthropic API にフォールバック (web_search 付き)]")
         yield from _api_stream(prompt, use_search=True, timeout=timeout)
@@ -1029,6 +1038,9 @@ def build_horse_research_prompt(
         "**締切~5分前=パドック実施中なので、各馬まず「パドック/当日馬体重/気配」を狙う専用クエリを 1 本"
         "投げる** (落ち着き/イレ込み/発汗/歩様/馬体重増減を拾う)。その上で取消/前走不利/勝負気配 を確認する。"
         " 例: \"<馬名>\" パドック OR 気配 OR 歩様 OR 馬体重 <YYYYMMDD>。",
+        "**ツール障害時の切替 (重要)**: Tavily (mcp__tavily__*) が Unauthorized / usage limit / "
+        "エラーを返したら、**再試行せず即座に WebSearch (組込 web 検索) に切り替えて**同じクエリを"
+        "投げること。Tavily の失敗で検索を諦めたり同じ失敗を繰り返して時間を浪費しない。",
         "**並列実行 (重要・速度に直結)**: 互いに依存しない検索・WebFetch は **必ず 1 ターンで同時に "
         "複数 tool_use** で呼ぶ。担当馬の ①直前/②軟情報を一度に並列発行 → 評価が割れる馬だけ次バッチで深掘り。",
         "**時間厳守**: 締切直前処理。timeout すると担当分が失われるので、予算を超えそうなら手元の "
@@ -1355,7 +1367,7 @@ def score_horses(
 
 # 締切1分前の高速 3連単選定では web 検索もファイル読みも一切させない (純粋推論で ~10-30s)。
 _TRIFECTA_SELECT_DISALLOWED = (
-    DISALLOWED_TOOLS + ",Read,WebFetch,"
+    DISALLOWED_TOOLS + ",Read,WebFetch,WebSearch,"
     "mcp__tavily__tavily_search,mcp__tavily__tavily-search,"
     "mcp__tavily__tavily_extract,mcp__tavily__tavily-extract"
 )
@@ -1518,10 +1530,11 @@ def select_trifecta_stream(
                 was_timeout = True
             limit_hit = limit_hit or _looks_rate_limited(str(ev[1]))
             yield ev
-    # result が出なかった (timeout 以外) → API フォールバック (検索なし・純粋推論なので低コスト/高速)。
+    # result が出なかった (timeout 以外、または limit 起因 timeout) → API フォールバック
+    # (検索なし・純粋推論なので低コスト/高速)。
     # 2026-07-04: テキスト一致 (limit_hit) 必須の gate は実機で claude -p の無言失敗を捉えられず
     # 発火しなかったため撤去 (score_horses_stream と同じ理由、詳細はそちら参照)。
-    if not saw_result and not was_timeout and _api_fallback_enabled():
+    if not saw_result and (not was_timeout or limit_hit) and _api_fallback_enabled():
         reason = "usage limit" if limit_hit else "result 取得失敗"
         yield ("text", f"[claude -p が{reason}で終了 → Anthropic API にフォールバック (検索なし)]")
         yield from _api_stream(prompt, use_search=False, timeout=timeout, max_tokens=8_000)

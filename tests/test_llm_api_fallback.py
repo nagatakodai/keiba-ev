@@ -124,6 +124,41 @@ def test_score_no_fallback_on_timeout(monkeypatch):
     assert not [p for t, p in events if t == "result" and p]
 
 
+def test_score_falls_back_on_timeout_with_limit_signal(monkeypatch):
+    """timeout でも **limit 信号を観測済み** (rate_limit_event rejected + overage 不可) なら
+    フォールバックする (2026-07-04: セッション途中で limit 到達 → 検索停止 → ストール →
+    kill timer 発火、の実機ケース。これは「遅い」のではなく limit 起因)。"""
+    line = json.dumps({"type": "rate_limit_event",
+                       "rate_limit_info": {"status": "rejected", "isUsingOverage": False}})
+    monkeypatch.setattr(llm, "is_available", lambda: True)
+    monkeypatch.setattr(
+        llm, "_spawn_claude",
+        lambda cmd: (_FakeProc([line + "\n"], returncode=None), io.StringIO()))
+    monkeypatch.setattr(llm, "_start_kill_timer", lambda proc, timeout: (_NoopTimer(), [True]))
+    monkeypatch.setattr(llm, "_api_stream", _fake_api_stream)
+    events = list(llm.score_horses_stream(_mk_race()))
+    results = [p for t, p in events if t == "result" and p]
+    assert results == ['{"scores": {"1": 80}}']
+
+
+def test_score_rate_limit_event_overage_ok_is_not_limit(monkeypatch):
+    """rate_limit_event が rejected でも overage で通っている (isUsingOverage=True) 間は
+    limit 扱いしない (実機 11:47: overage 許可中は正常に result が出る)。"""
+    ev1 = json.dumps({"type": "rate_limit_event",
+                      "rate_limit_info": {"status": "rejected", "isUsingOverage": True}})
+    ev2 = json.dumps({"type": "result", "result": '{"scores": {"1": 70}}'})
+    monkeypatch.setattr(llm, "is_available", lambda: True)
+    monkeypatch.setattr(
+        llm, "_spawn_claude",
+        lambda cmd: (_FakeProc([ev1 + "\n", ev2 + "\n"]), io.StringIO()))
+    called = []
+    monkeypatch.setattr(llm, "_api_stream",
+                        lambda *a, **k: called.append(1) or iter(()))
+    events = list(llm.score_horses_stream(_mk_race()))
+    assert [p for t, p in events if t == "result"] == ['{"scores": {"1": 70}}']
+    assert not called
+
+
 def test_score_no_fallback_when_disabled(monkeypatch):
     monkeypatch.setattr(llm, "is_available", lambda: True)
     monkeypatch.setenv("KEIBA_API_FALLBACK", "0")
