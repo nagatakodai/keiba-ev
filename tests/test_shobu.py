@@ -497,6 +497,59 @@ def test_run_claude_eval_retries_until_indexed(monkeypatch):
     assert any("リトライ" in m for m in logs)
 
 
+def test_run_claude_eval_retry_lightens_env(monkeypatch):
+    """リトライ時は env を **単一セッション・低クエリ・低同時数・シャード無** へ落として自己回復する。
+
+    2026-07-04 実機: 10クエリ/頭 × 並列 (最大 20 claude -p 同時) が Tavily/API を叩きすぎて
+    スロットリング → 各セッションが timeout 内に採点まで届かず全 fallback (load 1.3/24 なのに
+    24分で指数0)。across-race 並列を下げるだけでは各 subprocess が重いままなので、pass1 以降は
+    env も軽くする。pass0 (operator 設定) と pass1 (軽量) の env を両方 capture して検証する。
+    """
+    envs: list[dict] = []
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            envs.append(dict(kw.get("env") or {}))
+            self.returncode = 0
+            self.stdout = iter([])
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(shobu.subprocess, "Popen", lambda cmd, **kw: _P(cmd, **kw))
+    state = {"n": 0}
+
+    def _snap(_id):
+        state["n"] += 1
+        if state["n"] >= 2:        # pass1 で生成成功
+            return {"index_compare": [{"claude_index": 60.0}]}
+        return {"index_compare": [{"claude_index": None}], "llm_fallback": True}
+
+    monkeypatch.setattr(shobu, "_load_snapshot", _snap)
+    monkeypatch.setattr(shobu.time, "sleep", lambda *_a, **_k: None)
+    targets = [{"netkeiba_race_id": "x", "race_type": "nar", "start_at": 0,
+                "venue": "佐賀", "race_no": 11, "race_id": "zz-z-11"}]
+    done = shobu._run_claude_eval(targets, timeout=900, parallel=4, log=lambda m: None,
+                                  score_parallel=True, score_queries_per_horse=10,
+                                  llm_max_concurrent=20, max_retries=2)
+    assert done == 1 and len(envs) >= 2
+    p0, p1 = envs[0], envs[1]
+    # pass0 = operator 設定 (ARCH-A 並列・10クエリ/頭・シャード飽和)。
+    assert p0["KEIBA_SCORE_PARALLEL"] == "1"
+    assert p0["KEIBA_SCORE_QUERIES_PER_HORSE"] == "10"
+    assert p0.get("KEIBA_SCORE_MAX_SHARDS") == "5"          # 20 // 4
+    # pass1 = 自己回復 (単一セッション・低クエリ・低同時数・シャード無・内側timeoutクランプ)。
+    assert p1["KEIBA_SCORE_PARALLEL"] == ""
+    assert int(p1["KEIBA_SCORE_QUERIES_PER_HORSE"]) <= 4
+    assert int(p1["KEIBA_LLM_MAX_CONCURRENT"]) <= 4
+    assert "KEIBA_SCORE_MAX_SHARDS" not in p1
+    assert "KEIBA_SCORE_HORSES_PER_SHARD" not in p1
+    assert 0 < int(p1["KEIBA_SCORE_TIMEOUT"]) < 900
+
+
 def test_scan_claude_all_generates_for_all(monkeypatch):
     """claude_all: Claude 指数なしの全レースに生成 → 全レースが Claude 乖離を持つ。"""
     now = int(time.time())

@@ -432,7 +432,7 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
             except Exception:  # noqa: BLE001
                 pass
 
-    def _one(t: dict[str, Any]) -> tuple[dict[str, Any], bool, str]:
+    def _one(t: dict[str, Any], env: dict[str, str]) -> tuple[dict[str, Any], bool, str]:
         rid = t["netkeiba_race_id"]
         label = f"{t['venue']}{t['race_no']}R"
         cmd = _score_stage_cmd(rid, t["race_type"], int(t.get("start_at") or 0))
@@ -440,7 +440,7 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
         err_f = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
         try:
             proc = subprocess.Popen(
-                cmd, cwd=str(ROOT), env=score_env,
+                cmd, cwd=str(ROOT), env=env,
                 stdout=subprocess.PIPE, stderr=err_f,
                 text=True, bufsize=1,
                 start_new_session=True,   # 孫 (claude -p) ごと timeout で kill できるよう別 pgid に
@@ -528,24 +528,53 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                 return False
         return False
 
+    # リトライ時は across-race 並列を下げるだけでなく **各 subprocess の env も軽く**する
+    # (2026-07-04 修正)。失敗の主因は 10クエリ/頭 × 並列 (最大 llm_max_concurrent 本の
+    # claude -p 同時起動) が Tavily/Anthropic API を叩きすぎてスロットリングされ、1 セッションの
+    # リサーチ+採点が内側 timeout 内に終わらず fallback になること (実測: load 1.3/24 なのに
+    # 24分で指数0 = CPU でなく検索の同時実行過多)。across-race だけ下げても各 subprocess は
+    # 10クエリ/頭 × ARCH-A 並列のまま重いので、リトライでは **単一セッション + 低クエリ +
+    # 低同時数 + 内側 timeout クランプ** の既知の成功条件へ落として自己回復させる。
+    _retry_timeout = str(min(max(120, int(timeout) - 90), int(timeout) - 10))
+
+    def _pass_env(attempt: int) -> dict[str, str]:
+        if attempt == 0:
+            return score_env                                   # pass0 は operator 設定を尊重
+        env = score_env.copy()
+        env["KEIBA_SCORE_PARALLEL"] = ""                       # ARCH-A 並列 off = 単一セッション
+        env.pop("KEIBA_SCORE_HORSES_PER_SHARD", None)
+        env.pop("KEIBA_SCORE_MAX_SHARDS", None)
+        base_q = score_queries_per_horse or 2
+        env["KEIBA_SCORE_QUERIES_PER_HORSE"] = str(min(base_q, 4 if attempt == 1 else 3))
+        try:
+            conc0 = int(llm_max_concurrent or score_env.get("KEIBA_LLM_MAX_CONCURRENT") or 20)
+        except (TypeError, ValueError):
+            conc0 = 20
+        env["KEIBA_LLM_MAX_CONCURRENT"] = str(min(conc0, 4))   # 同時 claude -p を絞り輻輳を解く
+        env["KEIBA_SCORE_TIMEOUT"] = _retry_timeout             # 内側 claude kill を外側 timeout の手前に
+        return env
+
     succeeded: set[str] = set()
     pending = list(targets)
     attempt = 0
     while pending:
         # パスごとに across-race 並列度を下げる: 0→parallel, 1→parallel//2, 2+→直列。
         # 輻輳 (同時 claude -p 過多 → Tavily/API 輻輳で早期死) が失敗原因なので、リトライは
-        # 同時数を減らして輻輳を解く。最終パスは直列 = 1レースだけ走る既知の成功条件。
+        # 同時数を減らす + env も軽くする (_pass_env)。最終パスは直列 = 1レースだけ走る既知の成功条件。
         if attempt == 0:
             pass_parallel = max(1, parallel)
         elif attempt == 1:
             pass_parallel = max(1, parallel // 2)
         else:
             pass_parallel = 1
+        pass_env = _pass_env(attempt)
         if attempt > 0:
             _safe_log(f"[claude-eval] リトライ {attempt}/{max_retries}: 指数未生成 "
-                      f"{len(pending)} レースを並列 {pass_parallel} で再生成 (輻輳回避)…")
+                      f"{len(pending)} レースを 単一セッション・"
+                      f"{pass_env['KEIBA_SCORE_QUERIES_PER_HORSE']}クエリ/頭・across-race 並列 "
+                      f"{pass_parallel} で再生成 (輻輳回避)…")
         with ThreadPoolExecutor(max_workers=pass_parallel) as ex:
-            for fut in as_completed([ex.submit(_one, t) for t in pending]):
+            for fut in as_completed([ex.submit(_one, t, pass_env) for t in pending]):
                 t, _ok_rc, note = fut.result()
                 idx_ok = _has_index(t)
                 if idx_ok:
