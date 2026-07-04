@@ -1319,7 +1319,7 @@ function IndexCompareCard({
             <span className="px-1.5 py-0.5 rounded text-xs font-black bg-(--color-foreground)/10">
               プレレジ
             </span>
-            {sig.deadCell ? (
+            {sig.deadCell && (
               <>
                 <span className="px-1.5 py-0.5 rounded text-xs font-black bg-rose-500/20 text-rose-300">
                   見送りゾーン
@@ -1328,29 +1328,30 @@ function IndexCompareCard({
                   拮抗型 × 市場不一致 (死にセル) — 発見時実測で全券種が沈む状況。賭けない。
                 </span>
               </>
-            ) : (
-              sig.fired.map((f) => (
-                <span
-                  key={f.rule.key}
-                  title={`${f.rule.condition_label} → ${f.rule.strategy_label}。${f.rule.discovery}`}
-                  className={`px-1.5 py-0.5 rounded text-[11px] font-bold whitespace-nowrap ${
-                    f.status === "confirmed"
-                      ? "bg-emerald-400/20 text-emerald-300"
-                      : f.status === "promising"
-                        ? "bg-sky-400/20 text-sky-300"
-                        : "bg-(--color-surface-2) text-(--color-muted) border border-(--color-line)"
-                  }`}
-                >
-                  {f.rule.label}
-                  {f.status === "confirmed" ? " ★" : ""}
-                  <span className="ml-1 font-normal tnum">
-                    {f.prospectiveRaces > 0
-                      ? `登録後 ${Math.round(f.prospectiveRoi * 100)}% (${f.prospectiveRaces}R)`
-                      : "登録後 0R"}
-                  </span>
-                </span>
-              ))
             )}
+            {/* 死にセルでも条件成立中ルールは台帳計上が続くため隠さず併記する (確証★の母集団と
+                per-race 表示が乖離しないように)。見送りゾーンの警告が優先、ルールは参考。 */}
+            {sig.fired.map((f) => (
+              <span
+                key={f.rule.key}
+                title={`${f.rule.condition_label} → ${f.rule.strategy_label}。${f.rule.discovery}`}
+                className={`px-1.5 py-0.5 rounded text-[11px] font-bold whitespace-nowrap ${
+                  f.status === "confirmed"
+                    ? "bg-emerald-400/20 text-emerald-300"
+                    : f.status === "promising"
+                      ? "bg-sky-400/20 text-sky-300"
+                      : "bg-(--color-surface-2) text-(--color-muted) border border-(--color-line)"
+                }`}
+              >
+                {f.rule.label}
+                {f.status === "confirmed" ? " ★" : ""}
+                <span className="ml-1 font-normal tnum">
+                  {f.prospectiveRaces > 0
+                    ? `登録後 ${Math.round(f.prospectiveRoi * 100)}% (${f.prospectiveRaces}R)`
+                    : "登録後 0R"}
+                </span>
+              </span>
+            ))}
           </div>
           <p className="mt-1 text-[10px] text-(--color-muted)">
             ※ プレレジ済ルール (定義凍結・登録後データのみで確証判定)。★=確証 (登録後CI下限&gt;100%)

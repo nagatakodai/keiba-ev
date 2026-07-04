@@ -972,3 +972,62 @@ def test_signal_rules_dead_cell_block(dirs):
     # 死にセル回避ルールは alive のみ拾う。
     alive_rule = next(r for r in cur["rules"] if r["key"] == "quinella12_alive")
     assert alive_rule["insample"]["races"] == 1
+
+
+def test_prospective_excludes_post_start_scored(dirs):
+    """発走後に採点 (再score) された指数は prospective (確証★の母集団) に入れない。
+
+    発走後の score は web 検索が確定結果を拾い得る (hindsight 汚染) ため、
+    「採点時刻 < 発走時刻」を prospective 算入の条件にする (2026-07-05 レビュー修正)。
+    insample (参考値) には従来どおり入る。
+    """
+    sh, pr, rs = dirs
+    reg = store.SIGNAL_RULES[0]["registered_at"]
+    import datetime as dt
+    day = (dt.date.fromisoformat(reg) + dt.timedelta(days=1)).isoformat()
+    (sh / "20260706.json").write_text(json.dumps({
+        "generated_at": f"{day}T10:00:00+09:00",
+        "races": [
+            {"race_id": "pre-1", "recommended": True, "venue": "A", "race_no": 1,
+             "race_type": "nar", "n_runners": 8, "start_at": _jst_unix(day, 12)},
+            {"race_id": "post-1", "recommended": True, "venue": "A", "race_no": 2,
+             "race_type": "nar", "n_runners": 8, "start_at": _jst_unix(day, 12)},
+        ],
+    }), encoding="utf-8")
+    for rid, scored in (("pre-1", f"{day}T11:50:00"), ("post-1", f"{day}T12:30:00")):
+        snap = _snap(8, _IDX8, market={1: 95.0, 2: 60.0, 3: 40.0})
+        snap["llm_scored_at"] = scored          # pre=発走前 / post=発走後の再score
+        (pr / f"{rid}.json").write_text(json.dumps(snap), encoding="utf-8")
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo(
+            [1, 4, 5], 0,
+            {"win:1": 2.0, "place:1": 1.4, "place:4": 1.6,
+             "wide:1-4": 3.0, "trio:1-4-5": 20.0})), encoding="utf-8")
+    cur = store.compute_signal_rules()
+    p1 = next(r for r in cur["rules"] if r["key"] == "place1_consensus")
+    assert p1["insample"]["races"] == 2        # 参考値には両方入る
+    assert p1["prospective"]["races"] == 1     # 発走後採点 (post-1) は確証母集団から除外
+
+
+def test_consensus_tiebreak_by_number(dirs):
+    """市場指数の同点は馬番昇順で市場#1 を決める (market_ranked/_strategy_race_legs と同一規約)。
+
+    旧実装は index_compare の行順 (=Claude 指数降順) で同点解決し、Claude が上位に置いた馬を
+    市場#1 とみなして agree 側へ倒れるバイアスがあった (2026-07-05 レビュー修正)。
+    """
+    sh, pr, rs = dirs
+    (sh / "20260704.json").write_text(json.dumps({
+        "generated_at": "2026-07-04T11:00:00+09:00",
+        "races": [{"race_id": "tie-1", "recommended": True, "venue": "A", "race_no": 1,
+                   "race_type": "nar", "n_runners": 8,
+                   "start_at": _jst_unix("2026-07-04")}],
+    }), encoding="utf-8")
+    # Claude#1 = 馬番9 (先頭行)。市場は 馬番9 と 馬番1 が 60.0 で同点 → 市場#1 は馬番1 (昇順)。
+    idx = {9: 90.0, 1: 80.0, 2: 70.0, 3: 60.0, 4: 50.0, 5: 40.0, 6: 30.0, 7: 20.0}
+    (pr / "tie-1.json").write_text(json.dumps(_snap(
+        8, idx, market={9: 60.0, 1: 60.0, 2: 40.0})), encoding="utf-8")
+    (rs / "tie-1.json").write_text(json.dumps(_result_fo([6, 7, 8], 0, {})),
+                                   encoding="utf-8")
+    recs = store._tagged_eval_races()
+    assert len(recs) == 1
+    # Claude#1=9 ≠ 市場#1=1 (馬番昇順タイブレーク) → 不一致 (旧実装は行順で 9 を市場#1 とし一致)。
+    assert recs[0]["flags"]["consensus"] is False

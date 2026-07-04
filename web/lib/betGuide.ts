@@ -174,8 +174,20 @@ export function raceSignalRuleGuide(
     (i): i is IdxItem & { market_index: number } => typeof i.market_index === "number",
   );
   if (withClaude.length < 1 || withMarket.length < 2) return null;
-  const claudeTop = withClaude.reduce((a, b) => (b.claude_index > a.claude_index ? b : a));
-  const marketTop = withMarket.reduce((a, b) => (b.market_index > a.market_index ? b : a));
+  // 同点は馬番昇順の明示タイブレーク (backend _tagged_eval_races / market_ranked と同一規約。
+  // 行順 reduce だと index_compare の並び=Claude 指数降順に依存し consensus が非決定になる)。
+  const claudeTop = withClaude.reduce((a, b) =>
+    b.claude_index > a.claude_index ||
+    (b.claude_index === a.claude_index && b.number < a.number)
+      ? b
+      : a,
+  );
+  const marketTop = withMarket.reduce((a, b) =>
+    b.market_index > a.market_index ||
+    (b.market_index === a.market_index && b.number < a.number)
+      ? b
+      : a,
+  );
   const agree = claudeTop.number === marketTop.number;
   const ms = withMarket.map((i) => i.market_index).sort((a, b) => b - a);
   const p1 = Math.pow(ms[0] / 100, MARKET_INDEX_T);

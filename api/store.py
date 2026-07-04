@@ -1778,7 +1778,10 @@ def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
     walk-forward ガードレール) が共有するローダ。各レコード:
       - rid / ts (start_at unix, 無ければ 0) / date (発走日の JST YYYY-MM-DD、ts 無しは
         スキャン日 _generated_at で補完) / recorded_at (結果保存時刻)
-      - flags: {consensus: Claude#1==市場1番人気, style: 拮抗型=True, venue: JRA=True}
+      - scored_pre_start: 指数採点時刻 (_scored_at) < 発走時刻 か (発走後の再score =
+        hindsight 汚染の可能性がある指数を prospective 確証から弾くガード。ts 無しは False)
+      - flags: {consensus: Claude#1==市場1番人気 (同点は馬番昇順の明示タイブレーク),
+        style: 拮抗型=True, venue: JRA=True}
       - n_runners / per (Claude 指数順の戦略脚) / mper (市場人気順で同じ買い方、組めなければ None)
     **ts 昇順で返す** (walk-forward がそのまま時系列で歩ける)。
     """
@@ -1808,8 +1811,13 @@ def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
                                              meta={"race_id": rid})
         if reason != "ok" or detail is None:
             continue
-        # 3 条件でタグ付け (フラグ True → 高ラベル側)。
-        agree = max(idx, key=idx.get) == max(mkt, key=mkt.get)
+        # 3 条件でタグ付け (フラグ True → 高ラベル側)。consensus の同点タイブレークは
+        # _strategy_race_legs / market_ranked と同じ **(-指数, 馬番昇順)** に揃える
+        # (旧 max(dict) は index_compare の行順依存 = Claude 指数降順で同点が agree 側に
+        # 倒れ、market_baseline と別の馬を市場#1 とみなす矛盾があった。2026-07-05 レビュー修正)。
+        claude_top = min(idx.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        market_top = min(mkt.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        agree = claude_top == market_top
         ms = sorted(mkt.values(), reverse=True)
         p1 = (ms[0] / 100.0) ** _MARKET_INDEX_T
         p2 = (ms[1] / 100.0) ** _MARKET_INDEX_T
@@ -1826,16 +1834,25 @@ def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
                 mper = mdetail["per"]
         ts = race.get("start_at") or 0
         if ts:
-            date = _dt.datetime.fromtimestamp(
-                ts, _dt.timezone(_dt.timedelta(hours=9))).date().isoformat()
+            start_dt = _dt.datetime.fromtimestamp(
+                ts, _dt.timezone(_dt.timedelta(hours=9)))
+            date = start_dt.date().isoformat()
+            start_iso = start_dt.replace(tzinfo=None).isoformat(timespec="seconds")
         else:
             date = (race.get("_generated_at") or "")[:10]
+            start_iso = ""
+        # 指数が発走前に生成されたか (hindsight ガード)。発走後の再score (claude_eval リトライや
+        # 過去レースの手動 analyze) は web 検索が確定結果を拾い得るため、prospective (確証★の
+        # 母集団) には「採点時刻 < 発走時刻」を要求する (2026-07-05 レビュー修正)。start_at 不明は
+        # 検証不能 → False (保守的に prospective から除外)。
+        scored = _scored_at(snap)
         r_ts = result.get("recorded_at")
         records.append({
             "rid": rid,
             "ts": ts,
             "date": date,
             "recorded_at": r_ts if isinstance(r_ts, str) else None,
+            "scored_pre_start": bool(start_iso) and bool(scored) and scored < start_iso,
             "flags": {"consensus": agree, "style": competitive, "venue": jra},
             "n_runners": detail.get("n_runners") or 0,
             "per": detail["per"],
@@ -2015,7 +2032,8 @@ SIGNAL_RULES: list[dict[str, Any]] = [
     {"key": "place1_consensus", "label": "複勝1 × 市場一致",
      "strategy": "place1", "condition_label": "Claude#1=市場1番人気",
      "registered_at": "2026-07-05", "consensus": True,
-     "discovery": "発見時105R: ROI 98% (n=16, 前半85%/後半111%と安定・不一致側複勝は56%)"},
+     "discovery": "発見時105R: ROI 97% (n=15, 前後半で安定。市場#1複勝全体80%・"
+                  "Claude不一致側の人気馬複勝74%に対し一致選別の付加価値)"},
     {"key": "win1_smallfield", "label": "単勝1 × 少頭数",
      "strategy": "win1", "condition_label": "出走8頭以下",
      "registered_at": "2026-07-05", "max_runners": 8,
@@ -2023,7 +2041,7 @@ SIGNAL_RULES: list[dict[str, Any]] = [
     {"key": "quinella12_alive", "label": "馬連1-2 × 死にセル回避",
      "strategy": "quinella12", "condition_label": "拮抗型×市場不一致 のレースは見送り",
      "registered_at": "2026-07-05", "skip_dead_cell": True,
-     "discovery": "発見時105R: 回避後 ROI 96% (n=67) vs 死にセル 47% (n=38) — 見送り規律"},
+     "discovery": "発見時105R: 回避後 ROI 97% (n=66) vs 死にセル 47% — 見送り規律"},
     {"key": "quinella12_agree_honmei_nar", "label": "馬連1-2 × 一致×本命型×NAR",
      "strategy": "quinella12", "condition_label": "Claude#1=市場1番人気 かつ 本命型 かつ NAR",
      "registered_at": "2026-07-05", "consensus": True, "style": False, "venue": False,
@@ -2149,7 +2167,8 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
 
     各ルールについて:
       - insample: 全期間 (発見期間込み) の ROI — **参考値** (発見に使ったデータなので楽観)
-      - prospective: **registered_at 以降の発走日レースのみ** の ROI + CI — 確証判定はこちらだけ
+      - prospective: **registered_at 以降の発走日 かつ 指数が発走前に生成された (scored_pre_start)
+        レースのみ** の ROI + CI — 確証判定はこちらだけ
       - market_baseline: 同条件で市場人気順に同じ買い方をした ROI (Claude 指数の付加価値の基準線)
       - status: accumulating / promising / confirmed★ / broken (判定は `_rule_status`)
     `dead_cell` は見送り規律 (拮抗型×市場不一致) の根拠表示用、`walkforward` はマトリクス
@@ -2161,8 +2180,11 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
         keys = [rule["strategy"]]
         matched = [r for r in records if _rule_matches(rule, r)]
         all_pairs = [got[0] for r in matched if (got := _agreement_pairs([r["per"]], keys))]
+        # prospective = 登録日以降の発走 かつ **指数が発走前に生成されたレースのみ**
+        # (発走後の再score は hindsight 汚染し得るので確証★の母集団に入れない)。
         pros_pairs = [got[0] for r in matched
                       if r["date"] and r["date"] >= rule["registered_at"]
+                      and r["scored_pre_start"]
                       and (got := _agreement_pairs([r["per"]], keys))]
         mkt_pairs = [got[0] for r in matched if r["mper"] is not None
                      and (got := _agreement_pairs([r["mper"]], keys))]
