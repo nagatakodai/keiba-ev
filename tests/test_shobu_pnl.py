@@ -675,3 +675,72 @@ def test_dead_heat_second_exacta_both_orders(dirs):
     assert r["per"]["exacta12"]["payout"] == 1020
     # 3連単 5→6→4 は rank (1,2,2) 非減少 → 的中 (同着の両順序が払戻対象)
     assert r["per"]["trifecta123"]["hit"] is True and r["per"]["trifecta123"]["payout"] == 3510
+
+
+def test_hit_bet_labels_lists_dashboard_hits(dirs):
+    """hit_bet_labels: ダッシュボード仮想購入 (BOX+戦略くらべ) の的中だけをラベル化する。
+
+    8頭・着順 1-2-3 (指数どおり) → BOX(5頭)・単勝1・複勝1/2/3・馬連・ワイド・馬単・3連単・
+    3連複・BOX 系すべて的中。key/label/payout がカード表示にそのまま使える形で返る。
+    """
+    sh, pr, rs = dirs
+    snap = _snap(8, _IDX8)
+    res = _result_fo(
+        [1, 2, 3], 12000,
+        {"win:1": 3.0, "place:1": 1.2, "place:2": 1.5, "place:3": 2.0,
+         "quinella:1-2": 4.0, "exacta:1-2": 6.0,
+         "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5,
+         "trifecta:1-2-3": 120.0, "trio:1-2-3": 18.0})
+    labels = store.hit_bet_labels(snap, res)
+    assert labels is not None
+    by_key = {h["key"]: h for h in labels}
+    # BOX (上位5頭に 1-2-3 着が収まる) が先頭・trifecta 配当 12000 → ¥12,000 (100円換算)
+    assert labels[0]["key"] == "box" and labels[0]["payout"] == 12000
+    assert by_key["win1"]["label"] == "単勝1" and by_key["win1"]["payout"] == 300
+    assert by_key["quinella12"]["payout"] == 400
+    assert by_key["trifecta123"]["payout"] == 12000        # trifecta:1-2-3 = 120.0×100
+    # 全戦略的中 (8頭 cutoff=3) → 12 戦略 + box
+    assert len(labels) == len(store.STRATEGY_DEFS) + 1
+
+
+def test_hit_bet_labels_only_hits_and_none_when_undecidable(dirs):
+    """外れ戦略はラベルに載らない・指数<3頭 / 結果未確定は None (判定不能)。"""
+    sh, pr, rs = dirs
+    snap = _snap(8, _IDX8)
+    # 着順 1-5-6: 単勝1・複勝1 のみ的中 (top2=2, top3=3 は圏外)。
+    res = _result_fo([1, 5, 6], 8000, {"win:1": 2.0, "place:1": 1.3})
+    labels = store.hit_bet_labels(snap, res)
+    assert {h["key"] for h in labels} == {"win1", "place1"}
+    # 結果未確定 (着順 <3) → None
+    assert store.hit_bet_labels(snap, {"finish_order": [1]}) is None
+    # 指数 2 頭のみ → None
+    assert store.hit_bet_labels(_snap(8, {1: 90.0, 2: 80.0}), res) is None
+
+
+def test_attach_hit_labels_enriches_shobu_doc(dirs):
+    """attach_hit_labels: shobu doc の各レースに hit_strategies を付与 (snapshot/result 欠落は None)。"""
+    sh, pr, rs = dirs
+    (pr / "rec-1.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [1, 5, 6], 8000, {"win:1": 2.0, "place:1": 1.3})), encoding="utf-8")
+    doc = {"races": [
+        {"race_id": "rec-1"},           # snapshot+result あり → 的中ラベル
+        {"race_id": "no-res"},          # result なし → None
+        {"race_id": "../evil"},         # path traversal → None (reject)
+    ]}
+    out = store.attach_hit_labels(doc)
+    assert {h["key"] for h in out["races"][0]["hit_strategies"]} == {"win1", "place1"}
+    assert out["races"][1]["hit_strategies"] is None
+    assert out["races"][2]["hit_strategies"] is None
+
+
+def test_list_predictions_carries_hit_strategies(dirs):
+    """list_predictions: 結果確定レースに hit_strategies が載る (未確定は None)。"""
+    sh, pr, rs = dirs
+    (pr / "rec-1.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [1, 5, 6], 8000, {"win:1": 2.0, "place:1": 1.3})), encoding="utf-8")
+    (pr / "pend-1.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
+    items = {i["race_id"]: i for i in store.list_predictions(limit=None)}
+    assert {h["key"] for h in items["rec-1"]["hit_strategies"]} == {"win1", "place1"}
+    assert items["pend-1"]["hit_strategies"] is None and items["pend-1"]["has_result"] is False

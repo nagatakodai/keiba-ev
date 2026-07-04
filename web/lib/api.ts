@@ -38,6 +38,10 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 // --- Types ---
 
+// ダッシュボード仮想購入 (Claude 指数上位N頭3連単BOX + 戦略くらべ) の的中券種ラベル 1 件。
+// EV束/3連単束 (実弾) の的中とは無関係 (ユーザ指示 2026-07-04)。payout は ¥100/脚換算。
+export type HitBetLabel = { key: string; label: string; payout: number };
+
 export type PredictionSummary = {
   race_id: string;
   saved_at: string;
@@ -61,6 +65,8 @@ export type PredictionSummary = {
   // 補強根拠 (evidence) 方針バージョン: "v1"=3件上限 / "v2"=無制限 / null=Claude 指数なし。
   index_version?: string | null;
   has_result: boolean;
+  // 仮想購入の的中券種ラベル。null=判定不能 (指数なし/結果未確定/オッズ欠落)、[]=的中なし。
+  hit_strategies?: HitBetLabel[] | null;
 };
 
 export type PredictionRow = {
@@ -642,6 +648,9 @@ export type ShobuRace = {
   score_prev?: number | null;
   score_history?: Array<{ at: number; score: number }>;
   refreshed_at?: number | null;  // 最終 refresh の unix 秒
+  // 仮想購入 (ダッシュボード計測) の的中券種ラベル。配信時に snapshot+result から付与。
+  // null=判定不能 (結果未確定など)、[]=的中なし。
+  hit_strategies?: HitBetLabel[] | null;
 };
 
 export type ShobuResult = {

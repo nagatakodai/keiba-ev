@@ -29,6 +29,7 @@ import {
   raceTimingStatus,
 } from "@/components/ui";
 import { LogStream } from "@/components/LogStream";
+import { HitBetBadges } from "@/components/HitBetBadges";
 import {
   api,
   type JobInfo,
@@ -238,6 +239,14 @@ function RaceCard({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ── ダッシュボード仮想購入 (BOX+戦略くらべ) の的中券種 (ユーザ指示 2026-07-04)。
+          結果確定済レースのみ付く。EV束の的中とは無関係。 ── */}
+      {(r.hit_strategies?.length ?? 0) > 0 && (
+        <div className="mt-2.5">
+          <HitBetBadges hits={r.hit_strategies} />
         </div>
       )}
 

@@ -59,6 +59,7 @@ from .store import (
     RESULT_DIR,
     SHOBU_DIR,
     _safe_race_id,
+    attach_hit_labels,
     compute_calibration,
     compute_shobu_pnl,
     compute_indexed_pnl,
@@ -692,7 +693,8 @@ async def api_shobu_refresh(req: ShobuRefreshRequest) -> dict[str, Any]:
     doc = await asyncio.to_thread(refresh_recommended, date)
     if doc is None:
         raise HTTPException(404, "shobu result not found (まだスキャンしていません)")
-    return doc
+    # get_shobu_result と同様、各レースに仮想購入の的中券種ラベルを付与して返す。
+    return await asyncio.to_thread(attach_hit_labels, doc)
 
 
 @app.get("/api/shobu/pnl")

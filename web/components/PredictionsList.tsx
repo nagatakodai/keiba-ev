@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { type CalibrationReport, type PredictionSummary } from "@/lib/api";
+import { HitBetBadges } from "@/components/HitBetBadges";
 
 const BET_LABELS: Record<string, string> = {
   win: "単勝", place: "複勝", quinella: "馬連", wide: "ワイド",
@@ -276,6 +277,13 @@ function RaceRow({
           ) : (
             <div className="text-xs text-(--color-muted) tnum mt-0.5 flex flex-wrap gap-x-1.5">
               <span>候補 {p.row_count}</span>
+            </div>
+          )}
+          {/* ダッシュボード仮想購入 (BOX+戦略くらべ) の的中券種 (ユーザ指示 2026-07-04)。
+              EV束の的中とは無関係なので束バッジとは独立に表示する。 */}
+          {showHits && (p.hit_strategies?.length ?? 0) > 0 && (
+            <div className="mt-1.5">
+              <HitBetBadges hits={p.hit_strategies} />
             </div>
           )}
           {p.top_aptitude && p.top_aptitude.length > 0 && (

@@ -48,9 +48,11 @@ def get_shobu_result(date: str | None = None) -> dict[str, Any] | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        doc = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    # 各レースに仮想購入の的中券種ラベルを付与 (配信時に snapshot+result から都度計算)。
+    return attach_hit_labels(doc)
 
 
 def index_version_of(snap: dict[str, Any]) -> str | None:
@@ -108,6 +110,16 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
             }
             for a in apt[:3]
         ]
+        # ダッシュボード仮想購入 (BOX+戦略くらべ) の的中券種ラベル (ユーザ指示 2026-07-04)。
+        # EV束/3連単束 (実弾) の的中とは無関係。結果未確定/判定不能は None。
+        result_path = RESULT_DIR / f"{path.stem}.json"
+        hit_strategies: list[dict[str, Any]] | None = None
+        if result_path.exists():
+            try:
+                hit_strategies = hit_bet_labels(
+                    d, json.loads(result_path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                pass
         items.append(
             {
                 "race_id": d.get("race_id") or path.stem,
@@ -136,7 +148,8 @@ def list_predictions(limit: int | None = 100) -> list[dict[str, Any]]:
                 "has_evidence": bool(d.get("evidence")),
                 # 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限)。指数なしは null。
                 "index_version": index_version_of(d),
-                "has_result": (RESULT_DIR / f"{path.stem}.json").exists(),
+                "has_result": result_path.exists(),
+                "hit_strategies": hit_strategies,
             }
         )
     items.sort(key=lambda x: x.get("saved_at") or "", reverse=True)
@@ -1423,6 +1436,78 @@ def compute_indexed_strategies_pnl(point_cost: int = 100,
     `version` ("v1"/"v2"/"v3"/"β") を渡すと Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30)。
     """
     return _strategies_pnl(point_cost, recommended_only=False, version=version)
+
+
+# カードのバッジ表示用 短縮ラベル (STRATEGY_DEFS key → 表示名)。ダッシュボード仮想購入の的中表示。
+STRATEGY_SHORT_LABELS = {
+    "win1": "単勝1",
+    "place1": "複勝1",
+    "place2": "複勝2",
+    "place3": "複勝3",
+    "quinella12": "馬連1-2",
+    "wide12": "ワイド1-2",
+    "wide13": "ワイド1-3",
+    "exacta12": "馬単1→2",
+    "trifecta123": "3連単1→2→3",
+    "trio123": "3連複1-2-3",
+    "trio1234box": "3連複BOX",
+    "wide123box": "ワイドBOX",
+}
+
+
+def hit_bet_labels(snap: dict[str, Any],
+                   result: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """1 レースの **ダッシュボード仮想購入** の的中券種ラベル (ユーザ指示 2026-07-04)。
+
+    勝負レースカード / 予測分析履歴カードに「どの券種が的中したか」を表示するための一覧。
+    対象はダッシュボードで計測している仮想購入 = Claude 指数上位N頭 3連単BOX (`_box_race_pnl`)
+    + 戦略くらべ (`_strategy_race_legs`, STRATEGY_DEFS)。**EV束/3連単束 (実弾) の的中とは無関係**。
+    判定・フィルタ (≤1.1 見送り・複勝頭数ルール・同着 rank 判定) は計測本体と同じ共通ヘルパを
+    使うので、ダッシュボードの races_detail と必ず一致する。
+
+    返り値: 的中した仮想購入の [{key,label,payout}] (payout=¥100/脚換算・BOX 系は的中組合計)。
+    的中ゼロは []。指数<3頭 / 結果未確定 / 的中脚オッズ欠落 (= ダッシュボード計測の分母外) は
+    None (ラベル判定不能・カードは何も出さない)。
+    """
+    detail, reason = _strategy_race_legs(snap, result, point_cost=100, meta={})
+    if reason != "ok" or detail is None:
+        return None
+    hits: list[dict[str, Any]] = []
+    box_detail, box_reason = _box_race_pnl(snap, result, point_cost=100, box_size=5, meta={})
+    if box_reason == "ok" and box_detail is not None and box_detail["hit"]:
+        hits.append({"key": "box", "label": f"3連単BOX{box_detail['box']}頭",
+                     "payout": box_detail["payout"]})
+    for key, _label, _bt in STRATEGY_DEFS:
+        s = detail["per"][key]
+        if s["hit"]:
+            hits.append({"key": key, "label": STRATEGY_SHORT_LABELS.get(key, key),
+                         "payout": s["payout"]})
+    return hits
+
+
+def attach_hit_labels(doc: dict[str, Any]) -> dict[str, Any]:
+    """shobu result doc の各レースに `hit_strategies` (仮想購入の的中券種ラベル) を付与する。
+
+    scan file には結果が無い (結果はスキャン後に確定する) ので、配信時 (`get_shobu_result` /
+    refresh 応答) に snapshot + result から都度計算して載せる。snapshot/result 欠落・判定不能は
+    None のまま。doc を in-place 更新してそのまま返す。
+    """
+    for race in doc.get("races") or []:
+        race["hit_strategies"] = None
+        safe = _safe_race_id(race.get("race_id") or "")
+        if safe is None:
+            continue
+        snap_path = PRED_DIR / f"{safe}.json"
+        result_path = RESULT_DIR / f"{safe}.json"
+        if not (snap_path.exists() and result_path.exists()):
+            continue
+        try:
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            res = json.loads(result_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        race["hit_strategies"] = hit_bet_labels(snap, res)
+    return doc
 
 
 def _roi_block(races: int, races_hit: int, stake: int, payout: int) -> dict[str, Any]:
