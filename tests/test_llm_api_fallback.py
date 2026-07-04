@@ -1,8 +1,14 @@
 """claude -p usage limit → Anthropic API フォールバック (src/llm.py) のユニットテスト。
 
 すべて OFFLINE: claude CLI も Anthropic API も呼ばない。llm._spawn_claude /
-llm._api_stream を差し替えて「limit で結果が出ない → API へフォールバック」と
-「limit 以外の失敗ではフォールバックしない (従来挙動)」を検証する。
+llm._api_stream を差し替えて「result が出ない (timeout 以外) → API へフォールバック」と
+「timeout ではフォールバックしない (従来挙動)」を検証する。
+
+**2026-07-04 追記**: 実機で claude -p が usage limit 到達時に "usage limit" 等の既知テキストを
+一切出さず (assistant/result/error イベント無しのまま rc!=0 で落ちる) 挙動を確認し、旧来の
+「テキストが limit っぽいときだけフォールバック」gate では発火しない実障害が判明した。
+そのため gate は「limit_hit テキスト一致」ではなく「timeout 以外で result を得られなかったか」に
+変更した (limit_hit はログの理由表示のみに使う)。
 """
 from __future__ import annotations
 
@@ -84,12 +90,32 @@ def test_score_limit_in_result_event_triggers_fallback(monkeypatch):
     assert any("claude -p limit" in str(p) for t, p in events if t == "error")
 
 
-def test_score_no_fallback_on_non_limit_failure(monkeypatch):
-    """limit 以外の失敗 (rc=1 の一般エラー) ではフォールバックしない (従来挙動)。"""
+def test_score_falls_back_on_generic_failure(monkeypatch):
+    """limit と断定できない一般失敗 (rc=1, テキストに限定マーカー無し) でも result が無ければ
+    フォールバックする (2026-07-04 修正: テキスト一致必須の gate は実機の無言失敗を捉え損ねた)。"""
     monkeypatch.setattr(llm, "is_available", lambda: True)
     monkeypatch.setattr(
         llm, "_spawn_claude",
         lambda cmd: (_FakeProc([], returncode=1), io.StringIO("some other failure")))
+    monkeypatch.setattr(llm, "_api_stream", _fake_api_stream)
+    events = list(llm.score_horses_stream(_mk_race()))
+    results = [p for t, p in events if t == "result" and p]
+    assert results == ['{"scores": {"1": 80}}']
+
+
+class _NoopTimer:
+    def cancel(self):
+        pass
+
+
+def test_score_no_fallback_on_timeout(monkeypatch):
+    """timeout (`claude timeout`) は limit ではないのでフォールバックしない (従来どおり,
+    単に遅いだけの可能性がありフォールバックしても遅さは解決しないため)。"""
+    monkeypatch.setattr(llm, "is_available", lambda: True)
+    monkeypatch.setattr(
+        llm, "_spawn_claude",
+        lambda cmd: (_FakeProc([], returncode=None), io.StringIO()))
+    monkeypatch.setattr(llm, "_start_kill_timer", lambda proc, timeout: (_NoopTimer(), [True]))
     called = []
     monkeypatch.setattr(llm, "_api_stream",
                         lambda *a, **k: called.append(1) or iter(()))

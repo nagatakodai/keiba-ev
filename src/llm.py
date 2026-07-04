@@ -646,6 +646,7 @@ def score_horses_stream(
     timer, timed_out = _start_kill_timer(proc, timeout)
     saw_result = False
     limit_hit = False
+    was_timeout = False
     try:
         for raw in proc.stdout:
             line = raw.strip()
@@ -662,6 +663,13 @@ def score_horses_stream(
                         yield ("tool_use", {"name": block.get("name", ""), "input": block.get("input", {})})
                     elif block.get("type") == "text" and block.get("text"):
                         yield ("text", block["text"])
+            elif etype == "rate_limit_event":
+                # 実機確認 (2026-07-04): status=="rejected" でも overage 許可なら通常どおり
+                # 成功する (isUsingOverage=true)。overage も不可のときだけ実害が出るので、
+                # そのケースを検知フラグにする (fallback の gate には使わない・ログ精度用)。
+                info = ev.get("rate_limit_info") or {}
+                if info.get("status") == "rejected" and not info.get("isUsingOverage"):
+                    limit_hit = True
             elif etype == "result":
                 text = ev.get("result", "") or ""
                 # usage limit 到達時は result に短いエラーメッセージだけが乗ることがある →
@@ -680,12 +688,21 @@ def score_horses_stream(
         yield ("error", f"stream parse error: {e}")
     finally:
         for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=_err_f):
+            if ev[1] == "claude timeout":
+                was_timeout = True
             limit_hit = limit_hit or _looks_rate_limited(str(ev[1]))
             yield ev
-    # claude -p が usage limit で結果を出せなかった → Anthropic API へフォールバック
-    # (ユーザ指示 2026-07-04)。timeout 等の limit 以外の失敗では発火しない (従来挙動)。
-    if not saw_result and limit_hit and _api_fallback_enabled():
-        yield ("text", "[claude -p が usage limit → Anthropic API にフォールバック (web_search 付き)]")
+    # claude -p が result を出せなかった → Anthropic API へフォールバック (ユーザ指示 2026-07-04)。
+    # **2026-07-04 追記**: 実機で claude -p が usage limit 到達時に "usage limit" 等の
+    # 既知テキストを一切出さず (assistant/result/error イベント無しのまま stdout が閉じる) rc!=0 で
+    # 落ちる挙動を確認 (`_looks_rate_limited` が一切マッチせず fallback が発火しなかった実障害)。
+    # テキスト一致に頼らず **timeout 以外で result を得られなかった場合は無条件にフォールバック**する
+    # (limit_hit はログの理由表示にのみ使う。API 呼び出し自体は saw_result=False のときだけ = 通常運用の
+    # 課金は増えない)。timeout だけは従来どおり除外 (単に遅いだけの可能性があり、フォールバックしても
+    # 遅さは解決しないため)。
+    if not saw_result and not was_timeout and _api_fallback_enabled():
+        reason = "usage limit" if limit_hit else "result 取得失敗"
+        yield ("text", f"[claude -p が{reason}で終了 → Anthropic API にフォールバック (web_search 付き)]")
         yield from _api_stream(prompt, use_search=True, timeout=timeout)
 
 
@@ -1462,6 +1479,7 @@ def select_trifecta_stream(
     timer, timed_out = _start_kill_timer(proc, timeout)
     saw_result = False
     limit_hit = False
+    was_timeout = False
     try:
         for raw in proc.stdout:
             line = raw.strip()
@@ -1476,6 +1494,10 @@ def select_trifecta_stream(
                 for block in ev.get("message", {}).get("content", []) or []:
                     if block.get("type") == "text" and block.get("text"):
                         yield ("text", block["text"])
+            elif etype == "rate_limit_event":
+                info = ev.get("rate_limit_info") or {}
+                if info.get("status") == "rejected" and not info.get("isUsingOverage"):
+                    limit_hit = True
             elif etype == "result":
                 text = ev.get("result", "") or ""
                 if text and len(text) < 400 and _looks_rate_limited(text):
@@ -1492,11 +1514,16 @@ def select_trifecta_stream(
         yield ("error", f"stream parse error: {e}")
     finally:
         for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=_err_f):
+            if ev[1] == "claude timeout":
+                was_timeout = True
             limit_hit = limit_hit or _looks_rate_limited(str(ev[1]))
             yield ev
-    # usage limit で選定が出なかった → API フォールバック (検索なし・純粋推論なので低コスト/高速)。
-    if not saw_result and limit_hit and _api_fallback_enabled():
-        yield ("text", "[claude -p が usage limit → Anthropic API にフォールバック (検索なし)]")
+    # result が出なかった (timeout 以外) → API フォールバック (検索なし・純粋推論なので低コスト/高速)。
+    # 2026-07-04: テキスト一致 (limit_hit) 必須の gate は実機で claude -p の無言失敗を捉えられず
+    # 発火しなかったため撤去 (score_horses_stream と同じ理由、詳細はそちら参照)。
+    if not saw_result and not was_timeout and _api_fallback_enabled():
+        reason = "usage limit" if limit_hit else "result 取得失敗"
+        yield ("text", f"[claude -p が{reason}で終了 → Anthropic API にフォールバック (検索なし)]")
         yield from _api_stream(prompt, use_search=False, timeout=timeout, max_tokens=8_000)
 
 
