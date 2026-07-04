@@ -297,16 +297,22 @@ function shortTargetLabel(label: string): string {
 }
 
 // マトリクス 1 セル (状況 × 券種) の ROI 描画。最良=緑背景・確証=★・サンプル不足=淡色。
+// marketRoi (市場人気だけで券種を買った基準線) を渡すと、それを上回るセルに ▲ を付けて
+// 「Claude 指数戦略が単に人気を買うのに勝てているか」を一目で比較できるようにする。
 function MatrixCellTd({
   cell,
   isBest,
   floor,
+  marketRoi,
 }: {
   cell: MatrixCell;
   isBest: boolean;
   floor: number;
+  marketRoi?: number;
 }) {
   const enough = cell.legs >= floor;
+  const beatsMarket =
+    enough && marketRoi !== undefined && cell.legs > 0 && cell.roi > marketRoi;
   return (
     <td
       className={`px-2 py-1.5 text-right tnum align-middle ${
@@ -314,6 +320,11 @@ function MatrixCellTd({
       }`}
     >
       <div className="flex items-center justify-end gap-1">
+        {beatsMarket && (
+          <span className="text-sky-300 text-[10px]" title="市場人気だけで買った ROI を上回る">
+            ▲
+          </span>
+        )}
         <span
           className={
             !enough
@@ -340,13 +351,18 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
   const has = c.races > 0 && !!mx;
   const targets = mx?.targets ?? [];
   const floor = mx?.sample_floor ?? 8;
+  // 市場人気だけで券種を買った基準線 (key→ROI)。各セルの比較 (▲) に使う。
+  const marketRoiByKey: Record<string, number> = {};
+  for (const cell of mx?.market_baseline.cells ?? []) marketRoiByKey[cell.key] = cell.roi;
   // 参考行 (全体 / 市場人気) を本体行と同じ列構成で描くヘルパ。
+  // compareMarket=true の行 (全体) は各セルに ▲ (市場人気超) を付ける。市場人気行自身には付けない。
   const refRow = (
     label: string,
     n: number,
     cells: MatrixCell[],
     bestKey: string | null,
     tone: string,
+    compareMarket: boolean,
   ) => (
     <tr className={`border-t border-(--color-line) ${tone}`}>
       <td className="px-2 py-1.5">
@@ -361,6 +377,7 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
             cell={cell}
             isBest={bestKey === t.key}
             floor={floor}
+            marketRoi={compareMarket ? marketRoiByKey[t.key] : undefined}
           />
         ) : (
           <td key={t.key} className="px-2 py-1.5 text-right text-(--color-muted)">
@@ -424,6 +441,7 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
                             cell={cell}
                             isBest={r.best_key === t.key}
                             floor={floor}
+                            marketRoi={marketRoiByKey[t.key]}
                           />
                         ) : (
                           <td key={t.key} className="px-2 py-1.5 text-right text-(--color-muted)">
@@ -439,8 +457,16 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
                   mx.overall.cells,
                   mx.overall.best_key,
                   "text-(--color-muted)",
+                  true,
                 )}
-                {refRow("市場人気 (参考)", mx.market_baseline.n, mx.market_baseline.cells, null, "text-(--color-muted)")}
+                {refRow(
+                  "市場人気だけで購入 (基準線)",
+                  mx.market_baseline.n,
+                  mx.market_baseline.cells,
+                  null,
+                  "text-sky-200/80",
+                  false,
+                )}
               </tbody>
             </table>
           </div>
@@ -455,10 +481,13 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
             {data.history.length}件 蓄積
           </span>
           <span>
-            ※ 各セル = その状況で券種を上位指数馬で買った ROI (下段=レース数)。
+            ※ 各セル = その状況で券種を Claude 指数上位馬で買った ROI (下段=レース数)。
             <span className="text-emerald-200">緑=その状況の最良</span>・
-            ★=ROIの95%CI下限が100%超 (確定的に+EV)。{floor}R 未満のセルは信頼できないため淡色・
-            推奨から除外。「市場人気(参考)」= 各券種を市場指数順の上位馬で買った基準線。
+            ★=ROIの95%CI下限が100%超 (確定的に+EV)・
+            <span className="text-sky-300">▲=「市場人気だけで購入 (基準線)」の同券種 ROI を上回る</span>。
+            {floor}R 未満のセルは信頼できないため淡色・推奨から除外。
+            <span className="text-sky-200/80">「市場人気だけで購入 (基準線)」</span>= 各券種を
+            市場指数順の上位馬で機械的に買った ROI (Claude 戦略が単に人気を買うのに勝てているかの比較対象)。
           </span>
         </div>
       </div>
