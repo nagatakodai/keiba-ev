@@ -885,6 +885,81 @@ export type MarketAgreementResponse = {
   appends: number;
 };
 
+// プレレジ (事前登録) シグナルルール (GET /api/shobu/signal-rules, 2026-07-05)。
+// 研究中シグナルで見つけたルールを定義固定し、**登録日以降のレースのみ** の ROI + CI で
+// 確証★ (CI下限>1.0) / 破綻 (CI上限<1.0) を自動判定する (bin-selection 対策)。
+export type SignalRuleStats = {
+  races: number;
+  hits: number;
+  stake: number;
+  payout: number;
+  roi: number;
+  roi_ci_low: number;
+  roi_ci_high: number;
+  drop_best_roi?: number; // 最大払戻1レースを除いた ROI (単発依存の検出・insample のみ)
+};
+export type SignalRule = {
+  key: string;
+  label: string;
+  strategy: string; // STRATEGY_DEFS の key (place2 等)
+  strategy_label: string; // 短縮表示名 (複勝2 等)
+  condition_label: string; // 発走前条件の説明
+  registered_at: string; // プレレジ日 (YYYY-MM-DD, これ以降が prospective)
+  discovery: string; // 発見時の in-sample 所見 (参考)
+  consensus: boolean | null; // 条件: Claude#1==市場1番人気 (null=不問)
+  style: boolean | null; // 条件: 拮抗型=true / 本命型=false (null=不問)
+  venue: boolean | null; // 条件: JRA=true / NAR=false (null=不問)
+  min_runners: number | null;
+  max_runners: number | null;
+  skip_dead_cell: boolean; // 拮抗型×市場不一致 (死にセル) を見送る規律ルール
+  insample: SignalRuleStats; // 全期間 (発見データ込み・楽観) — 参考
+  prospective: SignalRuleStats; // 登録後のみ — 確証判定はこちらだけ
+  market_baseline: { races: number; roi: number }; // 同条件で市場人気順に同じ買い方 (基準線)
+  status: "accumulating" | "promising" | "confirmed" | "broken";
+  status_label: string; // 蓄積中 / 有望 / 確証★ / 破綻
+};
+export type SignalWalkforward = SignalRuleStats & {
+  key: string;
+  label: string;
+  chosen: Record<string, number>; // 追従で選ばれたターゲット券種の回数
+};
+export type SignalRules = {
+  point_cost: number;
+  races: number;
+  min_confirm: number; // 確証に必要な登録後レース数
+  min_broken: number;
+  rules: SignalRule[];
+  dead_cell: {
+    label: string;
+    n: number;
+    targets: Array<{
+      key: string;
+      label: string;
+      dead_roi: number;
+      dead_races: number;
+      alive_roi: number;
+      alive_races: number;
+    }>;
+  };
+  walkforward: SignalWalkforward[];
+  last_updated_at: string | null;
+  sample_warning: boolean;
+};
+export type SignalRulesResponse = {
+  current: SignalRules;
+  history: Array<{
+    recorded_at: string;
+    races: number;
+    rules: Array<{
+      key: string;
+      status: string;
+      prospective: { races: number; roi: number; roi_ci_low: number; roi_ci_high: number };
+    }>;
+    walkforward: Array<{ key: string; races: number; roi: number }>;
+  }>;
+  appends: number;
+};
+
 export type ShobuScanRequest = {
   date?: string | null;
   race_type?: "all" | "jra" | "nar" | "banei";
@@ -983,6 +1058,8 @@ export const api = {
   // 市場一致シグナル (Claude#1==市場1番人気で券種ROI分割) の現在値 + 蓄積履歴。
   marketAgreement: () =>
     jsonFetch<MarketAgreementResponse>("/api/shobu/market-agreement"),
+  // プレレジ済シグナルルールの検証状況 (登録後データのみで確証判定) + walk-forward ガードレール。
+  signalRules: () => jsonFetch<SignalRulesResponse>("/api/shobu/signal-rules"),
   // 予測分析履歴の結果 自動取得ループの状態 (make api 稼働中に 5 分毎)。
   getResultsAuto: () => jsonFetch<ResultsAutoStatus>(`/api/results/auto`),
 

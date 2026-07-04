@@ -1771,27 +1771,20 @@ def _matrix_cells(rows: list[dict[str, Any]], floor: int) -> tuple[list[dict[str
     return cells, best
 
 
-def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
-    """**市場一致シグナル + 買い方マトリクス**: 観測可能な発走前条件の組合せ毎に最良の買い方を見る。
+def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
+    """市場非依存 (β除外) の shobu 評価レースに 発走前条件タグ + 戦略脚 を付けた共通レコード列。
 
-    市場非依存 (β除外) の shobu 評価レースを、3 つの二値条件でタグ付けする:
-      - consensus: Claude 1位 == 市場1番人気 (一致) か
-      - style: 市場 top2 の implied 勝率比が `_FAVORITE_RATIO_THRESHOLD` 倍未満=拮抗型 / 以上=本命型
-      - venue: JRA (中央) か NAR (地方・banei 含む) か
-    `matrix` はこの 2^3=8 状況を行、`_AGREEMENT_TARGETS` (馬連/組合せ/3連複BOX/本命系) を列に、
-    各セルの ROI と bootstrap CI を出し、状況毎の最良の買い方 (`best_key`) と確証 (CI下限>1.0) を示す。
-    参考行として `overall` (条件なし全レース) と `market_baseline` (市場人気順で同じ買い方) を付ける。
-
-    `metrics` (Claude#1==市場1番人気の agree/disagree 1次元スプリット + Δ CI) は後方互換で残す
-    (per-race 買い方ガイド `web/lib/betGuide.ts` が現在値を参照する)。
-    `append_market_agreement_history` が結果取得ごとに現在値を時系列保存し確証まで蓄積する。
+    `compute_market_agreement` (買い方マトリクス) と `compute_signal_rules` (プレレジ検証 +
+    walk-forward ガードレール) が共有するローダ。各レコード:
+      - rid / ts (start_at unix, 無ければ 0) / date (発走日の JST YYYY-MM-DD、ts 無しは
+        スキャン日 _generated_at で補完) / recorded_at (結果保存時刻)
+      - flags: {consensus: Claude#1==市場1番人気, style: 拮抗型=True, venue: JRA=True}
+      - n_runners / per (Claude 指数順の戦略脚) / mper (市場人気順で同じ買い方、組めなければ None)
+    **ts 昇順で返す** (walk-forward がそのまま時系列で歩ける)。
     """
+    import datetime as _dt
     by_race = _shobu_eval_races(False)
-    agree_rows: list[dict[str, Any]] = []
-    disagree_rows: list[dict[str, Any]] = []
-    tagged: list[tuple[dict[str, bool], dict[str, Any]]] = []   # (条件フラグ, per) 全レース
-    market_rows: list[dict[str, Any]] = []     # 市場人気ベースライン (市場指数順で同じ買い方)
-    last_updated_at: str | None = None
+    records: list[dict[str, Any]] = []
     for rid, race in by_race.items():
         safe = _safe_race_id(rid)
         if safe is None:
@@ -1815,7 +1808,6 @@ def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
                                              meta={"race_id": rid})
         if reason != "ok" or detail is None:
             continue
-        per = detail["per"]
         # 3 条件でタグ付け (フラグ True → 高ラベル側)。
         agree = max(idx, key=idx.get) == max(mkt, key=mkt.get)
         ms = sorted(mkt.values(), reverse=True)
@@ -1823,17 +1815,68 @@ def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
         p2 = (ms[1] / 100.0) ** _MARKET_INDEX_T
         competitive = not (p2 > 0 and (p1 / p2) >= _FAVORITE_RATIO_THRESHOLD)  # 拮抗型=True
         jra = race.get("race_type") == "jra"
-        tagged.append(({"consensus": agree, "style": competitive, "venue": jra}, per))
-        (agree_rows if agree else disagree_rows).append(per)
         # 市場人気ベースライン: 市場指数順の上位馬で同じ買い方 (オッズ/フィルタ/的中は共通ロジック)。
+        mper: dict[str, Any] | None = None
         market_ranked = [num for num, _mi in sorted(mkt.items(), key=lambda kv: (-kv[1], kv[0]))]
         if len(market_ranked) >= 3:
             mdetail, mreason = _strategy_race_legs(
                 snap, result, point_cost=point_cost, meta={"race_id": rid},
                 ranking=market_ranked)
             if mreason == "ok" and mdetail is not None:
-                market_rows.append(mdetail["per"])
+                mper = mdetail["per"]
+        ts = race.get("start_at") or 0
+        if ts:
+            date = _dt.datetime.fromtimestamp(
+                ts, _dt.timezone(_dt.timedelta(hours=9))).date().isoformat()
+        else:
+            date = (race.get("_generated_at") or "")[:10]
         r_ts = result.get("recorded_at")
+        records.append({
+            "rid": rid,
+            "ts": ts,
+            "date": date,
+            "recorded_at": r_ts if isinstance(r_ts, str) else None,
+            "flags": {"consensus": agree, "style": competitive, "venue": jra},
+            "n_runners": detail.get("n_runners") or 0,
+            "per": detail["per"],
+            "mper": mper,
+        })
+    records.sort(key=lambda r: (r["ts"], r["rid"]))
+    return records
+
+
+def compute_market_agreement(point_cost: int = 100) -> dict[str, Any]:
+    """**市場一致シグナル + 買い方マトリクス**: 観測可能な発走前条件の組合せ毎に最良の買い方を見る。
+
+    市場非依存 (β除外) の shobu 評価レースを、3 つの二値条件でタグ付けする:
+      - consensus: Claude 1位 == 市場1番人気 (一致) か
+      - style: 市場 top2 の implied 勝率比が `_FAVORITE_RATIO_THRESHOLD` 倍未満=拮抗型 / 以上=本命型
+      - venue: JRA (中央) か NAR (地方・banei 含む) か
+    `matrix` はこの 2^3=8 状況を行、`_AGREEMENT_TARGETS` (馬連/組合せ/3連複BOX/本命系) を列に、
+    各セルの ROI と bootstrap CI を出し、状況毎の最良の買い方 (`best_key`) と確証 (CI下限>1.0) を示す。
+    参考行として `overall` (条件なし全レース) と `market_baseline` (市場人気順で同じ買い方) を付ける。
+
+    `metrics` (Claude#1==市場1番人気の agree/disagree 1次元スプリット + Δ CI) は後方互換で残す
+    (per-race 買い方ガイド `web/lib/betGuide.ts` が現在値を参照する)。
+    `append_market_agreement_history` が結果取得ごとに現在値を時系列保存し確証まで蓄積する。
+
+    ⚠ **このマトリクスの in-sample best セルをそのまま追従しても勝てない** ことが walk-forward
+    (`compute_signal_rules` の walkforward ブロック, look-ahead なし) で実測済 (2026-07-05,
+    105R: 追従 ROI 48-66% < 馬連固定 78%)。セルの数字は「発見の場」であり、行動に移すのは
+    プレレジ (`SIGNAL_RULES`) で登録後データの確証が取れたルールのみ。
+    """
+    agree_rows: list[dict[str, Any]] = []
+    disagree_rows: list[dict[str, Any]] = []
+    tagged: list[tuple[dict[str, bool], dict[str, Any]]] = []   # (条件フラグ, per) 全レース
+    market_rows: list[dict[str, Any]] = []     # 市場人気ベースライン (市場指数順で同じ買い方)
+    last_updated_at: str | None = None
+    for rec in _tagged_eval_races(point_cost):
+        per = rec["per"]
+        tagged.append((rec["flags"], per))
+        (agree_rows if rec["flags"]["consensus"] else disagree_rows).append(per)
+        if rec["mper"] is not None:
+            market_rows.append(rec["mper"])
+        r_ts = rec["recorded_at"]
         if isinstance(r_ts, str) and (last_updated_at is None or r_ts > last_updated_at):
             last_updated_at = r_ts
 
@@ -1931,6 +1974,321 @@ def market_agreement_history(limit: int = 200) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
         for line in MARKET_AGREEMENT_HISTORY.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
+# ─── プレレジ (事前登録) シグナルルール + walk-forward ガードレール (2026-07-05) ─────────
+#
+# 「研究中シグナルで回収率を上げる」正攻法: マトリクスの in-sample best セルは bin-selection
+# (trio1234box 失効・馬連202%セルの v2 時代 36% 崩壊と同型) なので**追従しない**。代わりに
+#   1. 発見したルールを **定義固定 (プレレジ)** して registered_at を刻む
+#   2. **登録日以降のレースのみ** で ROI + bootstrap CI を蓄積 (= 真の out-of-sample)
+#   3. prospective n ≥ SIGNAL_RULE_MIN_CONFIRM かつ CI 下限 > 1.0 で初めて「確証★」
+#   4. CI 上限 < 1.0 になったら「破綻」= ルール棄却 (負けを引きずらない)
+# walk-forward ブロックは「マトリクスをそのまま追従したら?」の正直な成績を常時併記し、
+# セル追従が機能しない事実をダッシュボードで見えるようにする (誤用ガードレール)。
+
+SIGNAL_RULES_HISTORY = ROOT / "data" / "cache" / "signal_rules_history.jsonl"
+
+SIGNAL_RULE_MIN_CONFIRM = 30   # 確証 (CI下限>1.0) に必要な登録後レース数
+SIGNAL_RULE_MIN_BROKEN = 20    # 破綻 (CI上限<1.0) を宣言できる登録後レース数
+
+# ルール定義は **凍結** (registered_at を変えない限り条件・戦略を書き換えない)。変更したい場合は
+# 新しい key で登録し直す (= プレレジのやり直し)。discovery は発見時 in-sample の参考値。
+SIGNAL_RULES: list[dict[str, Any]] = [
+    {"key": "place2_bigfield", "label": "複勝2 × 多頭数",
+     "strategy": "place2", "condition_label": "出走12頭以上",
+     "registered_at": "2026-07-05", "min_runners": 12,
+     "discovery": "発見時105R: ROI 123% (n=31, drop-best 105%) — 唯一 drop-best 後も100%超"},
+    {"key": "place2_bigfield_agree", "label": "複勝2 × 多頭数 × 市場一致",
+     "strategy": "place2", "condition_label": "出走12頭以上 かつ Claude#1=市場1番人気",
+     "registered_at": "2026-07-05", "min_runners": 12, "consensus": True,
+     "discovery": "発見時105R: ROI 162% (n=15, drop-best 126%)"},
+    {"key": "place1_consensus", "label": "複勝1 × 市場一致",
+     "strategy": "place1", "condition_label": "Claude#1=市場1番人気",
+     "registered_at": "2026-07-05", "consensus": True,
+     "discovery": "発見時105R: ROI 98% (n=16, 前半85%/後半111%と安定・不一致側複勝は56%)"},
+    {"key": "win1_smallfield", "label": "単勝1 × 少頭数",
+     "strategy": "win1", "condition_label": "出走8頭以下",
+     "registered_at": "2026-07-05", "max_runners": 8,
+     "discovery": "発見時105R: ROI 123% (n=12, drop-best 92% = 単発依存の疑い)"},
+    {"key": "quinella12_alive", "label": "馬連1-2 × 死にセル回避",
+     "strategy": "quinella12", "condition_label": "拮抗型×市場不一致 のレースは見送り",
+     "registered_at": "2026-07-05", "skip_dead_cell": True,
+     "discovery": "発見時105R: 回避後 ROI 96% (n=67) vs 死にセル 47% (n=38) — 見送り規律"},
+    {"key": "quinella12_agree_honmei_nar", "label": "馬連1-2 × 一致×本命型×NAR",
+     "strategy": "quinella12", "condition_label": "Claude#1=市場1番人気 かつ 本命型 かつ NAR",
+     "registered_at": "2026-07-05", "consensus": True, "style": False, "venue": False,
+     "discovery": "発見時105R: ROI 202% だが drop-best 106%・v2時代36% (マトリクス紙面上の主役の追試)"},
+]
+
+
+def _rule_matches(rule: dict[str, Any], rec: dict[str, Any]) -> bool:
+    """プレレジルールの発走前条件がレコードに合致するか (すべて発走前に観測可能な条件のみ)。"""
+    f = rec["flags"]
+    n = rec.get("n_runners") or 0
+    for dim in ("consensus", "style", "venue"):
+        want = rule.get(dim)
+        if want is not None and f[dim] != want:
+            return False
+    mn = rule.get("min_runners")
+    if mn is not None and n < mn:
+        return False
+    mx = rule.get("max_runners")
+    if mx is not None and (n <= 0 or n > mx):
+        return False
+    if rule.get("skip_dead_cell") and (f["style"] and not f["consensus"]):
+        return False   # 死にセル (拮抗型 × 市場不一致) は見送り
+    return True
+
+
+def _signal_stats(pairs: list[tuple[int, int]], *, with_drop_best: bool = False) -> dict[str, Any]:
+    """レース単位 (stake, payout) 列の ROI 統計ブロック (+CI, 任意で drop-best)。"""
+    stake = sum(p[0] for p in pairs)
+    payout = sum(p[1] for p in pairs)
+    roi = payout / stake if stake else 0.0
+    lo, hi = _roi_ci(pairs)
+    out = {
+        "races": len(pairs),
+        "hits": sum(1 for p in pairs if p[1] > 0),
+        "stake": stake,
+        "payout": payout,
+        "roi": roi,
+        "roi_ci_low": lo,
+        "roi_ci_high": hi,
+    }
+    if with_drop_best:
+        # 最大払戻1レースを除いた ROI (単発ジャックポット依存の検出)。
+        if len(pairs) >= 2:
+            best_i = max(range(len(pairs)), key=lambda i: pairs[i][1] - pairs[i][0])
+            out["drop_best_roi"] = _roi_of([p for i, p in enumerate(pairs) if i != best_i])
+        else:
+            out["drop_best_roi"] = 0.0
+    return out
+
+
+def _rule_status(prospective: dict[str, Any]) -> tuple[str, str]:
+    """登録後 (prospective) 統計からルール状態を判定する。
+
+    確証★ = n ≥ SIGNAL_RULE_MIN_CONFIRM かつ ROI CI 下限 > 1.0 (登録後データだけで +EV 確定)。
+    破綻 = n ≥ SIGNAL_RULE_MIN_BROKEN かつ CI 上限 < 1.0 (登録後データで -EV 確定 → 棄却)。
+    有望 = n ≥ MIN_CONFIRM かつ ROI > 1.0 だが CI 未達。それ以外は蓄積中。
+    """
+    n = prospective["races"]
+    if n >= SIGNAL_RULE_MIN_CONFIRM and prospective["roi_ci_low"] > 1.0:
+        return "confirmed", "確証★"
+    if n >= SIGNAL_RULE_MIN_BROKEN and prospective["roi_ci_high"] < 1.0:
+        return "broken", "破綻"
+    if n >= SIGNAL_RULE_MIN_CONFIRM and prospective["roi"] > 1.0:
+        return "promising", "有望"
+    return "accumulating", "蓄積中"
+
+
+def _walkforward_matrix(records: list[dict[str, Any]], *, floor: int,
+                        fallback_overall: bool) -> dict[str, Any]:
+    """買い方マトリクス追従の walk-forward 成績 (look-ahead なし・O(N) 逐次更新)。
+
+    各レース t で「t より前のレースのみ」からセル (consensus×style×venue) 毎の
+    ターゲット券種 ROI を集計し、`floor` レース以上あるターゲットのうち ROI 最大を賭ける。
+    `fallback_overall=True` はセルのサンプル不足時に全体 (条件なし) の best へフォールバック。
+    accumulator は**賭けた後に**当該レースを反映するので未来情報は一切使わない。
+    """
+    acc_new = lambda: {k: [0, 0, 0] for k, _l, _ks in _AGREEMENT_TARGETS}  # n/stake/payout
+    cell_acc: dict[tuple[bool, bool, bool], dict[str, list[int]]] = {}
+    overall_acc = acc_new()
+
+    def _best(acc: dict[str, list[int]]) -> str | None:
+        best_key, best_roi = None, -1.0
+        for key, _lbl, _keys in _AGREEMENT_TARGETS:
+            n, stk, pay = acc[key]
+            if n < floor or stk <= 0:
+                continue
+            roi = pay / stk
+            if roi > best_roi:
+                best_key, best_roi = key, roi
+        return best_key
+
+    keys_of = {k: ks for k, _l, ks in _AGREEMENT_TARGETS}
+    pairs: list[tuple[int, int]] = []
+    chosen: dict[str, int] = {}
+    for rec in records:
+        f = rec["flags"]
+        sig = (f["consensus"], f["style"], f["venue"])
+        acc = cell_acc.setdefault(sig, acc_new())
+        pick = _best(acc)
+        if pick is None and fallback_overall:
+            pick = _best(overall_acc)
+        if pick is not None:
+            got = _agreement_pairs([rec["per"]], keys_of[pick])
+            if got:
+                pairs.append(got[0])
+                chosen[pick] = chosen.get(pick, 0) + 1
+        # 賭けた後に反映 (look-ahead 防止)。
+        for key, _lbl, ks in _AGREEMENT_TARGETS:
+            got = _agreement_pairs([rec["per"]], ks)
+            if got:
+                for a in (acc[key], overall_acc[key]):
+                    a[0] += 1
+                    a[1] += got[0][0]
+                    a[2] += got[0][1]
+    stats = _signal_stats(pairs, with_drop_best=True)
+    stats["chosen"] = dict(sorted(chosen.items(), key=lambda kv: -kv[1]))
+    return stats
+
+
+def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
+    """プレレジ済シグナルルールの検証状況 + walk-forward ガードレール (2026-07-05)。
+
+    各ルールについて:
+      - insample: 全期間 (発見期間込み) の ROI — **参考値** (発見に使ったデータなので楽観)
+      - prospective: **registered_at 以降の発走日レースのみ** の ROI + CI — 確証判定はこちらだけ
+      - market_baseline: 同条件で市場人気順に同じ買い方をした ROI (Claude 指数の付加価値の基準線)
+      - status: accumulating / promising / confirmed★ / broken (判定は `_rule_status`)
+    `dead_cell` は見送り規律 (拮抗型×市場不一致) の根拠表示用、`walkforward` はマトリクス
+    best セル追従の正直な成績 (これが 100% を大きく割る限りセル追従は機能していない)。
+    """
+    records = _tagged_eval_races(point_cost)
+    rules_out: list[dict[str, Any]] = []
+    for rule in SIGNAL_RULES:
+        keys = [rule["strategy"]]
+        matched = [r for r in records if _rule_matches(rule, r)]
+        all_pairs = [got[0] for r in matched if (got := _agreement_pairs([r["per"]], keys))]
+        pros_pairs = [got[0] for r in matched
+                      if r["date"] and r["date"] >= rule["registered_at"]
+                      and (got := _agreement_pairs([r["per"]], keys))]
+        mkt_pairs = [got[0] for r in matched if r["mper"] is not None
+                     and (got := _agreement_pairs([r["mper"]], keys))]
+        insample = _signal_stats(all_pairs, with_drop_best=True)
+        prospective = _signal_stats(pros_pairs)
+        status, status_label = _rule_status(prospective)
+        rules_out.append({
+            "key": rule["key"],
+            "label": rule["label"],
+            "strategy": rule["strategy"],
+            "strategy_label": STRATEGY_SHORT_LABELS.get(rule["strategy"], rule["strategy"]),
+            "condition_label": rule["condition_label"],
+            "registered_at": rule["registered_at"],
+            "discovery": rule.get("discovery") or "",
+            "consensus": rule.get("consensus"),
+            "style": rule.get("style"),
+            "venue": rule.get("venue"),
+            "min_runners": rule.get("min_runners"),
+            "max_runners": rule.get("max_runners"),
+            "skip_dead_cell": bool(rule.get("skip_dead_cell")),
+            "insample": insample,
+            "prospective": prospective,
+            "market_baseline": {
+                "races": len(mkt_pairs),
+                "roi": _roi_of(mkt_pairs) if mkt_pairs else 0.0,
+            },
+            "status": status,
+            "status_label": status_label,
+        })
+
+    # 見送り規律の根拠: 死にセル (拮抗型 × 市場不一致) vs それ以外 のターゲット別 ROI。
+    dead = [r for r in records if r["flags"]["style"] and not r["flags"]["consensus"]]
+    alive = [r for r in records if not (r["flags"]["style"] and not r["flags"]["consensus"])]
+    dead_targets = []
+    for key, label, ks in _AGREEMENT_TARGETS:
+        dp = _agreement_pairs([r["per"] for r in dead], ks)
+        ap = _agreement_pairs([r["per"] for r in alive], ks)
+        dead_targets.append({
+            "key": key, "label": label,
+            "dead_roi": _roi_of(dp) if dp else 0.0, "dead_races": len(dp),
+            "alive_roi": _roi_of(ap) if ap else 0.0, "alive_races": len(ap),
+        })
+
+    walkforward = []
+    for wf_key, wf_label, kw in (
+        ("matrix_best", "マトリクス best セル追従 (セル n≥floor のみ賭ける)",
+         {"floor": _MATRIX_SAMPLE_FLOOR, "fallback_overall": False}),
+        ("matrix_best_fallback", "同上 + セル不足時は全体 best へフォールバック",
+         {"floor": _MATRIX_SAMPLE_FLOOR, "fallback_overall": True}),
+    ):
+        stats = _walkforward_matrix(records, **kw)
+        walkforward.append({"key": wf_key, "label": wf_label, **stats})
+
+    last_updated_at: str | None = None
+    for r in records:
+        ts = r["recorded_at"]
+        if isinstance(ts, str) and (last_updated_at is None or ts > last_updated_at):
+            last_updated_at = ts
+    return {
+        "point_cost": point_cost,
+        "races": len(records),
+        "min_confirm": SIGNAL_RULE_MIN_CONFIRM,
+        "min_broken": SIGNAL_RULE_MIN_BROKEN,
+        "rules": rules_out,
+        "dead_cell": {
+            "label": "拮抗型 × 市場不一致 (死にセル)",
+            "n": len(dead),
+            "targets": dead_targets,
+        },
+        "walkforward": walkforward,
+        "last_updated_at": last_updated_at,
+        "sample_warning": len(records) < 50,
+    }
+
+
+def append_signal_rules_history() -> dict[str, Any] | None:
+    """プレレジルールの現在値を history (jsonl) に追記 (結果取得ループから毎回呼ばれる)。
+
+    `races` が前回 entry と同じなら no-op (新しい結果が無い)。確証★/破綻 への遷移が
+    後から時系列で追えるよう、登録後 (prospective) 統計と状態だけを compact に残す。
+    """
+    cur = compute_signal_rules()
+    if cur["races"] == 0:
+        return None
+    last_races = None
+    if SIGNAL_RULES_HISTORY.exists():
+        try:
+            lines = SIGNAL_RULES_HISTORY.read_text(encoding="utf-8").splitlines()
+            if lines:
+                last_races = json.loads(lines[-1]).get("races")
+        except (OSError, json.JSONDecodeError, ValueError):
+            last_races = None
+    if last_races == cur["races"]:
+        return None
+    import datetime as _dt
+    row = {
+        "recorded_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "races": cur["races"],
+        "rules": [
+            {"key": r["key"], "status": r["status"],
+             "prospective": {
+                 "races": r["prospective"]["races"],
+                 "roi": round(r["prospective"]["roi"], 4),
+                 "roi_ci_low": round(r["prospective"]["roi_ci_low"], 4),
+                 "roi_ci_high": round(r["prospective"]["roi_ci_high"], 4),
+             }}
+            for r in cur["rules"]
+        ],
+        "walkforward": [
+            {"key": w["key"], "races": w["races"], "roi": round(w["roi"], 4)}
+            for w in cur["walkforward"]
+        ],
+    }
+    SIGNAL_RULES_HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    with open(SIGNAL_RULES_HISTORY, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return row
+
+
+def signal_rules_history(limit: int = 200) -> list[dict[str, Any]]:
+    """蓄積済のプレレジルール検証時系列 (古→新、最大 limit 件)。"""
+    if not SIGNAL_RULES_HISTORY.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in SIGNAL_RULES_HISTORY.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line:
                 try:

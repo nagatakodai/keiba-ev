@@ -24,6 +24,7 @@ import {
   combinedGuide,
   fieldSizeGuide,
   marketAgreementGuide,
+  raceSignalRuleGuide,
 } from "@/lib/betGuide";
 import { OddsTimelineCard, type LateMoneySnapshot } from "./OddsTimelineCard";
 import { OddsRefreshButton } from "./OddsRefreshButton";
@@ -39,6 +40,7 @@ import { isEvMeasured,
   type PredictionDetail,
   type PredictionRow,
   type RecommendedBundle,
+  type SignalRules,
 } from "@/lib/api";
 
 // race_id は backend で `${cup_id}-${schedule_index}-${race_number}` 形式
@@ -129,12 +131,19 @@ export default async function PredictionDetailPage({
   } catch {
     notFound();
   }
-  // 市場一致シグナル (Claude#1==市場1番人気で券種ROIを分割した蓄積値)。このレースが一致/不一致の
-  // どちら側か + その状態で伸びる傾向の券種を Claude 指数カードのガイドに出す。取得失敗は無視。
-  const marketAgreement: MarketAgreement | null = await api
-    .marketAgreement()
-    .then((r) => r.current)
-    .catch(() => null);
+  // 市場一致シグナル (Claude#1==市場1番人気で券種ROIを分割した蓄積値) + プレレジ済シグナル
+  // ルール (このレースで発火する定義固定ルール)。取得失敗は無視 (ガイド無しで描画)。
+  const [marketAgreement, signalRules]: [MarketAgreement | null, SignalRules | null] =
+    await Promise.all([
+      api
+        .marketAgreement()
+        .then((r) => r.current)
+        .catch(() => null),
+      api
+        .signalRules()
+        .then((r) => r.current)
+        .catch(() => null),
+    ]);
 
   const topByPxo = [...d.rows].sort((a, b) => b.px_o - a.px_o).slice(0, 30);
   // 推定当選率ランキング: 3連単 (d.rows) から推定P上位20。
@@ -241,6 +250,8 @@ export default async function PredictionDetailPage({
           scoredAt={d.llm_scored_at}
           hasClaude={!d.llm_fallback}
           agreement={marketAgreement}
+          signalRules={signalRules}
+          venueName={d.venue_name}
           nRunners={d.n_runners ?? d.index_compare.length}
         />
       )}
@@ -1248,6 +1259,8 @@ function IndexCompareCard({
   scoredAt,
   hasClaude,
   agreement,
+  signalRules,
+  venueName,
   nRunners,
 }: {
   items: NonNullable<PredictionDetail["index_compare"]>;
@@ -1255,6 +1268,8 @@ function IndexCompareCard({
   scoredAt?: string | null;
   hasClaude?: boolean;
   agreement?: MarketAgreement | null;
+  signalRules?: SignalRules | null;
+  venueName?: string | null;
   nRunners?: number | null;
 }) {
   const finishSet = new Set(finish ?? []);
@@ -1268,6 +1283,8 @@ function IndexCompareCard({
   const field = fieldSizeGuide(nRunners);
   // 総合ガイド (#1抜け × 市場一致 × 頭数 → 1行の推奨券種 or 見送り)。3信号を統合した結論。
   const combined = hasClaude ? combinedGuide(items, nRunners) : null;
+  // プレレジ済シグナルルール: このレースで条件成立中のルール + 死にセル (見送りゾーン) 判定。
+  const sig = hasClaude ? raceSignalRuleGuide(items, nRunners, venueName, signalRules) : null;
   const combinedToneClass: Record<string, string> = {
     good: "border-emerald-400/50 bg-emerald-400/10",
     info: "border-sky-400/50 bg-sky-400/10",
@@ -1288,6 +1305,59 @@ function IndexCompareCard({
         </span>
       }
     >
+      {sig && (sig.deadCell || sig.fired.length > 0) && (
+        <div
+          className={`mb-3 rounded-lg border px-3 py-2 ${
+            sig.deadCell
+              ? "border-rose-500/50 bg-rose-500/10"
+              : sig.fired.some((f) => f.status === "confirmed")
+                ? "border-emerald-400/50 bg-emerald-400/10"
+                : "border-(--color-line) bg-(--color-surface-2)/40"
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="px-1.5 py-0.5 rounded text-xs font-black bg-(--color-foreground)/10">
+              プレレジ
+            </span>
+            {sig.deadCell ? (
+              <>
+                <span className="px-1.5 py-0.5 rounded text-xs font-black bg-rose-500/20 text-rose-300">
+                  見送りゾーン
+                </span>
+                <span className="text-xs text-(--color-muted)">
+                  拮抗型 × 市場不一致 (死にセル) — 発見時実測で全券種が沈む状況。賭けない。
+                </span>
+              </>
+            ) : (
+              sig.fired.map((f) => (
+                <span
+                  key={f.rule.key}
+                  title={`${f.rule.condition_label} → ${f.rule.strategy_label}。${f.rule.discovery}`}
+                  className={`px-1.5 py-0.5 rounded text-[11px] font-bold whitespace-nowrap ${
+                    f.status === "confirmed"
+                      ? "bg-emerald-400/20 text-emerald-300"
+                      : f.status === "promising"
+                        ? "bg-sky-400/20 text-sky-300"
+                        : "bg-(--color-surface-2) text-(--color-muted) border border-(--color-line)"
+                  }`}
+                >
+                  {f.rule.label}
+                  {f.status === "confirmed" ? " ★" : ""}
+                  <span className="ml-1 font-normal tnum">
+                    {f.prospectiveRaces > 0
+                      ? `登録後 ${Math.round(f.prospectiveRoi * 100)}% (${f.prospectiveRaces}R)`
+                      : "登録後 0R"}
+                  </span>
+                </span>
+              ))
+            )}
+          </div>
+          <p className="mt-1 text-[10px] text-(--color-muted)">
+            ※ プレレジ済ルール (定義凍結・登録後データのみで確証判定)。★=確証 (登録後CI下限&gt;100%)
+            のみ行動根拠、他は蓄積中の参考。ダッシュボードの「プレレジ検証」カードが台帳。
+          </p>
+        </div>
+      )}
       {combined && (
         <div
           className={`mb-3 rounded-lg border-2 px-3 py-2 ${

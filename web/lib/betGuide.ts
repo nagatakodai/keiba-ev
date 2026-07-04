@@ -5,7 +5,7 @@
 //   上位が拮抗する (差が小) ほど **組合せ系** (馬連 / 馬単 / ワイド) の回収率が上がる傾向。
 // ただし標本が小さく **統計的に有意ではない** (Δ の 95%CI が 0 を跨ぐものが大半)。あくまで参考。
 
-import type { MarketAgreement } from "@/lib/api";
+import type { MarketAgreement, SignalRule, SignalRules } from "@/lib/api";
 import type { BadgeTone } from "@/components/ui";
 
 // この pt 以上の「1位−2位 指数差」で本命型とみなす (分析の median=8 を閾値に採用)。
@@ -123,6 +123,87 @@ export function marketAgreementGuide(
     races: agreement?.races ?? 0,
     sampleWarning: agreement?.sample_warning ?? true,
   };
+}
+
+// ── プレレジ済シグナルルール (per-race 発火判定, 2026-07-05) ─────────────────
+// api/store.py SIGNAL_RULES と同じ条件判定 (consensus / style / venue / 頭数 / 死にセル) を
+// このレースに適用し、発火中のルールを返す。「確証★」ルールだけが行動根拠になり、蓄積中は
+// 参考表示。破綻ルールは出さない。条件定数は backend (_MARKET_INDEX_T /
+// _FAVORITE_RATIO_THRESHOLD) のミラー — 変える時は両方変える。
+const MARKET_INDEX_T = 1.5;
+const FAVORITE_RATIO_THRESHOLD = 2.0;
+// JRA 10 場 (それ以外の venue_name は NAR/ばんえい)。
+const JRA_VENUES = new Set([
+  "札幌",
+  "函館",
+  "福島",
+  "新潟",
+  "東京",
+  "中山",
+  "中京",
+  "京都",
+  "阪神",
+  "小倉",
+]);
+
+export type FiredSignalRule = {
+  rule: SignalRule;
+  prospectiveRoi: number;
+  prospectiveRaces: number;
+  status: SignalRule["status"];
+};
+export type RaceSignalGuide = {
+  fired: FiredSignalRule[]; // このレースで条件成立中のプレレジルール (破綻除く)
+  deadCell: boolean; // 拮抗型 × 市場不一致 = 見送りゾーン
+  agree: boolean;
+  competitive: boolean; // 拮抗型か (市場 top2 implied 勝率比 < 2.0)
+  jra: boolean | null; // venue_name から判定 (不明は null)
+};
+
+/** このレースに発火するプレレジ済シグナルルールを判定する。指数不足なら null。 */
+export function raceSignalRuleGuide(
+  items: IdxItem[],
+  nRunners: number | null | undefined,
+  venueName: string | null | undefined,
+  signalRules?: SignalRules | null,
+): RaceSignalGuide | null {
+  const withClaude = items.filter(
+    (i): i is IdxItem & { claude_index: number } => typeof i.claude_index === "number",
+  );
+  const withMarket = items.filter(
+    (i): i is IdxItem & { market_index: number } => typeof i.market_index === "number",
+  );
+  if (withClaude.length < 1 || withMarket.length < 2) return null;
+  const claudeTop = withClaude.reduce((a, b) => (b.claude_index > a.claude_index ? b : a));
+  const marketTop = withMarket.reduce((a, b) => (b.market_index > a.market_index ? b : a));
+  const agree = claudeTop.number === marketTop.number;
+  const ms = withMarket.map((i) => i.market_index).sort((a, b) => b - a);
+  const p1 = Math.pow(ms[0] / 100, MARKET_INDEX_T);
+  const p2 = Math.pow(ms[1] / 100, MARKET_INDEX_T);
+  const competitive = !(p2 > 0 && p1 / p2 >= FAVORITE_RATIO_THRESHOLD);
+  const jra = venueName ? JRA_VENUES.has(venueName) : null;
+  const deadCell = competitive && !agree;
+
+  const fired: FiredSignalRule[] = [];
+  for (const rule of signalRules?.rules ?? []) {
+    if (rule.status === "broken") continue; // 棄却済ルールは提示しない
+    if (rule.consensus != null && agree !== rule.consensus) continue;
+    if (rule.style != null && competitive !== rule.style) continue;
+    if (rule.venue != null && (jra == null || jra !== rule.venue)) continue;
+    if (rule.min_runners != null && (!nRunners || nRunners < rule.min_runners)) continue;
+    if (rule.max_runners != null && (!nRunners || nRunners > rule.max_runners)) continue;
+    if (rule.skip_dead_cell && deadCell) continue; // 死にセルでは規律ルール自体が見送り
+    fired.push({
+      rule,
+      prospectiveRoi: rule.prospective.roi,
+      prospectiveRaces: rule.prospective.races,
+      status: rule.status,
+    });
+  }
+  // 確証★ → 有望 → 蓄積中 の順 (行動根拠になるものを先頭に)。
+  const rank: Record<string, number> = { confirmed: 0, promising: 1, accumulating: 2 };
+  fired.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
+  return { fired, deadCell, agree, competitive, jra };
 }
 
 // ── 頭数ガイド (出走頭数 → 効きやすい券種) ─────────────────────────────────

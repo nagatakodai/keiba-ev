@@ -1,12 +1,14 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { Coins, History, Layers, Scale, ServerOff } from "lucide-react";
+import { Coins, FlaskConical, History, Layers, Scale, ServerOff } from "lucide-react";
 import {
   api,
   type MarketAgreementResponse,
   type MatrixCell,
   type ShobuPnl,
   type ShobuPnlRace,
+  type SignalRule,
+  type SignalRulesResponse,
   type StrategiesPnl,
 } from "@/lib/api";
 import {
@@ -495,6 +497,149 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
   );
 }
 
+// プレレジ済ルール 1 行 (登録後データのみで確証判定)。
+function SignalRuleRow({ rule, minConfirm }: { rule: SignalRule; minConfirm: number }) {
+  const p = rule.prospective;
+  const i = rule.insample;
+  const statusClass: Record<SignalRule["status"], string> = {
+    confirmed: "bg-emerald-400/20 text-emerald-300",
+    promising: "bg-sky-400/20 text-sky-300",
+    accumulating: "bg-(--color-surface-2) text-(--color-muted)",
+    broken: "bg-rose-500/20 text-rose-300",
+  };
+  return (
+    <tr className="border-b border-(--color-line-soft)">
+      <td className="px-2 py-1.5">
+        <span className="font-bold whitespace-nowrap">{rule.label}</span>
+        <span className="block text-[9px] text-(--color-muted) leading-tight">
+          {rule.strategy_label} ・ {rule.condition_label}
+        </span>
+      </td>
+      <td className="px-2 py-1.5 text-right tnum text-(--color-muted)">
+        {i.races > 0 ? (
+          <>
+            {fmtRoiPct(i.roi)}
+            <span className="block text-[9px] leading-tight">
+              {i.races}R ・ 単発抜き {fmtRoiPct(i.drop_best_roi ?? 0)}
+            </span>
+          </>
+        ) : (
+          "—"
+        )}
+      </td>
+      <td className="px-2 py-1.5 text-right tnum">
+        {p.races > 0 ? (
+          <>
+            <span
+              className={
+                rule.status === "confirmed"
+                  ? "font-black text-emerald-300"
+                  : rule.status === "broken"
+                    ? "font-bold text-rose-300"
+                    : "font-bold"
+              }
+            >
+              {fmtRoiPct(p.roi)}
+            </span>
+            <span className="block text-[9px] text-(--color-muted) leading-tight">
+              {p.races}/{minConfirm}R ・ CI[{fmtRoiPct(p.roi_ci_low)},{fmtRoiPct(p.roi_ci_high)}]
+            </span>
+          </>
+        ) : (
+          <span className="text-(--color-muted)">
+            0/{minConfirm}R
+            <span className="block text-[9px] leading-tight">登録後の結果待ち</span>
+          </span>
+        )}
+      </td>
+      <td className="px-2 py-1.5 text-right tnum text-sky-200/80">
+        {rule.market_baseline.races > 0 ? fmtRoiPct(rule.market_baseline.roi) : "—"}
+      </td>
+      <td className="px-2 py-1.5 text-right">
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-black whitespace-nowrap ${statusClass[rule.status]}`}
+        >
+          {rule.status_label}
+        </span>
+      </td>
+    </tr>
+  );
+}
+
+// プレレジ済シグナルルールの検証カード: 発見 (in-sample) と検証 (登録後) を分離し、
+// 登録後データの ROI CI だけで 確証★/破綻 を自動判定する。walk-forward ガードレール付き。
+function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
+  const c = data.current;
+  const wfBest = c.walkforward.find((w) => w.key === "matrix_best");
+  const deadQuinella = c.dead_cell.targets.find((t) => t.key === "quinella12");
+  return (
+    <Card>
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <FlaskConical className="w-4 h-4 text-emerald-300" />
+          <span className="text-[10px] font-bold tracking-[0.22em] uppercase text-(--color-muted)">
+            研究中シグナル — プレレジ検証 (定義凍結 → 登録後データのみで確証判定)
+          </span>
+          {c.sample_warning && <Badge tone="muted">サンプル少</Badge>}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs table-zebra">
+            <thead>
+              <tr className="text-left text-[10px] uppercase tracking-wider text-(--color-muted) border-b border-(--color-line)">
+                <th className="px-2 py-2 font-bold">ルール (プレレジ {c.rules[0]?.registered_at})</th>
+                <th className="px-2 py-2 font-bold text-right whitespace-nowrap">発見時 (参考)</th>
+                <th className="px-2 py-2 font-bold text-right whitespace-nowrap">登録後 (確証判定)</th>
+                <th className="px-2 py-2 font-bold text-right whitespace-nowrap">市場人気基準</th>
+                <th className="px-2 py-2 font-bold text-right">状態</th>
+              </tr>
+            </thead>
+            <tbody>
+              {c.rules.map((r) => (
+                <SignalRuleRow key={r.key} rule={r} minConfirm={c.min_confirm} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-[11px] text-(--color-muted)">
+          <span className="font-bold text-amber-200">walk-forward ガードレール: </span>
+          上の買い方マトリクスの「その時点の best セル」を look-ahead なしで追従した場合の実測は
+          {wfBest ? (
+            <span className="tnum">
+              {" "}
+              ROI {fmtRoiPct(wfBest.roi)} ({wfBest.races}R・単発抜き{" "}
+              {fmtRoiPct(wfBest.drop_best_roi ?? 0)})
+            </span>
+          ) : (
+            " —"
+          )}
+          。マトリクスのセル追従は現状 <span className="font-bold">機能しない</span>{" "}
+          (in-sample の最良セルはノイズ)。行動に移すのは上の表で「確証★」になったルールのみ。
+          {deadQuinella && deadQuinella.dead_races > 0 && (
+            <span>
+              {" "}
+              見送り規律: {c.dead_cell.label} は馬連 ROI {fmtRoiPct(deadQuinella.dead_roi)} (
+              {deadQuinella.dead_races}R) vs それ以外 {fmtRoiPct(deadQuinella.alive_roi)} (
+              {deadQuinella.alive_races}R) — このゾーンは賭けない。
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-(--color-muted) pt-2 border-t border-(--color-line-soft)">
+          <span>
+            対象 {c.races}R ・ 自動蓄積 {data.appends} 回 ・ {data.history.length}件 蓄積
+          </span>
+          <span>
+            ※ 「発見時」= ルールを見つけたデータ込みの全期間 ROI (楽観・参考値)。「登録後」=
+            プレレジ日以降の発走レースのみ (真の out-of-sample)。確証★ = 登録後 {c.min_confirm}R
+            以上 かつ ROI 95%CI 下限 &gt; 100% ・ 破綻 = 登録後 {c.min_broken}R 以上 かつ CI 上限
+            &lt; 100% (ルール棄却)。「市場人気基準」= 同条件で市場人気順に同じ買い方をした全期間
+            ROI (Claude 指数の付加価値の基準線)。
+          </span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // API 未接続時のエラーカード (silent null の代わりに明示表示)
 function ApiDownCard() {
   return (
@@ -562,15 +707,17 @@ function VersionMeasurementSection({
 export default async function DashboardPage() {
   // 計測を Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30: 新しい/現行が上)。
   // β (市場由来・〜2026-06-21) は対象が少ないため表示しない (ユーザ指示で撤去)。
-  const [boxV3, boxV2, boxV1, stratV3, stratV2, stratV1, marketAgree] = await Promise.all([
-    api.indexedPnl(100, "v3").catch(() => null),
-    api.indexedPnl(100, "v2").catch(() => null),
-    api.indexedPnl(100, "v1").catch(() => null),
-    api.indexedStrategiesPnl(100, "v3").catch(() => null),
-    api.indexedStrategiesPnl(100, "v2").catch(() => null),
-    api.indexedStrategiesPnl(100, "v1").catch(() => null),
-    api.marketAgreement().catch(() => null),
-  ]);
+  const [boxV3, boxV2, boxV1, stratV3, stratV2, stratV1, marketAgree, signalRules] =
+    await Promise.all([
+      api.indexedPnl(100, "v3").catch(() => null),
+      api.indexedPnl(100, "v2").catch(() => null),
+      api.indexedPnl(100, "v1").catch(() => null),
+      api.indexedStrategiesPnl(100, "v3").catch(() => null),
+      api.indexedStrategiesPnl(100, "v2").catch(() => null),
+      api.indexedStrategiesPnl(100, "v1").catch(() => null),
+      api.marketAgreement().catch(() => null),
+      api.signalRules().catch(() => null),
+    ]);
 
   // API 未接続: どのバージョンも取れなければ明示のエラーカードを出す。
   if (!boxV3 && !boxV2 && !boxV1) {
@@ -600,7 +747,8 @@ export default async function DashboardPage() {
         subtitle="shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v3=仮指数アンカー・現行 / v2=補強根拠無制限 / v1=3件上限)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。"
       />
 
-      {/* ====== 研究中シグナル: 市場一致 (自動蓄積・確証まで) ====== */}
+      {/* ====== 研究中シグナル: プレレジ検証 (行動に移す唯一の経路) + 市場一致マトリクス ====== */}
+      {signalRules && <SignalRulesCard data={signalRules} />}
       {marketAgree && <MarketAgreementCard data={marketAgree} />}
 
       {/* ====== v3 (現行・仮指数アンカー) を上、v2 / v1 (旧) を下 ====== */}

@@ -164,6 +164,7 @@ class ResultAutoFetcher:
         self.last_summary: dict[str, Any] | None = None
         self.runs: int = 0
         self.market_agreement_appends: int = 0   # 市場一致シグナルを history に追記した回数
+        self.signal_rules_appends: int = 0        # プレレジルール検証を history に追記した回数
 
     def status(self) -> dict[str, Any]:
         return {
@@ -174,6 +175,7 @@ class ResultAutoFetcher:
             "runs": self.runs,
             "last_summary": self.last_summary,
             "market_agreement_appends": self.market_agreement_appends,
+            "signal_rules_appends": self.signal_rules_appends,
         }
 
     def start(self) -> None:
@@ -236,6 +238,15 @@ class ResultAutoFetcher:
             row = await asyncio.to_thread(append_market_agreement_history)
             if row:
                 self.market_agreement_appends += 1
+        except Exception:  # noqa: BLE001 - 計測は結果取得ループを止めない
+            pass
+        # プレレジ済シグナルルールの検証状況も同様に蓄積 (2026-07-05): 登録後レースの ROI CI が
+        # 確証★/破綻 に遷移する過程を時系列で残す。dedup 済 (races 不変なら no-op)。
+        try:
+            from api.store import append_signal_rules_history
+            row = await asyncio.to_thread(append_signal_rules_history)
+            if row:
+                self.signal_rules_appends += 1
         except Exception:  # noqa: BLE001 - 計測は結果取得ループを止めない
             pass
         self.last_run_at = time.time()
@@ -766,6 +777,23 @@ def api_shobu_market_agreement() -> dict[str, Any]:
         "current": compute_market_agreement(),
         "history": market_agreement_history(),
         "appends": RESULTS_AUTO.market_agreement_appends,
+    }
+
+
+@app.get("/api/shobu/signal-rules")
+def api_shobu_signal_rules() -> dict[str, Any]:
+    """**プレレジ済シグナルルール** の検証状況 + walk-forward ガードレール (2026-07-05)。
+
+    研究中シグナルで見つけたルールを定義固定 (プレレジ) し、**登録日以降のレースのみ** の
+    ROI + bootstrap CI で 確証★ (CI下限>1.0) / 破綻 (CI上限<1.0) を自動判定する。
+    walkforward は買い方マトリクスの best セルをそのまま追従した場合の正直な成績
+    (look-ahead なし) — これが 100% を割る限りセル追従は機能していない、の誤用ガード。
+    """
+    from api.store import compute_signal_rules, signal_rules_history
+    return {
+        "current": compute_signal_rules(),
+        "history": signal_rules_history(),
+        "appends": RESULTS_AUTO.signal_rules_appends,
     }
 
 

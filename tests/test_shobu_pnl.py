@@ -807,3 +807,168 @@ def test_list_predictions_carries_hit_strategies(dirs):
     items = {i["race_id"]: i for i in store.list_predictions(limit=None)}
     assert {h["key"] for h in items["rec-1"]["hit_strategies"]} == {"win1", "place1"}
     assert items["pend-1"]["hit_strategies"] is None and items["pend-1"]["has_result"] is False
+
+
+# ─── プレレジ済シグナルルール + walk-forward ガードレール (2026-07-05) ─────────────
+
+
+def _jst_unix(iso_date: str, hour: int = 12) -> int:
+    """JST の日付 (YYYY-MM-DD) → その日 hour 時の unix。start_at 用。"""
+    import datetime as dt
+    d = dt.date.fromisoformat(iso_date)
+    return int(dt.datetime(d.year, d.month, d.day, hour,
+                           tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp())
+
+
+def test_signal_rules_prospective_split(dirs):
+    """プレレジ日 (registered_at) 以降の発走レースだけが prospective に入る。
+
+    insample はルール発見に使ったデータ込み (楽観・参考)、確証判定は登録後のみで行う。
+    """
+    sh, pr, rs = dirs
+    reg = store.SIGNAL_RULES[0]["registered_at"]          # 全ルール同日登録 (2026-07-05)
+    import datetime as dt
+    before = (dt.date.fromisoformat(reg) - dt.timedelta(days=3)).isoformat()
+    after = (dt.date.fromisoformat(reg) + dt.timedelta(days=1)).isoformat()
+    (sh / "20260701.json").write_text(json.dumps({
+        "generated_at": "2026-07-01T11:00:00+09:00",
+        "races": [
+            {"race_id": "old-1", "recommended": True, "venue": "A", "race_no": 1,
+             "race_type": "nar", "n_runners": 8, "start_at": _jst_unix(before)},
+            {"race_id": "new-1", "recommended": True, "venue": "A", "race_no": 2,
+             "race_type": "nar", "n_runners": 8, "start_at": _jst_unix(after)},
+        ],
+    }), encoding="utf-8")
+    # 一致 (Claude#1 = 市場#1 = 馬番1)。着順 1-4-5 → Claude 側は win1/place1 のみ的中。
+    # place:4 / wide:1-4 / trio:1-4-5 は市場人気順ベースライン (top4=1,2,4,5: 4-8 は既定50>40)
+    # の的中脚用 (final_odds に無いと市場側だけ no_odds になり market_baseline から漏れる)。
+    for rid in ("old-1", "new-1"):
+        (pr / f"{rid}.json").write_text(json.dumps(_snap(
+            8, _IDX8, market={1: 95.0, 2: 60.0, 3: 40.0})), encoding="utf-8")
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo(
+            [1, 4, 5], 0,
+            {"win:1": 2.0, "place:1": 1.4, "place:4": 1.6,
+             "wide:1-4": 3.0, "trio:1-4-5": 20.0})),
+            encoding="utf-8")
+    cur = store.compute_signal_rules()
+    assert cur["races"] == 2
+    p1 = next(r for r in cur["rules"] if r["key"] == "place1_consensus")
+    assert p1["insample"]["races"] == 2            # 全期間 = 2R
+    assert p1["prospective"]["races"] == 1         # 登録後 = after の 1R のみ
+    assert p1["prospective"]["hits"] == 1
+    assert p1["prospective"]["roi"] == pytest.approx(1.4)
+    assert p1["status"] == "accumulating"          # n < min_confirm
+    # 市場人気基準 (市場#1 の複勝) も同条件で計算される (Claude 付加価値の基準線)。
+    assert p1["market_baseline"]["races"] == 2
+    # 少頭数 (≤8) ルールも両レースで発火し win:2.0 を拾う。
+    w1 = next(r for r in cur["rules"] if r["key"] == "win1_smallfield")
+    assert w1["insample"]["races"] == 2 and w1["insample"]["roi"] == pytest.approx(2.0)
+
+
+def test_signal_rule_status_gates():
+    """確証★/破綻/有望/蓄積中 の判定は登録後 (prospective) 統計のみで行う。"""
+    def stats(races, roi, lo, hi):
+        return {"races": races, "roi": roi, "roi_ci_low": lo, "roi_ci_high": hi}
+    assert store._rule_status(stats(30, 1.3, 1.05, 1.8))[0] == "confirmed"
+    assert store._rule_status(stats(29, 1.3, 1.05, 1.8))[0] == "accumulating"  # n 不足
+    assert store._rule_status(stats(30, 1.3, 0.95, 1.8))[0] == "promising"     # CI 未達
+    assert store._rule_status(stats(20, 0.5, 0.2, 0.9))[0] == "broken"         # CI 上限 <1
+    assert store._rule_status(stats(19, 0.5, 0.2, 0.9))[0] == "accumulating"   # 破綻も n 必要
+    assert store._rule_status(stats(0, 0.0, 0.0, 0.0))[0] == "accumulating"
+
+
+def test_signal_rule_matches_conditions():
+    """_rule_matches: 発走前条件 (consensus/style/venue/頭数/死にセル) の合致判定。"""
+    rec = {"flags": {"consensus": True, "style": False, "venue": False}, "n_runners": 12}
+    assert store._rule_matches({"min_runners": 12}, rec) is True
+    assert store._rule_matches({"min_runners": 13}, rec) is False
+    assert store._rule_matches({"max_runners": 8}, rec) is False
+    assert store._rule_matches({"consensus": True}, rec) is True
+    assert store._rule_matches({"consensus": False}, rec) is False
+    assert store._rule_matches({"style": False, "venue": False}, rec) is True
+    assert store._rule_matches({"style": True}, rec) is False
+    # 死にセル (拮抗×不一致) 回避ルール: 死にセルでは False、それ以外 True。
+    dead = {"flags": {"consensus": False, "style": True, "venue": False}, "n_runners": 10}
+    assert store._rule_matches({"skip_dead_cell": True}, dead) is False
+    assert store._rule_matches({"skip_dead_cell": True}, rec) is True
+    # 頭数不明 (0) は頭数条件ルールに乗せない。
+    unknown = {"flags": {"consensus": True, "style": True, "venue": False}, "n_runners": 0}
+    assert store._rule_matches({"min_runners": 12}, unknown) is False
+    assert store._rule_matches({"max_runners": 8}, unknown) is False
+
+
+def test_walkforward_matrix_no_lookahead():
+    """walk-forward は「そのレースより前」の履歴だけで選ぶ (look-ahead なし)。
+
+    rec2 自身は trio1234box が大的中するが、rec2 時点の履歴 (rec1) では quinella12 が
+    最良なので quinella12 を賭ける (= 未来の自分の結果で選んでいたら trio を選ぶはず)。
+    """
+    def per(quin, trio):
+        return {
+            "quinella12": {"stake": quin[0], "payout": quin[1], "bets": 1,
+                           "hits": int(quin[1] > 0), "hit": quin[1] > 0},
+            "trio1234box": {"stake": trio[0], "payout": trio[1], "bets": 4,
+                            "hits": int(trio[1] > 0), "hit": trio[1] > 0},
+        }
+    flags = {"consensus": True, "style": True, "venue": False}
+    records = [
+        {"flags": flags, "per": per((100, 300), (400, 0))},      # 履歴: 馬連が優勢
+        {"flags": flags, "per": per((100, 0), (400, 4000))},     # 自身は trio 大的中
+        {"flags": flags, "per": per((100, 500), (400, 0))},
+    ]
+    out = store._walkforward_matrix(records, floor=1, fallback_overall=False)
+    # rec1: 履歴なし → 賭けない。rec2: 履歴=rec1 → quinella12 (trio ではない = look-ahead なし)。
+    # rec3: 履歴 roi は quinella 300/200=1.5 < trio 4000/800=5.0 → trio1234box。
+    assert out["chosen"] == {"quinella12": 1, "trio1234box": 1}
+    assert out["races"] == 2
+    assert out["stake"] == 100 + 400 and out["payout"] == 0
+
+
+def test_signal_rules_history_append(dirs, monkeypatch, tmp_path):
+    """history 追記は races が増えた時のみ (dedup)。compact な prospective + status を残す。"""
+    sh, pr, rs = dirs
+    (sh / "20260704.json").write_text(json.dumps({
+        "generated_at": "2026-07-04T11:00:00+09:00",
+        "races": [{"race_id": "r-1", "recommended": True, "venue": "A", "race_no": 1,
+                   "race_type": "nar", "n_runners": 8,
+                   "start_at": _jst_unix("2026-07-04")}],
+    }), encoding="utf-8")
+    (pr / "r-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, market={1: 95.0, 2: 60.0})), encoding="utf-8")
+    (rs / "r-1.json").write_text(json.dumps(_result_fo([6, 7, 8], 0, {})), encoding="utf-8")
+    monkeypatch.setattr(store, "SIGNAL_RULES_HISTORY", tmp_path / "sig_hist.jsonl")
+    row = store.append_signal_rules_history()
+    assert row is not None and row["races"] == 1
+    assert {r["key"] for r in row["rules"]} == {r["key"] for r in store.SIGNAL_RULES}
+    assert all("prospective" in r and "status" in r for r in row["rules"])
+    assert store.append_signal_rules_history() is None      # dedup (races 不変)
+    assert len(store.signal_rules_history()) == 1
+
+
+def test_signal_rules_dead_cell_block(dirs):
+    """dead_cell (拮抗×不一致) の n とターゲット別 dead/alive ROI が出る (見送り規律の根拠)。"""
+    sh, pr, rs = dirs
+    (sh / "20260704.json").write_text(json.dumps({
+        "generated_at": "2026-07-04T11:00:00+09:00",
+        "races": [
+            {"race_id": "dead-1", "recommended": True, "venue": "A", "race_no": 1,
+             "race_type": "nar", "n_runners": 8, "start_at": _jst_unix("2026-07-04")},
+            {"race_id": "alive-1", "recommended": True, "venue": "A", "race_no": 2,
+             "race_type": "nar", "n_runners": 8, "start_at": _jst_unix("2026-07-04")},
+        ],
+    }), encoding="utf-8")
+    # dead-1: 拮抗 (60 vs 58) × 不一致 (市場#1=馬番2)。alive-1: 本命型 × 一致。
+    (pr / "dead-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, market={1: 58.0, 2: 60.0, 3: 40.0})), encoding="utf-8")
+    (pr / "alive-1.json").write_text(json.dumps(_snap(
+        8, _IDX8, market={1: 95.0, 2: 40.0, 3: 30.0})), encoding="utf-8")
+    for rid in ("dead-1", "alive-1"):
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo([6, 7, 8], 0, {})),
+                                        encoding="utf-8")
+    cur = store.compute_signal_rules()
+    assert cur["dead_cell"]["n"] == 1
+    quin = next(t for t in cur["dead_cell"]["targets"] if t["key"] == "quinella12")
+    assert quin["dead_races"] == 1 and quin["alive_races"] == 1
+    # 死にセル回避ルールは alive のみ拾う。
+    alive_rule = next(r for r in cur["rules"] if r["key"] == "quinella12_alive")
+    assert alive_rule["insample"]["races"] == 1
