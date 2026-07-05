@@ -121,3 +121,41 @@ def test_paddock_rescorer_due_window(tmp_path, monkeypatch):
     # 1 度 fire したら window 内で再び返さない (二重撃ち防止)
     rs._fired.add("due-1")
     assert rs._due() == []
+
+
+def test_nightly_prescanner_due_gate(tmp_path, monkeypatch):
+    """夜間プリスキャナ: 発火は「設定時刻以降 × 翌日未実行 × 有効」のときだけ (2026-07-05)。"""
+    import datetime
+    from zoneinfo import ZoneInfo
+    import api.main as m
+
+    monkeypatch.setattr(m.ShobuNightlyPrescanner, "STATE_FILE",
+                        tmp_path / "nightly_state.json")
+    ps = m.ShobuNightlyPrescanner(m.JOBS)
+    ps.enabled = True
+    ps.hour = 21
+    jst = ZoneInfo("Asia/Tokyo")
+    evening = datetime.datetime(2026, 7, 5, 21, 30, tzinfo=jst)
+    noon = datetime.datetime(2026, 7, 5, 12, 0, tzinfo=jst)
+
+    assert ps._due(noon) is None                      # 時刻前は発火しない
+    assert ps._due(evening) == "20260706"             # 21時以降 → 翌日日付
+    # 実行済みガード (state file) があれば同じ翌日に二重発火しない
+    (tmp_path / "nightly_state.json").write_text(
+        '{"date": "20260706", "job_id": "x"}', encoding="utf-8")
+    assert ps._due(evening) is None
+    # 別の日の state なら発火する
+    (tmp_path / "nightly_state.json").write_text(
+        '{"date": "20260705", "job_id": "x"}', encoding="utf-8")
+    assert ps._due(evening) == "20260706"
+    # 無効化フラグ
+    ps.enabled = False
+    assert ps._due(evening) is None
+
+
+def test_nightly_prescanner_status_shape():
+    import api.main as m
+    st = m.NIGHTLY_PRESCANNER.status()
+    assert set(st) >= {"enabled", "hour_jst", "loop_running", "launches",
+                       "last_job_id", "last_launched_date", "last_run_at"}
+    assert st["loop_running"] is False   # start() 前 (テストは lifespan を通らない)

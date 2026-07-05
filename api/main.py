@@ -113,6 +113,10 @@ async def lifespan(app: FastAPI):
         SHOBU_RESCORER.start()  # 勝負レース(推奨)を締切5-7分前に自動再score (パドック込み)
     except Exception as e:  # noqa: BLE001
         print(f"[lifespan.startup] shobu rescorer start failed: {e}")
+    try:
+        NIGHTLY_PRESCANNER.start()  # 前日夜間に翌日の勝負レースを全レース解析 (2026-07-05)
+    except Exception as e:  # noqa: BLE001
+        print(f"[lifespan.startup] nightly prescanner start failed: {e}")
     yield
     try:
         await RESULTS_AUTO.stop()  # 結果取得ループを止めてから残 Job を倒す
@@ -120,6 +124,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await SHOBU_RESCORER.stop()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await NIGHTLY_PRESCANNER.stop()
     except Exception:  # noqa: BLE001
         pass
     await shutdown_all_jobs()
@@ -375,6 +383,11 @@ class ShobuPaddockRescorer:
         # 締切5分前の素早い再score: パドッククエリが入る予算を確保しつつ window 内に収める。
         env.setdefault("KEIBA_SCORE_QUERIES_PER_HORSE", "4")
         env["KEIBA_SCORE_TIMEOUT"] = "200"   # window 内に収める (失敗時は指数据え置きで無害)
+        # ⚠ これが無いと _run_score_stage の「既存指数の再利用」(2026-06-24) に当たり、
+        # スキャン時 (=パドック前) の指数をそのまま返して **再検索が一切走らない** =
+        # パドック再score が no-op になる実バグだった (2026-07-05 修正)。前夜の先行生成
+        # (翌日スキャン) と組むときは特に、当日直前の再検索がここでしか入らない。
+        env["KEIBA_SCORE_FORCE_RESCORE"] = "1"
         try:
             subprocess.run(cmd, timeout=240, capture_output=True, env=env)
             return True
@@ -410,6 +423,144 @@ class ShobuPaddockRescorer:
 
 
 SHOBU_RESCORER = ShobuPaddockRescorer()
+
+
+class ShobuNightlyPrescanner:
+    """make api 常駐: **前日夜間に翌日の勝負レースを全レース解析** する (ユーザ指示 2026-07-05)。
+
+    毎晩 `KEIBA_NIGHTLY_SCAN_HOUR` (JST, 既定 21 時・12-23 にクランプ) 以降の最初の tick で、
+    **翌日** (JST+1日) の shobu スキャン (race_type=all・claude_all=True) を Job として 1 回
+    だけ起動する。出馬表は前夜に公式各所へ出るので Claude 指数 (市場非依存) を先行生成できる:
+      - オッズ未発売のレースは指数のみキャッシュ (odds_empty 早期 return, 2026-06-24 機構)
+      - 当日の再スキャン/2分毎 refresh が市場を付けて基準B を確定 (指数は再利用 = 当日の
+        Claude コストほぼゼロ)
+      - 推奨レースは締切5-7分前に ShobuPaddockRescorer が FORCE_RESCORE で再検索し、
+        パドック/当日馬体重を指数に反映 (前夜指数が stale なまま賭け時刻を迎えない)
+      - keiba.go.jp に翌日カードが未掲載の NAR 場 (実測: 盛岡) は shobu 側の oddspark
+        フォールバックが救う。JRA は前日夜に公式オッズページが開けば乗る (無ければ当日)
+    無効化は env `KEIBA_NIGHTLY_SCAN=0`。`KEIBA_NIGHTLY_RESEARCH=prefetch` で ARCH-B
+    (固定クエリ Tavily) に切替可 (夜間の大量一括はセッション数が効くので好相性)。
+    実行済みガードは `SHOBU_DIR/nightly_state.json` に永続 (uvicorn --reload 耐性 =
+    再起動のたびに再スキャンして Claude を浪費しない)。
+    """
+
+    STATE_FILE = SHOBU_DIR / "nightly_state.json"
+
+    def __init__(self, registry: JobRegistry) -> None:
+        self._registry = registry
+        self._task: asyncio.Task | None = None
+        self.interval_sec = 300
+        self.enabled = (os.environ.get("KEIBA_NIGHTLY_SCAN") or "1").strip() != "0"
+        try:
+            h = int((os.environ.get("KEIBA_NIGHTLY_SCAN_HOUR") or "21").strip())
+        except ValueError:
+            h = 21
+        self.hour = min(23, max(12, h))
+        self.launches = 0
+        self.last_job_id: str | None = None
+        self.last_launched_date: str | None = None
+        self.last_run_at: float | None = None
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "hour_jst": self.hour,
+            "loop_running": self._task is not None and not self._task.done(),
+            "launches": self.launches,
+            "last_job_id": self.last_job_id,
+            "last_launched_date": self.last_launched_date,
+            "last_run_at": self.last_run_at,
+        }
+
+    def start(self) -> None:
+        if self.enabled and (self._task is None or self._task.done()):
+            self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _now_jst() -> "datetime.datetime":
+        import datetime
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
+
+    def _tomorrow(self, now: "datetime.datetime | None" = None) -> str:
+        import datetime
+        n = now or self._now_jst()
+        return (n + datetime.timedelta(days=1)).strftime("%Y%m%d")
+
+    def _already_launched(self, date: str) -> bool:
+        try:
+            st = json.loads(self.STATE_FILE.read_text(encoding="utf-8"))
+            return st.get("date") == date
+        except (OSError, json.JSONDecodeError, ValueError):
+            return False
+
+    def _due(self, now: "datetime.datetime | None" = None) -> str | None:
+        """発火すべきなら翌日日付 (YYYYMMDD) を返す。時刻前/実行済み/無効は None。"""
+        if not self.enabled:
+            return None
+        n = now or self._now_jst()
+        if n.hour < self.hour:
+            return None
+        date = self._tomorrow(n)
+        if self._already_launched(date):
+            return None
+        return date
+
+    async def _launch(self, date: str) -> None:
+        SHOBU_DIR.mkdir(parents=True, exist_ok=True)
+        research = (os.environ.get("KEIBA_NIGHTLY_RESEARCH") or "agentic").strip() or "agentic"
+        cmd = build_shobu_cmd(
+            str(SHOBU_DIR / f"{date}.json"),
+            date=date,
+            race_type="all",
+            claude_all=True,
+            research=(research if research in ("agentic", "prefetch") else "agentic"),
+        )
+        job = self._registry.new(label=f"shobu-nightly: {date}", cmd=cmd)
+        await job.start()
+        self.launches += 1
+        self.last_job_id = job.id
+        self.last_launched_date = date
+        try:   # 実行済みガードを永続 (reload/再起動で二重スキャンしない)
+            tmp = self.STATE_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({
+                "date": date, "job_id": job.id,
+                "launched_at": self._now_jst().isoformat(timespec="seconds"),
+            }, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.STATE_FILE)
+        except OSError:
+            pass
+
+    async def _loop(self) -> None:
+        first = True
+        while True:
+            try:
+                await asyncio.sleep(30 if first else self.interval_sec)
+            except asyncio.CancelledError:
+                raise
+            first = False
+            try:
+                date = self._due()
+                if date:
+                    await self._launch(date)
+                self.last_run_at = time.time()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - ループは止めない
+                pass
+
+
+NIGHTLY_PRESCANNER = ShobuNightlyPrescanner(JOBS)
 
 
 # --- predictions ---
@@ -834,6 +985,16 @@ def api_shobu_paddock_rescore_status() -> dict[str, Any]:
     再生成 (Claude 指数をパドック評価込みで更新 → 乖離/市場一致シグナルも自動反映)。実弾投票はしない。
     """
     return SHOBU_RESCORER.status()
+
+
+@app.get("/api/shobu/nightly")
+def api_shobu_nightly_status() -> dict[str, Any]:
+    """**前日夜間の翌日一括解析** ループの状態 (ユーザ指示 2026-07-05)。
+
+    make api 稼働中、毎晩 KEIBA_NIGHTLY_SCAN_HOUR (既定 21時 JST) 以降に翌日の shobu スキャン
+    (全レース claude_all) を 1 回だけ Job 起動する。KEIBA_NIGHTLY_SCAN=0 で無効化。
+    """
+    return NIGHTLY_PRESCANNER.status()
 
 
 @app.get("/api/jobs")

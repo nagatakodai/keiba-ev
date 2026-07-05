@@ -300,6 +300,10 @@ export default function ShobuPage() {
   // リサーチ方式 (ARCH-B, 2026-07-05): agentic=Claude が MCP 検索 (従来) /
   // prefetch=固定クエリ Tavily 直叩き + 採点 claude 1回 (速い・輻輳なし)。
   const [research, setResearch] = useState<"agentic" | "prefetch">("agentic");
+  // 対象日 (2026-07-05 ユーザ指示「前日夜間に次の日の勝負レースを全て解析できるように」):
+  // today=当日 (既定) / tomorrow=翌日 (前夜に出馬表から Claude 指数を先行生成。オッズ未発売の
+  // レースは指数のみキャッシュされ、当日の再スキャン/自動再score が市場を付けて確定する)。
+  const [targetDay, setTargetDay] = useState<"today" | "tomorrow">("today");
   const [showSettings, setShowSettings] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
 
@@ -322,8 +326,17 @@ export default function ShobuPage() {
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set());
   const [showHidden, setShowHidden] = useState(false);
 
+  // JST の翌日 (YYYYMMDD)。UTC+9 に 24h 足して UTC getter で読む (クライアント TZ 非依存)。
+  const jstTomorrow = (): string => {
+    const d = new Date(Date.now() + (9 + 24) * 3600 * 1000);
+    return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(
+      d.getUTCDate(),
+    ).padStart(2, "0")}`;
+  };
+
   // 現在のフォーム設定を scan options に変換 (基準B 単独)。
   const buildOptions = (): ShobuScanRequest => ({
+    date: targetDay === "tomorrow" ? jstTomorrow() : undefined,
     race_type: raceType,
     edge_margin: (() => {
       const v = parseFloat(edgeMargin);
@@ -635,6 +648,12 @@ export default function ShobuPage() {
 
               <FieldGroup legend="対象 / データ取得">
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <Select label="対象日" value={targetDay}
+                    onChange={(e) => setTargetDay(e.target.value as "today" | "tomorrow")} disabled={scanning}
+                    hint="翌日=前夜に出馬表から Claude 指数を先行生成 (当日の再スキャンが指数を再利用し市場を付ける)">
+                    <option value="today">今日</option>
+                    <option value="tomorrow">翌日 (前夜の先行解析)</option>
+                  </Select>
                   <Select label="対象" value={raceType} onChange={(e) => setRaceType(e.target.value as "all" | "jra" | "nar" | "banei")} disabled={scanning}
                     hint="ばんえいは別競技として分離 (確率モデルも segment 分離済)">
                     <option value="all">JRA + 地方 + ばんえい</option>

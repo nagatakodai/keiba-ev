@@ -442,72 +442,92 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     def _one(t: dict[str, Any], env: dict[str, str]) -> tuple[dict[str, Any], bool, str]:
         rid = t["netkeiba_race_id"]
         label = f"{t['venue']}{t['race_no']}R"
-        cmd = _score_stage_cmd(rid, t["race_type"], int(t.get("start_at") or 0), model=model)
-        # stderr は一時ファイルへ (rc≠0 = keiba.go.jp レート制限でオッズ空 等 の原因を末尾から拾う)。
-        err_f = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
-        try:
-            proc = subprocess.Popen(
-                cmd, cwd=str(ROOT), env=env,
-                stdout=subprocess.PIPE, stderr=err_f,
-                text=True, bufsize=1,
-                start_new_session=True,   # 孫 (claude -p) ごと timeout で kill できるよう別 pgid に
-            )
-        except Exception as e:  # noqa: BLE001
-            err_f.close()
-            return (t, False, str(e))
-        timed_out = [False]
+        start_at = int(t.get("start_at") or 0)
 
-        def _kill() -> None:
-            timed_out[0] = True
-            _killpg(proc)
-
-        timer = threading.Timer(timeout, _kill)
-        timer.daemon = True
-        timer.start()
-        try:
-            assert proc.stdout is not None
-            for raw in proc.stdout:
-                # 内側 score subprocess (analyze._run_score_stage) は検索クエリを
-                # "  🔍 <tool>: <query>" 行で出す。その行だけレース名付きで scan ログへ転送し、
-                # 他の冗長な LLM 出力は読み捨てる (pipe を drain しデッドロックも防ぐ)。
-                if "🔍" in raw:
-                    q = raw.split("🔍", 1)[1].strip()
-                    if q:
-                        _safe_log(f"[query] {label} 🔍 {q}")
-        except Exception:  # noqa: BLE001
-            pass  # ログ転送の失敗で生成判定 (rc) を壊さない
-        finally:
-            timer.cancel()
+        def _exec(cmd: list[str]) -> tuple[bool, str, bool]:
+            """score subprocess を 1 回実行 → (ok, note, timed_out)。"""
+            # stderr は一時ファイルへ (rc≠0 = keiba.go.jp レート制限でオッズ空 等 の原因を末尾から拾う)。
+            err_f = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
             try:
-                proc.wait(timeout=15)
-            except Exception:  # noqa: BLE001
+                proc = subprocess.Popen(
+                    cmd, cwd=str(ROOT), env=env,
+                    stdout=subprocess.PIPE, stderr=err_f,
+                    text=True, bufsize=1,
+                    start_new_session=True,   # 孫 (claude -p) ごと timeout で kill できるよう別 pgid に
+                )
+            except Exception as e:  # noqa: BLE001
+                err_f.close()
+                return (False, str(e), False)
+            timed_out = [False]
+
+            def _kill() -> None:
+                timed_out[0] = True
                 _killpg(proc)
+
+            timer = threading.Timer(timeout, _kill)
+            timer.daemon = True
+            timer.start()
+            try:
+                assert proc.stdout is not None
+                for raw in proc.stdout:
+                    # 内側 score subprocess (analyze._run_score_stage) は検索クエリを
+                    # "  🔍 <tool>: <query>" 行で出す。その行だけレース名付きで scan ログへ転送し、
+                    # 他の冗長な LLM 出力は読み捨てる (pipe を drain しデッドロックも防ぐ)。
+                    if "🔍" in raw:
+                        q = raw.split("🔍", 1)[1].strip()
+                        if q:
+                            _safe_log(f"[query] {label} 🔍 {q}")
+            except Exception:  # noqa: BLE001
+                pass  # ログ転送の失敗で生成判定 (rc) を壊さない
+            finally:
+                timer.cancel()
                 try:
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=15)
+                except Exception:  # noqa: BLE001
+                    _killpg(proc)
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:  # noqa: BLE001
+                        pass
+            rc = proc.returncode
+            # rc==0 (内側が JSON を書き終え正常終了) を最優先で成功扱い: timeout 丁度の境界で _kill が
+            # timed_out を立てても、既に終わっていた成功を誤って失敗にしない。
+            if rc == 0:
+                ok, note = True, "OK"
+            elif timed_out[0]:
+                ok, note = False, f"timeout ({timeout}s)"
+            else:
+                ok, note = False, f"rc={rc}"
+                try:   # 非 timeout の失敗のみ stderr 末尾を診断ログへ
+                    err_f.seek(0, 2)
+                    size = err_f.tell()
+                    err_f.seek(max(0, size - 500))
+                    tail = err_f.read().strip().replace("\n", " ")
+                    if tail:
+                        _safe_log(f"[claude-eval] {label} rc={rc} stderr: …{tail[-300:]}")
                 except Exception:  # noqa: BLE001
                     pass
-        rc = proc.returncode
-        # rc==0 (内側が JSON を書き終え正常終了) を最優先で成功扱い: timeout 丁度の境界で _kill が
-        # timed_out を立てても、既に終わっていた成功を誤って失敗にしない。
-        if rc == 0:
-            ok, note = True, "OK"
-        elif timed_out[0]:
-            ok, note = False, f"timeout ({timeout}s)"
-        else:
-            ok, note = False, f"rc={rc}"
-            try:   # 非 timeout の失敗のみ stderr 末尾を診断ログへ
-                err_f.seek(0, 2)
-                size = err_f.tell()
-                err_f.seek(max(0, size - 500))
-                tail = err_f.read().strip().replace("\n", " ")
-                if tail:
-                    _safe_log(f"[claude-eval] {label} rc={rc} stderr: …{tail[-300:]}")
+            try:
+                err_f.close()
             except Exception:  # noqa: BLE001
                 pass
-        try:
-            err_f.close()
-        except Exception:  # noqa: BLE001
-            pass
+            return (ok, note, timed_out[0])
+
+        ok, note, was_timeout = _exec(
+            _score_stage_cmd(rid, t["race_type"], start_at, model=model))
+        # NAR で keibago が rc≠0 で失敗 (timeout 以外) したら oddspark 経路に 1 回だけ
+        # フォールバック (2026-07-05): 前夜の翌日スキャンでは keiba.go.jp に翌日カードが
+        # 未掲載の場 (実測: 盛岡) があり、oddspark 前売りで score 段が成立することがある。
+        # timeout は時間切れなので追い打ちしない (時間予算を倍にしない)。
+        if not ok and not was_timeout and t["race_type"] == "nar":
+            _safe_log(f"[claude-eval] {label} keibago 失敗 ({note}) → oddspark にフォールバック")
+            ok2, note2, _to2 = _exec(
+                [PY, "-m", "src.scrape_oddspark", rid, "--snapshot", "--phase=score",
+                 f"--start-at={start_at}", f"--model={model}"])
+            if ok2:
+                ok, note = True, "OK (oddspark)"
+            else:
+                note = f"{note} / oddspark: {note2}"
         return (t, ok, note)
 
     def _internal(t: dict[str, Any]) -> str:
