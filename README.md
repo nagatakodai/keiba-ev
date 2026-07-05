@@ -1,282 +1,174 @@
-# keiba-ev
+# keiba-ev — 競馬 期待値分析・自動予測プラットフォーム
 
-中央 (JRA) + 地方 (NAR) 競馬の全 7 券種について **EV (期待値) > 1** の買い目を抽出し、Claude が選定した「総合オススメ束」を提示するローカル分析ツール。オッズパーク経由で **自動投票 (実弾) まで可能**。
+中央競馬 (JRA)・地方競馬 (NAR)・ばんえい競馬を対象に、**「予測を出す → 実際に賭けたらどうなったかを全件計測する → 統計的に確証が取れた戦略だけを残す」** ループを自動で回す、個人開発の研究プラットフォームです。
 
-`ev` / `ev-api` (競輪向け) を keiba 用に移植したもの。**ローカル完結** (Vercel / GCS / Cloud Run には依存しない)。
+- **Python ~3.7万行 / TypeScript ~1万行 / オフライン自動テスト 402 件** (LLM・外部 API はモック、全件数秒で完走)
+- データ取得 (公式 4 ソース多重フォールバック) → 確率モデル → LLM リサーチ → Kelly 配分 → 自動投票 → 仮想収支計測 → 統計検証 まで一気通貫
+- **ローカル完結** (クラウド非依存)。FastAPI + Next.js の Web UI 付き
 
-- 詳細な分析方針・確率モデル・市場バイアスの扱い・運用フローは `CLAUDE.md`
-- データソース:
-  - **live (発走前)**: NAR は [keiba.go.jp 公式](https://www.keiba.go.jp/) (全6券種)、JRA は [JRA 公式](https://www.jra.go.jp/) (全7券種)。発走時刻は [競馬ブック](https://p.keibabook.co.jp/cyuou/top) / [オッズパーク](https://www.oddspark.com/) から取得
-  - **past (過去レース)**: [netkeiba.com](https://race.netkeiba.com/) (出馬表・馬柱・結果)
-  - 投票実行: [オッズパーク](https://www.oddspark.com/) (Playwright で半自動 or 全自動)
+> **設計思想**: このプロジェクトの中心は「勝てる予想を主張すること」ではなく、**自分の予測が市場に勝てているかを誠実に測る仕組み**です。in-sample で好成績に見えた戦略が検証で崩れた記録も含め、意思決定の経緯はすべて `CLAUDE.md` に残しています。
+
+## アーキテクチャ
+
+```
+┌─ データ取得層 (多重フォールバック) ──────────────────────────────┐
+│ netkeiba (過去レース) / JRA公式 / 地方競馬公式 keiba.go.jp /     │
+│ オッズパーク — 一次ソースが IP 規制で落ちても、出馬表・オッズ・   │
+│ 馬柱・確定結果まで公式ソースで自給して予測→計測ループが止まらない │
+└──────────────────────────────┬───────────────────────────────┘
+                               ▼
+┌─ 予測層 (2 系統の独立シグナル) ────────────────────────────────┐
+│ ① 確率モデル: LightGBM (lambdarank) + 温度較正 + 市場ブレンド + │
+│    Plackett-Luce 連鎖 → 全 7 券種の的中確率を導出                │
+│ ② Claude 指数: 公式出走表から機械計算した「仮指数」を anchor に、 │
+│    Claude + Web 検索でパドック気配・直前情報・軟情報を調べ ±調整。 │
+│    市場オッズは一切渡さない (市場と直交する情報だけを寄与させる)   │
+└──────────────────────────────┬───────────────────────────────┘
+                               ▼
+┌─ 意思決定層 ───────────────────────────────────────────────────┐
+│ joint Kelly 最適化のまとめ買い束 + トリガミ防止マージン +        │
+│ EV フロア + オッズドリフト緩衝。締切 2 分前に最新オッズで最終判定 │
+└──────────────────────────────┬───────────────────────────────┘
+                               ▼
+┌─ 計測・検証層 (このプロジェクトの本体) ─────────────────────────┐
+│ 全予測の仮想収支を券種×条件×指数バージョン別に自動計測 /          │
+│ bootstrap 信頼区間 / プレレジ (事前登録) 方式のシグナル台帳 /     │
+│ walk-forward 監査 / 市場人気だけで買った場合の基準線と常時比較    │
+└────────────────────────────────────────────────────────────────┘
+```
+
+## エンジニアリング上の特徴
+
+### 1. 「発見と検証の分離」を仕組みで強制する
+
+回収率が高く見える条件 (例:「市場一致 × 本命型 × 地方で馬連 202%」) は、後知恵のビン選択でいくらでも作れます。本プロジェクトでは:
+
+- 有望に見えた戦略は**定義を凍結してプレレジ (事前登録)** し、**登録日以降のレースのみ**で回収率 + bootstrap 95% 信頼区間を蓄積
+- CI 下限が 100% を超えて初めて「確証★」、上限が 100% を割れば「破綻」として自動棄却
+- 「その時点の最良セルを追従したら?」を **walk-forward バックテスト (look-ahead なし)** で常時併記し、セル追従が機能しない事実を可視化
+- 発走後に再生成された予測が検証母集団に混ざらないよう **hindsight ガード** (採点時刻 < 発走時刻) を実装
+- 10 券種 × 固定条件 (無条件 / 市場一致 / 荒れ模様) の**比較グリッド**で、券種間を同じ土俵で比較
+
+### 2. 楽観バイアスとの戦いを記録する
+
+- 検証で幻影と判明した「市場に +7-8pt の優位」(実は時系列 split が会場コード split になっていた) を特定・修正し、結論ごと差し替え
+- 複勝レンジは下限採用・締切直前ドリフトにトリガミ防止マージン (×1.10) — **実払戻が想定を下回る方向の誤差**を優先的に潰す
+- 誤オッズ (賭け金が動く最悪のバグ) を出すパーサは、実オッズ照合で検証してから採用。位置推定でしか取れない券種は無効化
+
+### 3. LLM を「検索と読解」に限定して使う
+
+- Claude の役割は各馬の**強さ指数 (0-100)** の生成と 3 連単買い目選定のみ。確率・配分の数学は決定的コードが担う
+- 実測 (85R・検索 1,286 本のツールログ) からクエリの 8 割がテンプレ的と判明 → **固定クエリを Tavily API へ直接発行し、LLM は読解と採点 1 回だけ**という省コスト構成 (ARCH-B) も選択可。LLM セッション数 ~1/5
+- claude CLI (サブスクリプション) → Anthropic API の自動フォールバック、モデル選択 (Opus/Sonnet/Haiku)、指数の方針バージョン (v1/v2/v3) 別の計測分離
+
+### 4. 自動化と安全性の両立
+
+投票の自動化 (地方: オッズパーク / 中央: 即PAT) は Playwright で実装しつつ、**四段構えの安全ゲート** (①レース単位の上限 ②日次累計上限 ③実機検証フラグ ④成功マーカー検出後のみ計上) を通します。既定は「カート投入まで自動・購入確定は人間」の半自動です。
+
+### 5. 常駐自動化 (`make api` を回しておくだけ)
+
+| ループ | 動作 |
+|---|---|
+| 結果自動取得 | 発走済・結果未取得の全予測の着順/払戻を 10 分毎に取得し計測へ反映 |
+| 締切直前の再評価 | 推奨レースを締切 5-7 分前に再検索 (パドック・当日馬体重を指数に反映) |
+| 前夜の翌日一括解析 | 毎晩 21 時に翌日全レースの Claude 指数を先行生成 (当日は再利用でコストほぼゼロ) |
+| シグナル台帳の自動追記 | プレレジ検証・市場一致シグナルの時系列を結果確定のたび蓄積 |
 
 ## 構成
 
 ```
 keiba-ev/
-├── src/                # Python バックエンド (CLI + ライブラリ)
-│   ├── analyze.py            # メインエントリ (URL → 確率推定 + bet table + 2 bundle)
-│   ├── aptitude.py           # 各馬の 9 因子適性指数
-│   ├── parse.py              # netkeiba HTML → RaceData
-│   ├── scrape.py             # netkeiba Playwright fetch (過去レース取得用)
-│   ├── scrape_keibago.py     # NAR 公式 (keiba.go.jp) 全6券種 (live odds 用)
-│   ├── scrape_jra.py         # JRA 公式 (accessO.html token walk) 全7券種 (live odds 用)
-│   ├── scrape_oddspark.py    # オッズパーク (NAR 二次 fallback + race list discovery)
-│   ├── scrape_alt.py         # 競馬ブック (JRA 発走時刻 / live discovery)
-│   ├── ev.py                 # 確率推定 + Plackett-Luce 連鎖 + 全 bet type EV table
-│   ├── portfolio.py          # joint Kelly 最適まとめ買い束 (回収優先 + 的中優先)
-│   ├── models.py             # Horse / Race / Probabilities / EvRow
-│   ├── llm.py                # claude CLI spawn + framework プロンプト
-│   ├── auto_watch.py         # 当日開催を polling して発走前に自動解析
-│   ├── oddspark_bet.py       # オッズパーク投票 (半自動 / 全自動 / 常駐 daemon)
-│   ├── fetch_result.py       # 結果ページから着順・払戻を自動取得
-│   ├── record.py             # 手動で結果記録
-│   ├── bulk_fetch.py         # 過去レース一括取得 (学習データ用)
-│   └── calibrate.py          # tier 別 / bundle 別 hit / ROI 集計
-├── api/                # FastAPI バックエンド (ローカル開発用)
-│   ├── main.py
-│   ├── runner.py
-│   ├── store.py
-│   └── _watch_loop.py
-├── web/                # Next.js フロントエンド
-│   ├── app/                  # dashboard / predictions / calibrate / watch-auto / analyze
-│   ├── components/
-│   └── lib/
-├── Makefile
-├── CLAUDE.md           # 運用方針 / 確率モデル / 検索 MCP ルール / 開発フロー
-├── requirements.txt    # Python 依存
-└── package.json        # MCP サーバ (Tavily) 用
+├── src/                # コア (Python)
+│   ├── analyze.py            # メインパイプライン (取得 → 確率 → 束 → snapshot)
+│   ├── ev.py                 # 確率推定 (LightGBM + 市場ブレンド + Plackett-Luce)
+│   ├── aptitude.py           # 各馬 9 因子の適性指数
+│   ├── llm.py                # Claude パイプライン (score/bet 2段・並列検索・API fallback)
+│   ├── research_prefetch.py  # 固定クエリ Tavily 直叩き (ARCH-B)
+│   ├── portfolio.py          # joint Kelly 最適束 + トリガミ防止
+│   ├── shobu.py              # 今日の勝負レース抽出 (市場との順位乖離スクリーン)
+│   ├── scrape_keibago.py     # 地方競馬公式 (全6券種・出馬表・馬柱・結果)
+│   ├── scrape_jra.py         # JRA公式 (全7券種・フォーム POST チェーンの token walk)
+│   ├── scrape_oddspark.py    # オッズパーク (fallback + discovery)
+│   ├── auto_watch.py         # 発走前レースの自動検出・解析・投票 enqueue
+│   ├── oddspark_bet.py       # オッズパーク投票 (半自動/全自動 + 常駐 daemon)
+│   ├── ipat_bet.py           # JRA 即PAT 投票 (同上)
+│   └── fetch_result.py       # 確定結果の取得 (block 時は公式へ fallback)
+├── api/                # FastAPI (ジョブ実行・計測集計・常駐ループ)
+├── web/                # Next.js ダッシュボード
+├── scripts/            # 読み取り専用の検証・バックテスト群
+├── tests/              # オフライン自動テスト (402件)
+├── data/               # 生 HTML / 予測 snapshot / 確定結果 / 学習データ (git 管理外)
+└── CLAUDE.md           # 意思決定ログ (何を試し、何が幻影で、なぜ今の設計か)
 ```
+
+## Web UI
+
+```bash
+make api    # FastAPI    (localhost:9788)
+make web    # Next.js    (localhost:3788)
+```
+
+- **ダッシュボード (地方 / 中央 / ばんえい)**: Claude 指数上位の 3 連単 BOX・券種別戦略くらべの仮想収支 (指数バージョン別)、研究中シグナルのプレレジ台帳、買い方マトリクス
+- **今日の勝負レース (`/shobu`)**: 当日 (または翌日) 全レースをスキャンし、Claude 指数と市場の順位乖離でスクリーニング。2 分毎の最新オッズ再採点・Claude モデル / リサーチ方式の選択
+- **予測分析履歴**: 全予測の snapshot (指数・根拠・買い目・結果・的中券種ラベル)
+- **自動予測分析・投票 (`/watch-auto`)**: 監視ループと投票 daemon の起動/設定
+- **競馬場別 / 確率較正**: 場別内訳・実測 hit と予測確率の較正
 
 ## セットアップ
 
-### Python (バックエンド)
+```bash
+make setup        # python3.13 venv + 依存 + Playwright Chromium
+make web-install  # フロントエンド依存
+```
+
+LLM リサーチには `claude` CLI (Pro/Max サブスクリプションで `claude login`、または `.env` に `ANTHROPIC_API_KEY`) と、Web 検索用の `TAVILY_API_KEY` (`.env`) が必要です。投票を使う場合のみ `ODDS_PARK_ID` / `IPAT_*` 等の認証情報を `.env` に設定します (コード・ログ・コミットには残さない)。
+
+## 使い方 (CLI)
 
 ```bash
-make setup        # python3.13 + venv + pip install + Playwright Chromium
-# python3.13 がない環境 (WSL Ubuntu 等) は:
-make setup-uv     # uv 経由で 3.13 を入れる
-```
-
-### Claude CLI (LLM 評価 / web 検索補強)
-
-LLM 評価は Anthropic API を直叩きせず、ローカルの `claude` CLI を `claude -p` で subprocess spawn します (`src/llm.py`)。
-
-```bash
-# Claude Pro / Max サブスクリプションでログイン (推奨)
-claude login
-```
-
-サブスクリプションでログイン済みなら `ANTHROPIC_API_KEY` は不要です。
-
-### MCP サーバ (任意 / Claude 評価で使う Tavily)
-
-```bash
-npm install       # ./node_modules/.bin/tavily-mcp を取得
-cp .env.example .env
-# .env を編集して TAVILY_API_KEY を記入
-```
-
-`make run` 時に `.env` が `python-dotenv` で読まれ、spawn する `claude` CLI に継承されます。
-
-### オッズパーク認証 (任意 / 自動投票で使う)
-
-実弾自動購入 (`make bet`) / Web UI の自動投票 (自動ログイン) 用。`.env` に追記:
-
-```
-ODDSPARK_ID=...
-ODDSPARK_PASSWORD=...
-ODDSPARK_PIN=...
-```
-
-PIN は普段使ってない端末でログイン時に oddspark が追加認証として要求するため。
-
-`make run` / `make bet` / `make api` はいずれも起動時に `.env` を `python-dotenv` で読み込むので、ここに書けば
-Web UI (watch-auto ページ) の **自動ログイントグル** でも認証情報が daemon に継承される (env が空だと daemon は
-手動ログインにフォールバックしてブラウザを開いたまま待つ)。認証情報はコード / ログ / コミットに残さない。
-
-### フロントエンド
-
-```bash
-make web-install  # pnpm install (or npm install) を web/ で実行
-make web          # next dev :3788 (keirin web 3000 と被らないように)
-```
-
-## 使い方
-
-### URL から解析 (手動 / 単発)
-
-```bash
-. .venv/bin/activate
+# 単発レース分析
 python -m src.analyze 'https://race.netkeiba.com/race/shutuba.html?race_id=202605210601'
-# or make run URL='...'
+
+# 発走前の自動監視 (指数生成 → 締切直前の最終判定 → snapshot → 結果取得)
+make watch-auto
+
+# 学習パイプライン (特徴量再集計 → LightGBM 再学習 → ホールドアウト評価, ~40分)
+make retrain
+
+# 検証系 (読み取り専用): 較正レポート / ブレンド MLE / momentum 検定 / クエリ分析 など
+python scripts/bundle_calibration_report.py
+python scripts/signal_feature_sweep.py
 ```
-
-`race_id` は `YYYYVVKKDDRR` 形式 (例 `202605210601` = 2026/05/21 阪神 (06) 1R)。
-
-実行内容:
-
-1. 出馬表 + 馬柱 + 全 7 券種オッズを取得・パース
-2. 9 因子適性指数 + 確率モデル (市場ブレンド + Plackett-Luce) で各 outcome の P を推定
-3. 各 bet type の EV table (回収優先・P×O 降順) + 的中優先 table (prob 降順 + px_o≥1.0 floor)
-4. **joint Kelly 最適まとめ買い束** を 2 つ生成:
-   - `recommended_bundle` (回収優先) ← 実弾で買う対象
-   - `recommended_bundle_hit` (的中優先) ← おまけ計測のみ
-5. (任意) `claude -p` を spawn し、Tavily で per-leg 補強根拠を集めさせて bundle を選定 / 検証
-
-### Plan キャップ / 適性ゲート / 多 bet type フラグ
-
-```bash
-make run URL='...' MARKET_BLEND=0.8 APTITUDE_TOP=6
-#   MARKET_BLEND  : 市場暗黙率とモデルの混合比 β (default 0.78)
-#   APTITUDE_TOP  : 適性 top N 頭 (default 6)
-#   EV_MAX        : EV table の最大 P×O (大穴除外)
-#   MIN_PROB      : 最低当選率 % (低当選率除外)
-```
-
-`make bet` で自動投票する場合のデフォルトは `WINDOW=1 MARKET_BLEND=0.8 MIN_PROB=0.5` 等 (下記)。
-
-### Bundle (旧 Plan A/B/C/F/G/H1/H2 は廃止)
-
-2026-05-29 の restructure で集計対象を **2 bundle のみ** に集約。
-
-- **回収優先 (`recommended_bundle`)**: joint Kelly で E[log W] を最大化する EV 最適束。トリガミ防止フィルタ (margin=1.10) 付き。**実弾で買う対象**。
-- **的中優先 (`recommended_bundle_hit`)**: prob 降順で pool を絞ったうえで Kelly 配分。確率高い目を抑える戦略。**おまけ計測のみ** (買わない、ダッシュボードで的中率 / ROI 集計だけする)。
-
-bet type は 単勝 / 複勝 / 馬連 / ワイド / 馬単 / 3連複 / 3連単 を全て同じ確率モデルで EV 計算。3連単 も他券種と並ぶ `bet_tables` の一員。Claude が両 bundle を選定する。
-
-### 発走前 Refresh
-
-「初回分析 → 締切 N 分前まで待機 → 再取得 → 差分表示 → 再評価」を 1 コマンド:
-
-```bash
-python -m src.analyze <url> --refresh
-```
-
-### watch-auto (発走前に自動発火)
-
-```bash
-make watch-auto WINDOW=5 TOLERANCE=4 INTERVAL_SEC=60
-```
-
-`WINDOW` は **締切までのリード時間 (分)**。締切=発走 2 分前固定なので、`WINDOW=5` は発走 7 分前に dispatch。
-
-discovery は **公式ソース** から (netkeiba live は使わない):
-- NAR: oddspark の当日 race list (発走時刻つき)
-- JRA: 競馬ブック (発走時刻) × JRA 公式 `discover_jra_races` (netkeiba_rid) を場名+R で join
-
-analyze は NAR=keibago / JRA=JRA 公式。netkeiba は data/raw/ の **過去レースキャッシュと学習データ用途のみ**。
-
-### `make bet` — watch-auto + 自動投票 (実弾 / 半自動)
-
-```bash
-make bet
-# ↑ 推奨デフォルト: WINDOW=1, MARKET_BLEND=0.8, MIN_PROB=0.5, APTITUDE_TOP=6,
-#   SESSION_ARGS=--auto-purchase --auto-login --clear --payment=buylimit
-#                --stake-multiplier=2 --daily-cap=50000 --poll=5
-```
-
-挙動:
-- 投票ブラウザ daemon (`oddspark_bet --session`) を headful で起動 → env で自動ログイン (or 手動ログイン)
-- watch-auto ループが裏で回り、締切 1〜5 分前のレースを解析
-- 解析後 `recommended_bundle` (回収優先) が空でなければ daemon の queue (`data/cache/oddspark_bet_queue/`) に投入
-- daemon がカート投入 + `--auto-purchase` で `#gotobuy → 確認 → #buy` まで自動確定 (実弾)
-- 安全四段: ① `AUTO_PURCHASE_VERIFIED=True` フラグ ② per-race ¥10,000 上限 ③ `--daily-cap=50000` 日次上限 ④ success marker 検出後にのみ daily_stake 加算
-
-部分上書き:
-
-```bash
-make bet WINDOW=3                              # 発走 5 分前 dispatch
-make bet MARKET_BLEND=0.9                       # 市場寄せを強める
-make bet SESSION_ARGS="--auto-purchase --clear --payment=opcoin --stake-multiplier=1"
-```
-
-### 浦和スキップ等の場別フィルタ
-
-`src/auto_watch.py:BET_SKIP_VENUES` に場名を追加すると、analyze / snapshot は通常通り走るが enqueue (= 自動投票) だけ skip:
-
-```python
-BET_SKIP_VENUES: set[str] = {"浦和", "船橋"}   # 投票対象から外す
-```
-
-### キャリブレーション
-
-```bash
-# 結果記録 (auto fetch が拾えなかった時の手動入力)
-make record RACE=20260521-521-1 ORDER=5,2,7 PAYOUT=25400
-
-# 集計
-make calibrate
-```
-
-dashboard (`/`) / 確率較正 (`/calibrate`) に **回収優先 / 的中優先 AI** の hit_rate + ROI (見送り除外) が出る。
-
-### FastAPI バックエンド + フロント (UI)
-
-```bash
-make api          # uvicorn --reload :9788 (keirin ev-api 8787 と完全にずらす。「788」は keiba シグネチャ)
-# 別ターミナルで
-make web          # next dev :3788 (keirin web 3000 と被らないように)
-```
-
-ブラウザで http://localhost:3788
-
-- **ダッシュボード (`/`)**: watch-auto 稼働状況 + 集計レース数 + **回収優先AI** (実弾で買う・的中率/回収率) セクションと **回収優先のみのチャート** (累積収支 / 回収率推移 / 結果分布 / bet 種別)。その下に **的中優先AI** (おまけ計測・買わない) セクションと専用チャート (緑系・bet 種別含む)
-- **確率較正 (`/calibrate`)**: tier ratio (実hit/予測P) + 回収優先 / 的中優先 bundle の実績集計 + race 毎の 2 列 grid (見送りはグレー bg、回収優先=青バッジ / 的中優先=緑バッジ)。※旧 Plan A/B/C 別テーブルは廃止
-- **予測詳細 (`/predictions/<race_id>`)**: 回収優先まとめ買い (Claude 選定 / full Kelly + ½ Kelly 併記) + **的中優先まとめ買い** (おまけ計測・緑系) + 全 bet type EV table + 適性 / 馬体 / 馬場
-- **watch-auto (`/watch-auto`)**: 開始 / 停止 + 直近履歴 (回収優先 / 的中優先 picks) + **オッズパーク自動投票トグル** (カート投入) と **自動ログイントグル** (env 認証で daemon が自動ログイン / OFF は手動)
-
-### 過去レース一括取得 (学習データ蓄積)
-
-```bash
-python -m src.bulk_fetch --since 20260101 --until 20260531 --workers 2 --polite-ms 2000
-# or
-make bulk-fetch SINCE=20260101 UNTIL=20260531 WORKERS=2
-
-# 既存 rids list を再利用してレジューム
-python -m src.bulk_fetch --rids-file=data/cache/rids_year_2026.txt \
-  --since 20260101 --until 20260531 --workers 2 --polite-ms 2000
-```
-
-netkeiba の出馬表 + 馬柱 + 結果を `data/raw/*.html.gz` に gzip 保存。
 
 ## データソースの使い分け
 
 | 用途 | ソース | 備考 |
 |---|---|---|
-| **live odds (発走前)** NAR | keiba.go.jp 公式 (`scrape_keibago.py`) | 全6券種、組合せ明示、誤オッズ無し |
-| **live odds (発走前)** JRA | JRA 公式 (`scrape_jra.py`) | 全7券種、accessO.html token walk |
-| **live race discovery** NAR | オッズパーク (`scrape_oddspark.fetch_race_list_oddspark`) | netkeiba_rid + 発走時刻 |
-| **live race discovery** JRA | 競馬ブック (`scrape_alt.fetch_race_list_keibabook`) × JRA 公式 `discover_jra_races` | 場名+R で join して netkeiba_rid + 発走時刻 |
-| **live odds fallback** NAR | オッズパーク (単複/3連単のみ) | keiba.go.jp が解決できない場合 |
-| **過去レース (学習データ)** | netkeiba (`scrape.py`, `bulk_fetch.py`) | 出馬表 / 馬柱 / 結果 |
-| **結果 fallback** NAR | keiba.go.jp `fetch_keibago_result` | netkeiba block 中も着順 + 払戻取得 |
-| **結果 fallback** JRA | JRA 公式 `fetch_jra_result` | 同上 |
-| **投票実行** | オッズパーク (`oddspark_bet.py`) | Playwright で半自動 / 全自動 |
+| live オッズ (NAR) | 地方競馬公式 keiba.go.jp | 全 6 券種・組合せ明示 (誤オッズなし) |
+| live オッズ (JRA) | JRA 公式 | 全 7 券種・Shift_JIS フォーム POST チェーンを token 抽出で walk |
+| live discovery | オッズパーク / keiba.go.jp / 競馬ブック×JRA公式 | 発走時刻つき当日 (+翌日) 一覧 |
+| 出馬表・馬柱 | 公式各所 (netkeiba キャッシュがあれば優先) | leakage 防止 (対象日以降の戦績除外) 済 |
+| 確定結果 | netkeiba → 公式 fallback | 同着 (dead heat) の払戻ルール対応 |
+| 過去レース (学習) | netkeiba | gzip キャッシュ (`make bulk-fetch`) |
 
-netkeiba は **live odds / live discovery では一切使わない** (IP 規制対策)。過去レースの解析や学習用 cache のみ。
+netkeiba は live 用途では一切使いません (IP 規制対策)。規制中もすべての機能が公式ソースで継続します。
 
-## EV / 確率モデルの詳細
+## 確率モデルの要点
 
-`CLAUDE.md` を参照。要点:
+- 控除率は券種別に厳密に扱う (3 連単 27.5% / 単複 20% など)。市場効率なら `P × O ≒ 払戻率`
+- LightGBM (lambdarank) の出力を softmax 温度 `T` で較正し、市場暗黙確率と β=0.78 でブレンド。JRA / NAR / ばんえい でセグメント別に再較正
+- 順位ごとの強度減衰を持つ **Plackett-Luce 連鎖 (Discounted Harville)** で 3 連単まで展開
+- Claude 指数は市場ブレンド後の確率に温度付き softmax で対数線形合成 (支持馬の最終確率は Claude ≈75% / 市場 ≈20% / モデル ≈5%)
 
-- 中央競馬の 3 連単控除率 ≒ 22.5%。市場効率では `P × O ≒ 0.775`。
-- `P × O > 1.0` で理論上 +EV だが、確率モデルの楽観バイアスを考慮して **Plan 入りフロアは P × O ≥ 1.02**。
-- 確率モデルは **市場ブレンディング** (`market_blend=0.78`) で市場暗黙率と混合 (Phase 22-23 で全 plan で β=0.78 が CV 通過した唯一の robust 設定)。
-- 各順位 (1/2/3) に固有 strength を持つ **Plackett-Luce 連鎖**。
-- LightGBM softmax 温度 `T=0.4` で sharpen (holdout 291 races で唯一 CV 通過した out-of-sample 改善)。
+## 現状の結論 (誠実な要約)
 
-## 開発フロー
+- 勝率次元で確率モデルは市場とほぼ同等です (市場は強い)。**控除率を安定して上回る戦略はまだ確証されていません**
+- だからこそ実弾は計測モードの小額に抑え、プレレジ台帳で「確証★」(登録後 30R 以上 かつ CI 下限 > 100%) が出るまで戦略を昇格させない運用にしています
+- Claude 指数の付加価値 (市場人気だけで買う基準線との差) は複数条件で正の傾向が観測されており、サンプル蓄積中です
 
-CLAUDE.md にも記載:
+## 既知の制約 / 免責
 
-- **commit + main push は確認なしで OK** (2026-05-29 ユーザ許可)。論理的なまとまりで commit して main へ直 push。
-- ただし依然として要確認: 破壊的操作 (reset --hard / force push / branch -D)、`.env` 等機密のコミット可能性、hooks の skip。
-- commit message は日本語 conventional 風 (`feat:` / `fix:` / `refactor:`)。Co-Authored-By 付け。
-
-## 既知の制約
-
-- netkeiba 結果ページのパーサは降着・取消などの非正規ケースは未対応
-- JRA 公式 (`accessO.html`) は **開催日 (土日)** のみ live、平日は accessO に race token 不在 → JRA 平日は手動分析のみ
-- オッズパーク利用規約による自動化制限のリスクは使用者が負う
-- 自動キャリブレーションは未実装 (calibrate は集計のみ、係数の自動更新は人判断)
+- JRA 公式の live オッズは開催日のみ (平日の JRA は事後解析のみ)
+- 降着・出走取消などの非正規ケースは一部パーサ未対応
+- 各投票サイトの利用規約による自動化制限のリスクは使用者が負います
+- 個人研究用プロジェクトです。馬券の購入は自己責任であり、本ソフトウェアは利益を保証しません
