@@ -44,26 +44,28 @@ _MAX_TOTAL_FRACTION = 0.9999
 # 1.10 → オッズ 9% 下振れまで吸収。複勝/ワイドのレンジ下限採用 (parse 側) と二段構え。
 TORIGAMI_MARGIN = 1.10
 
-# 券種別オッズドリフトシェード (E[確定オッズ/bet時オッズ | 的中] の保守的推定)。
-# パリミュチュエルの実払戻は bet 時オッズでなく確定オッズで決まる。実測
-# (data/results の final_odds × snapshot 保存オッズ, 2026-06-10 時点 n=185 脚):
-#   place median 0.891 (52.9% が margin1.10 突破) / trifecta median 1.009 p25 0.727 /
-#   wide median 1.067 p25 0.793 / exacta median 0.709 (n=6)。
-# 締切直前は informed money が入り「的中する組番ほど直前に売れて配当が下がる」
-# (arXiv:2509.14645) ため、的中条件付きの下振れは無条件 median より大きい。
-# EV 判定・Kelly 配分・トリガミ判定の **意思決定にのみ** このシェードを掛ける
-# (表示の odds/payout_if_hit は名目のまま)。値は scripts/bundle_calibration_report.py
-# の実測で定期的に較正すること。
+# 券種別オッズドリフトシェード (E[確定オッズ/bet時オッズ | 的中] の推定)。
+# パリミュチュエルの実払戻は bet 時オッズでなく確定オッズで決まる。EV 判定・Kelly 配分・
+# トリガミ判定の **意思決定にのみ** このシェードを掛ける (表示の odds/payout_if_hit は
+# 名目のまま)。テールの下振れは TORIGAMI_MARGIN (=1.10) が吸収する二段構え。
+# **較正 2026-07-05 (scripts/calibrate_drift_shade.py)**: odds_timeline の締切≤600s前
+# キャプチャ (282R, リード median 147s) × 実払戻 (的中組 final_odds) の比
+# r = 実払戻/直前オッズ の **median** を採用 (中心推定・上振れは 1.0 キャップ = EV に
+# 上振れを織り込まない)。旧値 (2026-06-10, n=185脚の暫定) は複勝 0.85 が過度に悲観的
+# だった: 複勝キャプチャはレンジ**下限**なので実払戻 median は下限比 1.08 (n=833)、
+# r<0.85 は 12% のみ → 複勝/ワイドの EV を系統的に ~15% 過小評価していた。
+# segment 別では NAR が JRA よりやや低い (自票インパクト方向, 例 3連単 med JRA 1.00 /
+# NAR 0.89) が差 ~0.05 のため全体 median の単一値とする。レース蓄積で定期再較正すること。
 DRIFT_SHADE: dict[str, float] = {
-    "win": 1.00,       # median 1.315 (n=13) — 上振れ観測だが保守的に 1.0 でキャップ
-    "place": 0.85,
-    "quinella": 0.90,
-    "wide": 0.90,
-    "exacta": 0.85,
-    "trio": 0.85,
-    "trifecta": 0.85,
+    "win": 0.95,       # med 0.95 (n=282)
+    "place": 1.00,     # med 1.08 (n=833, レンジ下限比) → 1.0 キャップ
+    "quinella": 0.95,  # med 0.95 (n=264)
+    "wide": 1.00,      # med 1.00 (n=791, レンジ下限比)
+    "exacta": 0.93,    # med 0.93 (n=264)
+    "trio": 0.97,      # med 0.97 (n=264)
+    "trifecta": 0.93,  # med 0.93 (n=284)
 }
-_DRIFT_SHADE_DEFAULT = 0.90
+_DRIFT_SHADE_DEFAULT = 0.95
 
 # px_o (P×O) の上限ゲート。市場効率 (P×O ≈ 払戻率 0.72-0.80) の下で px_o が 2 を超える
 # 脚は「モデルが市場の ~3 倍の確率を主張」しており、実測ではほぼ常にモデルの楽観誤差

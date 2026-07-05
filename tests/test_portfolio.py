@@ -244,7 +244,11 @@ def test_empty_bundle_when_no_positive_ev():
 
 
 def test_single_bet_matches_scalar_kelly():
-    """単一 +EV bet の joint Kelly は scalar Kelly f*=(pO-1)/(O-1) に一致。"""
+    """単一 +EV bet の joint Kelly は scalar Kelly f*=(pO-1)/(O-1) に一致。
+
+    最適化はドリフトシェード込みの実効オッズ (odds × DRIFT_SHADE[bet_type]) で行うので、
+    期待値もシェード込みで計算する (shade 定数の較正でテストが壊れないように, 2026-07-05)。
+    """
     n = 6
     probs = _uniform_probs(n)  # p(win=horse1)=1/6
     p_win = 1.0 / n
@@ -253,7 +257,8 @@ def test_single_bet_matches_scalar_kelly():
               "px_o": p_win * odds, "tier": "chuana"}]
     b = pf.build_bundle(cands, probs, min_stake=1, stake_unit=1)
     assert len(b["legs"]) == 1
-    f_expected = (p_win * odds - 1.0) / (odds - 1.0)
+    odds_eff = odds * pf._drift_shade("win")
+    f_expected = (p_win * odds_eff - 1.0) / (odds_eff - 1.0)
     assert math.isclose(b["legs"][0]["kelly"], f_expected, abs_tol=2e-3)
 
 
