@@ -734,3 +734,10 @@ def test_refresh_recommended_missing_result(tmp_path, monkeypatch):
     """スキャン結果ファイルが無ければ None (404 元)。"""
     monkeypatch.setattr(shobu, "SHOBU_DIR", tmp_path)
     assert shobu.refresh_recommended("20260102") is None
+
+
+def test_score_stage_cmd_routes_banei_to_keibago():
+    """banei (帯広) は keibago 経路 (旧: else jra で全滅する実障害, 2026-07-05 修正)。"""
+    assert "src.scrape_keibago" in shobu._score_stage_cmd("202665070601", "banei", 1)
+    assert "src.scrape_keibago" in shobu._score_stage_cmd("202644070601", "nar", 1)
+    assert "src.scrape_jra" in shobu._score_stage_cmd("202605070601", "jra", 1)

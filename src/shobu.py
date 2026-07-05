@@ -301,11 +301,14 @@ def _fetch_fresh_win(rid: str, rtype: str) -> dict[str, Any] | None:
 def _score_stage_cmd(rid: str, rtype: str, start_at: int, model: str = "opus") -> list[str]:
     """score ステージ (Claude 指数生成 + 暫定 snapshot) の subprocess コマンド。
 
-    api/main.py の refresh-odds と同経路: NAR=keibago / JRA=jra に `--phase=score --snapshot`。
+    api/main.py の refresh-odds と同経路: JRA=jra / **それ以外 (nar + banei) = keibago** に
+    `--phase=score --snapshot`。旧実装は `nar なら keibago、else jra` で **banei (帯広) が
+    JRA 経路に送られ全レース rc=1 で指数生成不能**だった (実障害: 翌日スキャンで帯広12R が
+    2回リトライ後 全見送り, 2026-07-05 修正)。keiba.go.jp は帯広 (babaCode=3) を扱える。
     `model` は claude -p のモデル (opus/sonnet/haiku) — モデルで指数の質・速度・コストが変わるか
     比較するため選べるようにした (ユーザ指示 2026-07-05)。
     """
-    mod = "src.scrape_keibago" if rtype == "nar" else "src.scrape_jra"
+    mod = "src.scrape_jra" if rtype == "jra" else "src.scrape_keibago"
     return [PY, "-m", mod, rid, "--snapshot", "--phase=score", f"--start-at={start_at}",
             f"--model={model}"]
 
@@ -515,11 +518,12 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
 
         ok, note, was_timeout = _exec(
             _score_stage_cmd(rid, t["race_type"], start_at, model=model))
-        # NAR で keibago が rc≠0 で失敗 (timeout 以外) したら oddspark 経路に 1 回だけ
-        # フォールバック (2026-07-05): 前夜の翌日スキャンでは keiba.go.jp に翌日カードが
+        # 地方 (nar/banei) で keibago が rc≠0 で失敗 (timeout 以外) したら oddspark 経路に
+        # 1 回だけフォールバック (2026-07-05): 前夜の翌日スキャンでは keiba.go.jp に翌日カードが
         # 未掲載の場 (実測: 盛岡) があり、oddspark 前売りで score 段が成立することがある。
-        # timeout は時間切れなので追い打ちしない (時間予算を倍にしない)。
-        if not ok and not was_timeout and t["race_type"] == "nar":
+        # oddspark は帯広 (banei) も売るので banei も対象。timeout は時間切れなので追い打ち
+        # しない (時間予算を倍にしない)。
+        if not ok and not was_timeout and t["race_type"] in ("nar", "banei"):
             _safe_log(f"[claude-eval] {label} keibago 失敗 ({note}) → oddspark にフォールバック")
             ok2, note2, _to2 = _exec(
                 [PY, "-m", "src.scrape_oddspark", rid, "--snapshot", "--phase=score",
