@@ -973,6 +973,7 @@ export type ShobuScanRequest = {
   score_parallel?: boolean;
   score_queries_per_horse?: number;
   llm_max_concurrent?: number;
+  model?: "opus" | "sonnet" | "haiku";
 };
 
 // --- Endpoints ---

@@ -626,7 +626,7 @@ def _tag_snapshot_source(race_id: str, source: str) -> None:
 def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int = 0,
                     with_llm: bool = True, market_blend: float = MARKET_BLEND_LIVE,
                     aptitude_top: int = 6, phase: str = "bet",
-                    llm_blend: float = LLM_BLEND_DEFAULT) -> dict:
+                    llm_blend: float = LLM_BLEND_DEFAULT, model: str = "opus") -> dict:
     """NAR race を keiba.go.jp の全6券種オッズで解析 (netkeiba/oddspark の上位互換)。
 
     出馬表/馬柱は data/raw の netkeiba cache があれば使い (確率モデルが効く)、無ければ
@@ -733,7 +733,7 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     if phase == "score":
         az_mod._run_score_stage(
             race_id, rd, aptitudes=aptitudes, market_signals=market_signals,
-            horse_best_times=best_times, model="opus", no_llm=not with_llm,
+            horse_best_times=best_times, model=model, no_llm=not with_llm,
             past_source=("netkeiba馬柱" if used_cache else "地方競馬公式(keiba.go.jp)"))
         # Claude 指数が出た段階で予想履歴詳細 (snapshot) を作って表示する (ユーザ指示 2026-06-13)。
         # save_snapshot 時は early return せず下の bet 段ロジックへ fall-through し、指数つき
@@ -1088,6 +1088,7 @@ def _main() -> None:
     aptitude_top = 6
     phase = "bet"
     llm_blend = LLM_BLEND_DEFAULT
+    model = "opus"
     for a in sys.argv:
         if a.startswith("--start-at="):
             start_at = int(a.split("=", 1)[1] or 0)
@@ -1108,12 +1109,14 @@ def _main() -> None:
                 aptitude_top = int(a.split("=", 1)[1])
             except ValueError:
                 pass
+        elif a.startswith("--model="):
+            model = a.split("=", 1)[1].strip() or "opus"
     if save:
         try:
             res = analyze_keibago(rid, save_snapshot=True, start_at=start_at,
                                   with_llm="--no-llm" not in sys.argv,
                                   market_blend=market_blend, aptitude_top=aptitude_top,
-                                  phase=phase, llm_blend=llm_blend)
+                                  phase=phase, llm_blend=llm_blend, model=model)
         except KeibagoError as ex:
             print(f"keiba.go.jp 解析不能 ({rid}): {ex}")
             raise SystemExit(1)

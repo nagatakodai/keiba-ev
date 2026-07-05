@@ -639,6 +639,9 @@ class ShobuScanRequest(BaseModel):
     score_queries_per_horse: int = Field(default=10, ge=2, le=12)
     # claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT)。claude の並列は keiba.go.jp と無関係なので 20 維持。
     llm_max_concurrent: int = Field(default=20, ge=1, le=50)
+    # Claude 指数を生成する claude -p のモデル (ユーザ指示 2026-07-05: opus/sonnet/haiku で
+    # 指数の質・速度・コストが変わるか比較したい)。既定 opus (従来挙動と同じ)。
+    model: Literal["opus", "sonnet", "haiku"] = "opus"
 
 
 @app.post("/api/shobu/scan")
@@ -664,6 +667,7 @@ async def api_shobu_scan(req: ShobuScanRequest) -> dict[str, Any]:
         score_parallel=req.score_parallel,
         score_queries_per_horse=req.score_queries_per_horse,
         llm_max_concurrent=req.llm_max_concurrent,
+        model=req.model,
         max_races=req.max_races,
     )
     job = JOBS.new(label=f"shobu-scan: {date}", cmd=cmd)

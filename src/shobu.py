@@ -298,13 +298,16 @@ def _fetch_fresh_win(rid: str, rtype: str) -> dict[str, Any] | None:
 
 # -------------------------------------------------------------- claude eval ----
 
-def _score_stage_cmd(rid: str, rtype: str, start_at: int) -> list[str]:
+def _score_stage_cmd(rid: str, rtype: str, start_at: int, model: str = "opus") -> list[str]:
     """score ステージ (Claude 指数生成 + 暫定 snapshot) の subprocess コマンド。
 
     api/main.py の refresh-odds と同経路: NAR=keibago / JRA=jra に `--phase=score --snapshot`。
+    `model` は claude -p のモデル (opus/sonnet/haiku) — モデルで指数の質・速度・コストが変わるか
+    比較するため選べるようにした (ユーザ指示 2026-07-05)。
     """
     mod = "src.scrape_keibago" if rtype == "nar" else "src.scrape_jra"
-    return [PY, "-m", mod, rid, "--snapshot", "--phase=score", f"--start-at={start_at}"]
+    return [PY, "-m", mod, rid, "--snapshot", "--phase=score", f"--start-at={start_at}",
+            f"--model={model}"]
 
 
 def _select_claude_targets(results: list[dict[str, Any]], *, claude_all: bool,
@@ -334,7 +337,7 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                      score_parallel: bool = False,
                      score_queries_per_horse: int | None = None,
                      llm_max_concurrent: int | None = None,
-                     max_retries: int = 2,
+                     max_retries: int = 2, model: str = "opus",
                      on_progress: Callable[[dict[str, Any], int, int], None] | None = None) -> int:
     """対象レースに score ステージ (claude -p) を spawn して Claude 指数を生成。生成成功数を返す。
 
@@ -418,8 +421,8 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
         with _log_lock:
             log(msg)
 
-    _safe_log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 "
-              f"(across-race 並列 {parallel}{qph_txt}{shard_txt} / 各 timeout {timeout}s)…")
+    _safe_log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 (model={model}"
+              f" / across-race 並列 {parallel}{qph_txt}{shard_txt} / 各 timeout {timeout}s)…")
 
     def _killpg(proc) -> None:
         """score subprocess を **プロセスグループごと** SIGKILL (research の claude -p 孫まで道連れ)。
@@ -435,7 +438,7 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     def _one(t: dict[str, Any], env: dict[str, str]) -> tuple[dict[str, Any], bool, str]:
         rid = t["netkeiba_race_id"]
         label = f"{t['venue']}{t['race_no']}R"
-        cmd = _score_stage_cmd(rid, t["race_type"], int(t.get("start_at") or 0))
+        cmd = _score_stage_cmd(rid, t["race_type"], int(t.get("start_at") or 0), model=model)
         # stderr は一時ファイルへ (rc≠0 = keiba.go.jp レート制限でオッズ空 等 の原因を末尾から拾う)。
         err_f = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
         try:
@@ -621,6 +624,7 @@ def scan(
     score_parallel: bool = False,
     score_queries_per_horse: int | None = None,
     llm_max_concurrent: int | None = None,
+    model: str = "opus",
     max_races: int | None = None,
     out: Path | None = None,
     log: Callable[[str], None] | None = None,
@@ -796,6 +800,7 @@ def scan(
                          score_parallel=score_parallel,
                          score_queries_per_horse=score_queries_per_horse,
                          llm_max_concurrent=llm_max_concurrent,
+                         model=model,
                          on_progress=_on_progress)
 
         # ③ 権威的な最終再評価 — on_progress が呼ばれなくても (テストの monkeypatch 等) 確定させる。
@@ -962,6 +967,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="1馬あたり検索クエリ数 (KEIBA_SCORE_QUERIES_PER_HORSE)。"
                          "頭数×これ クエリが流れる (既定 10)")
     ap.add_argument("--llm-max-concurrent", type=int, default=20, help="claude -p 同時数上限 (KEIBA_LLM_MAX_CONCURRENT, 既定 20)")
+    ap.add_argument("--model", choices=["opus", "sonnet", "haiku"], default="opus",
+                    help="Claude 指数を生成する claude -p のモデル (既定 opus)。sonnet/haiku は"
+                         "速いが検索深度/推論の質は要検証")
     ap.add_argument("--max-races", type=int, default=None,
                     help="取得レース数の上限。発走日時が近い (早い) 順に N 件だけ評価 (既定=全件)")
     ap.add_argument("--refresh", action="store_true",
@@ -998,6 +1006,7 @@ def main(argv: list[str] | None = None) -> int:
         score_parallel=args.score_parallel,
         score_queries_per_horse=args.score_queries_per_horse,
         llm_max_concurrent=args.llm_max_concurrent,
+        model=args.model,
         max_races=args.max_races,
         out=out,   # scan が暫定→確定の 2 段階で書き出す (生成完了ごとに live 更新)
     )

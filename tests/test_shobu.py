@@ -433,7 +433,7 @@ def test_run_claude_eval_real_subprocess_timeout(monkeypatch):
              "sys.stdout.write('  \U0001f50d t: REALQ\\n'); sys.stdout.flush()\n"
              "time.sleep(30)\n")
     monkeypatch.setattr(shobu, "_score_stage_cmd",
-                        lambda rid, rtype, start_at: [sys.executable, "-c", child])
+                        lambda rid, rtype, start_at, model="opus": [sys.executable, "-c", child])
     logs: list[str] = []
     targets = [{"netkeiba_race_id": "x", "race_type": "nar",
                 "start_at": 0, "venue": "佐賀", "race_no": 11}]

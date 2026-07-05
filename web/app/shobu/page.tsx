@@ -295,6 +295,8 @@ export default function ShobuPage() {
   const [claudeEval, setClaudeEval] = useState("0");
   // 取得レース数の上限 ("" = 全件)。発走日時が近い (早い) 順に N 件だけ評価する。
   const [maxRaces, setMaxRaces] = useState("");
+  // Claude 指数を生成するモデル (opus/sonnet/haiku で質・速度・コストを比較したい, 2026-07-05)。
+  const [model, setModel] = useState<"opus" | "sonnet" | "haiku">("opus");
   const [showSettings, setShowSettings] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
 
@@ -339,6 +341,7 @@ export default function ShobuPage() {
       const v = parseInt(maxRaces, 10);
       return Number.isFinite(v) && v > 0 ? Math.min(300, v) : undefined;
     })(),
+    model,
   });
 
   // 締切バッジ用の現在時刻 (5秒毎)。
@@ -644,6 +647,13 @@ export default function ShobuPage() {
                     <option value="20">発走が近い 20 件</option>
                     <option value="30">発走が近い 30 件</option>
                     <option value="50">発走が近い 50 件</option>
+                  </Select>
+                  <Select label="Claude モデル" value={model}
+                    onChange={(e) => setModel(e.target.value as "opus" | "sonnet" | "haiku")} disabled={scanning}
+                    hint="指数の質・速度・コストを比較。既定 Opus (従来挙動)">
+                    <option value="opus">Opus (既定・最も精密)</option>
+                    <option value="sonnet">Sonnet (速い・低コスト)</option>
+                    <option value="haiku">Haiku (最速・最安)</option>
                   </Select>
                   {!claudeAll && (
                     <Input label="Claude 指数を生成 (発走が近い順 N件)" type="number" min="0" max="50" step="1"
