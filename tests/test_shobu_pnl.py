@@ -333,8 +333,10 @@ def test_strategies_wide(dirs):
     # 着順 1-3-5: 上位3着 {1,3,5}。wide12{1,2}は2が圏外で外れ。wide13{1,3}は両方圏内で的中。
     # wideBOX: (1,2)外れ / (1,3){1,3}⊆{1,3,5}的中 / (2,3)外れ。→ 1点的中。
     # #3(=馬番3) は2着で複勝圏 → place3 的中 (place:3 が要る)。
+    # quinella13{1,3} は 1-2着一致で的中 → quinella:1-3 も要る (2026-07-05 戦略追加)。
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
-        [1, 3, 5], 9999, {"win:1": 2.0, "place:1": 1.5, "place:3": 1.8, "wide:1-3": 2.2})),
+        [1, 3, 5], 9999, {"win:1": 2.0, "place:1": 1.5, "place:3": 1.8, "wide:1-3": 2.2,
+                          "quinella:1-3": 5.0})),
         encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     r = d["races_detail"][0]
@@ -370,9 +372,10 @@ def test_strategies_win_place_skip_low_odds(dirs):
     # #1 の最終オッズ: 単勝1.1(≤1.1=買わない) / 複勝1.0(≤1.1=買わない)。#2 複勝1.5(>1.1=買う)。
     (pr / "rec-1.json").write_text(json.dumps(_snap(
         8, _IDX8, win_odds={1: 1.1, 2: 4.0}, place_odds={1: 1.0, 2: 1.5})), encoding="utf-8")
-    # 着順 2-4-6: 馬連/馬単/3連単/3連複/BOX は全外れ (余計なオッズ不要)。#2 は2着で複勝圏。
+    # 着順 2-4-6: 馬連/馬単/3連単/3連複/BOX は全外れ。#2 は1着=複勝圏 + win2 (指数2位単勝) 的中
+    # → place:2 と win:2 が要る (win:2 は 2026-07-05 の win2 戦略追加で必要になった)。
     (rs / "rec-1.json").write_text(json.dumps(_result_fo(
-        [2, 4, 6], 9999, {"place:2": 1.5})), encoding="utf-8")
+        [2, 4, 6], 9999, {"place:2": 1.5, "win:2": 4.0})), encoding="utf-8")
     d = store.compute_shobu_strategies_pnl(point_cost=100)
     # win1: #1 単勝1.1 → 買わない → races=0
     assert _strat(d, "win1")["races"] == 0 and _strat(d, "win1")["bets"] == 0
@@ -700,8 +703,10 @@ def test_dead_heat_wide_third_pair_misses(dirs):
         "finish_order": [9, 7, 8],
         "finish_positions": {"9": 1, "7": 2, "8": 3, "10": 3},
         "trifecta_payout": 4480,
+        # win:9 は win3 (指数3位=馬9 が1着) の的中脚用 (2026-07-05 戦略追加)。
         "final_odds": {"place:8": 1.6, "place:9": 1.2, "place:10": 1.7, "wide:8-9": 3.0,
-                       "wide:9-10": 4.0, "trio:7-8-9": 15.0, "trio:7-9-10": 17.3},
+                       "wide:9-10": 4.0, "trio:7-8-9": 15.0, "trio:7-9-10": 17.3,
+                       "win:9": 6.0},
         "recorded_at": "2026-06-28T17:00:00",
     }
     (rs / "dh-2.json").write_text(json.dumps(res), encoding="utf-8")
@@ -724,8 +729,9 @@ def test_dead_heat_second_exacta_both_orders(dirs):
         "finish_order": [5, 4, 6],
         "finish_positions": {"5": 1, "4": 2, "6": 2},   # 2着同着 (4 と 6)
         "trifecta_payout": 3510,
+        # quinella:4-5 は quinella13 (指数1-3位={5,4} が1-2着) の的中脚用 (2026-07-05 戦略追加)。
         "final_odds": {"win:5": 2.0, "place:5": 1.2, "place:4": 1.4, "place:6": 1.5,
-                       "quinella:5-6": 5.7, "exacta:5-6": 10.2,
+                       "quinella:5-6": 5.7, "exacta:5-6": 10.2, "quinella:4-5": 4.4,
                        "wide:4-5": 1.8, "wide:4-6": 2.2, "wide:5-6": 1.9,
                        "trio:4-5-6": 8.0, "trifecta:5-6-4": 35.1},
         "recorded_at": "2026-06-28T17:00:00",
@@ -762,8 +768,10 @@ def test_hit_bet_labels_lists_dashboard_hits(dirs):
     assert by_key["win1"]["label"] == "単勝1" and by_key["win1"]["payout"] == 300
     assert by_key["quinella12"]["payout"] == 400
     assert by_key["trifecta123"]["payout"] == 12000        # trifecta:1-2-3 = 120.0×100
-    # 全戦略的中 (8頭 cutoff=3) → 12 戦略 + box
-    assert len(labels) == len(store.STRATEGY_DEFS) + 1
+    # 着順 1-2-3 で的中するのは旧 12 戦略 + box。win2/win3 (指数2/3位が1着) と
+    # quinella13 (1位-3位が1-2着) は 1-2-3 の順当着では構造上的中しない (2026-07-05 戦略追加)。
+    assert len(labels) == len(store.STRATEGY_DEFS) - 3 + 1
+    assert {"win2", "win3", "quinella13"}.isdisjoint(by_key)
 
 
 def test_hit_bet_labels_only_hits_and_none_when_undecidable(dirs):
@@ -840,15 +848,16 @@ def test_signal_rules_prospective_split(dirs):
         ],
     }), encoding="utf-8")
     # 一致 (Claude#1 = 市場#1 = 馬番1)。着順 1-4-5 → Claude 側は win1/place1 のみ的中。
-    # place:4 / wide:1-4 / trio:1-4-5 は市場人気順ベースライン (top4=1,2,4,5: 4-8 は既定50>40)
-    # の的中脚用 (final_odds に無いと市場側だけ no_odds になり market_baseline から漏れる)。
+    # place:4 / wide:1-4 / trio:1-4-5 / quinella:1-4 (市場側 quinella13={1,4} が1-2着) は
+    # 市場人気順ベースライン (top4=1,2,4,5: 4-8 は既定50>40) の的中脚用
+    # (final_odds に無いと市場側だけ no_odds になり market_baseline から漏れる)。
     for rid in ("old-1", "new-1"):
         (pr / f"{rid}.json").write_text(json.dumps(_snap(
             8, _IDX8, market={1: 95.0, 2: 60.0, 3: 40.0})), encoding="utf-8")
         (rs / f"{rid}.json").write_text(json.dumps(_result_fo(
             [1, 4, 5], 0,
             {"win:1": 2.0, "place:1": 1.4, "place:4": 1.6,
-             "wide:1-4": 3.0, "trio:1-4-5": 20.0})),
+             "wide:1-4": 3.0, "trio:1-4-5": 20.0, "quinella:1-4": 8.0})),
             encoding="utf-8")
     cur = store.compute_signal_rules()
     assert cur["races"] == 2
@@ -957,8 +966,9 @@ def test_signal_rules_features_end_to_end(dirs):
     idx = {1: 90.0, 2: 78.0, 3: 77.0, 4: 60.0, 5: 50.0, 6: 40.0, 7: 30.0, 8: 20.0}
     (pr / "ft-1.json").write_text(json.dumps(_snap(
         8, idx, market={1: 95.0, 2: 60.0, 3: 40.0})), encoding="utf-8")
+    # win:3 は win3 (指数3位=馬3 が1着) の的中脚用 (2026-07-05 戦略追加)。
     (rs / "ft-1.json").write_text(json.dumps(_result_fo(
-        [3, 7, 8], 0, {"place:3": 2.0})), encoding="utf-8")
+        [3, 7, 8], 0, {"place:3": 2.0, "win:3": 12.0})), encoding="utf-8")
     cur = store.compute_signal_rules()
     tight = next(r for r in cur["rules"] if r["key"] == "place3_toppack_tight")
     assert tight["features"] == {"gap23": {"max": 2}}

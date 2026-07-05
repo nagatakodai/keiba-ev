@@ -1084,11 +1084,16 @@ def _winning_trifectas(ranks: dict[int, int]) -> list[tuple[int, int, int]]:
 # 複勝は 1/2/3 位を分けて計測 (ユーザ指示 2026-06-30)。
 # (単複 winplace は 2026-06-30 ユーザ指示で全表示から撤去)。
 STRATEGY_DEFS = [
+    # 並び順はユーザ指示 (2026-07-05): 単勝1,2,3 → 複勝1,2,3 → 馬連1-2,1-3 → ワイド1-2,1-3 →
+    # その他。win2/win3/quinella13 は券種比較グリッドのために追加 (同日)。
     ("win1", "単勝 (指数1位)", "win"),
+    ("win2", "単勝 (指数2位)", "win"),
+    ("win3", "単勝 (指数3位)", "win"),
     ("place1", "複勝 (指数1位)", "place"),
     ("place2", "複勝 (指数2位)", "place"),
     ("place3", "複勝 (指数3位)", "place"),
     ("quinella12", "馬連 (指数1-2位)", "quinella"),
+    ("quinella13", "馬連 (指数1-3位)", "quinella"),
     ("wide12", "ワイド (指数1-2位)", "wide"),
     ("wide13", "ワイド (指数1-3位)", "wide"),
     ("exacta12", "馬単 (指数1→2位)", "exacta"),
@@ -1209,6 +1214,9 @@ def _strategy_race_legs(
 
     # 単勝 (1位) — 頭数に関係なく常に発売。最終オッズ ≤1.1 は買わない (全券種共通フィルタ)。
     win_leg = _leg("win", [top1], _r(top1) == 1, f"win:{top1}")
+    # 単勝 (2位 / 3位) — 券種比較グリッド用 (ユーザ指示 2026-07-05)。
+    win_leg_2 = _leg("win", [top2], _r(top2) == 1, f"win:{top2}")
+    win_leg_3 = _leg("win", [top3], _r(top3) == 1, f"win:{top3}")
     # 複勝 (1位 / 2位 / 3位 を分けて計測) — 複勝が発売される頭数のときだけ。
     place_leg_1 = (_leg("place", [top1], top1 in placed_set, f"place:{top1}")
                    if cutoff > 0 else None)
@@ -1219,6 +1227,9 @@ def _strategy_race_legs(
     # 馬連 (1-2位)。key は昇順 (final_odds の規約に合わせる)。
     qa, qb = sorted((top1, top2))
     quin_leg = _leg("quinella", [qa, qb], _quinella_hit(top1, top2), f"quinella:{qa}-{qb}")
+    # 馬連 (1-3位) — 券種比較グリッド用 (ユーザ指示 2026-07-05)。判定は quinella12 と同型。
+    qc, qd = sorted((top1, top3))
+    quin13_leg = _leg("quinella", [qc, qd], _quinella_hit(top1, top3), f"quinella:{qc}-{qd}")
     # 馬単 (1→2位)。key は着順そのまま。
     exacta_leg = _leg("exacta", [top1, top2],
                       _exacta_hit(top1, top2), f"exacta:{top1}-{top2}")
@@ -1264,10 +1275,13 @@ def _strategy_race_legs(
 
     per = {
         "win1": _agg([win_leg]),
+        "win2": _agg([win_leg_2]),
+        "win3": _agg([win_leg_3]),
         "place1": _agg([place_leg_1] if place_leg_1 else []),
         "place2": _agg([place_leg_2] if place_leg_2 else []),
         "place3": _agg([place_leg_3] if place_leg_3 else []),
         "quinella12": _agg([quin_leg]),
+        "quinella13": _agg([quin13_leg]),
         "wide12": _agg([wide12_leg]),
         "wide13": _agg([wide13_leg]),
         "exacta12": _agg([exacta_leg]),
@@ -1450,10 +1464,13 @@ def compute_indexed_strategies_pnl(point_cost: int = 100,
 # カードのバッジ表示用 短縮ラベル (STRATEGY_DEFS key → 表示名)。ダッシュボード仮想購入の的中表示。
 STRATEGY_SHORT_LABELS = {
     "win1": "単勝1",
+    "win2": "単勝2",
+    "win3": "単勝3",
     "place1": "複勝1",
     "place2": "複勝2",
     "place3": "複勝3",
     "quinella12": "馬連1-2",
+    "quinella13": "馬連1-3",
     "wide12": "ワイド1-2",
     "wide13": "ワイド1-3",
     "exacta12": "馬単1→2",
@@ -2124,6 +2141,32 @@ SIGNAL_RULES: list[dict[str, Any]] = [
                   "1,2,3の開き系の代表として n極小のまま参考登録)"},
 ]
 
+# --- 券種比較グリッド (ユーザ指示 2026-07-05「単勝1,単勝2,単勝3,複勝1,複勝2,複勝3,馬連1-2,
+# 馬連1-3,ワイド1-2,ワイド1-3 の順で並べ、条件の定義は固定のものにして比較」) ---
+# 10 券種 × 固定 3 条件を一括プレレジし、**全券種を同じ条件の土俵で比較**できるようにする。
+# 個別発見のルール (上の手書き分) とは別 key ("grid_" 接頭) で、判定・蓄積・凍結規約は同一。
+# win2/win3/quinella13 はこのグリッドのために STRATEGY_DEFS へ追加した新戦略 (同日)。
+_GRID_STRATEGIES = ["win1", "win2", "win3", "place1", "place2", "place3",
+                    "quinella12", "quinella13", "wide12", "wide13"]
+_GRID_CONDITIONS: list[tuple[str, str, dict[str, Any]]] = [
+    ("all", "無条件 (全評価レース)", {}),
+    ("agree", "市場一致 (Claude#1=市場1番人気)", {"consensus": True}),
+    ("rough", "荒れ模様 (1番人気の復元オッズ ≥ 2.5)",
+     {"features": {"fav_odds": {"min": 2.5}}}),
+]
+for _sk in _GRID_STRATEGIES:
+    for _ck, _clabel, _cond in _GRID_CONDITIONS:
+        SIGNAL_RULES.append({
+            "key": f"grid_{_sk}_{_ck}",
+            "label": f"{_sk} × {_ck}",
+            "strategy": _sk,
+            "condition_label": _clabel,
+            "registered_at": "2026-07-05",
+            "discovery": "券種比較グリッド (固定条件の一括プレレジ 2026-07-05)",
+            **_cond,
+        })
+del _sk, _ck, _clabel, _cond
+
 
 def _rule_matches(rule: dict[str, Any], rec: dict[str, Any]) -> bool:
     """プレレジルールの発走前条件がレコードに合致するか (すべて発走前に観測可能な条件のみ)。"""
@@ -2304,6 +2347,15 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
             "status": status,
             "status_label": status_label,
         })
+
+    # 表示順 (ユーザ指示 2026-07-05): 券種を 単勝1→単勝2→単勝3→複勝1→複勝2→複勝3→馬連1-2→
+    # 馬連1-3→ワイド1-2→ワイド1-3 (それ以外は末尾) の順にグループ化し、各券種内は
+    # 固定グリッド条件 (無条件/一致/荒れ) → 個別発見ルール の順。
+    _order = {k: i for i, k in enumerate(_GRID_STRATEGIES)}
+    rules_out = [r for _i, r in sorted(
+        enumerate(rules_out),
+        key=lambda t: (_order.get(t[1]["strategy"], 99),
+                       0 if t[1]["key"].startswith("grid_") else 1, t[0]))]
 
     # 見送り規律の根拠: 死にセル (拮抗型 × 市場不一致) vs それ以外 のターゲット別 ROI。
     dead = [r for r in records if r["flags"]["style"] and not r["flags"]["consensus"]]
