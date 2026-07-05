@@ -497,8 +497,18 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
   );
 }
 
-// プレレジ済ルール 1 行 (登録後データのみで確証判定)。
-function SignalRuleRow({ rule, minConfirm }: { rule: SignalRule; minConfirm: number }) {
+// プレレジ済ルール 1 行 (登録後データのみで確証判定)。券種 (strategy) でグループ化した表の
+// 1 行 = 1 条件定義。`strategySpan` があればグループ先頭行として券種セルを rowSpan で描く
+// (ユーザ指示 2026-07-05: 券種 × [発見時参考・登録後・市場人気基準・状態] × 各条件の定義)。
+function SignalRuleRow({
+  rule,
+  minConfirm,
+  strategySpan,
+}: {
+  rule: SignalRule;
+  minConfirm: number;
+  strategySpan?: number;
+}) {
   const p = rule.prospective;
   const i = rule.insample;
   const statusClass: Record<SignalRule["status"], string> = {
@@ -508,11 +518,25 @@ function SignalRuleRow({ rule, minConfirm }: { rule: SignalRule; minConfirm: num
     broken: "bg-rose-500/20 text-rose-300",
   };
   return (
-    <tr className="border-b border-(--color-line-soft)">
-      <td className="px-2 py-1.5">
-        <span className="font-bold whitespace-nowrap">{rule.label}</span>
+    <tr
+      className={
+        strategySpan
+          ? "border-t border-(--color-line)" // 券種グループの先頭は強い区切り線
+          : "border-t border-(--color-line-soft)"
+      }
+    >
+      {strategySpan != null && (
+        <td
+          rowSpan={strategySpan}
+          className="px-2 py-1.5 align-top font-bold whitespace-nowrap border-r border-(--color-line-soft)"
+        >
+          {rule.strategy_label}
+        </td>
+      )}
+      <td className="px-2 py-1.5 text-[11px] leading-tight">
+        {rule.condition_label}
         <span className="block text-[9px] text-(--color-muted) leading-tight">
-          {rule.strategy_label} ・ {rule.condition_label}
+          プレレジ {rule.registered_at}
         </span>
       </td>
       <td className="px-2 py-1.5 text-right tnum text-(--color-muted)">
@@ -572,6 +596,21 @@ function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
   const c = data.current;
   const wfBest = c.walkforward.find((w) => w.key === "matrix_best");
   const deadQuinella = c.dead_cell.targets.find((t) => t.key === "quinella12");
+  // 券種 (strategy) でグループ化 (初出順を保持)。同じ券種の条件定義を1つの券種セルにまとめる。
+  const groups: SignalRule[][] = [];
+  {
+    const byStrategy = new Map<string, SignalRule[]>();
+    for (const r of c.rules) {
+      const g = byStrategy.get(r.strategy);
+      if (g) {
+        g.push(r);
+      } else {
+        const arr = [r];
+        byStrategy.set(r.strategy, arr);
+        groups.push(arr);
+      }
+    }
+  }
   return (
     <Card>
       <div className="space-y-3">
@@ -583,10 +622,11 @@ function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
           {c.sample_warning && <Badge tone="muted">サンプル少</Badge>}
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-xs table-zebra">
+          <table className="w-full text-xs">
             <thead>
               <tr className="text-left text-[10px] uppercase tracking-wider text-(--color-muted) border-b border-(--color-line)">
-                <th className="px-2 py-2 font-bold">ルール (プレレジ {c.rules[0]?.registered_at})</th>
+                <th className="px-2 py-2 font-bold">券種</th>
+                <th className="px-2 py-2 font-bold">条件の定義</th>
                 <th className="px-2 py-2 font-bold text-right whitespace-nowrap">発見時 (参考)</th>
                 <th className="px-2 py-2 font-bold text-right whitespace-nowrap">登録後 (確証判定)</th>
                 <th className="px-2 py-2 font-bold text-right whitespace-nowrap">市場人気基準</th>
@@ -594,9 +634,16 @@ function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
               </tr>
             </thead>
             <tbody>
-              {c.rules.map((r) => (
-                <SignalRuleRow key={r.key} rule={r} minConfirm={c.min_confirm} />
-              ))}
+              {groups.map((g) =>
+                g.map((r, i) => (
+                  <SignalRuleRow
+                    key={r.key}
+                    rule={r}
+                    minConfirm={c.min_confirm}
+                    strategySpan={i === 0 ? g.length : undefined}
+                  />
+                )),
+              )}
             </tbody>
           </table>
         </div>
