@@ -917,7 +917,7 @@ export type SignalRule = {
   features: Record<string, { min?: number; max?: number }> | null;
   insample: SignalRuleStats; // 全期間 (発見データ込み・楽観) — 参考
   prospective: SignalRuleStats; // 登録後のみ — 確証判定はこちらだけ
-  market_baseline: { races: number; roi: number }; // 同条件で市場人気順に同じ買い方 (基準線)
+  market_baseline: { races: number; hits: number; roi: number }; // 同条件で市場人気順に同じ買い方 (基準線)
   status: "accumulating" | "promising" | "confirmed" | "broken";
   status_label: string; // 蓄積中 / 有望 / 確証★ / 破綻
 };

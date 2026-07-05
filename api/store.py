@@ -2298,6 +2298,7 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
             "prospective": prospective,
             "market_baseline": {
                 "races": len(mkt_pairs),
+                "hits": sum(1 for p in mkt_pairs if p[1] > 0),
                 "roi": _roi_of(mkt_pairs) if mkt_pairs else 0.0,
             },
             "status": status,

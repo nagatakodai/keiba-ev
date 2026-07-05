@@ -544,7 +544,8 @@ function SignalRuleRow({
           <>
             {fmtRoiPct(i.roi)}
             <span className="block text-[9px] leading-tight">
-              {i.races}R ・ 単発抜き {fmtRoiPct(i.drop_best_roi ?? 0)}
+              {i.races}R ・ 的中 {fmtPct(i.hits / i.races, 0)} ・ 単発抜き{" "}
+              {fmtRoiPct(i.drop_best_roi ?? 0)}
             </span>
           </>
         ) : (
@@ -566,7 +567,8 @@ function SignalRuleRow({
               {fmtRoiPct(p.roi)}
             </span>
             <span className="block text-[9px] text-(--color-muted) leading-tight">
-              {p.races}/{minConfirm}R ・ CI[{fmtRoiPct(p.roi_ci_low)},{fmtRoiPct(p.roi_ci_high)}]
+              {p.races}/{minConfirm}R ・ 的中 {fmtPct(p.hits / p.races, 0)} ・ CI[
+              {fmtRoiPct(p.roi_ci_low)},{fmtRoiPct(p.roi_ci_high)}]
             </span>
           </>
         ) : (
@@ -577,7 +579,16 @@ function SignalRuleRow({
         )}
       </td>
       <td className="px-2 py-1.5 text-right tnum text-sky-200/80">
-        {rule.market_baseline.races > 0 ? fmtRoiPct(rule.market_baseline.roi) : "—"}
+        {rule.market_baseline.races > 0 ? (
+          <>
+            {fmtRoiPct(rule.market_baseline.roi)}
+            <span className="block text-[9px] leading-tight">
+              的中 {fmtPct(rule.market_baseline.hits / rule.market_baseline.races, 0)}
+            </span>
+          </>
+        ) : (
+          "—"
+        )}
       </td>
       <td className="px-2 py-1.5 text-right">
         <span
