@@ -833,9 +833,23 @@ def _box_race_pnl(
     return detail, "ok"
 
 
+def _venue_filter(by_race: dict[str, dict[str, Any]],
+                  venue: str | None) -> dict[str, dict[str, Any]]:
+    """競馬場フィルタ (ユーザ指示 2026-07-05: ダッシュボードを 地方/中央 の別ページに分離)。
+
+    venue="jra" = 中央 (race_type == "jra") / "nar" = 地方 (race_type != "jra"、**banei も
+    地方に含める**) / None = 従来どおり全レース (後方互換)。母集団 dict の段階で絞るので
+    recommended_total / skipped_* / races_detail もすべて venue スコープになる。
+    """
+    if venue is None:
+        return by_race
+    return {rid: r for rid, r in by_race.items()
+            if (r.get("race_type") == "jra") == (venue == "jra")}
+
+
 def _shobu_box_pnl(
     point_cost: int = 100, box_size: int = 5, *, recommended_only: bool = True,
-    version: str | None = None,
+    version: str | None = None, venue: str | None = None,
 ) -> dict[str, Any]:
     """**shobu スキャンが評価したレース** の Claude 指数上位N頭3連単BOX 仮想収支 (共通コア)。
 
@@ -855,9 +869,10 @@ def _shobu_box_pnl(
     返り値は hits/hit_rate/stake/payout/roi + CI + per-race detail。指数なし=skipped_no_index、
     結果未確定=skipped_no_result (分母外)。recommended_total = 集約レース数 (= recommended_only なら
     勝負レース総数 / False なら shobu 評価レース総数)。
+    `venue` ("nar"/"jra") で 地方/中央 に母集団を分離 (ユーザ指示 2026-07-05、None=全レース)。
     """
     # shobu 評価レースを race_id で集約 (再スキャンの重複は generated_at 後勝ち)。
-    by_race = _shobu_eval_races(recommended_only)
+    by_race = _venue_filter(_shobu_eval_races(recommended_only), venue)
 
     races_detail: list[dict[str, Any]] = []
     per_race: list[tuple[int, int]] = []
@@ -945,6 +960,7 @@ def _shobu_box_pnl(
         # 集約レース総数 (version 指定時はそのバージョンのレース数 / 未指定は全集約数)。
         "recommended_total": pop if version is not None else len(by_race),
         "version": version,
+        "venue": venue,
         "skipped_no_index": skipped_no_index,
         "skipped_no_result": skipped_no_result,
         "last_updated_at": last_updated_at,
@@ -954,13 +970,16 @@ def _shobu_box_pnl(
 
 
 def compute_shobu_pnl(point_cost: int = 100, box_size: int = 5,
-                      version: str | None = None) -> dict[str, Any]:
+                      version: str | None = None,
+                      venue: str | None = None) -> dict[str, Any]:
     """勝負レース (recommended) 専用の仮想収支 (ダッシュボード hero。ユーザ指示 2026-06-21)。"""
-    return _shobu_box_pnl(point_cost, box_size, recommended_only=True, version=version)
+    return _shobu_box_pnl(point_cost, box_size, recommended_only=True, version=version,
+                          venue=venue)
 
 
 def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5,
-                        version: str | None = None) -> dict[str, Any]:
+                        version: str | None = None,
+                        venue: str | None = None) -> dict[str, Any]:
     """**shobu が評価した全レース** (recommended に限らない) の仮想収支 (別カード併記)。
 
     ユーザ指示 (2026-06-28): 「Claude 指数が全ての馬についていて結果があればダッシュボードに反映」
@@ -969,8 +988,10 @@ def compute_indexed_pnl(point_cost: int = 100, box_size: int = 5,
     shobu 評価レース (recommended + 非recommended) に scope。これで「ほとんど推奨」(推奨カードの
     proper superset) になる。指数条件は推奨カードと同じ (BOX 可能=指数3頭以上) で揃える。
     `version` ("v1"/"v2"/"v3"/"β") を渡すと Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30)。
+    `venue` ("nar"/"jra") で 地方/中央 に分離 (ユーザ指示 2026-07-05)。
     """
-    return _shobu_box_pnl(point_cost, box_size, recommended_only=False, version=version)
+    return _shobu_box_pnl(point_cost, box_size, recommended_only=False, version=version,
+                          venue=venue)
 
 
 # ============================================================
@@ -1310,7 +1331,8 @@ def _strategy_race_legs(
 
 
 def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
-                    version: str | None = None) -> dict[str, Any]:
+                    version: str | None = None,
+                    venue: str | None = None) -> dict[str, Any]:
     """**shobu 評価レース** の Claude 指数 単純戦略くらべ 仮想収支 (共通コア)。
 
     各レースで win1 (1位単勝) / place1,2,3 (1/2/3位複勝) / quinella12 (1-2位馬連) /
@@ -1325,8 +1347,9 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
     `races` は **実際に 1 脚以上買ったレース数** (フィルタ後): 単勝/複勝は最終オッズ ≤1.1、単複は合成オッズ
     <1 (1位複勝オッズ/2<1) で買い見送り、複勝は ≤4頭で発売なし → いずれも races から外れる。
     指数<3頭=skipped_no_index、結果未確定=skipped_no_result、的中脚オッズ欠落=skipped_no_odds。
+    `venue` ("nar"/"jra") で 地方/中央 に母集団を分離 (ユーザ指示 2026-07-05、None=全レース)。
     """
-    by_race = _shobu_eval_races(recommended_only)
+    by_race = _venue_filter(_shobu_eval_races(recommended_only), venue)
 
     # 戦略ごとの集計器。races_hit = レース単位の的中数 (hit_rate の分子)。
     acc = {key: {"races": 0, "races_hit": 0, "bets": 0, "hits": 0, "stake": 0,
@@ -1435,6 +1458,7 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
         "races": races_n,
         "recommended_total": pop if version is not None else len(by_race),
         "version": version,
+        "venue": venue,
         "skipped_no_index": skipped_no_index,
         "skipped_no_result": skipped_no_result,
         "skipped_no_odds": skipped_no_odds,
@@ -1445,20 +1469,23 @@ def _strategies_pnl(point_cost: int = 100, *, recommended_only: bool = True,
 
 
 def compute_shobu_strategies_pnl(point_cost: int = 100,
-                                 version: str | None = None) -> dict[str, Any]:
+                                 version: str | None = None,
+                                 venue: str | None = None) -> dict[str, Any]:
     """勝負レース (recommended) の Claude 指数 単純戦略くらべ 仮想収支 (ユーザ指示 2026-06-30)。"""
-    return _strategies_pnl(point_cost, recommended_only=True, version=version)
+    return _strategies_pnl(point_cost, recommended_only=True, version=version, venue=venue)
 
 
 def compute_indexed_strategies_pnl(point_cost: int = 100,
-                                   version: str | None = None) -> dict[str, Any]:
+                                   version: str | None = None,
+                                   venue: str | None = None) -> dict[str, Any]:
     """shobu が評価した全レース (recommended に限らない) の Claude 指数 単純戦略くらべ 仮想収支。
 
     ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して表示」。
     母集団は BOX 収支の indexed (compute_indexed_pnl) と揃える (shobu 評価レース全体)。
     `version` ("v1"/"v2"/"v3"/"β") を渡すと Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30)。
+    `venue` ("nar"/"jra") で 地方/中央 に分離 (ユーザ指示 2026-07-05)。
     """
-    return _strategies_pnl(point_cost, recommended_only=False, version=version)
+    return _strategies_pnl(point_cost, recommended_only=False, version=version, venue=venue)
 
 
 # カードのバッジ表示用 短縮ラベル (STRATEGY_DEFS key → 表示名)。ダッシュボード仮想購入の的中表示。

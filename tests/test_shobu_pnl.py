@@ -61,11 +61,12 @@ def _result_fo(order: list[int], payout: int, final_odds: dict) -> dict:
             "final_odds": final_odds, "recorded_at": "2026-06-28T17:00:00"}
 
 
-def _shobu_doc(rid: str, n_runners: int, recommended: bool = True) -> dict:
+def _shobu_doc(rid: str, n_runners: int, recommended: bool = True,
+               race_type: str = "jra") -> dict:
     return {
         "generated_at": "2026-06-28T11:42:00+09:00",
         "races": [{"race_id": rid, "recommended": recommended, "venue": "A",
-                   "race_no": 1, "race_type": "jra", "n_runners": n_runners}],
+                   "race_no": 1, "race_type": race_type, "n_runners": n_runners}],
     }
 
 
@@ -432,6 +433,35 @@ def test_strategies_version_split(dirs):
     # BOX 側も同様に分離
     b2 = store.compute_shobu_pnl(version="v2")
     assert b2["races"] == 1 and b2["recommended_total"] == 1
+
+
+def test_venue_filter_splits_nar_and_jra(dirs):
+    """venue フィルタ: "nar"=地方 (banei 含む) / "jra"=中央 / None=全件 (ユーザ指示 2026-07-05:
+    ダッシュボードを 地方/中央 の別ページに分離)。BOX 収支と戦略くらべの両方に効く。"""
+    sh, pr, rs = dirs
+    for rid, rtype in (("jra-1", "jra"), ("nar-1", "nar"), ("banei-1", "banei")):
+        (sh / f"{rid}.json").write_text(json.dumps(_shobu_doc(rid, 8, race_type=rtype)),
+                                        encoding="utf-8")
+        (pr / f"{rid}.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
+        # 着順 1-4-5: 的中は win1/place1 のみ (+BOX は top5 内に収まり trifecta_payout で的中)。
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo(
+            [1, 4, 5], 8000, {"win:1": 2.0, "place:1": 1.4})), encoding="utf-8")
+
+    d_all = store.compute_shobu_strategies_pnl()
+    d_nar = store.compute_shobu_strategies_pnl(venue="nar")
+    d_jra = store.compute_shobu_strategies_pnl(venue="jra")
+    assert d_all["races"] == 3 and d_all["venue"] is None          # 後方互換 (全件)
+    assert d_nar["races"] == 2 and d_nar["venue"] == "nar"         # nar + banei = 地方
+    assert {r["race_id"] for r in d_nar["races_detail"]} == {"nar-1", "banei-1"}
+    assert d_jra["races"] == 1
+    assert d_jra["races_detail"][0]["race_id"] == "jra-1"
+
+    # BOX 収支側も同じ _venue_filter を共有 (recommended_total も venue スコープ)。
+    b_nar = store.compute_shobu_pnl(venue="nar")
+    b_jra = store.compute_indexed_pnl(venue="jra")
+    assert b_nar["recommended_total"] == 2 and b_nar["races"] == 2
+    assert b_jra["recommended_total"] == 1 and b_jra["races"] == 1
+    assert b_nar["venue"] == "nar" and b_jra["venue"] == "jra"
 
 
 def test_index_version_beta_for_market_derived(dirs):
