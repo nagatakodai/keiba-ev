@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -313,6 +314,19 @@ def _score_stage_cmd(rid: str, rtype: str, start_at: int, model: str = "opus") -
             f"--model={model}"]
 
 
+def _ab_research_arm(rid: str) -> str:
+    """research="ab" のレース割当腕 ("prefetch" / "agentic") を決定論的に返す。
+
+    md5(rid) 先頭バイトの偶奇で 50/50 (組込み hash() は PYTHONHASHSEED 依存で
+    プロセスごとに変わるため不可)。同一 rid は再実行・リトライ・別プロセスでも常に
+    同じ腕 → 腕が途中で入れ替わらず、snapshot に刻まれる実績 `llm_research_mode`
+    (prefetch が dossier 不可で agentic に落ちた場合はその実績値) で A/B 比較できる
+    (research_mode A/B の比較データ自動蓄積, 2026-07-06)。
+    """
+    return ("prefetch" if hashlib.md5(str(rid).encode("utf-8")).digest()[0] % 2 == 0
+            else "agentic")
+
+
 def _select_claude_targets(results: list[dict[str, Any]], *, claude_all: bool,
                            claude_eval: int, upcoming_only: bool,
                            now: int) -> list[dict[str, Any]]:
@@ -341,7 +355,7 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                      score_queries_per_horse: int | None = None,
                      llm_max_concurrent: int | None = None,
                      max_retries: int = 2, model: str = "opus",
-                     research: str = "agentic",
+                     research: str = "ab",
                      on_progress: Callable[[dict[str, Any], int, int], None] | None = None) -> int:
     """対象レースに score ステージ (claude -p) を spawn して Claude 指数を生成。生成成功数を返す。
 
@@ -375,6 +389,14 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     score_env["KEIBA_SCORE_PARALLEL"] = "1" if score_parallel else ""
     # リサーチ方式 (ARCH-B, 2026-07-05): "prefetch" = 固定クエリ Tavily 直叩き + 採点 claude 1回。
     # agentic のときは空文字で継承値を打ち消す (score_parallel と同流儀)。
+    # "ab" (既定, 2026-07-06) = レースごとに md5(rid) 偶奇で prefetch/agentic を決定論
+    # 50/50 割当し、research_mode A/B の比較データを自動蓄積する (_ab_research_arm)。
+    # ただし operator が env KEIBA_SCORE_RESEARCH を明示していればそちらを尊重
+    # (明示 > ab 割当 — HORSES_PER_SHARD の「operator 明示は尊重」と同流儀)。
+    if research == "ab":
+        env_explicit = (os.environ.get("KEIBA_SCORE_RESEARCH") or "").strip().lower()
+        if env_explicit:
+            research = "prefetch" if env_explicit == "prefetch" else "agentic"
     score_env["KEIBA_SCORE_RESEARCH"] = "prefetch" if research == "prefetch" else ""
     if score_queries_per_horse:
         # 1馬あたり検索クエリ数。並列パスは「頭数 × これ」を全シャードで被覆し、
@@ -430,6 +452,11 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
 
     _safe_log(f"[claude-eval] {total} レースの Claude 指数を一括生成中 (model={model}"
               f" / across-race 並列 {parallel}{qph_txt}{shard_txt} / 各 timeout {timeout}s)…")
+    if research == "ab":
+        n_pf = sum(1 for t in targets
+                   if _ab_research_arm(t["netkeiba_race_id"]) == "prefetch")
+        _safe_log(f"[claude-eval] research A/B 割当 (md5(rid) 偶奇・決定論): "
+                  f"prefetch {n_pf} / agentic {total - n_pf}")
 
     def _killpg(proc) -> None:
         """score subprocess を **プロセスグループごと** SIGKILL (research の claude -p 孫まで道連れ)。
@@ -446,6 +473,12 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
         rid = t["netkeiba_race_id"]
         label = f"{t['venue']}{t['race_no']}R"
         start_at = int(t.get("start_at") or 0)
+        if research == "ab":
+            # A/B 割当: レース単位で env を複製して腕を上書き。_pass_env (リトライの軽量化)
+            # の後に適用されるので、リトライでも同一 rid = 同一腕が必ず保持される。
+            env = dict(env)
+            env["KEIBA_SCORE_RESEARCH"] = (
+                "prefetch" if _ab_research_arm(rid) == "prefetch" else "")
 
         def _exec(cmd: list[str]) -> tuple[bool, str, bool]:
             """score subprocess を 1 回実行 → (ok, note, timed_out)。"""
@@ -611,6 +644,8 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                 if idx_ok:
                     succeeded.add(_internal(t))
                 status = "OK" if idx_ok else f"指数なし ({note})"
+                if research == "ab":   # A/B 中は割当腕も見えるように (ログで層別確認できる)
+                    status += f" [{_ab_research_arm(t['netkeiba_race_id'])}]"
                 _safe_log(f"[claude-eval] ({len(succeeded)}/{total}) "
                           f"{t['venue']}{t['race_no']}R {status}")
                 if on_progress is not None:
@@ -653,7 +688,7 @@ def scan(
     score_queries_per_horse: int | None = None,
     llm_max_concurrent: int | None = None,
     model: str = "opus",
-    research: str = "agentic",
+    research: str = "ab",
     max_races: int | None = None,
     out: Path | None = None,
     log: Callable[[str], None] | None = None,
@@ -999,10 +1034,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", choices=["opus", "sonnet", "haiku"], default="opus",
                     help="Claude 指数を生成する claude -p のモデル (既定 opus)。sonnet/haiku は"
                          "速いが検索深度/推論の質は要検証")
-    ap.add_argument("--research", choices=["agentic", "prefetch"], default="agentic",
+    ap.add_argument("--research", choices=["agentic", "prefetch", "ab"], default="ab",
                     help="リサーチ方式 (KEIBA_SCORE_RESEARCH)。agentic=Claude が MCP 検索 (従来) / "
                          "prefetch=固定クエリを Tavily 直叩き + 採点 claude 1回 (速い・輻輳なし・"
-                         "TAVILY_API_KEY 必須。dossier 不可時は agentic に自動フォールバック)")
+                         "TAVILY_API_KEY 必須。dossier 不可時は agentic に自動フォールバック) / "
+                         "ab=レースごとに md5(rid) 偶奇で prefetch/agentic を決定論 50/50 割当 "
+                         "(既定 2026-07-06〜 — research_mode A/B の比較データを自動蓄積。"
+                         "env KEIBA_SCORE_RESEARCH の明示があればそちらを尊重)")
     ap.add_argument("--max-races", type=int, default=None,
                     help="取得レース数の上限。発走日時が近い (早い) 順に N 件だけ評価 (既定=全件)")
     ap.add_argument("--refresh", action="store_true",

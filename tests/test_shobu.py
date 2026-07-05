@@ -550,6 +550,149 @@ def test_run_claude_eval_retry_lightens_env(monkeypatch):
     assert 0 < int(p1["KEIBA_SCORE_TIMEOUT"]) < 900
 
 
+def _arm_rid(arm: str) -> str:
+    """指定腕に割り当たる 12 桁 rid を機械的に探す (md5 決定論なのでテストも安定)。"""
+    return next(r for r in (f"20263206{i:04d}" for i in range(200))
+                if shobu._ab_research_arm(r) == arm)
+
+
+def test_ab_research_arm_deterministic_and_balanced():
+    """A/B 割当は決定論 (同 rid → 常に同腕) かつ md5 偶奇でほぼ 50/50 に割れる。"""
+    rids = [f"2026{i:08d}" for i in range(1000)]
+    arms = [shobu._ab_research_arm(r) for r in rids]
+    assert arms == [shobu._ab_research_arm(r) for r in rids]   # 再計算しても同じ (決定論)
+    assert set(arms) == {"prefetch", "agentic"}
+    n_pf = arms.count("prefetch")
+    assert 400 <= n_pf <= 600, f"50/50 から大きく乖離: prefetch {n_pf}/1000"
+
+
+def test_run_claude_eval_ab_assigns_env_per_race(monkeypatch):
+    """research="ab" (既定) はレースごとに md5(rid) 偶奇で KEIBA_SCORE_RESEARCH を振り分ける。"""
+    monkeypatch.delenv("KEIBA_SCORE_RESEARCH", raising=False)
+    pf_rid, ag_rid = _arm_rid("prefetch"), _arm_rid("agentic")
+    envs: dict[str, dict] = {}
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            rid = next(c for c in cmd if c in (pf_rid, ag_rid))
+            envs[rid] = dict(kw.get("env") or {})
+            self.returncode = 0
+            self.stdout = iter([])
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(shobu.subprocess, "Popen", lambda cmd, **kw: _P(cmd, **kw))
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
+    logs: list[str] = []
+    targets = [
+        {"netkeiba_race_id": pf_rid, "race_type": "nar", "start_at": 0,
+         "venue": "佐賀", "race_no": 1, "race_id": "a-a-1"},
+        {"netkeiba_race_id": ag_rid, "race_type": "nar", "start_at": 0,
+         "venue": "佐賀", "race_no": 2, "race_id": "b-b-2"},
+    ]
+    done = shobu._run_claude_eval(targets, timeout=900, parallel=1, log=logs.append,
+                                  score_parallel=False)   # research 既定 = "ab"
+    assert done == 2
+    assert envs[pf_rid]["KEIBA_SCORE_RESEARCH"] == "prefetch"
+    assert envs[ag_rid]["KEIBA_SCORE_RESEARCH"] == ""      # agentic は空文字で打ち消し
+    assert any("A/B 割当" in m and "prefetch 1 / agentic 1" in m for m in logs)
+
+
+def test_run_claude_eval_explicit_research_disables_ab(monkeypatch):
+    """--research agentic/prefetch の明示指定では ab 割当をしない (従来どおり全レース同一)。"""
+    monkeypatch.delenv("KEIBA_SCORE_RESEARCH", raising=False)
+    captured: dict = {}
+    monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
+    # prefetch 腕の rid でも explicit agentic → ""。
+    targets = [{"netkeiba_race_id": _arm_rid("prefetch"), "race_type": "nar",
+                "start_at": 0, "venue": "V", "race_no": 1, "race_id": "a-a-1"}]
+    shobu._run_claude_eval(targets, timeout=900, parallel=1, log=lambda m: None,
+                           score_parallel=False, research="agentic")
+    assert captured["env"]["KEIBA_SCORE_RESEARCH"] == ""
+    # agentic 腕の rid でも explicit prefetch → "prefetch"。
+    targets = [{"netkeiba_race_id": _arm_rid("agentic"), "race_type": "nar",
+                "start_at": 0, "venue": "V", "race_no": 1, "race_id": "b-b-1"}]
+    shobu._run_claude_eval(targets, timeout=900, parallel=1, log=lambda m: None,
+                           score_parallel=False, research="prefetch")
+    assert captured["env"]["KEIBA_SCORE_RESEARCH"] == "prefetch"
+
+
+def test_run_claude_eval_ab_respects_env_override(monkeypatch):
+    """operator が env KEIBA_SCORE_RESEARCH を明示していれば ab 割当よりそちらを尊重する。"""
+    monkeypatch.setenv("KEIBA_SCORE_RESEARCH", "prefetch")
+    captured: dict = {}
+    monkeypatch.setattr(shobu.subprocess, "Popen", _fake_popen_factory(captured))
+    monkeypatch.setattr(shobu, "_load_snapshot",
+                        lambda _id: {"index_compare": [{"claude_index": 50.0}]})
+    # agentic 腕の rid でも env 明示 prefetch が勝つ。
+    targets = [{"netkeiba_race_id": _arm_rid("agentic"), "race_type": "nar",
+                "start_at": 0, "venue": "V", "race_no": 1, "race_id": "a-a-1"}]
+    shobu._run_claude_eval(targets, timeout=900, parallel=1, log=lambda m: None,
+                           score_parallel=False, research="ab")
+    assert captured["env"]["KEIBA_SCORE_RESEARCH"] == "prefetch"
+
+
+def test_run_claude_eval_ab_arm_kept_on_retry(monkeypatch):
+    """リトライ (_pass_env で env 軽量化) でも md5(rid) の割当腕は保持される。"""
+    monkeypatch.delenv("KEIBA_SCORE_RESEARCH", raising=False)
+    pf_rid = _arm_rid("prefetch")
+    envs: list[dict] = []
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            envs.append(dict(kw.get("env") or {}))
+            self.returncode = 0
+            self.stdout = iter([])
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(shobu.subprocess, "Popen", lambda cmd, **kw: _P(cmd, **kw))
+    state = {"n": 0}
+
+    def _snap(_id):
+        state["n"] += 1
+        if state["n"] >= 2:        # pass1 (リトライ) で生成成功
+            return {"index_compare": [{"claude_index": 60.0}]}
+        return {"index_compare": [{"claude_index": None}], "llm_fallback": True}
+
+    monkeypatch.setattr(shobu, "_load_snapshot", _snap)
+    monkeypatch.setattr(shobu.time, "sleep", lambda *_a, **_k: None)
+    targets = [{"netkeiba_race_id": pf_rid, "race_type": "nar", "start_at": 0,
+                "venue": "佐賀", "race_no": 11, "race_id": "zz-z-11"}]
+    done = shobu._run_claude_eval(targets, timeout=900, parallel=4, log=lambda m: None,
+                                  score_parallel=True, score_queries_per_horse=10,
+                                  llm_max_concurrent=20, max_retries=2)
+    assert done == 1 and len(envs) >= 2
+    # pass0 も pass1 (軽量化後) も同じ prefetch 腕。
+    assert all(e["KEIBA_SCORE_RESEARCH"] == "prefetch" for e in envs)
+    # pass1 の軽量化自体は効いている (割当保持と両立)。
+    assert envs[1]["KEIBA_SCORE_PARALLEL"] == ""
+
+
+def test_cli_research_default_ab(monkeypatch):
+    """CLI の --research 既定は "ab" (2026-07-06〜)。明示指定はそのまま通る。"""
+    seen: dict = {}
+    monkeypatch.setattr(shobu, "scan",
+                        lambda **k: seen.update(k) or {"races": [],
+                            "summary": {"recommended": 0, "evaluated": 0,
+                                        "with_snapshot": 0, "with_claude": 0}})
+    shobu.main([])
+    assert seen["research"] == "ab"
+    shobu.main(["--research", "prefetch"])
+    assert seen["research"] == "prefetch"
+
+
 def test_scan_claude_all_generates_for_all(monkeypatch):
     """claude_all: Claude 指数なしの全レースに生成 → 全レースが Claude 乖離を持つ。"""
     now = int(time.time())
