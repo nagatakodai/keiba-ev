@@ -8,6 +8,7 @@ import {
   Landmark,
   ListOrdered,
   MapPin,
+  Mountain,
   Radio,
   Swords,
   Target,
@@ -16,10 +17,11 @@ import {
 
 // グローバルナビ。usePathname でアクティブ状態を付けるため client component。
 // layout.tsx (server) からはこのコンポーネントを mount するだけ。
-// ダッシュボードは 地方(/)/中央(/jra) に分離 (ユーザ指示 2026-07-05)。
+// ダッシュボードは 地方(/)/中央(/jra)/ばんえい(/banei) に分離 (ユーザ指示 2026-07-05)。
 const NAV: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/", label: "ダッシュボード(地方)", icon: LayoutDashboard },
   { href: "/jra", label: "ダッシュボード(中央)", icon: Landmark },
+  { href: "/banei", label: "ダッシュボード(ばんえい)", icon: Mountain },
   { href: "/venues", label: "競馬場別", icon: MapPin },
   { href: "/shobu", label: "今日の勝負レース", icon: Swords },
   { href: "/analyze", label: "レース予測分析", icon: FlaskConical },

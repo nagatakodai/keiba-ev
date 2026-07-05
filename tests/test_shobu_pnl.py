@@ -436,8 +436,9 @@ def test_strategies_version_split(dirs):
 
 
 def test_venue_filter_splits_nar_and_jra(dirs):
-    """venue フィルタ: "nar"=地方 (banei 含む) / "jra"=中央 / None=全件 (ユーザ指示 2026-07-05:
-    ダッシュボードを 地方/中央 の別ページに分離)。BOX 収支と戦略くらべの両方に効く。"""
+    """venue フィルタ: "nar"=地方平地 / "jra"=中央 / "banei"=帯広ばんえい / None=全件
+    (ユーザ指示 2026-07-05: ダッシュボードを 地方/中央/ばんえい の別ページに分離)。
+    BOX 収支と戦略くらべの両方に効く。"""
     sh, pr, rs = dirs
     for rid, rtype in (("jra-1", "jra"), ("nar-1", "nar"), ("banei-1", "banei")):
         (sh / f"{rid}.json").write_text(json.dumps(_shobu_doc(rid, 8, race_type=rtype)),
@@ -450,18 +451,23 @@ def test_venue_filter_splits_nar_and_jra(dirs):
     d_all = store.compute_shobu_strategies_pnl()
     d_nar = store.compute_shobu_strategies_pnl(venue="nar")
     d_jra = store.compute_shobu_strategies_pnl(venue="jra")
+    d_banei = store.compute_shobu_strategies_pnl(venue="banei")
     assert d_all["races"] == 3 and d_all["venue"] is None          # 後方互換 (全件)
-    assert d_nar["races"] == 2 and d_nar["venue"] == "nar"         # nar + banei = 地方
-    assert {r["race_id"] for r in d_nar["races_detail"]} == {"nar-1", "banei-1"}
+    assert d_nar["races"] == 1 and d_nar["venue"] == "nar"         # 地方平地のみ (banei 除く)
+    assert d_nar["races_detail"][0]["race_id"] == "nar-1"
     assert d_jra["races"] == 1
     assert d_jra["races_detail"][0]["race_id"] == "jra-1"
+    assert d_banei["races"] == 1 and d_banei["venue"] == "banei"   # ばんえいは別競技で分離
+    assert d_banei["races_detail"][0]["race_id"] == "banei-1"
 
     # BOX 収支側も同じ _venue_filter を共有 (recommended_total も venue スコープ)。
     b_nar = store.compute_shobu_pnl(venue="nar")
     b_jra = store.compute_indexed_pnl(venue="jra")
-    assert b_nar["recommended_total"] == 2 and b_nar["races"] == 2
+    b_banei = store.compute_indexed_pnl(venue="banei")
+    assert b_nar["recommended_total"] == 1 and b_nar["races"] == 1
     assert b_jra["recommended_total"] == 1 and b_jra["races"] == 1
-    assert b_nar["venue"] == "nar" and b_jra["venue"] == "jra"
+    assert b_banei["recommended_total"] == 1 and b_banei["races"] == 1
+    assert (b_nar["venue"], b_jra["venue"], b_banei["venue"]) == ("nar", "jra", "banei")
 
 
 def test_index_version_beta_for_market_derived(dirs):

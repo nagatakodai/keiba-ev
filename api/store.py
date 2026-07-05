@@ -835,16 +835,22 @@ def _box_race_pnl(
 
 def _venue_filter(by_race: dict[str, dict[str, Any]],
                   venue: str | None) -> dict[str, dict[str, Any]]:
-    """競馬場フィルタ (ユーザ指示 2026-07-05: ダッシュボードを 地方/中央 の別ページに分離)。
+    """競馬場フィルタ (ユーザ指示 2026-07-05: ダッシュボードを 地方/中央/ばんえい の別ページに分離)。
 
-    venue="jra" = 中央 (race_type == "jra") / "nar" = 地方 (race_type != "jra"、**banei も
-    地方に含める**) / None = 従来どおり全レース (後方互換)。母集団 dict の段階で絞るので
+    venue="jra" = 中央 (race_type == "jra") / "banei" = 帯広ばんえい (race_type == "banei"、
+    別競技なので地方平地と混ぜない — ev.segment_of_rd と同じ3区分) / "nar" = 地方平地
+    (それ以外 = jra でも banei でもない。race_type 欠落の旧 doc も地方に落とす) /
+    None = 従来どおり全レース (後方互換)。母集団 dict の段階で絞るので
     recommended_total / skipped_* / races_detail もすべて venue スコープになる。
     """
     if venue is None:
         return by_race
-    return {rid: r for rid, r in by_race.items()
-            if (r.get("race_type") == "jra") == (venue == "jra")}
+
+    def _of(r: dict[str, Any]) -> str:
+        rt = r.get("race_type")
+        return rt if rt in ("jra", "banei") else "nar"
+
+    return {rid: r for rid, r in by_race.items() if _of(r) == venue}
 
 
 def _shobu_box_pnl(

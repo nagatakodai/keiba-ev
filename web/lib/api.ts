@@ -1032,26 +1032,26 @@ export const api = {
     }),
   // 勝負レース専用の仮想収支 (Claude 指数上位N頭の3連単 BOX を買ったと仮定)。
   // venue ("nar"=地方(banei含む)/"jra"=中央) でダッシュボード(地方)/(中央) を分離 (2026-07-05)。
-  shobuPnl: (pointCost = 100, venue?: "nar" | "jra") =>
+  shobuPnl: (pointCost = 100, venue?: "nar" | "jra" | "banei") =>
     jsonFetch<ShobuPnl>(
       `/api/shobu/pnl?point_cost=${pointCost}${venue ? `&venue=${venue}` : ""}`,
     ),
   // 全 Claude 指数レース (recommended に限らない・全馬指数+結果あり) の仮想収支。
   // version ("v1"/"v2") を渡すと補強根拠バージョン毎に分離。venue で 地方/中央 分離 (2026-07-05)。
-  indexedPnl: (pointCost = 100, version?: string, venue?: "nar" | "jra") =>
+  indexedPnl: (pointCost = 100, version?: string, venue?: "nar" | "jra" | "banei") =>
     jsonFetch<ShobuPnl>(
       `/api/shobu/indexed-pnl?point_cost=${pointCost}${
         version ? `&version=${encodeURIComponent(version)}` : ""
       }${venue ? `&venue=${venue}` : ""}`,
     ),
   // Claude 指数 単純戦略くらべ (単勝/複勝/馬連/単複) の仮想収支 — 勝負レース(推奨)のみ。
-  strategiesPnl: (pointCost = 100, venue?: "nar" | "jra") =>
+  strategiesPnl: (pointCost = 100, venue?: "nar" | "jra" | "banei") =>
     jsonFetch<StrategiesPnl>(
       `/api/shobu/strategies-pnl?point_cost=${pointCost}${venue ? `&venue=${venue}` : ""}`,
     ),
   // Claude 指数 単純戦略くらべ — shobu 評価レース全体 (過去分全て・recommended に限らない)。
   // version ("v1"/"v2") を渡すと補強根拠バージョン毎に分離。venue で 地方/中央 分離 (2026-07-05)。
-  indexedStrategiesPnl: (pointCost = 100, version?: string, venue?: "nar" | "jra") =>
+  indexedStrategiesPnl: (pointCost = 100, version?: string, venue?: "nar" | "jra" | "banei") =>
     jsonFetch<StrategiesPnl>(
       `/api/shobu/indexed-strategies-pnl?point_cost=${pointCost}${
         version ? `&version=${encodeURIComponent(version)}` : ""

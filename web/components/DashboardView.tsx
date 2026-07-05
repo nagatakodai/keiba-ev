@@ -1,6 +1,7 @@
-// ダッシュボード本体 (server component)。venue プロップで 地方(NAR)/中央(JRA) を分離
-// (ユーザ指示 2026-07-05「JRAはいったん別ページに避難して。ダッシュボード（地方）と
-// ダッシュボード（中央）で分ける」)。app/page.tsx (地方) と app/jra/page.tsx (中央) の
+// ダッシュボード本体 (server component)。venue プロップで 地方(NAR平地)/中央(JRA)/ばんえい を
+// 分離 (ユーザ指示 2026-07-05「JRAはいったん別ページに避難して。ダッシュボード（地方）と
+// ダッシュボード（中央）で分ける」+ 同日「ばんえいは地方と中央と同じように別ダッシュボードに
+// 分離」)。app/page.tsx (地方) / app/jra/page.tsx (中央) / app/banei/page.tsx (ばんえい) の
 // 薄いラッパから venue を受けて描画する。旧 app/page.tsx の内容を移動 (書き換え最小限)。
 import Link from "next/link";
 import type { ReactNode } from "react";
@@ -27,7 +28,7 @@ import {
 import { AutoRefresh } from "@/components/AutoRefresh";
 import { VersionHeading } from "@/components/VersionHeading";
 
-export type DashboardVenue = "nar" | "jra";
+export type DashboardVenue = "nar" | "jra" | "banei";
 
 function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
@@ -778,8 +779,14 @@ function VersionMeasurementSection({
 
 export async function DashboardView({ venue }: { venue: DashboardVenue }) {
   const isNar = venue === "nar";
-  const title = isNar ? "ダッシュボード（地方）" : "ダッシュボード（中央）";
-  const venueLabel = isNar ? "地方 (NAR・ばんえい含む)" : "中央 (JRA)";
+  const title =
+    venue === "nar"
+      ? "ダッシュボード（地方）"
+      : venue === "jra"
+        ? "ダッシュボード（中央）"
+        : "ダッシュボード（ばんえい）";
+  const venueLabel =
+    venue === "nar" ? "地方 (NAR平地)" : venue === "jra" ? "中央 (JRA)" : "帯広ばんえい";
   // 計測を Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30: 新しい/現行が上)。
   // β (市場由来・〜2026-06-21) は対象が少ないため表示しない (ユーザ指示で撤去)。
   // 計測系は venue で 地方/中央 を分離 (2026-07-05)。研究系カード (プレレジ台帳・市場一致

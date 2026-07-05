@@ -714,7 +714,7 @@ async def api_shobu_refresh(req: ShobuRefreshRequest) -> dict[str, Any]:
 
 @app.get("/api/shobu/pnl")
 def api_shobu_pnl(point_cost: int = 100, box_size: int = 5,
-                  venue: Literal["nar", "jra"] | None = None) -> dict[str, Any]:
+                  venue: Literal["nar", "jra", "banei"] | None = None) -> dict[str, Any]:
     """勝負レース専用の **仮想収支** (Claude 指数上位5頭の3連単 BOX を買ったと仮定)。
 
     recommended 勝負レースで Claude 指数上位 box_size 頭の3連単 BOX (5頭=60点) を組み、実際の
@@ -727,7 +727,7 @@ def api_shobu_pnl(point_cost: int = 100, box_size: int = 5,
 @app.get("/api/shobu/indexed-pnl")
 def api_shobu_indexed_pnl(point_cost: int = 100, box_size: int = 5,
                           version: str | None = None,
-                          venue: Literal["nar", "jra"] | None = None) -> dict[str, Any]:
+                          venue: Literal["nar", "jra", "banei"] | None = None) -> dict[str, Any]:
     """**全 Claude 指数レース** (recommended に限らない) の仮想収支 (ユーザ指示 2026-06-28)。
 
     全出走馬に Claude 指数が付いて結果が確定したレースを上位 box_size 頭の3連単 BOX で集計。
@@ -742,7 +742,7 @@ def api_shobu_indexed_pnl(point_cost: int = 100, box_size: int = 5,
 @app.get("/api/shobu/strategies-pnl")
 def api_shobu_strategies_pnl(point_cost: int = 100,
                              version: str | None = None,
-                             venue: Literal["nar", "jra"] | None = None) -> dict[str, Any]:
+                             venue: Literal["nar", "jra", "banei"] | None = None) -> dict[str, Any]:
     """勝負レース (推奨) の **Claude 指数 単純戦略くらべ** 仮想収支 (ユーザ指示 2026-06-30)。
 
     各レースで win1(1位単勝) / place1,2,3(複勝) / quinella12(馬連) / wide12,13(ワイド) /
@@ -756,7 +756,7 @@ def api_shobu_strategies_pnl(point_cost: int = 100,
 @app.get("/api/shobu/indexed-strategies-pnl")
 def api_shobu_indexed_strategies_pnl(point_cost: int = 100,
                                      version: str | None = None,
-                                     venue: Literal["nar", "jra"] | None = None) -> dict[str, Any]:
+                                     venue: Literal["nar", "jra", "banei"] | None = None) -> dict[str, Any]:
     """**shobu 評価レース全体** (recommended に限らない) の Claude 指数 単純戦略くらべ 仮想収支。
 
     ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して過去分全て表示」。
