@@ -23,6 +23,11 @@ from .models import RaceData
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# score_horses dispatcher が最後に実際使ったリサーチ方式 ("agentic" | "prefetch")。
+# env KEIBA_SCORE_RESEARCH=prefetch でもフォールバックで agentic に落ちることがあるため、
+# .llm.json への research_mode 刻印はこの実績値を使う (score subprocess は 1 レース/プロセス)。
+LAST_RESEARCH_MODE = "agentic"
+
 # Claude 指数の方針バージョン (ユーザ指示 2026-06-30「方針バージョン毎に計測を分離」):
 #   v1 = 各馬の evidence (補強根拠) を **3 件まで** に制限していた頃 (〜2026-06-27)
 #   v2 = evidence の **上限を撤廃** (無制限・あればあるだけ) (2026-06-28 commit 78a248c〜)
@@ -1124,6 +1129,126 @@ def build_horse_score_from_research_prompt(
     return pre + "\n".join(rlines) + sep + tail
 
 
+def build_horse_score_from_dossier_prompt(
+    rd: RaceData,
+    dossier: dict[str, Any],
+    *,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+    past_source: str = "",
+    provisional: dict[int, float] | None = None,
+) -> str:
+    """固定クエリ prefetch (ARCH-B) の SCORING プロンプト。
+
+    build_horse_score_from_research_prompt と同じ文字列手術 (ヘッダ+出走馬表 → 資料 → 採点
+    ルール+JSON schema) だが、資料が **LLM 読解済みの facts ではなく Tavily 生スニペット**
+    である点が違う: 読解・関連判定 (同名別馬/古い記事の排除)・evidence 化を採点段の Claude が
+    ここで行う (= ARCH-A で RESEARCH 子がやっていた判断を採点段に統合)。
+    """
+    from . import research_prefetch as _rp
+    base = build_horse_score_prompt(
+        rd, aptitudes=aptitudes, market_signals=market_signals,
+        horse_best_times=horse_best_times, past_source=past_source,
+        provisional=provisional,
+    )
+    head, sep, tail = base.partition("## 指数の付け方")     # tail = 採点ルール + JSON schema
+    pre = head.partition("## 検索 MCP の運用ルール")[0]      # ヘッダ + edge + 出走馬表
+    rlines = [
+        "## 収集済み検索資料 (固定クエリ・Tavily 直取得 = **未読解の生スニペット**)",
+        _rp.render_dossier(dossier, rd),
+        "",
+        "## 採点時のルール (資料の読解 → 仮指数±調整)",
+        "上の検索資料は機械取得の生スニペットで **未検証** である。あなたが読解して:",
+        "- **関連判定**: 同名別馬・過去開催の古い記事・対象レースと無関係な内容は捨てる "
+        "(日付・場・クラスで照合)。",
+        "- ①直前情報 (取消/除外→指数0・当日馬体重±10kg超・馬場急変・パドック気配) と "
+        "②軟情報 (前走不利・厩舎勝負気配・展開) を抽出し、**仮指数を anchor に ±調整**する。"
+        "根拠が無い馬は仮指数のまま据え置く。",
+        "- 採用した根拠は **自分の言葉で要約して `evidence` 配列に全件** (あるだけ・上限なし) "
+        "書き、support はその件数。パドック気配は各馬の `paddock` フィールドに書く。",
+        "- **新規検索は原則不要** (資料の矛盾をどうしても確認したい時のみ最大 2 クエリ)。",
+        "",
+    ]
+    return pre + "\n".join(rlines) + sep + tail
+
+
+def score_horses_prefetch(
+    rd: RaceData,
+    *,
+    model: str = "opus",
+    timeout: int = 900,
+    aptitudes: dict[int, Any] | None = None,
+    market_signals: dict[int, Any] | None = None,
+    horse_best_times: list[dict] | None = None,
+    past_source: str = "",
+    provisional: dict[int, float] | None = None,
+) -> Iterator[tuple[str, Any]]:
+    """ARCH-B: 固定クエリ Tavily プリフェッチ → 採点 claude 1 回 (ユーザ指示 2026-07-05)。
+
+    リサーチを LLM から Python (research_prefetch) に移し、claude -p はレース当たり
+    **採点の 1 セッションのみ** (検索ツールはほぼ使わない) → セッション数 ~1/5・
+    Tavily/Anthropic 輻輳の構造的回避。dossier が取れない (API キー無し/全滅) 時は
+    ('error',...) で終わり、呼び元 dispatcher が従来 (agentic) にフォールバックする。
+    プリフェッチした各クエリは ('tool_use', {name: 'tavily_prefetch'}) で yield し、
+    shobu の 🔍 転送・tool_usage 永続化 (kind='prefetch') に乗せる。
+    """
+    if not is_available():
+        yield ("error", "claude CLI が見つかりません")
+        return
+    horses = [h for h in rd.race.horses if not h.absent]
+    if not horses:
+        yield ("result", "")
+        return
+    from . import research_prefetch as _rp
+    t0 = time.time()
+    try:
+        dossier = _rp.fetch_dossier(rd)
+    except Exception as e:  # noqa: BLE001
+        yield ("error", f"prefetch: dossier 取得例外 {e}")
+        return
+    if not dossier:
+        yield ("error", "prefetch: dossier 取得不可 (TAVILY_API_KEY 無し/全クエリ失敗)")
+        return
+    for q in dossier.get("queries") or []:
+        yield ("tool_use", {"name": "tavily_prefetch", "input": {"query": q}})
+    prompt = build_horse_score_from_dossier_prompt(
+        rd, dossier, aptitudes=aptitudes, market_signals=market_signals,
+        horse_best_times=horse_best_times, past_source=past_source,
+        provisional=provisional,
+    )
+    scoring_timeout = max(60, int(timeout - (time.time() - t0)))
+    proc, err_f = _spawn_claude(_score_cmd(prompt, model))
+    timer, timed_out = _start_kill_timer(proc, scoring_timeout)
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            etype = ev.get("type")
+            if etype == "assistant":
+                for block in ev.get("message", {}).get("content", []) or []:
+                    if block.get("type") == "tool_use":
+                        yield ("tool_use", {"name": block.get("name", ""),
+                                            "input": block.get("input", {})})
+                    elif block.get("type") == "text" and block.get("text"):
+                        yield ("text", block["text"])
+            elif etype == "result":
+                yield ("result", ev.get("result", "") or "")
+            elif etype == "error":
+                yield ("error", ev.get("message", "unknown error"))
+    except Exception as e:  # noqa: BLE001
+        yield ("error", f"stream parse error: {e}")
+    finally:
+        for ev in _finalize_claude_proc(proc, timer, timed_out, err_file=err_f):
+            yield ev
+
+
 def _merge_research(shard_texts: list[str]) -> dict[int, dict]:
     """各 RESEARCH シャードの出力 (facts JSON 文字列) を馬番キーの evidence dict に union。
 
@@ -1326,9 +1451,38 @@ def score_horses(
     past_source: str = "",
     provisional: dict[int, float] | None = None,
 ) -> Iterator[tuple[str, Any]]:
-    """score ステージの dispatcher。KEIBA_SCORE_PARALLEL かつ十分な頭数なら並列 score を試し、
-    'result' を出せなければ単一セッション score_horses_stream にフォールバック。既定 (env 未設定)
-    は従来どおり score_horses_stream をそのまま流す (挙動変化なし)。provisional=仮指数 (anchor)。"""
+    """score ステージの dispatcher。優先順:
+
+    1. env `KEIBA_SCORE_RESEARCH=prefetch` → **ARCH-B** (固定クエリ Tavily プリフェッチ +
+       採点 claude 1 回, ユーザ指示 2026-07-05)。result を出せなければ従来パスへフォールバック。
+    2. `KEIBA_SCORE_PARALLEL` かつ十分な頭数 → ARCH-A 並列 score。
+    3. 既定 (env 未設定) → 従来どおり score_horses_stream (挙動変化なし)。
+    実際に使われたリサーチ方式は module global `LAST_RESEARCH_MODE` に記録される
+    (analyze が .llm.json の research_mode に刻む — prefetch がフォールバックした場合に
+    agentic と正しくラベルするため)。provisional=仮指数 (anchor)。"""
+    global LAST_RESEARCH_MODE
+    LAST_RESEARCH_MODE = "agentic"
+    if (os.environ.get("KEIBA_SCORE_RESEARCH") or "").strip().lower() == "prefetch":
+        buffered: list[tuple[str, Any]] = []
+        saw_result = False
+        try:
+            for ev in score_horses_prefetch(
+                rd, model=model, timeout=timeout, aptitudes=aptitudes,
+                market_signals=market_signals, horse_best_times=horse_best_times,
+                past_source=past_source, provisional=provisional,
+            ):
+                buffered.append(ev)
+                if ev[0] == "result" and ev[1]:
+                    saw_result = True
+        except Exception as e:  # noqa: BLE001
+            buffered.append(("error", f"prefetch score 例外: {e}"))
+        if saw_result:
+            LAST_RESEARCH_MODE = "prefetch"
+            yield from buffered
+            return
+        # 実行済みのプリフェッチクエリ (tool_use) はログに残し、result だけ捨てて従来パスへ。
+        yield from [ev for ev in buffered if ev[0] != "result"]
+        yield ("text", "[prefetch score が result 無し → 従来 (agentic) パスにフォールバック]")
     horses = [h for h in rd.race.horses if not h.absent]
     min_h = _env_int("KEIBA_SCORE_MIN_HORSES_FOR_PARALLEL", 8)
     if not (_env_truthy("KEIBA_SCORE_PARALLEL") and len(horses) >= min_h):

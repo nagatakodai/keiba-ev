@@ -27,6 +27,10 @@ def test_build_shobu_cmd_flags():
     assert "--sep-threshold" not in s
     assert "--no-fetch-odds" not in s
     assert "--no-claude" not in s
+    # リサーチ方式 (ARCH-B): 既定 agentic はフラグを出さず、prefetch のとき --research を付ける。
+    assert "--research" not in s
+    s2 = " ".join(build_shobu_cmd("/tmp/out.json", research="prefetch"))
+    assert "--research prefetch" in s2
 
 
 def test_results_auto_status_shape():

@@ -642,6 +642,10 @@ class ShobuScanRequest(BaseModel):
     # Claude 指数を生成する claude -p のモデル (ユーザ指示 2026-07-05: opus/sonnet/haiku で
     # 指数の質・速度・コストが変わるか比較したい)。既定 opus (従来挙動と同じ)。
     model: Literal["opus", "sonnet", "haiku"] = "opus"
+    # リサーチ方式 (ARCH-B, ユーザ指示 2026-07-05「固定クエリを自動で Tavily 検索できるか」):
+    # agentic = Claude が MCP で対話的に検索 (従来) / prefetch = 固定テンプレクエリを Python が
+    # Tavily API 直叩き → 採点 claude 1 回 (速い・輻輳なし。dossier 不可時は agentic に自動降格)。
+    research: Literal["agentic", "prefetch"] = "agentic"
 
 
 @app.post("/api/shobu/scan")
@@ -668,6 +672,7 @@ async def api_shobu_scan(req: ShobuScanRequest) -> dict[str, Any]:
         score_queries_per_horse=req.score_queries_per_horse,
         llm_max_concurrent=req.llm_max_concurrent,
         model=req.model,
+        research=req.research,
         max_races=req.max_races,
     )
     job = JOBS.new(label=f"shobu-scan: {date}", cmd=cmd)

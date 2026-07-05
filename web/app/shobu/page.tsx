@@ -297,6 +297,9 @@ export default function ShobuPage() {
   const [maxRaces, setMaxRaces] = useState("");
   // Claude 指数を生成するモデル (opus/sonnet/haiku で質・速度・コストを比較したい, 2026-07-05)。
   const [model, setModel] = useState<"opus" | "sonnet" | "haiku">("opus");
+  // リサーチ方式 (ARCH-B, 2026-07-05): agentic=Claude が MCP 検索 (従来) /
+  // prefetch=固定クエリ Tavily 直叩き + 採点 claude 1回 (速い・輻輳なし)。
+  const [research, setResearch] = useState<"agentic" | "prefetch">("agentic");
   const [showSettings, setShowSettings] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
 
@@ -342,6 +345,7 @@ export default function ShobuPage() {
       return Number.isFinite(v) && v > 0 ? Math.min(300, v) : undefined;
     })(),
     model,
+    research,
   });
 
   // 締切バッジ用の現在時刻 (5秒毎)。
@@ -654,6 +658,12 @@ export default function ShobuPage() {
                     <option value="opus">Opus (既定・最も精密)</option>
                     <option value="sonnet">Sonnet (速い・低コスト)</option>
                     <option value="haiku">Haiku (最速・最安)</option>
+                  </Select>
+                  <Select label="リサーチ方式" value={research}
+                    onChange={(e) => setResearch(e.target.value as "agentic" | "prefetch")} disabled={scanning}
+                    hint="prefetch=固定クエリを Tavily 直叩き+採点1回 (速い・輻輳なし)。取得不可時は従来に自動降格">
+                    <option value="agentic">Claude が検索 (従来)</option>
+                    <option value="prefetch">固定クエリ prefetch (実験)</option>
                   </Select>
                   {!claudeAll && (
                     <Input label="Claude 指数を生成 (発走が近い順 N件)" type="number" min="0" max="50" step="1"

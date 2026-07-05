@@ -338,6 +338,7 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
                      score_queries_per_horse: int | None = None,
                      llm_max_concurrent: int | None = None,
                      max_retries: int = 2, model: str = "opus",
+                     research: str = "agentic",
                      on_progress: Callable[[dict[str, Any], int, int], None] | None = None) -> int:
     """対象レースに score ステージ (claude -p) を spawn して Claude 指数を生成。生成成功数を返す。
 
@@ -369,6 +370,9 @@ def _run_claude_eval(targets: list[dict[str, Any]], *, timeout: int,
     # score subprocess の検索並列化 (KEIBA_SCORE_PARALLEL=1 で ARCH-A プロセス並列)。
     # OFF のときは継承した "1" を空文字で打ち消す (main.py の score タブと同流儀)。
     score_env["KEIBA_SCORE_PARALLEL"] = "1" if score_parallel else ""
+    # リサーチ方式 (ARCH-B, 2026-07-05): "prefetch" = 固定クエリ Tavily 直叩き + 採点 claude 1回。
+    # agentic のときは空文字で継承値を打ち消す (score_parallel と同流儀)。
+    score_env["KEIBA_SCORE_RESEARCH"] = "prefetch" if research == "prefetch" else ""
     if score_queries_per_horse:
         # 1馬あたり検索クエリ数。並列パスは「頭数 × これ」を全シャードで被覆し、
         # 単一セッション (< 並列しきい値の小頭数) も llm.score_horses_stream が同 env を読むので
@@ -625,6 +629,7 @@ def scan(
     score_queries_per_horse: int | None = None,
     llm_max_concurrent: int | None = None,
     model: str = "opus",
+    research: str = "agentic",
     max_races: int | None = None,
     out: Path | None = None,
     log: Callable[[str], None] | None = None,
@@ -800,7 +805,7 @@ def scan(
                          score_parallel=score_parallel,
                          score_queries_per_horse=score_queries_per_horse,
                          llm_max_concurrent=llm_max_concurrent,
-                         model=model,
+                         model=model, research=research,
                          on_progress=_on_progress)
 
         # ③ 権威的な最終再評価 — on_progress が呼ばれなくても (テストの monkeypatch 等) 確定させる。
@@ -970,6 +975,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", choices=["opus", "sonnet", "haiku"], default="opus",
                     help="Claude 指数を生成する claude -p のモデル (既定 opus)。sonnet/haiku は"
                          "速いが検索深度/推論の質は要検証")
+    ap.add_argument("--research", choices=["agentic", "prefetch"], default="agentic",
+                    help="リサーチ方式 (KEIBA_SCORE_RESEARCH)。agentic=Claude が MCP 検索 (従来) / "
+                         "prefetch=固定クエリを Tavily 直叩き + 採点 claude 1回 (速い・輻輳なし・"
+                         "TAVILY_API_KEY 必須。dossier 不可時は agentic に自動フォールバック)")
     ap.add_argument("--max-races", type=int, default=None,
                     help="取得レース数の上限。発走日時が近い (早い) 順に N 件だけ評価 (既定=全件)")
     ap.add_argument("--refresh", action="store_true",
@@ -1007,6 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
         score_queries_per_horse=args.score_queries_per_horse,
         llm_max_concurrent=args.llm_max_concurrent,
         model=args.model,
+        research=args.research,
         max_races=args.max_races,
         out=out,   # scan が暫定→確定の 2 段階で書き出す (生成完了ごとに live 更新)
     )

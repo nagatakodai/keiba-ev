@@ -415,6 +415,7 @@ def build_shobu_cmd(
     score_queries_per_horse: int | None = None,
     llm_max_concurrent: int | None = None,
     model: str = "opus",
+    research: str = "agentic",
     max_races: int | None = None,
 ) -> list[str]:
     """`python -m src.shobu` (今日の勝負レース スキャン) コマンドを組む。結果は out_path に書かれる。
@@ -447,6 +448,8 @@ def build_shobu_cmd(
         cmd += ["--llm-max-concurrent", str(llm_max_concurrent)]
     if model:
         cmd += ["--model", model]
+    if research and research != "agentic":
+        cmd += ["--research", research]
     return cmd
 
 

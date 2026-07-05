@@ -977,6 +977,8 @@ export type ShobuScanRequest = {
   score_queries_per_horse?: number;
   llm_max_concurrent?: number;
   model?: "opus" | "sonnet" | "haiku";
+  // リサーチ方式: agentic=Claude が MCP 検索 (従来) / prefetch=固定クエリ Tavily 直叩き+採点1回。
+  research?: "agentic" | "prefetch";
 };
 
 // --- Endpoints ---

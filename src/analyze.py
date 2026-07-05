@@ -409,12 +409,29 @@ def _llm_scores_path(race_id: str) -> Path:
     return ROOT / "data" / "predictions" / f"{race_id}.llm.json"
 
 
+def _llm_meta(race_id: str) -> tuple[str | None, str | None]:
+    """`.llm.json` から (model, research_mode) を読む (snapshot への刻印用・欠落/破損は None)。
+
+    _load_llm_scores の 7-tuple を拡張すると unpack site が多い (analyze×3 + scrape 3 経路)
+    ため、メタ 2 項目はこの軽量ヘルパで別読みする (2026-07-05 ARCH-B)。"""
+    try:
+        d = json.loads(_llm_scores_path(race_id).read_text(encoding="utf-8"))
+        model = d.get("model")
+        mode = d.get("research_mode")
+        return (str(model) if model else None,
+                str(mode) if mode else "agentic")   # 旧 .llm.json (刻印なし) は agentic
+    except (OSError, json.JSONDecodeError, ValueError):
+        return (None, None)
+
+
 _TOOL_USAGE_DIR = ROOT / "data" / "cache" / "tool_usage"
 
 
 def _classify_tool(name: str) -> str:
-    """score 段ツール名 → 種別 (search/extract/fetch/websearch/read/other)。比較集計のキー。"""
+    """score 段ツール名 → 種別 (search/extract/fetch/websearch/read/prefetch/other)。比較集計のキー。"""
     n = name or ""
+    if "tavily_prefetch" in n:
+        return "prefetch"        # 固定クエリ prefetch (ARCH-B, Python 直叩き)
     if "tavily_search" in n or "tavily-search" in n:
         return "search"          # Tavily 検索
     if "tavily_extract" in n or "tavily-extract" in n:
@@ -462,6 +479,10 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
         "race_id": race_id,
         "scored_at": dt.datetime.now().isoformat(timespec="seconds"),
         "model": model,
+        # 実際に使われたリサーチ方式 "agentic" (LLM が MCP 検索) / "prefetch" (固定クエリ
+        # Tavily 直叩き + 採点1回, ARCH-B 2026-07-05)。A/B 計測の分割キー。dispatcher の
+        # 実績値 (フォールバック済みなら agentic) を読む。
+        "research_mode": getattr(llm_mod, "LAST_RESEARCH_MODE", "agentic"),
         # scale="strength": scores は 0-100 強さ指数 (温度パス)。"prob": 推定勝率 % (後方互換)。
         "scale": parsed.get("scale", "strength"),
         "scores": {str(k): v for k, v in (parsed.get("scores") or {}).items()},
@@ -1114,6 +1135,7 @@ def _save_prediction_snapshot(
     # 可視化する (2026-07-01)。**既存 snapshot にあれば再利用して凍結** — オッズ更新/再score で
     # レース内再正規化により値が揺れるのを防ぐ (ユーザ指摘 2026-07-01: 出走表のみで決めるべき)。
     _prov = _resolve_provisional(race_id, rd)
+    _lm_model, _lm_mode = _llm_meta(race_id)   # .llm.json のモデル/リサーチ方式 (1回だけ読む)
     snapshot = {
         "race_id": race_id,
         "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1207,6 +1229,10 @@ def _save_prediction_snapshot(
         "llm_fallback": llm_win_index is None,
         # 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限・現行)。Claude 指数があるときのみ刻む。
         "index_version": (llm_mod.INDEX_VERSION if llm_win_index is not None else None),
+        # 指数生成のモデルとリサーチ方式 (agentic=LLM検索 / prefetch=固定クエリ Tavily 直, 2026-07-05)。
+        # .llm.json から読む (score 段の実績値)。A/B 比較の分割キー。指数なしは None。
+        "llm_research_mode": (_lm_mode if llm_win_index is not None else None),
+        "llm_model": (_lm_model if llm_win_index is not None else None),
         # v2 速度図表 (実データ par+pace+trip) を LightGBM fundamental と並列合成した重みと、
         # 各馬の図表値 (best/wavg/pace/trip/n_runs)。speed_v2_blend=0/None なら未使用。
         "speed_v2_blend": speed_v2_blend,
