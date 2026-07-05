@@ -898,6 +898,16 @@ export type SignalRuleStats = {
   roi_ci_high: number;
   drop_best_roi?: number; // 最大払戻1レースを除いた ROI (単発依存の検出・insample のみ)
 };
+// 対市場Δ (ペア比較, 2026-07-06): 同一発火レース集合上で「ルールの買い方 − 市場人気基準の
+// 同じ買い方」の ROI 差 (1.0 = +100pt) をレース単位ペア bootstrap した 95%CI。確証★判定とは
+// 独立の補助列 (Claude 指数の並びが「ただ人気を買う」に勝てているか)。n<5 は null (「—」表示)。
+export type SignalVsBaseline = {
+  delta: number; // ROI 差 (rule − baseline)。0.45 = +45pt
+  ci_low: number;
+  ci_high: number;
+  beats_baseline: boolean; // CI 下限 > 0 = 市場人気基準に確定的に勝つ
+  n: number; // 両側の買い目が組めたレース数 (ペア母集団)
+};
 export type SignalRule = {
   key: string;
   label: string;
@@ -918,6 +928,8 @@ export type SignalRule = {
   insample: SignalRuleStats; // 全期間 (発見データ込み・楽観) — 参考
   prospective: SignalRuleStats; // 登録後のみ — 確証判定はこちらだけ
   market_baseline: { races: number; hits: number; roi: number }; // 同条件で市場人気順に同じ買い方 (基準線)
+  insample_vs_baseline: SignalVsBaseline | null; // 対市場Δ 全期間 (参考)
+  prospective_vs_baseline: SignalVsBaseline | null; // 対市場Δ 登録後のみ (表の「対市場Δ」列)
   status: "accumulating" | "promising" | "confirmed" | "broken";
   status_label: string; // 蓄積中 / 有望 / 確証★ / 破綻
 };
@@ -957,6 +969,8 @@ export type SignalRulesResponse = {
       key: string;
       status: string;
       prospective: { races: number; roi: number; roi_ci_low: number; roi_ci_high: number };
+      // 対市場Δ (登録後・ペア比較)。2026-07-06 より前の history 行には無い (optional)。
+      vs_baseline?: { n: number; delta: number; ci_low: number; ci_high: number } | null;
     }>;
     walkforward: Array<{ key: string; races: number; roi: number }>;
   }>;

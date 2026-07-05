@@ -1722,6 +1722,41 @@ def _roi_delta_ci(high: list[tuple[int, int]], low: list[tuple[int, int]],
     return base, deltas[int(0.025 * n_iter)], deltas[int(0.975 * n_iter)]
 
 
+# 対市場Δ (ペア比較) の bootstrap が意味を持つ最小レース数。これ未満は None (UI は「—」表示)。
+_SIGNAL_BASELINE_MIN_N = 5
+
+
+def _paired_delta_ci(rule_pairs: list[tuple[int, int]], base_pairs: list[tuple[int, int]],
+                     n_iter: int = 2000, seed: int = 42) -> dict[str, Any] | None:
+    """同一レース集合上の「ルールの買い方 vs 市場人気基準の同じ買い方」の ROI 差 (pt) + 95%CI。
+
+    rule_pairs[i] / base_pairs[i] は **同じレース i** の (Σstake, Σpayout)。再標本化の単位は
+    レース (ペアを崩さず resample) — 同一レースのルール脚と基準脚は同じ着順を共有し強相関
+    (一致条件下では同一馬になることもある) なので、2群独立の再標本化 (`_roi_delta_ci`) では
+    相関を無視して CI が歪む。脚単位 iid 再標本化がレース内相関で CI 過小になった既知バグ
+    (2026-07-04, `_agreement_pairs` のレース単位合算で修正) と同型の教訓。
+    ルールと基準が定義上同じ買い目になるケース (place1_consensus の一致条件下など) は
+    Δ が恒等 0・CI [0,0] → beats_baseline=False が正しい挙動。
+    n < _SIGNAL_BASELINE_MIN_N は bootstrap が無意味なので None (確証★判定には使わない補助列)。
+    """
+    n = len(rule_pairs)
+    if n != len(base_pairs) or n < _SIGNAL_BASELINE_MIN_N:
+        return None
+    import random
+    rng = random.Random(seed)
+    delta = _roi_of(rule_pairs) - _roi_of(base_pairs)
+    deltas: list[float] = []
+    for _ in range(n_iter):
+        idxs = [rng.randrange(n) for _ in range(n)]
+        deltas.append(_roi_of([rule_pairs[i] for i in idxs])
+                      - _roi_of([base_pairs[i] for i in idxs]))
+    deltas.sort()
+    lo = deltas[int(0.025 * n_iter)]
+    hi = deltas[int(0.975 * n_iter)]
+    return {"delta": delta, "ci_low": lo, "ci_high": hi,
+            "beats_baseline": bool(lo > 0), "n": n}
+
+
 def _roi_ci(pairs: list[tuple[int, int]], n_iter: int = 2000,
             seed: int = 42) -> tuple[float, float]:
     """1 群の ROI の bootstrap 95%CI (レース単位ペアを再標本化・固定 seed で決定的)。
@@ -2381,6 +2416,25 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
                       and (got := _agreement_pairs([r["per"]], keys))]
         mkt_pairs = [got[0] for r in matched if r["mper"] is not None
                      and (got := _agreement_pairs([r["mper"]], keys))]
+        # 対市場Δ (ペア比較): per と mper の両方が組めたレースだけを **同一レースの対** にする
+        # (レース単位ペア bootstrap 用。片側しか組めないレースは対比較の母集団に入れない)。
+        ins_rule_p: list[tuple[int, int]] = []
+        ins_base_p: list[tuple[int, int]] = []
+        pros_rule_p: list[tuple[int, int]] = []
+        pros_base_p: list[tuple[int, int]] = []
+        for r in matched:
+            if r["mper"] is None:
+                continue
+            rp = _agreement_pairs([r["per"]], keys)
+            bp = _agreement_pairs([r["mper"]], keys)
+            if not (rp and bp):
+                continue
+            ins_rule_p.append(rp[0])
+            ins_base_p.append(bp[0])
+            if (r["date"] and r["date"] >= rule["registered_at"]
+                    and r["scored_pre_start"]):
+                pros_rule_p.append(rp[0])
+                pros_base_p.append(bp[0])
         insample = _signal_stats(all_pairs, with_drop_best=True)
         prospective = _signal_stats(pros_pairs)
         status, status_label = _rule_status(prospective)
@@ -2408,6 +2462,11 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
                 "hits": sum(1 for p in mkt_pairs if p[1] > 0),
                 "roi": _roi_of(mkt_pairs) if mkt_pairs else 0.0,
             },
+            # 対市場Δ (レース単位ペア bootstrap): ルールの買い方 − 市場人気基準の同じ買い方。
+            # ★判定 (_rule_status) は変えない補助列 — 「市場人気を買うだけ」に勝てているかの
+            # 常設表示 (place1_consensus のように定義上基準と同値になるルールは Δ=0 が出る)。
+            "insample_vs_baseline": _paired_delta_ci(ins_rule_p, ins_base_p),
+            "prospective_vs_baseline": _paired_delta_ci(pros_rule_p, pros_base_p),
             "status": status,
             "status_label": status_label,
         })
@@ -2496,7 +2555,13 @@ def append_signal_rules_history() -> dict[str, Any] | None:
                  "roi": round(r["prospective"]["roi"], 4),
                  "roi_ci_low": round(r["prospective"]["roi_ci_low"], 4),
                  "roi_ci_high": round(r["prospective"]["roi_ci_high"], 4),
-             }}
+             },
+             # 対市場Δ (登録後・ペア比較) — CI 下限>0 への遷移を時系列で追えるよう compact に残す。
+             "vs_baseline": (
+                 {"n": vb["n"], "delta": round(vb["delta"], 4),
+                  "ci_low": round(vb["ci_low"], 4), "ci_high": round(vb["ci_high"], 4)}
+                 if (vb := r["prospective_vs_baseline"]) else None
+             )}
             for r in cur["rules"]
         ],
         "walkforward": [

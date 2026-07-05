@@ -1166,3 +1166,120 @@ def test_consensus_tiebreak_by_number(dirs):
     assert len(recs) == 1
     # Claude#1=9 ≠ 市場#1=1 (馬番昇順タイブレーク) → 不一致 (旧実装は行順で 9 を市場#1 とし一致)。
     assert recs[0]["flags"]["consensus"] is False
+
+
+# ─── 対市場Δ (レース単位ペア bootstrap, 2026-07-06) ─────────────────────────────
+
+
+def test_paired_delta_ci_race_level():
+    """_paired_delta_ci: レース単位のペア再標本化 (n<5 は None・長さ不一致は None)。
+
+    ペアを崩さず resample するのが本質 — rule == baseline (同じ買い目) なら、レース毎の
+    当たり外れがどれだけ振れても Δ の bootstrap 分布は恒等 0 → CI がちょうど [0,0] になる
+    (2群独立の再標本化 (_roi_delta_ci) だと相関を無視して CI が広がってしまう)。
+    """
+    assert store._paired_delta_ci([(100, 200)] * 4, [(100, 100)] * 4) is None   # n<5
+    assert store._paired_delta_ci([(100, 200)] * 5, [(100, 100)] * 4) is None   # 長さ不一致
+    rule = [(100, 300), (100, 0), (100, 300), (100, 0), (100, 150)]
+    base = [(100, 100)] * 5
+    out = store._paired_delta_ci(rule, base)
+    assert out["n"] == 5
+    assert out["delta"] == pytest.approx(750 / 500 - 1.0)
+    assert out["ci_low"] <= out["delta"] <= out["ci_high"]
+    # rule == baseline (定義上同じ買い目): 的中/不的中がレース間で振れても Δ は恒等 0。
+    same = [(100, 0), (100, 260), (100, 0), (100, 260), (100, 130)]
+    out2 = store._paired_delta_ci(same, list(same))
+    assert out2["delta"] == 0.0
+    assert out2["ci_low"] == 0.0 and out2["ci_high"] == 0.0
+    assert out2["beats_baseline"] is False
+
+
+def test_signal_rules_vs_baseline_end_to_end(dirs, monkeypatch, tmp_path):
+    """対市場Δ が API 応答に載る: Claude#1 が市場#1 と別の馬で勝ち続ければ beats_baseline。
+
+    5R とも Claude#1=馬1 (win:3.0 的中)・市場#1=馬2 (外れ) → Δ = 300% − 0% = +300pt、
+    全レース同一なので CI も [300,300]・beats_baseline=True。発火しないルール
+    (place2_bigfield は 12頭以上) は None。history にも compact な vs_baseline が載る。
+    """
+    sh, pr, rs = dirs
+    rule_def = next(r for r in store.SIGNAL_RULES if r["key"] == "grid_win1_all")
+    import datetime as dt
+    reg_d = dt.date.fromisoformat(rule_def["registered_at"])
+    races = []
+    for k in range(5):
+        day = (reg_d + dt.timedelta(days=1 + k)).isoformat()
+        rid = f"vb-{k}"
+        races.append({"race_id": rid, "recommended": True, "venue": "A", "race_no": k + 1,
+                      "race_type": "nar", "n_runners": 8, "start_at": _jst_unix(day)})
+        # Claude#1=馬1 / 市場#1=馬2 (不一致)。着順 1-7-8 → rule (win:1) 的中・基準 (win:2) 外れ。
+        # 的中脚を win1/place1 (Claude側) + place2 (市場側=馬1が市場2番人気) だけに絞り、
+        # final_odds (all-or-nothing = 的中全脚のオッズ必須) を最小化する。
+        (pr / f"{rid}.json").write_text(json.dumps(_snap(
+            8, _IDX8, market={2: 95.0, 1: 60.0, 3: 40.0})), encoding="utf-8")
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo(
+            [1, 7, 8], 0, {"win:1": 3.0, "place:1": 1.5})), encoding="utf-8")
+    (sh / "20260707.json").write_text(json.dumps({
+        "generated_at": f"{reg_d.isoformat()}T10:00:00+09:00", "races": races,
+    }), encoding="utf-8")
+    cur = store.compute_signal_rules()
+    w1 = next(r for r in cur["rules"] if r["key"] == "grid_win1_all")
+    vb = w1["prospective_vs_baseline"]
+    assert vb is not None and vb["n"] == 5
+    assert vb["delta"] == pytest.approx(3.0)           # 300% − 0%
+    assert vb["ci_low"] == pytest.approx(3.0) and vb["ci_high"] == pytest.approx(3.0)
+    assert vb["beats_baseline"] is True
+    assert w1["insample_vs_baseline"] is not None
+    assert w1["insample_vs_baseline"]["n"] == 5        # 全期間側も同じ 5R
+    # 発火しないルール (12頭以上条件) は None = UI「—」。
+    p2 = next(r for r in cur["rules"] if r["key"] == "place2_bigfield")
+    assert p2["prospective_vs_baseline"] is None
+    # スキーマ: 全ルールに両フィールドがあり、None か 5 キーの dict。
+    for r in cur["rules"]:
+        for f in ("insample_vs_baseline", "prospective_vs_baseline"):
+            assert f in r
+            if r[f] is not None:
+                assert set(r[f]) == {"delta", "ci_low", "ci_high", "beats_baseline", "n"}
+    # history には prospective 側の compact vs_baseline が載る (発火しないルールは None)。
+    monkeypatch.setattr(store, "SIGNAL_RULES_HISTORY", tmp_path / "sig_hist.jsonl")
+    row = store.append_signal_rules_history()
+    hw1 = next(r for r in row["rules"] if r["key"] == "grid_win1_all")
+    assert hw1["vs_baseline"] == {"n": 5, "delta": 3.0, "ci_low": 3.0, "ci_high": 3.0}
+    hp2 = next(r for r in row["rules"] if r["key"] == "place2_bigfield")
+    assert hp2["vs_baseline"] is None
+
+
+def test_signal_rules_vs_baseline_identical_picks_zero(dirs):
+    """定義上ルールと市場基準が同じ買い目になるケースは Δ が恒等 0 (CI [0,0]・非緑)。
+
+    一致条件下 (Claude#1 == 市場#1) の win1 は両者同じ馬を買う。当たり外れが 5R 間で
+    振れても (3勝2敗)、レース単位ペア bootstrap なら Δ は常に 0 — これが崩れたら
+    再標本化がペアを崩している (レース内相関の無視) サイン。
+    """
+    sh, pr, rs = dirs
+    rule_def = next(r for r in store.SIGNAL_RULES if r["key"] == "grid_win1_all")
+    import datetime as dt
+    reg_d = dt.date.fromisoformat(rule_def["registered_at"])
+    races = []
+    for k in range(5):
+        day = (reg_d + dt.timedelta(days=1 + k)).isoformat()
+        rid = f"same-{k}"
+        races.append({"race_id": rid, "recommended": True, "venue": "A", "race_no": k + 1,
+                      "race_type": "nar", "n_runners": 8, "start_at": _jst_unix(day)})
+        # 一致: Claude#1 = 市場#1 = 馬1。3R は馬1 が勝ち (win:2.6・着順 1-7-8 で他戦略の
+        # 的中を避ける)、2R は外れ (6-7-8 = 上位指数馬が全滅で final_odds 不要)。
+        (pr / f"{rid}.json").write_text(json.dumps(_snap(
+            8, _IDX8, market={1: 95.0, 2: 60.0, 3: 40.0})), encoding="utf-8")
+        order = [1, 7, 8] if k < 3 else [6, 7, 8]
+        odds = {"win:1": 2.6, "place:1": 1.4} if k < 3 else {}
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo(order, 0, odds)),
+                                        encoding="utf-8")
+    (sh / "20260707.json").write_text(json.dumps({
+        "generated_at": f"{reg_d.isoformat()}T10:00:00+09:00", "races": races,
+    }), encoding="utf-8")
+    cur = store.compute_signal_rules()
+    w1 = next(r for r in cur["rules"] if r["key"] == "grid_win1_all")
+    vb = w1["prospective_vs_baseline"]
+    assert vb is not None and vb["n"] == 5
+    assert vb["delta"] == pytest.approx(0.0)
+    assert vb["ci_low"] == pytest.approx(0.0) and vb["ci_high"] == pytest.approx(0.0)
+    assert vb["beats_baseline"] is False

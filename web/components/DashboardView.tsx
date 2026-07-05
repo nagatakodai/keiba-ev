@@ -34,6 +34,12 @@ function fmtRoiPct(roi: number): string {
   return `${Math.round(roi * 100)}%`;
 }
 
+// 対市場Δ (ROI 差) の pt 表示: 0.45 → "+45pt" / -0.2 → "−20pt" (符号明示)。
+function fmtDeltaPt(delta: number): string {
+  const pt = Math.round(delta * 100);
+  return pt < 0 ? `−${Math.abs(pt)}pt` : `+${pt}pt`;
+}
+
 function fmtSignedYen(n: number): string {
   return `${n < 0 ? "-" : "+"}¥${Math.abs(n).toLocaleString()}`;
 }
@@ -516,6 +522,8 @@ function SignalRuleRow({
 }) {
   const p = rule.prospective;
   const i = rule.insample;
+  // 対市場Δ (登録後・ペア比較)。CI 下限 > 0 (beats_baseline) で緑、0 跨ぎは淡色、n<5 は null=「—」。
+  const vsBase = rule.prospective_vs_baseline;
   // ROI ≥ 100% の緑ハイライト (ユーザ指示 2026-07-05): 発見時/登録後の ROI と、登録後が
   // 緑のルールは条件の定義も緑にする。broken (rose) は status 装飾を優先。
   const insampleGreen = i.races > 0 && i.roi >= 1.0;
@@ -605,6 +613,26 @@ function SignalRuleRow({
           "—"
         )}
       </td>
+      <td className="px-2 py-1.5 text-right tnum">
+        {vsBase ? (
+          <>
+            <span
+              className={
+                vsBase.beats_baseline
+                  ? "font-bold text-emerald-300"
+                  : "text-(--color-muted)" // CI が 0 を跨ぐ間は淡色 (未確定)
+              }
+            >
+              {fmtDeltaPt(vsBase.delta)}
+            </span>
+            <span className="block text-[9px] text-(--color-muted) leading-tight">
+              {vsBase.n}R ・ CI[{fmtDeltaPt(vsBase.ci_low)},{fmtDeltaPt(vsBase.ci_high)}]
+            </span>
+          </>
+        ) : (
+          <span className="text-(--color-muted)">—</span>
+        )}
+      </td>
       <td className="px-2 py-1.5 text-right">
         <span
           className={`px-1.5 py-0.5 rounded text-[10px] font-black whitespace-nowrap ${statusClass[rule.status]}`}
@@ -656,6 +684,7 @@ function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
                 <th className="px-2 py-2 font-bold text-right whitespace-nowrap">発見時 (参考)</th>
                 <th className="px-2 py-2 font-bold text-right whitespace-nowrap">登録後 (確証判定)</th>
                 <th className="px-2 py-2 font-bold text-right whitespace-nowrap">市場人気基準</th>
+                <th className="px-2 py-2 font-bold text-right whitespace-nowrap">対市場Δ (登録後)</th>
                 <th className="px-2 py-2 font-bold text-right">状態</th>
               </tr>
             </thead>
@@ -705,7 +734,11 @@ function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
             プレレジ日以降の発走レースのみ (真の out-of-sample)。確証★ = 登録後 {c.min_confirm}R
             以上 かつ ROI 95%CI 下限 &gt; 100% ・ 破綻 = 登録後 {c.min_broken}R 以上 かつ CI 上限
             &lt; 100% (ルール棄却)。「市場人気基準」= 同条件で市場人気順に同じ買い方をした全期間
-            ROI (Claude 指数の付加価値の基準線)。
+            ROI (Claude 指数の付加価値の基準線)。「対市場Δ」= 登録後の同一レース集合で
+            ルール − 市場人気基準 の ROI 差 (レース単位ペア bootstrap の 95%CI・
+            <span className="text-emerald-200">緑 = CI 下限 &gt; 0 で基準線に確定的に勝つ</span>
+            ・確証★判定とは独立の補助列・5R 未満は「—」。定義上基準と同じ買い目になるルールは
+            Δ=0 が正しい)。
           </span>
         </div>
       </div>
