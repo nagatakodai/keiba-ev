@@ -5,7 +5,7 @@
 //   上位が拮抗する (差が小) ほど **組合せ系** (馬連 / 馬単 / ワイド) の回収率が上がる傾向。
 // ただし標本が小さく **統計的に有意ではない** (Δ の 95%CI が 0 を跨ぐものが大半)。あくまで参考。
 
-import type { MarketAgreement, SignalRule, SignalRules } from "@/lib/api";
+import type { BetEvRow, MarketAgreement, SignalRule, SignalRules } from "@/lib/api";
 import type { BadgeTone } from "@/components/ui";
 
 // この pt 以上の「1位−2位 指数差」で本命型とみなす (分析の median=8 を閾値に採用)。
@@ -154,9 +154,13 @@ export type FiredSignalRule = {
 };
 
 // backend `_race_features` (api/store.py) のミラー: Claude 指数上位3頭のギャップ + 市場の
-// 荒れ具合の発走前特徴量。同点タイブレークは (-指数, 馬番昇順)。計算不能な特徴量は null
-// (= その特徴量を要求するルールは発火しない)。変える時は backend と両方変える。
-export function raceSignalFeatures(items: IdxItem[]): Record<string, number | null> {
+// 荒れ具合 + FL バイアス (単勝/複勝オッズ比, betTables から) の発走前特徴量。同点タイブレークは
+// (-指数, 馬番昇順)。計算不能な特徴量は null (= その特徴量を要求するルールは発火しない)。
+// 変える時は backend と両方変える。
+export function raceSignalFeatures(
+  items: IdxItem[],
+  betTables?: Record<string, BetEvRow[]> | null,
+): Record<string, number | null> {
   const withClaude = items
     .filter((i): i is IdxItem & { claude_index: number } => typeof i.claude_index === "number")
     .slice()
@@ -186,6 +190,22 @@ export function raceSignalFeatures(items: IdxItem[]): Record<string, number | nu
     .map((i) => Math.pow(i.market_index / 100, MARKET_INDEX_T));
   const total = probs.reduce((a, b) => a + b, 0);
   const top3Conc = probs.length >= 3 && total > 0 ? (probs[0] + probs[1] + probs[2]) / total : null;
+  // FL バイアス: Claude 上位3頭の 単勝/複勝 オッズ比 (bet_tables の実オッズ, 2026-07-06)。
+  const pw: Record<string, number | null> = { pw_top1: null, pw_top2: null, pw_top3: null };
+  if (betTables) {
+    const oddsMap = (rows?: BetEvRow[]) => {
+      const m = new Map<number, number>();
+      for (const r of rows ?? []) if (r.key.length === 1 && r.odds > 0) m.set(r.key[0], r.odds);
+      return m;
+    };
+    const winO = oddsMap(betTables.win);
+    const plcO = oddsMap(betTables.place);
+    withClaude.slice(0, 3).forEach((h, i) => {
+      const w = winO.get(h.number);
+      const p = plcO.get(h.number);
+      if (w && p) pw[`pw_top${i + 1}`] = w / p;
+    });
+  }
   return {
     gap12,
     gap23,
@@ -194,6 +214,7 @@ export function raceSignalFeatures(items: IdxItem[]): Record<string, number | nu
     top3_idx_diff: top3IdxDiff,
     fav_odds: favOdds,
     top3_conc: top3Conc,
+    ...pw,
   };
 }
 export type RaceSignalGuide = {
@@ -210,6 +231,7 @@ export function raceSignalRuleGuide(
   nRunners: number | null | undefined,
   venueName: string | null | undefined,
   signalRules?: SignalRules | null,
+  betTables?: Record<string, BetEvRow[]> | null,
 ): RaceSignalGuide | null {
   const withClaude = items.filter(
     (i): i is IdxItem & { claude_index: number } => typeof i.claude_index === "number",
@@ -239,7 +261,7 @@ export function raceSignalRuleGuide(
   const competitive = !(p2 > 0 && p1 / p2 >= FAVORITE_RATIO_THRESHOLD);
   const jra = venueName ? JRA_VENUES.has(venueName) : null;
   const deadCell = competitive && !agree;
-  const features = raceSignalFeatures(items);
+  const features = raceSignalFeatures(items, betTables);
 
   const fired: FiredSignalRule[] = [];
   for (const rule of signalRules?.rules ?? []) {

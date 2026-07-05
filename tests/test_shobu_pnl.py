@@ -967,6 +967,19 @@ def test_race_features_insufficient_data():
     assert f["top3_rank_gap"] is None      # Claude 3位 (馬3) に市場指数が無い
     assert f["top3_idx_diff"] is None
     assert f["fav_odds"] == pytest.approx((100 / 80.0) ** store._MARKET_INDEX_T)
+    assert f["pw_top1"] is None            # snap 無し → FL バイアス特徴量は None
+
+
+def test_race_features_pw_ratio_from_bet_tables():
+    """pw_top1/2/3 = Claude 上位馬の 単勝/複勝オッズ比 (snap の bet_tables, 2026-07-06)。"""
+    idx = {1: 90.0, 2: 80.0, 3: 70.0}
+    mkt = {1: 80.0, 2: 60.0, 3: 40.0}
+    snap = _snap(8, idx, win_odds={1: 2.0, 2: 8.0, 3: 12.0},
+                 place_odds={1: 1.2, 2: 2.0})
+    f = store._race_features(idx, mkt, snap)
+    assert f["pw_top1"] == pytest.approx(2.0 / 1.2)
+    assert f["pw_top2"] == pytest.approx(8.0 / 2.0)
+    assert f["pw_top3"] is None            # 馬3の複勝オッズ欠落 → None (保守的)
 
 
 def test_rule_matches_features():

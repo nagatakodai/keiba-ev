@@ -1821,7 +1821,8 @@ def _matrix_cells(rows: list[dict[str, Any]], floor: int) -> tuple[list[dict[str
     return cells, best
 
 
-def _race_features(idx: dict[int, float], mkt: dict[int, float]) -> dict[str, float | None]:
+def _race_features(idx: dict[int, float], mkt: dict[int, float],
+                   snap: dict[str, Any] | None = None) -> dict[str, float | None]:
     """Claude 指数上位3頭 + 市場の荒れ具合の **発走前観測可能な数値特徴量** (ユーザ指示 2026-07-05:
     「上位3頭の指数と市場との差・1,2,3の開き・4頭目との開き・市場のオッズの開き (荒れ具合) から
     どの券種が回収率が高くなるか研究中シグナルに入れて」)。
@@ -1837,6 +1838,10 @@ def _race_features(idx: dict[int, float], mkt: dict[int, float]) -> dict[str, fl
       - top3_idx_diff: Claude 上位3頭の mean(claude_index − market_index) (同一 0-100 尺度の数値差)
       - fav_odds: 市場1番人気の単勝オッズ復元値 (100/market_index)^T。高い = 突出人気不在 = 荒れ模様
       - top3_conc: 市場 implied 勝率の上位3頭への集中度 (Σtop3 p / Σall p)。低い = 混戦 (荒れ)
+      - pw_top1/2/3: Claude 上位1/2/3位馬の 単勝オッズ ÷ 複勝オッズ (snap の bet_tables から。
+        本命-大穴バイアス (FL bias) の per-horse シグナル: 高い = 市場が「勝ち切らないが
+        絡む」(3着型) と見る馬。複勝はレンジ下限なので比は系統的にやや高め (レース間で一貫)。
+        bet_tables が無い/欠落は None (2026-07-06 追加)
     """
     c_sorted = sorted(idx.items(), key=lambda kv: (-kv[1], kv[0]))
     gap12 = c_sorted[0][1] - c_sorted[1][1] if len(c_sorted) >= 2 else None
@@ -1857,10 +1862,19 @@ def _race_features(idx: dict[int, float], mkt: dict[int, float]) -> dict[str, fl
     probs = [(mi / 100.0) ** _MARKET_INDEX_T for _num, mi in m_sorted if mi > 0]
     if len(probs) >= 3 and sum(probs) > 0:
         top3_conc = sum(probs[:3]) / sum(probs)
+    # FL バイアス: Claude 上位3頭の 単勝/複勝 オッズ比 (bet_tables の実オッズ)。
+    pw: dict[str, float | None] = {"pw_top1": None, "pw_top2": None, "pw_top3": None}
+    if snap is not None:
+        win_o = {k[0]: v for k, v in _snap_combo_odds(snap, "win").items() if v > 0}
+        plc_o = {k[0]: v for k, v in _snap_combo_odds(snap, "place").items() if v > 0}
+        for i, (num, _v) in enumerate(c_sorted[:3]):
+            w_o, p_o = win_o.get(num), plc_o.get(num)
+            if w_o and p_o:
+                pw[f"pw_top{i + 1}"] = w_o / p_o
     return {
         "gap12": gap12, "gap23": gap23, "gap34": gap34,
         "top3_rank_gap": top3_rank_gap, "top3_idx_diff": top3_idx_diff,
-        "fav_odds": fav_odds, "top3_conc": top3_conc,
+        "fav_odds": fav_odds, "top3_conc": top3_conc, **pw,
     }
 
 
@@ -1948,8 +1962,8 @@ def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
             "scored_pre_start": bool(start_iso) and bool(scored) and scored < start_iso,
             "flags": {"consensus": agree, "style": competitive, "venue": jra},
             "n_runners": detail.get("n_runners") or 0,
-            # 上位3頭ギャップ + 荒れ具合の数値特徴量 (プレレジ features 条件用, 2026-07-05)。
-            "features": _race_features(idx, mkt),
+            # 上位3頭ギャップ + 荒れ具合 + FL バイアスの数値特徴量 (プレレジ features 条件用)。
+            "features": _race_features(idx, mkt, snap),
             "per": detail["per"],
             "mper": mper,
         })
@@ -2172,6 +2186,23 @@ SIGNAL_RULES: list[dict[str, Any]] = [
      "features": {"gap23": {"max": 2}},
      "discovery": "発見時108R: ROI 159% (n=17, drop-best 119%, 前半258%/後半71%と不安定 — "
                   "1,2,3の開き系の代表として n極小のまま参考登録)"},
+    # --- FL バイアス (単勝/複勝オッズ比 = 市場の「勝ち切り型/3着型」評価) ルール
+    #     (ユーザ指示 2026-07-05「他に回収率を上げられることは」→ pw 特徴量 sweep から 2 本,
+    #      2026-07-06 プレレジ。特徴量は `_race_features` の pw_top* = bet_tables 実オッズ比) ---
+    {"key": "quinella13_top2winner", "label": "馬連1-3 × 2位が勝ち切り型",
+     "strategy": "quinella13",
+     "condition_label": "Claude2位馬の 単勝/複勝オッズ比 ≤ 3.0 (市場が勝ち切り型と評価)",
+     "registered_at": "2026-07-06",
+     "features": {"pw_top2": {"max": 3.0}},
+     "discovery": "発見時108R: ROI 141% (n=39, 前半141%/後半142%と安定・市場人気基準52%。"
+                  "ただし drop-best 92% = 単発寄与が大きい)"},
+    {"key": "place2_top2placer", "label": "複勝2 × 2位が3着型",
+     "strategy": "place2",
+     "condition_label": "Claude2位馬の 単勝/複勝オッズ比 ≥ 4.0 (市場が「絡むが勝ち切らない」と評価)",
+     "registered_at": "2026-07-06",
+     "features": {"pw_top2": {"min": 4.0}},
+     "discovery": "発見時108R: ROI 102% (n=47, drop-best 90%, 前半126%/後半79%。"
+                  "FLバイアス系の対側・市場人気基準64%に対する付加価値が主眼)"},
 ]
 
 # --- 券種比較グリッド (ユーザ指示 2026-07-05「単勝1,単勝2,単勝3,複勝1,複勝2,複勝3,馬連1-2,

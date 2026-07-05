@@ -253,6 +253,7 @@ export default async function PredictionDetailPage({
           signalRules={signalRules}
           venueName={d.venue_name}
           nRunners={d.n_runners ?? d.index_compare.length}
+          betTables={d.bet_tables}
         />
       )}
 
@@ -1262,6 +1263,7 @@ function IndexCompareCard({
   signalRules,
   venueName,
   nRunners,
+  betTables,
 }: {
   items: NonNullable<PredictionDetail["index_compare"]>;
   finish?: number[];
@@ -1271,6 +1273,8 @@ function IndexCompareCard({
   signalRules?: SignalRules | null;
   venueName?: string | null;
   nRunners?: number | null;
+  // FL バイアス特徴量 (pw_top*) の発火判定用 (単勝/複勝の実オッズ, 2026-07-06)。
+  betTables?: PredictionDetail["bet_tables"];
 }) {
   const finishSet = new Set(finish ?? []);
   // 買い方ガイド (Claude 指数の自信度 → 本命系/組合せ系)。傾向ベースの参考 (有意ではない)。
@@ -1284,7 +1288,9 @@ function IndexCompareCard({
   // 総合ガイド (#1抜け × 市場一致 × 頭数 → 1行の推奨券種 or 見送り)。3信号を統合した結論。
   const combined = hasClaude ? combinedGuide(items, nRunners) : null;
   // プレレジ済シグナルルール: このレースで条件成立中のルール + 死にセル (見送りゾーン) 判定。
-  const sig = hasClaude ? raceSignalRuleGuide(items, nRunners, venueName, signalRules) : null;
+  const sig = hasClaude
+    ? raceSignalRuleGuide(items, nRunners, venueName, signalRules, betTables)
+    : null;
   const combinedToneClass: Record<string, string> = {
     good: "border-emerald-400/50 bg-emerald-400/10",
     info: "border-sky-400/50 bg-sky-400/10",
