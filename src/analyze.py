@@ -87,7 +87,7 @@ def main(
     with_exacta: bool = typer.Option(False, "--with-exacta", help="馬単 (b5) も fetch (jiku iteration で重い)"),
     with_trio: bool = typer.Option(False, "--with-trio", help="3 連複 (b6) も fetch (jiku iteration で重い)"),
     phase: str = typer.Option("bet", "--phase", help="score = Claude 考察で各馬指数を出しキャッシュ / bet = 指数+市場でP→束→snapshot (既定)"),
-    llm_blend: float = typer.Option(ev_mod.LLM_BLEND_DEFAULT, "--llm-blend", help="市場ブレンド後の Claude 指数合成重み (0=合成なし, 1=Claudeのみ。既定 0.75 = 支持馬の最終P Claude≈75%/市場≈19.5%)"),
+    llm_blend: float = typer.Option(ev_mod.LLM_BLEND_DEFAULT, "--llm-blend", help="市場ブレンド後の Claude 指数合成重み (0=合成なし, 1=Claudeのみ。既定 ev.LLM_BLEND_DEFAULT=0.25 — 2026-07-05 の log-loss 較正で 0.75 は市場単独より悪化と実測)"),
     speed_v2_blend: float = typer.Option(ev_mod.SPEED_V2_BLEND_LIVE, "--speed-v2-blend", help="v2速度図表(実データpar+pace+trip)を LightGBM fundamental と並列合成する重み (0=図表使わず, 0.5=幾何平均)。既定=SPEED_V2_BLEND_LIVE"),
     trifecta_head_max: int = typer.Option(2, "--t-head-max", help="3連単的中モード: 1着列の最大頭数 (絞る)。指数top2が接戦なら2頭"),
     trifecta_head_gap: float = typer.Option(0.12, "--t-head-gap", help="3連単的中モード: 指数top2の相対差がこれ以下なら1着を2頭に (開き判定)"),

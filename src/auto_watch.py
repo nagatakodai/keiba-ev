@@ -630,7 +630,7 @@ def main(
     tolerance_min: float = typer.Option(1.5, "--tolerance", help="bet 帯 window からの + 側許容 (分)。締切 window〜window+tolerance 分前で検出。小数可"),
     score_window: float = typer.Option(5, "--score-window", help="**score 帯** 締切までのリード (分)。Claude 考察で各馬指数を出しキャッシュする早回し。既定 5 分前"),
     score_tolerance: float = typer.Option(2, "--score-tolerance", help="score 帯の + 側許容 (分)。締切 score_window〜+tolerance 分前で考察。小数可"),
-    llm_blend: float = typer.Option(None, "--llm-blend", help="市場ブレンド後の Claude 指数合成重み (未指定なら各 analyze の既定 0.75)"),
+    llm_blend: float = typer.Option(None, "--llm-blend", help="市場ブレンド後の Claude 指数合成重み (未指定なら ev.LLM_BLEND_DEFAULT=0.25, 2026-07-05 較正)"),
     ev_max: float = typer.Option(None, "--ev-max"),
     min_prob: float = typer.Option(None, "--min-prob"),
     market_blend: float = typer.Option(None, "--market-blend"),
