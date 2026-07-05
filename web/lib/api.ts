@@ -912,6 +912,9 @@ export type SignalRule = {
   min_runners: number | null;
   max_runners: number | null;
   skip_dead_cell: boolean; // 拮抗型×市場不一致 (死にセル) を見送る規律ルール
+  // 数値特徴量条件 (上位3頭ギャップ/荒れ具合, 2026-07-05)。key は backend _race_features の
+  // gap12/gap23/gap34/top3_rank_gap/top3_idx_diff/fav_odds/top3_conc。betGuide がミラー計算で評価。
+  features: Record<string, { min?: number; max?: number }> | null;
   insample: SignalRuleStats; // 全期間 (発見データ込み・楽観) — 参考
   prospective: SignalRuleStats; // 登録後のみ — 確証判定はこちらだけ
   market_baseline: { races: number; roi: number }; // 同条件で市場人気順に同じ買い方 (基準線)

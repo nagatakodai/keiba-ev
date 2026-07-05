@@ -1771,6 +1771,49 @@ def _matrix_cells(rows: list[dict[str, Any]], floor: int) -> tuple[list[dict[str
     return cells, best
 
 
+def _race_features(idx: dict[int, float], mkt: dict[int, float]) -> dict[str, float | None]:
+    """Claude 指数上位3頭 + 市場の荒れ具合の **発走前観測可能な数値特徴量** (ユーザ指示 2026-07-05:
+    「上位3頭の指数と市場との差・1,2,3の開き・4頭目との開き・市場のオッズの開き (荒れ具合) から
+    どの券種が回収率が高くなるか研究中シグナルに入れて」)。
+
+    プレレジルールの `features` 条件 (`_rule_matches`) と読み取り専用スイープ
+    (`scripts/signal_feature_sweep.py`) が共有する。計算不能な特徴量は None (= その特徴量を
+    要求するルールは発火しない)。同点タイブレークは他と同じ (-指数, 馬番昇順)。
+
+      - gap12 / gap23: Claude 指数 1-2位 / 2-3位 の開き (指数ポイント)
+      - gap34: Claude 3位と4位の開き = 上位3頭パックと残りの分離度 (指数4頭未満は None)
+      - top3_rank_gap: Claude 上位3頭の Σ(市場順位 − Claude順位)。正 = 市場が Claude 上位勢を
+        過小評価 (shobu 基準B の rank_gap を上位3頭に拡張したもの)
+      - top3_idx_diff: Claude 上位3頭の mean(claude_index − market_index) (同一 0-100 尺度の数値差)
+      - fav_odds: 市場1番人気の単勝オッズ復元値 (100/market_index)^T。高い = 突出人気不在 = 荒れ模様
+      - top3_conc: 市場 implied 勝率の上位3頭への集中度 (Σtop3 p / Σall p)。低い = 混戦 (荒れ)
+    """
+    c_sorted = sorted(idx.items(), key=lambda kv: (-kv[1], kv[0]))
+    gap12 = c_sorted[0][1] - c_sorted[1][1] if len(c_sorted) >= 2 else None
+    gap23 = c_sorted[1][1] - c_sorted[2][1] if len(c_sorted) >= 3 else None
+    gap34 = c_sorted[2][1] - c_sorted[3][1] if len(c_sorted) >= 4 else None
+    m_sorted = sorted(mkt.items(), key=lambda kv: (-kv[1], kv[0]))
+    m_rank = {num: i + 1 for i, (num, _mi) in enumerate(m_sorted)}
+    top3_rank_gap: float | None = None
+    top3_idx_diff: float | None = None
+    top3 = c_sorted[:3]
+    if len(top3) == 3 and all(num in mkt for num, _v in top3):
+        top3_rank_gap = float(sum(m_rank[num] - (k + 1) for k, (num, _v) in enumerate(top3)))
+        top3_idx_diff = sum(v - mkt[num] for num, v in top3) / 3.0
+    fav_odds: float | None = None
+    top3_conc: float | None = None
+    if m_sorted and m_sorted[0][1] > 0:
+        fav_odds = (100.0 / m_sorted[0][1]) ** _MARKET_INDEX_T
+    probs = [(mi / 100.0) ** _MARKET_INDEX_T for _num, mi in m_sorted if mi > 0]
+    if len(probs) >= 3 and sum(probs) > 0:
+        top3_conc = sum(probs[:3]) / sum(probs)
+    return {
+        "gap12": gap12, "gap23": gap23, "gap34": gap34,
+        "top3_rank_gap": top3_rank_gap, "top3_idx_diff": top3_idx_diff,
+        "fav_odds": fav_odds, "top3_conc": top3_conc,
+    }
+
+
 def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
     """市場非依存 (β除外) の shobu 評価レースに 発走前条件タグ + 戦略脚 を付けた共通レコード列。
 
@@ -1855,6 +1898,8 @@ def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
             "scored_pre_start": bool(start_iso) and bool(scored) and scored < start_iso,
             "flags": {"consensus": agree, "style": competitive, "venue": jra},
             "n_runners": detail.get("n_runners") or 0,
+            # 上位3頭ギャップ + 荒れ具合の数値特徴量 (プレレジ features 条件用, 2026-07-05)。
+            "features": _race_features(idx, mkt),
             "per": detail["per"],
             "mper": mper,
         })
@@ -2046,6 +2091,37 @@ SIGNAL_RULES: list[dict[str, Any]] = [
      "strategy": "quinella12", "condition_label": "Claude#1=市場1番人気 かつ 本命型 かつ NAR",
      "registered_at": "2026-07-05", "consensus": True, "style": False, "venue": False,
      "discovery": "発見時105R: ROI 202% だが drop-best 106%・v2時代36% (マトリクス紙面上の主役の追試)"},
+    # --- 上位3頭ギャップ + 荒れ具合の特徴量ルール (ユーザ指示 2026-07-05, `_race_features`) ---
+    # 発見は scripts/signal_feature_sweep.py (108R in-sample・固定閾値グリッド)。条件は全て
+    # 発走前観測可能な数値特徴量の min/max。以降は登録後データのみで確証判定 (定義凍結)。
+    {"key": "place2_top3undervalued", "label": "複勝2 × 上位3頭を市場が過小評価",
+     "strategy": "place2",
+     "condition_label": "Claude上位3頭の Σ(市場順位−Claude順位) ≥ 5",
+     "registered_at": "2026-07-05",
+     "features": {"top3_rank_gap": {"min": 5}},
+     "discovery": "発見時108R: ROI 110% (n=38, drop-best 94%, 前半113%/後半106%と唯一安定・"
+                  "市場人気基準67%)。place2_bigfield と母集団は部分重複 (21/47R) の別条件"},
+    {"key": "wide13_top3consensus", "label": "ワイド1-3 × 上位3頭が市場と一致",
+     "strategy": "wide13",
+     "condition_label": "Claude上位3頭の Σ(市場順位−Claude順位) ≤ 0",
+     "registered_at": "2026-07-05",
+     "features": {"top3_rank_gap": {"max": 0}},
+     "discovery": "発見時108R: ROI 130% (n=20, drop-best 114%, 前半82%/後半177%・市場人気基準65%。"
+                  "市場と上位勢の見立てが揃う時 Claude の並び順が価値を持つ仮説)"},
+    {"key": "win1_rough_market", "label": "単勝1 × 荒れ模様 (突出人気不在)",
+     "strategy": "win1",
+     "condition_label": "市場1番人気の復元オッズ ≥ 2.5倍",
+     "registered_at": "2026-07-05",
+     "features": {"fav_odds": {"min": 2.5}},
+     "discovery": "発見時108R: ROI 119% (n=32, drop-best 95% だが 前半179%/後半58%と不安定・"
+                  "市場人気基準58%。荒れ具合系の代表として登録)"},
+    {"key": "place3_toppack_tight", "label": "複勝3 × Claude 2-3位が拮抗",
+     "strategy": "place3",
+     "condition_label": "Claude指数の 2位−3位差 ≤ 2 (3位は実質2位級)",
+     "registered_at": "2026-07-05",
+     "features": {"gap23": {"max": 2}},
+     "discovery": "発見時108R: ROI 159% (n=17, drop-best 119%, 前半258%/後半71%と不安定 — "
+                  "1,2,3の開き系の代表として n極小のまま参考登録)"},
 ]
 
 
@@ -2065,6 +2141,16 @@ def _rule_matches(rule: dict[str, Any], rec: dict[str, Any]) -> bool:
         return False
     if rule.get("skip_dead_cell") and (f["style"] and not f["consensus"]):
         return False   # 死にセル (拮抗型 × 市場不一致) は見送り
+    # 数値特徴量の min/max 条件 (`_race_features` の gap12/gap34/top3_rank_gap/fav_odds/
+    # top3_conc 等, 2026-07-05)。特徴量が計算不能 (None) のレースはルール不発火 = 保守的。
+    for name, cond in (rule.get("features") or {}).items():
+        v = (rec.get("features") or {}).get(name)
+        if v is None:
+            return False
+        if "min" in cond and v < cond["min"]:
+            return False
+        if "max" in cond and v > cond["max"]:
+            return False
     return True
 
 
@@ -2205,6 +2291,9 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
             "min_runners": rule.get("min_runners"),
             "max_runners": rule.get("max_runners"),
             "skip_dead_cell": bool(rule.get("skip_dead_cell")),
+            # 数値特徴量条件 (上位3頭ギャップ/荒れ具合)。frontend の per-race 発火判定
+            # (betGuide.raceSignalRuleGuide) が同じ特徴量をミラー計算して評価する。
+            "features": rule.get("features") or None,
             "insample": insample,
             "prospective": prospective,
             "market_baseline": {

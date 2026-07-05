@@ -152,6 +152,50 @@ export type FiredSignalRule = {
   prospectiveRaces: number;
   status: SignalRule["status"];
 };
+
+// backend `_race_features` (api/store.py) のミラー: Claude 指数上位3頭のギャップ + 市場の
+// 荒れ具合の発走前特徴量。同点タイブレークは (-指数, 馬番昇順)。計算不能な特徴量は null
+// (= その特徴量を要求するルールは発火しない)。変える時は backend と両方変える。
+export function raceSignalFeatures(items: IdxItem[]): Record<string, number | null> {
+  const withClaude = items
+    .filter((i): i is IdxItem & { claude_index: number } => typeof i.claude_index === "number")
+    .slice()
+    .sort((a, b) => b.claude_index - a.claude_index || a.number - b.number);
+  const withMarket = items
+    .filter((i): i is IdxItem & { market_index: number } => typeof i.market_index === "number")
+    .slice()
+    .sort((a, b) => b.market_index - a.market_index || a.number - b.number);
+  const gap12 = withClaude.length >= 2 ? withClaude[0].claude_index - withClaude[1].claude_index : null;
+  const gap23 = withClaude.length >= 3 ? withClaude[1].claude_index - withClaude[2].claude_index : null;
+  const gap34 = withClaude.length >= 4 ? withClaude[2].claude_index - withClaude[3].claude_index : null;
+  const marketRank = new Map(withMarket.map((i, k) => [i.number, k + 1]));
+  const top3 = withClaude.slice(0, 3);
+  let top3RankGap: number | null = null;
+  let top3IdxDiff: number | null = null;
+  if (top3.length === 3 && top3.every((h) => marketRank.has(h.number))) {
+    top3RankGap = top3.reduce((s, h, k) => s + (marketRank.get(h.number)! - (k + 1)), 0);
+    const byNum = new Map(withMarket.map((i) => [i.number, i.market_index]));
+    top3IdxDiff = top3.reduce((s, h) => s + (h.claude_index - byNum.get(h.number)!), 0) / 3;
+  }
+  const favOdds =
+    withMarket.length >= 1 && withMarket[0].market_index > 0
+      ? Math.pow(100 / withMarket[0].market_index, MARKET_INDEX_T)
+      : null;
+  const probs = withMarket
+    .filter((i) => i.market_index > 0)
+    .map((i) => Math.pow(i.market_index / 100, MARKET_INDEX_T));
+  const total = probs.reduce((a, b) => a + b, 0);
+  const top3Conc = probs.length >= 3 && total > 0 ? (probs[0] + probs[1] + probs[2]) / total : null;
+  return {
+    gap12,
+    gap23,
+    gap34,
+    top3_rank_gap: top3RankGap,
+    top3_idx_diff: top3IdxDiff,
+    fav_odds: favOdds,
+    top3_conc: top3Conc,
+  };
+}
 export type RaceSignalGuide = {
   fired: FiredSignalRule[]; // このレースで条件成立中のプレレジルール (破綻除く)
   deadCell: boolean; // 拮抗型 × 市場不一致 = 見送りゾーン
@@ -195,6 +239,7 @@ export function raceSignalRuleGuide(
   const competitive = !(p2 > 0 && p1 / p2 >= FAVORITE_RATIO_THRESHOLD);
   const jra = venueName ? JRA_VENUES.has(venueName) : null;
   const deadCell = competitive && !agree;
+  const features = raceSignalFeatures(items);
 
   const fired: FiredSignalRule[] = [];
   for (const rule of signalRules?.rules ?? []) {
@@ -205,6 +250,16 @@ export function raceSignalRuleGuide(
     if (rule.min_runners != null && (!nRunners || nRunners < rule.min_runners)) continue;
     if (rule.max_runners != null && (!nRunners || nRunners > rule.max_runners)) continue;
     if (rule.skip_dead_cell && deadCell) continue; // 死にセルでは規律ルール自体が見送り
+    // 数値特徴量条件 (上位3頭ギャップ/荒れ具合)。backend `_rule_matches` と同じ: 計算不能は不発火。
+    let featOk = true;
+    for (const [name, cond] of Object.entries(rule.features ?? {})) {
+      const v = features[name];
+      if (v == null || (cond.min != null && v < cond.min) || (cond.max != null && v > cond.max)) {
+        featOk = false;
+        break;
+      }
+    }
+    if (!featOk) continue;
     fired.push({
       rule,
       prospectiveRoi: rule.prospective.roi,

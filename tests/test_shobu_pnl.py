@@ -897,6 +897,82 @@ def test_signal_rule_matches_conditions():
     assert store._rule_matches({"max_runners": 8}, unknown) is False
 
 
+def test_race_features_top3_and_roughness():
+    """_race_features: 上位3頭ギャップ・市場との差・荒れ具合の計算 (ユーザ指示 2026-07-05)。"""
+    idx = {1: 90.0, 2: 80.0, 3: 78.0, 4: 60.0, 5: 50.0}
+    # 市場は馬3を1番人気に (Claude 上位3頭 1,2,3 の市場順位 = 2,3,1)。
+    mkt = {1: 80.0, 2: 70.0, 3: 90.0, 4: 60.0, 5: 40.0}
+    f = store._race_features(idx, mkt)
+    assert f["gap12"] == pytest.approx(10.0)
+    assert f["gap23"] == pytest.approx(2.0)
+    assert f["gap34"] == pytest.approx(18.0)
+    # Σ(市場順位−Claude順位) = (2-1)+(3-2)+(1-3) = 0
+    assert f["top3_rank_gap"] == pytest.approx(0.0)
+    assert f["top3_idx_diff"] == pytest.approx(((90 - 80) + (80 - 70) + (78 - 90)) / 3)
+    assert f["fav_odds"] == pytest.approx((100 / 90.0) ** store._MARKET_INDEX_T)
+    probs = sorted(((m / 100.0) ** store._MARKET_INDEX_T for m in mkt.values()), reverse=True)
+    assert f["top3_conc"] == pytest.approx(sum(probs[:3]) / sum(probs))
+
+
+def test_race_features_insufficient_data():
+    """計算不能な特徴量は None (指数4頭未満の gap34・市場3頭未満の top3_conc 等)。"""
+    f = store._race_features({1: 90.0, 2: 80.0, 3: 70.0}, {1: 80.0, 2: 60.0})
+    assert f["gap34"] is None
+    assert f["top3_conc"] is None
+    assert f["top3_rank_gap"] is None      # Claude 3位 (馬3) に市場指数が無い
+    assert f["top3_idx_diff"] is None
+    assert f["fav_odds"] == pytest.approx((100 / 80.0) ** store._MARKET_INDEX_T)
+
+
+def test_rule_matches_features():
+    """features 条件 (min/max): 閾値判定 + 計算不能 (None)/欠落レコードは不発火 (保守的)。"""
+    rec = {"flags": {"consensus": True, "style": False, "venue": False}, "n_runners": 10,
+           "features": {"top3_rank_gap": 5.0, "fav_odds": 2.6, "gap23": None}}
+    assert store._rule_matches({"features": {"top3_rank_gap": {"min": 5}}}, rec) is True
+    assert store._rule_matches({"features": {"top3_rank_gap": {"min": 6}}}, rec) is False
+    assert store._rule_matches({"features": {"top3_rank_gap": {"max": 0}}}, rec) is False
+    assert store._rule_matches({"features": {"fav_odds": {"min": 2.5}}}, rec) is True
+    assert store._rule_matches(
+        {"features": {"fav_odds": {"min": 2.5}, "top3_rank_gap": {"min": 6}}}, rec) is False
+    assert store._rule_matches({"features": {"gap23": {"max": 2}}}, rec) is False   # None → 不発火
+    assert store._rule_matches({"features": {"unknown": {"min": 1}}}, rec) is False
+    # features を持たない旧形式レコード (後方互換) も不発火、条件なしルールは従来どおり。
+    old = {"flags": {"consensus": True, "style": False, "venue": False}, "n_runners": 10}
+    assert store._rule_matches({"features": {"gap12": {"min": 1}}}, old) is False
+    assert store._rule_matches({}, old) is True
+
+
+def test_signal_rules_features_end_to_end(dirs):
+    """features 条件ルールが実レコード経由で発火し、API 出力に features が serialize される。
+
+    gap23=1 (≤2) → place3_toppack_tight 発火 / fav_odds≈1.08 (<2.5) → win1_rough_market 不発火。
+    着順 3-7-8 (Claude#3 が勝つ) で的中は place3 のみ = 必要な final_odds を最小化。
+    """
+    sh, pr, rs = dirs
+    (sh / "20260701.json").write_text(json.dumps({
+        "generated_at": "2026-07-01T11:00:00+09:00",
+        "races": [{"race_id": "ft-1", "recommended": True, "venue": "A", "race_no": 1,
+                   "race_type": "nar", "n_runners": 8, "start_at": _jst_unix("2026-07-06")}],
+    }), encoding="utf-8")
+    idx = {1: 90.0, 2: 78.0, 3: 77.0, 4: 60.0, 5: 50.0, 6: 40.0, 7: 30.0, 8: 20.0}
+    (pr / "ft-1.json").write_text(json.dumps(_snap(
+        8, idx, market={1: 95.0, 2: 60.0, 3: 40.0})), encoding="utf-8")
+    (rs / "ft-1.json").write_text(json.dumps(_result_fo(
+        [3, 7, 8], 0, {"place:3": 2.0})), encoding="utf-8")
+    cur = store.compute_signal_rules()
+    tight = next(r for r in cur["rules"] if r["key"] == "place3_toppack_tight")
+    assert tight["features"] == {"gap23": {"max": 2}}
+    assert tight["insample"]["races"] == 1
+    assert tight["insample"]["roi"] == pytest.approx(2.0)
+    rough = next(r for r in cur["rules"] if r["key"] == "win1_rough_market")
+    assert rough["insample"]["races"] == 0
+    # 市場は馬3を最下位評価 → Claude 上位3頭の Σ(市場順位−Claude順位) = (1-1)+(2-2)+(8-3) = 5
+    # → place2_top3undervalued も発火 (place2=馬2 は外れ = stake のみ)。
+    under = next(r for r in cur["rules"] if r["key"] == "place2_top3undervalued")
+    assert under["insample"]["races"] == 1
+    assert under["insample"]["roi"] == pytest.approx(0.0)
+
+
 def test_walkforward_matrix_no_lookahead():
     """walk-forward は「そのレースより前」の履歴だけで選ぶ (look-ahead なし)。
 
