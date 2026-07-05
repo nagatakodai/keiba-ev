@@ -27,10 +27,13 @@ def test_build_shobu_cmd_flags():
     assert "--sep-threshold" not in s
     assert "--no-fetch-odds" not in s
     assert "--no-claude" not in s
-    # リサーチ方式 (ARCH-B): 既定 agentic はフラグを出さず、prefetch のとき --research を付ける。
-    assert "--research" not in s
+    # リサーチ方式 (ARCH-B): 既定は "ab" (レース毎 50/50 A/B, 2026-07-06)。shobu CLI 側の
+    # 既定も "ab" になったため**常に明示**で渡す (省略＝agentic ではなくなった)。
+    assert "--research ab" in s
     s2 = " ".join(build_shobu_cmd("/tmp/out.json", research="prefetch"))
     assert "--research prefetch" in s2
+    s3 = " ".join(build_shobu_cmd("/tmp/out.json", research="agentic"))
+    assert "--research agentic" in s3    # 明示 agentic は ab に呑まれず固定される
 
 
 def test_results_auto_status_shape():
@@ -159,3 +162,102 @@ def test_nightly_prescanner_status_shape():
     assert set(st) >= {"enabled", "hour_jst", "loop_running", "launches",
                        "last_job_id", "last_launched_date", "last_run_at"}
     assert st["loop_running"] is False   # start() 前 (テストは lifespan を通らない)
+
+
+def test_daily_scanner_due_gate(tmp_path, monkeypatch):
+    """当日キャッチアップ: 発火は「設定時刻以降 × 当日 06:00 以降未スキャン × 未実行 × 有効」(2026-07-06)。"""
+    import datetime
+    import json
+    import os
+    from zoneinfo import ZoneInfo
+    import api.main as m
+
+    monkeypatch.setattr(m, "SHOBU_DIR", tmp_path)
+    monkeypatch.setattr(m.ShobuDailyCatchupScanner, "STATE_FILE",
+                        tmp_path / "daily_scan_state.json")
+    sc = m.ShobuDailyCatchupScanner(m.JOBS)
+    sc.enabled = True
+    sc.hour = 9
+    jst = ZoneInfo("Asia/Tokyo")
+    morning = datetime.datetime(2026, 7, 6, 9, 30, tzinfo=jst)
+    early = datetime.datetime(2026, 7, 6, 8, 0, tzinfo=jst)
+
+    assert sc._due(early) is None                       # 時刻前は発火しない
+    assert sc._due(morning) == "20260706"               # ファイル無し → 当日日付で発火
+
+    # 前夜 nightly 産のファイル (mtime が当日 06:00 より前) → 再スキャンする
+    f = tmp_path / "20260706.json"
+    f.write_text(json.dumps({"races": []}), encoding="utf-8")
+    stale = datetime.datetime(2026, 7, 5, 21, 30, tzinfo=jst).timestamp()
+    os.utime(f, (stale, stale))
+    assert sc._due(morning) == "20260706"
+
+    # 当日 06:00 以降にスキャン済 (手動含む) → skip
+    fresh = datetime.datetime(2026, 7, 6, 7, 0, tzinfo=jst).timestamp()
+    os.utime(f, (fresh, fresh))
+    assert sc._due(morning) is None
+
+    # ファイルが stale に戻っても、実行済みガード (state file) があれば二重発火しない
+    os.utime(f, (stale, stale))
+    (tmp_path / "daily_scan_state.json").write_text(
+        '{"date": "20260706", "job_id": "x"}', encoding="utf-8")
+    assert sc._due(morning) is None
+    # 別の日の state なら発火する
+    (tmp_path / "daily_scan_state.json").write_text(
+        '{"date": "20260705", "job_id": "x"}', encoding="utf-8")
+    assert sc._due(morning) == "20260706"
+    # 無効化フラグ (KEIBA_DAILY_SCAN=0 相当)
+    sc.enabled = False
+    assert sc._due(morning) is None
+
+
+def test_daily_scanner_status_shape():
+    import api.main as m
+    st = m.DAILY_SCANNER.status()
+    assert set(st) >= {"enabled", "hour_jst", "loop_running", "launches",
+                       "last_job_id", "last_launched_date", "last_run_at"}
+    assert st["loop_running"] is False   # start() 前 (テストは lifespan を通らない)
+    assert 6 <= st["hour_jst"] <= 15     # 既定 9・6-15 クランプ
+
+
+def test_paddock_rescore_event_jsonl(tmp_path, monkeypatch):
+    """パドック再score の発火 1 回 = EVENTS_FILE に 1 行 (rid/date/fired_at/rc/duration_sec/ok)。"""
+    import json
+    import subprocess
+    import api.main as m
+
+    events = tmp_path / "paddock_rescore_events.jsonl"
+    monkeypatch.setattr(m.ShobuPaddockRescorer, "EVENTS_FILE", events)
+    monkeypatch.setattr(m, "shobu_today_jst", lambda: "20260706")
+    race = {"netkeiba": "202644070606", "internal": "20260706-44-6", "rtype": "nar",
+            "start_at": 1780000000, "venue": "大井", "race_no": 6}
+
+    # 成功パス: subprocess が rc=0 で終了 → ok=True, rc=0
+    class _Proc:
+        returncode = 0
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
+    assert m.ShobuPaddockRescorer._rescore(race) is True
+
+    # 失敗パス: timeout (例外) → ok=False, rc=None。イベントは失敗でも記録される。
+    def _boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=240)
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert m.ShobuPaddockRescorer._rescore(race) is False
+
+    lines = [json.loads(x) for x in events.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 2
+    ok_ev, ng_ev = lines
+    assert set(ok_ev) >= {"rid", "netkeiba", "date", "fired_at", "rc", "duration_sec", "ok"}
+    assert ok_ev["rid"] == "20260706-44-6" and ok_ev["date"] == "20260706"
+    assert ok_ev["rc"] == 0 and ok_ev["ok"] is True
+    assert isinstance(ok_ev["duration_sec"], (int, float))
+    assert "T" in ok_ev["fired_at"]                      # ISO 形式
+    assert ng_ev["rc"] is None and ng_ev["ok"] is False  # timeout は rc 不明で記録
+
+
+def test_shobu_scan_request_research_default_ab():
+    """ShobuScanRequest.research の既定は "ab" (A/B 自動蓄積)。明示 agentic/prefetch も valid。"""
+    import api.main as m
+    assert m.ShobuScanRequest().research == "ab"
+    assert m.ShobuScanRequest(research="agentic").research == "agentic"
+    assert m.ShobuScanRequest(research="prefetch").research == "prefetch"

@@ -117,6 +117,10 @@ async def lifespan(app: FastAPI):
         NIGHTLY_PRESCANNER.start()  # 前日夜間に翌日の勝負レースを全レース解析 (2026-07-05)
     except Exception as e:  # noqa: BLE001
         print(f"[lifespan.startup] nightly prescanner start failed: {e}")
+    try:
+        DAILY_SCANNER.start()  # 当日朝の自動キャッチアップスキャン (手動ボタン依存の解消, 2026-07-06)
+    except Exception as e:  # noqa: BLE001
+        print(f"[lifespan.startup] daily scanner start failed: {e}")
     yield
     try:
         await RESULTS_AUTO.stop()  # 結果取得ループを止めてから残 Job を倒す
@@ -128,6 +132,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await NIGHTLY_PRESCANNER.stop()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await DAILY_SCANNER.stop()
     except Exception:  # noqa: BLE001
         pass
     await shutdown_all_jobs()
@@ -303,6 +311,10 @@ class ShobuPaddockRescorer:
 
     WINDOW_SEC = 7 * 60      # 締切この秒前から再score 対象に入れる (score に時間が要るので余裕)
     MIN_LEAD_SEC = 2 * 60    # 締切この秒前を切ったら対象外 (締切間際は撃たない)
+    # 発火イベントの永続ログ (2026-07-06)。in-memory の status だけだと reload で消え、
+    # 「再score 有無 × 戦略 ROI」の効果検証 (パドック検索が指数を実際に良くしているか) が
+    # できなかった。1 発火 = 1 行 append し、後日 rid で predictions/results と join する。
+    EVENTS_FILE = SHOBU_DIR.parent / "paddock_rescore_events.jsonl"
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -388,11 +400,39 @@ class ShobuPaddockRescorer:
         # パドック再score が no-op になる実バグだった (2026-07-05 修正)。前夜の先行生成
         # (翌日スキャン) と組むときは特に、当日直前の再検索がここでしか入らない。
         env["KEIBA_SCORE_FORCE_RESCORE"] = "1"
+        t0 = time.time()
+        rc: int | None = None
+        ok = False
         try:
-            subprocess.run(cmd, timeout=240, capture_output=True, env=env)
-            return True
+            proc = subprocess.run(cmd, timeout=240, capture_output=True, env=env)
+            rc = proc.returncode
+            ok = True
         except Exception:  # noqa: BLE001
-            return False
+            ok = False
+        ShobuPaddockRescorer._log_event(race, rc=rc, duration_sec=round(time.time() - t0, 1), ok=ok)
+        return ok
+
+    @classmethod
+    def _log_event(cls, race: dict[str, Any], *, rc: int | None,
+                   duration_sec: float, ok: bool) -> None:
+        """発火 1 回を EVENTS_FILE に 1 行 append。失敗は呑む (再score を止めない)。"""
+        try:
+            import datetime
+            from zoneinfo import ZoneInfo
+            line = json.dumps({
+                "rid": race.get("internal"),          # 内部 race_id (predictions/results の join キー)
+                "netkeiba": race.get("netkeiba"),
+                "date": shobu_today_jst(),
+                "fired_at": datetime.datetime.now(ZoneInfo("Asia/Tokyo")).isoformat(timespec="seconds"),
+                "rc": rc,                              # subprocess の returncode (timeout/例外は None)
+                "duration_sec": duration_sec,
+                "ok": ok,                              # subprocess が例外なく終了したか (rc != 0 でも True)
+            }, ensure_ascii=False)
+            cls.EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with cls.EVENTS_FILE.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:  # noqa: BLE001 - ログ失敗で再score を止めない
+            pass
 
     async def _run_once(self) -> None:
         due = await asyncio.to_thread(self._due)
@@ -518,13 +558,14 @@ class ShobuNightlyPrescanner:
 
     async def _launch(self, date: str) -> None:
         SHOBU_DIR.mkdir(parents=True, exist_ok=True)
-        research = (os.environ.get("KEIBA_NIGHTLY_RESEARCH") or "agentic").strip() or "agentic"
+        # 既定 "ab" (レース毎 50/50 A/B, 2026-07-06)。明示の agentic/prefetch は尊重。
+        research = (os.environ.get("KEIBA_NIGHTLY_RESEARCH") or "ab").strip() or "ab"
         cmd = build_shobu_cmd(
             str(SHOBU_DIR / f"{date}.json"),
             date=date,
             race_type="all",
             claude_all=True,
-            research=(research if research in ("agentic", "prefetch") else "agentic"),
+            research=(research if research in ("agentic", "prefetch", "ab") else "ab"),
         )
         job = self._registry.new(label=f"shobu-nightly: {date}", cmd=cmd)
         await job.start()
@@ -561,6 +602,155 @@ class ShobuNightlyPrescanner:
 
 
 NIGHTLY_PRESCANNER = ShobuNightlyPrescanner(JOBS)
+
+
+class ShobuDailyCatchupScanner:
+    """make api 常駐: **当日朝に当日の勝負レースを自動スキャン** する (2026-07-06)。
+
+    台帳の蓄積が ~9R/日しかない主因の一つが「当日スキャンは手動ボタン依存」だったのを解消する
+    (nightly prescanner は前夜21時に**翌日**を 1 回スキャンするだけで、その時刻に make api が
+    落ちていた日・前夜に出馬表/オッズが無かった場のレースは当日誰かがボタンを押すまで台帳に
+    乗らない)。毎日 `KEIBA_DAILY_SCAN_HOUR` (JST, 既定 9・6-15 にクランプ) 以降の最初の tick で
+    **当日** の shobu スキャン (race_type=all・claude_all=True) を Job として 1 回だけ起動する:
+      - 前夜 nightly が走っていれば指数は再利用 (2026-06-24 機構) されるので当日 Claude コストは
+        ほぼゼロ。このスキャンの仕事は当日オッズの付与 + 前夜に無かった場/レースの取り込み。
+      - JRA 開催日 (週末) が自動で計測対象に入るのが主目的の一つ (JRA は 9R しか台帳に無い)。
+    起動条件: 当日 `SHOBU_DIR/<today>.json` が**存在しない**か、mtime が**当日 06:00 JST より前**
+    (= 前夜 nightly 産の翌日ファイル等 → 当日オッズで再スキャンする価値がある)。当日 06:00 以降に
+    手動/他経路でスキャン済なら skip。無効化は env `KEIBA_DAILY_SCAN=0`。リサーチ方式は env
+    `KEIBA_DAILY_RESEARCH` (既定 "ab" = レース毎 50/50 A/B)。実行済みガードは
+    `SHOBU_DIR/daily_scan_state.json` に永続 (uvicorn --reload 耐性)。
+    """
+
+    STATE_FILE = SHOBU_DIR / "daily_scan_state.json"
+    FRESH_HOUR = 6   # この時刻 (JST) 以降に書かれた当日ファイルは「当日スキャン済」とみなす
+
+    def __init__(self, registry: JobRegistry) -> None:
+        self._registry = registry
+        self._task: asyncio.Task | None = None
+        self.interval_sec = 300
+        self.enabled = (os.environ.get("KEIBA_DAILY_SCAN") or "1").strip() != "0"
+        try:
+            h = int((os.environ.get("KEIBA_DAILY_SCAN_HOUR") or "9").strip())
+        except ValueError:
+            h = 9
+        self.hour = min(15, max(6, h))
+        self.launches = 0
+        self.last_job_id: str | None = None
+        self.last_launched_date: str | None = None
+        self.last_run_at: float | None = None
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "hour_jst": self.hour,
+            "loop_running": self._task is not None and not self._task.done(),
+            "launches": self.launches,
+            "last_job_id": self.last_job_id,
+            "last_launched_date": self.last_launched_date,
+            "last_run_at": self.last_run_at,
+        }
+
+    def start(self) -> None:
+        if self.enabled and (self._task is None or self._task.done()):
+            self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _now_jst() -> "datetime.datetime":
+        import datetime
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
+
+    def _already_launched(self, date: str) -> bool:
+        try:
+            st = json.loads(self.STATE_FILE.read_text(encoding="utf-8"))
+            return st.get("date") == date
+        except (OSError, json.JSONDecodeError, ValueError):
+            return False
+
+    def _scanned_today(self, date: str, now: "datetime.datetime") -> bool:
+        """当日ファイルが当日 FRESH_HOUR 時 (JST) 以降に書かれていれば「スキャン済」。
+
+        それより古い mtime (典型: 前夜 nightly が作った翌日ファイル) は当日オッズが乗って
+        いないので再スキャン対象。
+        """
+        path = SHOBU_DIR / f"{date}.json"
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return False
+        fresh_after = now.replace(hour=self.FRESH_HOUR, minute=0, second=0, microsecond=0)
+        return mtime >= fresh_after.timestamp()
+
+    def _due(self, now: "datetime.datetime | None" = None) -> str | None:
+        """発火すべきなら当日日付 (YYYYMMDD) を返す。時刻前/スキャン済/実行済/無効は None。"""
+        if not self.enabled:
+            return None
+        n = now or self._now_jst()
+        if n.hour < self.hour:
+            return None
+        date = n.strftime("%Y%m%d")
+        if self._already_launched(date):
+            return None
+        if self._scanned_today(date, n):
+            return None
+        return date
+
+    async def _launch(self, date: str) -> None:
+        SHOBU_DIR.mkdir(parents=True, exist_ok=True)
+        research = (os.environ.get("KEIBA_DAILY_RESEARCH") or "ab").strip() or "ab"
+        cmd = build_shobu_cmd(
+            str(SHOBU_DIR / f"{date}.json"),
+            date=date,
+            race_type="all",
+            claude_all=True,
+            research=(research if research in ("agentic", "prefetch", "ab") else "ab"),
+        )
+        job = self._registry.new(label=f"shobu-daily: {date}", cmd=cmd)
+        await job.start()
+        self.launches += 1
+        self.last_job_id = job.id
+        self.last_launched_date = date
+        try:   # 実行済みガードを永続 (reload/再起動で二重スキャンしない)
+            tmp = self.STATE_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({
+                "date": date, "job_id": job.id,
+                "launched_at": self._now_jst().isoformat(timespec="seconds"),
+            }, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.STATE_FILE)
+        except OSError:
+            pass
+
+    async def _loop(self) -> None:
+        first = True
+        while True:
+            try:
+                await asyncio.sleep(45 if first else self.interval_sec)
+            except asyncio.CancelledError:
+                raise
+            first = False
+            try:
+                date = self._due()
+                if date:
+                    await self._launch(date)
+                self.last_run_at = time.time()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - ループは止めない
+                pass
+
+
+DAILY_SCANNER = ShobuDailyCatchupScanner(JOBS)
 
 
 # --- predictions ---
@@ -796,7 +986,9 @@ class ShobuScanRequest(BaseModel):
     # リサーチ方式 (ARCH-B, ユーザ指示 2026-07-05「固定クエリを自動で Tavily 検索できるか」):
     # agentic = Claude が MCP で対話的に検索 (従来) / prefetch = 固定テンプレクエリを Python が
     # Tavily API 直叩き → 採点 claude 1 回 (速い・輻輳なし。dossier 不可時は agentic に自動降格)。
-    research: Literal["agentic", "prefetch"] = "agentic"
+    # ab = レース毎に決定論ハッシュで agentic/prefetch を 50/50 割当 (research_mode A/B 計測を
+    # 自動蓄積する既定, 2026-07-06。prefetch の劣化検証が済むまでこの既定で比較データを貯める)。
+    research: Literal["agentic", "prefetch", "ab"] = "ab"
 
 
 @app.post("/api/shobu/scan")
@@ -985,6 +1177,17 @@ def api_shobu_paddock_rescore_status() -> dict[str, Any]:
     再生成 (Claude 指数をパドック評価込みで更新 → 乖離/市場一致シグナルも自動反映)。実弾投票はしない。
     """
     return SHOBU_RESCORER.status()
+
+
+@app.get("/api/shobu/daily")
+def api_shobu_daily_status() -> dict[str, Any]:
+    """**当日朝の自動キャッチアップスキャン** ループの状態 (2026-07-06)。
+
+    make api 稼働中、毎日 KEIBA_DAILY_SCAN_HOUR (既定 9時 JST) 以降に当日の shobu スキャン
+    (全レース claude_all) を 1 回だけ Job 起動する。当日 06:00 JST 以降に既にスキャン済
+    (手動含む) なら skip。KEIBA_DAILY_SCAN=0 で無効化。
+    """
+    return DAILY_SCANNER.status()
 
 
 @app.get("/api/shobu/nightly")

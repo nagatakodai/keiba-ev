@@ -415,7 +415,7 @@ def build_shobu_cmd(
     score_queries_per_horse: int | None = None,
     llm_max_concurrent: int | None = None,
     model: str = "opus",
-    research: str = "agentic",
+    research: str = "ab",
     max_races: int | None = None,
 ) -> list[str]:
     """`python -m src.shobu` (今日の勝負レース スキャン) コマンドを組む。結果は out_path に書かれる。
@@ -448,7 +448,10 @@ def build_shobu_cmd(
         cmd += ["--llm-max-concurrent", str(llm_max_concurrent)]
     if model:
         cmd += ["--model", model]
-    if research and research != "agentic":
+    # リサーチ方式は**常に明示**で渡す (2026-07-06)。shobu CLI 側の既定が "ab" (レース毎
+    # 50/50 A/B 割当) になったため、省略＝agentic ではなくなった。明示指定 (agentic/prefetch)
+    # を尊重するには省略せずフラグで固定する必要がある。
+    if research:
         cmd += ["--research", research]
     return cmd
 
