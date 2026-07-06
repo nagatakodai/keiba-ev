@@ -1119,6 +1119,10 @@ STRATEGY_DEFS = [
     ("place1", "複勝 (指数1位)", "place"),
     ("place2", "複勝 (指数2位)", "place"),
     ("place3", "複勝 (指数3位)", "place"),
+    # 単勝1位 + 複勝3位 の両方買い (ユーザ指示 2026-07-06)。ペア併用スイープで CI下限が
+    # 全組み合わせ中最高だった候補 (荒れ条件 108% CI[72,151])。複勝発売なし (少頭数) の
+    # レースは単勝1のみ。
+    ("win1_place3", "単勝1位 + 複勝3位 (両方)", "win"),
     ("quinella12", "馬連 (指数1-2位)", "quinella"),
     ("quinella13", "馬連 (指数1-3位)", "quinella"),
     # 馬連1-2 と 1-3 の両方買い (ユーザ指示 2026-07-06)。2脚/レース・的中は排反なので高々1脚。
@@ -1309,6 +1313,8 @@ def _strategy_race_legs(
         "place1": _agg([place_leg_1] if place_leg_1 else []),
         "place2": _agg([place_leg_2] if place_leg_2 else []),
         "place3": _agg([place_leg_3] if place_leg_3 else []),
+        # 両方買い = 既存2脚の合算 (複勝発売なしのレースは単勝1のみ・≤1.1 見送りは脚単位継承)
+        "win1_place3": _agg([win_leg] + ([place_leg_3] if place_leg_3 else [])),
         "quinella12": _agg([quin_leg]),
         "quinella13": _agg([quin13_leg]),
         # 両方買い = 既存2脚の合算 (見送りフィルタ ≤1.1 は脚単位でそのまま効く)
@@ -1506,6 +1512,7 @@ STRATEGY_SHORT_LABELS = {
     "place1": "複勝1",
     "place2": "複勝2",
     "place3": "複勝3",
+    "win1_place3": "単勝1+複勝3",
     "quinella12": "馬連1-2",
     "quinella13": "馬連1-3",
     "quinella12_13": "馬連1-2+1-3",
@@ -2283,6 +2290,23 @@ for _ck, _clabel, _cond in _GRID_CONDITIONS:
         "condition_label": _clabel,
         "registered_at": "2026-07-06",
         "discovery": "馬連1-2+1-3 両方買い (ユーザ指示 2026-07-06 の追加プレレジ)",
+        **_cond,
+    })
+del _ck, _clabel, _cond
+
+# --- 単勝1 + 複勝3 の両方買い (ユーザ指示 2026-07-06「荒れ×(単勝1+複勝3) も研究しよう」) ---
+# ペア併用スイープ (105ペア×3条件=315セルの読み取り専用探索) で CI下限が全組み合わせ中最高
+# だった候補 (発見時 111R: 荒れ 108% CI[72,151]・単独 CI下限 60/55 に対し +12pt)。
+# ⚠ 315セルからの事後選択なので多重比較バイアスが大きい — prospective 判定が本命。
+# 発見条件は「荒れ」だが、グリッドと同じ固定3条件で登録し同じ土俵で比較する。
+for _ck, _clabel, _cond in _GRID_CONDITIONS:
+    SIGNAL_RULES.append({
+        "key": f"grid_win1_place3_{_ck}",
+        "label": f"win1_place3 × {_ck}",
+        "strategy": "win1_place3",
+        "condition_label": _clabel,
+        "registered_at": "2026-07-06",
+        "discovery": "ペア併用スイープの CI下限最高候補 (荒れ 108% CI[72,151], 2026-07-06 追加プレレジ)",
         **_cond,
     })
 del _ck, _clabel, _cond

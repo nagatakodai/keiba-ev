@@ -184,6 +184,9 @@ def test_strategies_full_hit_payout(dirs):
     assert r["per"]["place1"]["payout"] == 110 and r["per"]["place1"]["hits"] == 1   # 1.1×100
     assert r["per"]["place2"]["payout"] == 150 and r["per"]["place2"]["hits"] == 1   # 1.5×100
     assert r["per"]["place3"]["payout"] == 200 and r["per"]["place3"]["hits"] == 1   # 2.0×100
+    # 単勝1+複勝3 両方買い (2026-07-06 追加): 両的中 → 2脚¥200 で払戻 300+200=500
+    assert r["per"]["win1_place3"] == {
+        "stake": 200, "payout": 500, "bets": 2, "hits": 2, "hit": True}
     assert r["per"]["quinella12"]["payout"] == 400 and r["per"]["quinella12"]["hits"] == 1
     # 馬連1-2+1-3 両方買い (2026-07-06 追加): 1-2 的中 + 1-3 不的中 → 2脚¥200 で払戻400。
     # 的中は排反 (馬連の勝ち組は1つ) なので hits は高々1。
@@ -211,6 +214,36 @@ def test_signal_rules_quinella12_13_prereg():
     # 新戦略が STRATEGY_DEFS の馬連グループ (quinella13 の直後) に入っている
     order = [k for k, _l, _b in store.STRATEGY_DEFS]
     assert order.index("quinella12_13") == order.index("quinella13") + 1
+
+
+def test_signal_rules_win1_place3_prereg():
+    """単勝1+複勝3 両方買いの追加プレレジ (2026-07-06 ペア併用スイープ発見・荒れが本命)。"""
+    keys = {r["key"]: r for r in store.SIGNAL_RULES}
+    for ck in ("all", "agree", "rough"):
+        r = keys[f"grid_win1_place3_{ck}"]
+        assert r["registered_at"] == "2026-07-06"
+        assert r["strategy"] == "win1_place3"
+    order = [k for k, _l, _b in store.STRATEGY_DEFS]
+    assert order.index("win1_place3") == order.index("place3") + 1
+
+
+def test_strategy_win1_place3_win_only_when_no_place(dirs):
+    """複勝発売なし (4頭 = cutoff 0) のレースは win1_place3 が単勝1のみ (1脚¥100) になる。"""
+    sh, pr, rs = dirs
+    (sh / "20260628.json").write_text(json.dumps(_shobu_doc("rec-1", 4)), encoding="utf-8")
+    (pr / "rec-1.json").write_text(json.dumps(
+        _snap(4, {k: v for k, v in _IDX8.items() if k <= 4})), encoding="utf-8")
+    (rs / "rec-1.json").write_text(json.dumps(_result_fo(
+        [1, 2, 3], 12000, {"win:1": 3.0, "quinella:1-2": 4.0, "exacta:1-2": 6.0,
+                           "trifecta:1-2-3": 120.0, "trio:1-2-3": 18.0,
+                           "quinella:1-3": 8.0,
+                           "wide:1-2": 1.5, "wide:1-3": 2.0, "wide:2-3": 2.5})),
+        encoding="utf-8")
+    d = store.compute_shobu_strategies_pnl(point_cost=100)
+    r = d["races_detail"][0]
+    assert r["per"]["place3"]["bets"] == 0            # 複勝発売なし
+    assert r["per"]["win1_place3"] == {
+        "stake": 100, "payout": 300, "bets": 1, "hits": 1, "hit": True}
 
 
 def test_strategies_quinella_needs_both_in_top2(dirs):
@@ -837,7 +870,7 @@ def test_hit_bet_labels_only_hits_and_none_when_undecidable(dirs):
     # 着順 1-5-6: 単勝1・複勝1 のみ的中 (top2=2, top3=3 は圏外)。
     res = _result_fo([1, 5, 6], 8000, {"win:1": 2.0, "place:1": 1.3})
     labels = store.hit_bet_labels(snap, res)
-    assert {h["key"] for h in labels} == {"win1", "place1"}
+    assert {h["key"] for h in labels} == {"win1", "place1", "win1_place3"}
     # 結果未確定 (着順 <3) → None
     assert store.hit_bet_labels(snap, {"finish_order": [1]}) is None
     # 指数 2 頭のみ → None
@@ -856,7 +889,7 @@ def test_attach_hit_labels_enriches_shobu_doc(dirs):
         {"race_id": "../evil"},         # path traversal → None (reject)
     ]}
     out = store.attach_hit_labels(doc)
-    assert {h["key"] for h in out["races"][0]["hit_strategies"]} == {"win1", "place1"}
+    assert {h["key"] for h in out["races"][0]["hit_strategies"]} == {"win1", "place1", "win1_place3"}
     assert out["races"][1]["hit_strategies"] is None
     assert out["races"][2]["hit_strategies"] is None
 
@@ -869,7 +902,7 @@ def test_list_predictions_carries_hit_strategies(dirs):
         [1, 5, 6], 8000, {"win:1": 2.0, "place:1": 1.3})), encoding="utf-8")
     (pr / "pend-1.json").write_text(json.dumps(_snap(8, _IDX8)), encoding="utf-8")
     items = {i["race_id"]: i for i in store.list_predictions(limit=None)}
-    assert {h["key"] for h in items["rec-1"]["hit_strategies"]} == {"win1", "place1"}
+    assert {h["key"] for h in items["rec-1"]["hit_strategies"]} == {"win1", "place1", "win1_place3"}
     assert items["pend-1"]["hit_strategies"] is None and items["pend-1"]["has_result"] is False
 
 
