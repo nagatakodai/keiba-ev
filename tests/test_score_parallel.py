@@ -440,6 +440,15 @@ def test_resolve_provisional_freezes_after_first_save(tmp_path, monkeypatch):
     for h in rd.race.horses:
         h.past_runs = []
     assert az._resolve_provisional(rid, rd) == {1: 71.0, 2: 42.0, 3: 55.0}
+    # 凍結時に不在だった馬 (部分フィールドで凍結された場合) は補完される (2026-07-06):
+    # 凍結値 {1,2} のみの snapshot に対し rd は 3頭 → 馬3 だけ fresh 計算で埋まり、
+    # 馬1/馬2 の凍結値はそのまま (再計算しない)。
+    (tmp_path / "data" / "predictions" / f"{rid}.json").write_text(
+        __import__("json").dumps({"provisional_index": {"1": 71.0, "2": 42.0}}),
+        encoding="utf-8")
+    merged = az._resolve_provisional(rid, rd)
+    assert merged[1] == 71.0 and merged[2] == 42.0
+    assert 3 in merged and isinstance(merged[3], float)
 
 
 def test_index_compare_threads_provisional_and_delta():

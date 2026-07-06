@@ -881,12 +881,20 @@ def _resolve_provisional(race_id: str, rd) -> dict[int, float]:
     一度計算したら snapshot に凍結**し以後は再利用して市場更新に対する不変性を保証する。
     """
     prev = _load_saved_provisional(race_id)
-    if prev:
+    # 凍結時に不在だった馬だけ補完する (2026-07-06): 凍結 snapshot が部分フィールドで保存された
+    # 場合 (実機: 朝スキャンの取消誤判定バグで 盛岡5R が 7頭時点の仮指数で凍結 → 修復で復帰した
+    # #2/#5 が仮指数なしになった)、凍結値はそのまま尊重しつつ **欠落馬の分のみ** 現 rd から
+    # 計算して埋める。全馬凍結済みなら従来どおり再計算しない (市場更新に対する不変性は不変)。
+    missing = [h.number for h in rd.race.horses if not h.absent and h.number not in prev]
+    if prev and not missing:
         return prev
     try:
-        return _provisional_mod.provisional_index(rd)
+        fresh = _provisional_mod.provisional_index(rd)
     except Exception:  # noqa: BLE001
-        return {}
+        return prev
+    if not prev:
+        return fresh
+    return {**fresh, **prev}   # 凍結値優先・欠落馬のみ fresh で補完
 
 
 def _build_index_compare(
