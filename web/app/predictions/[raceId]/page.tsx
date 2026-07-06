@@ -215,37 +215,41 @@ export default async function PredictionDetailPage({
             {" · オッズ更新 "}{fmtTs(d.odds_updated_at)}
           </span>
         }
-        right={
-          <div className="flex flex-col items-end gap-1">
-            <OddsRefreshButton
-              raceId={d.race_id}
-              canRefresh={d.can_refresh ?? true}
-              closeAt={d.close_at}
-            />
-            {winticketUrl && (
-              <a
-                href={winticketUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs font-bold text-(--color-highlight) hover:underline"
-              >
-                netkeiba で開く
-                <ExternalLink className="w-3 h-3 shrink-0" aria-hidden />
-              </a>
-            )}
-            <Link
-              href="/predictions"
-              className="inline-flex items-center gap-1 text-xs text-(--color-accent) hover:underline"
-            >
-              <ArrowLeft className="w-3 h-3 shrink-0" aria-hidden />
-              一覧
-            </Link>
-          </div>
-        }
       />
 
-      {/* 同日の他R・他競馬場への動線 (ユーザ指示 2026-07-06) */}
-      <RaceNav currentId={d.race_id} />
+      {/* 同日の他R・他競馬場への動線 (左) + オッズ更新/ライブログ/リンク (右)。
+          「これらの左に先ほどの一覧を置く」(ユーザ指示 2026-07-06) — 操作列は
+          ヘッダ右スロットからこの行へ移設。 */}
+      <div className="flex flex-col sm:flex-row sm:items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <RaceNav currentId={d.race_id} />
+        </div>
+        <div className="flex flex-col items-end gap-1 shrink-0 sm:ml-auto">
+          <OddsRefreshButton
+            raceId={d.race_id}
+            canRefresh={d.can_refresh ?? true}
+            closeAt={d.close_at}
+          />
+          {winticketUrl && (
+            <a
+              href={winticketUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-xs font-bold text-(--color-highlight) hover:underline"
+            >
+              netkeiba で開く
+              <ExternalLink className="w-3 h-3 shrink-0" aria-hidden />
+            </a>
+          )}
+          <Link
+            href="/predictions"
+            className="inline-flex items-center gap-1 text-xs text-(--color-accent) hover:underline"
+          >
+            <ArrowLeft className="w-3 h-3 shrink-0" aria-hidden />
+            一覧
+          </Link>
+        </div>
+      </div>
 
       {d.index_compare && d.index_compare.length > 0 && (
         <IndexCompareCard
