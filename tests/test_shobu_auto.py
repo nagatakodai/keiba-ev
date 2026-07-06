@@ -90,7 +90,11 @@ def test_results_auto_enqueue_filters(monkeypatch):
 
 
 def test_paddock_rescorer_due_window(tmp_path, monkeypatch):
-    """ShobuPaddockRescorer._due は **推奨 NAR/JRA で締切5-7分前** のレースだけ返し dedup する。"""
+    """ShobuPaddockRescorer._due は **推奨 NAR/JRA/ばんえい で締切5-7分前** のレースだけ返し dedup する。
+
+    banei は 2026-07-06 の実障害 (帯広R3 が前夜の低品質指数のまま再scoreされず発走) で
+    対象に追加 — keibago 経路 (jra 以外) に乗る。
+    """
     import json
     import time
     import api.main as m
@@ -112,17 +116,24 @@ def test_paddock_rescorer_due_window(tmp_path, monkeypatch):
         # 非推奨 → skip
         {"race_id": "norec", "netkeiba_race_id": "202644063010", "recommended": False,
          "race_type": "nar", "close_at": now + 360, "start_at": now + 480},
-        # ばんえい (nar/jra 以外) → skip
+        # ばんえい → due (2026-07-06 追加。keibago 経路で再score する)
         {"race_id": "banei", "netkeiba_race_id": "202665063001", "recommended": True,
-         "race_type": "banei", "close_at": now + 360, "start_at": now + 480},
+         "race_type": "banei", "close_at": now + 360, "start_at": now + 480,
+         "venue": "帯広", "race_no": 1},
+        # 不明 race_type → skip
+        {"race_id": "unknown", "netkeiba_race_id": "202699063001", "recommended": True,
+         "race_type": None, "close_at": now + 360, "start_at": now + 480},
     ]
     (tmp_path / "20260630.json").write_text(json.dumps({"races": races}), encoding="utf-8")
     rs = m.ShobuPaddockRescorer()
     due = rs._due()
-    assert {d["internal"] for d in due} == {"due-1"}
-    assert due[0]["netkeiba"] == "202644063006" and due[0]["rtype"] == "nar"
+    assert {d["internal"] for d in due} == {"due-1", "banei"}
+    by_id = {d["internal"]: d for d in due}
+    assert by_id["due-1"]["netkeiba"] == "202644063006" and by_id["due-1"]["rtype"] == "nar"
+    assert by_id["banei"]["rtype"] == "banei"   # cmd 側は jra 以外 → keibago 経路
     # 1 度 fire したら window 内で再び返さない (二重撃ち防止)
     rs._fired.add("due-1")
+    rs._fired.add("banei")
     assert rs._due() == []
 
 

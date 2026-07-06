@@ -372,7 +372,12 @@ class ShobuPaddockRescorer:
             internal = r.get("race_id") or rid
             close_at = r.get("close_at") or 0
             rtype = r.get("race_type")
-            if not rid or not close_at or rtype not in ("nar", "jra") or internal in self._fired:
+            # banei (帯広ばんえい) も対象 (2026-07-06 実障害の修正): 旧 ("nar", "jra") は
+            # ばんえいを再score から漏らし、帯広R3 が前夜の低品質指数 (haiku+フラット) のまま
+            # 発走した。cmd 側は「jra 以外 → keibago」なので banei は keiba.go.jp 経路に乗る
+            # (nightly の banei→keibago 修正 2026-07-05 と同経路)。
+            if (not rid or not close_at or rtype not in ("nar", "jra", "banei")
+                    or internal in self._fired):
                 continue
             lead = close_at - now
             if self.MIN_LEAD_SEC <= lead <= self.WINDOW_SEC:
