@@ -672,6 +672,18 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     else:
         win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
         deba = parse_deba_table(_get(_odds_url(loc, "DebaTable")))
+        if not deba:
+            # keiba.go.jp は同時アクセスでレート制限され空/骨組み HTML を返すことがある。
+            # 指数再利用の朝スキャンは LLM が走らず 36R 分のスクレイプが4並列・数十秒に
+            # 凝縮されて burst になり、DebaTable だけ空 → 単複馬リスト (=オッズが付いた
+            # 馬のみ) に縮退 → 朝の空プールでは出走馬の一部しか載らない幻フィールドに
+            # なる (実機 2026-07-06 盛岡R4: 9頭が3頭に)。間を置いて再試行して救う。
+            import time as _time
+            for _wait in (3.0, 6.0):
+                _time.sleep(_wait)
+                deba = parse_deba_table(_get(_odds_url(loc, "DebaTable")))
+                if deba:
+                    break
         if deba:
             # 出馬表 + HorseMarkInfo の馬柱で確率モデルをフル稼働 (公式自給)
             rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True)

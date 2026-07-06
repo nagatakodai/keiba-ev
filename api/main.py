@@ -631,7 +631,10 @@ class ShobuDailyCatchupScanner:
     """
 
     STATE_FILE = SHOBU_DIR / "daily_scan_state.json"
-    DONE_SNAPSHOT_RATIO = 0.5   # 当日ファイルの snapshot 被覆がこれ以上なら「オッズ付与済」= 完了
+    # 当日ファイルの snapshot 被覆がこれ以上なら「オッズ付与済」= 完了。0.9 な理由 (2026-07-06):
+    # 0.5 だと 3場開催 (昼12R+ナイター24R) で昼+夕方の2場が付いた時点 (24/36=67%) で打ち切り、
+    # 発売が最も遅い場 (実機: 帯広ばんえい) の 12R が永久に台帳へ載らない。
+    DONE_SNAPSHOT_RATIO = 0.9
 
     def __init__(self, registry: JobRegistry) -> None:
         self._registry = registry

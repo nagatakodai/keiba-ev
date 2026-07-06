@@ -208,9 +208,14 @@ def test_daily_scanner_due_gate(tmp_path, monkeypatch):
     later = datetime.datetime(2026, 7, 6, 10, 30, tzinfo=jst)
     assert sc._due(later) == "20260706"
 
-    # snapshot 被覆が 50% 以上になったら完了 (以後発火しない)
+    # snapshot 被覆 90% 未満 (24/36=67% = 発売が遅い場が未取得) ではまだ完了しない
     f.write_text(json.dumps(
-        {"races": [], "summary": {"evaluated": 36, "with_snapshot": 20}}), encoding="utf-8")
+        {"races": [], "summary": {"evaluated": 36, "with_snapshot": 24}}), encoding="utf-8")
+    os.utime(f, (stale, stale))
+    assert sc._due(later) == "20260706"
+    # 90% 以上で完了 (以後発火しない)
+    f.write_text(json.dumps(
+        {"races": [], "summary": {"evaluated": 36, "with_snapshot": 34}}), encoding="utf-8")
     os.utime(f, (stale, stale))
     assert sc._due(later) is None
 
