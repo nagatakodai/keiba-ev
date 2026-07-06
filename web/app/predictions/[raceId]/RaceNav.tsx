@@ -55,6 +55,10 @@ export async function RaceNav({ currentId }: { currentId: string }) {
     })
     .sort((a, b) => a.first - b.first);
 
+  // 状態色分け (ユーザ指示 2026-07-06): 投票受付中 (締切前) = 黄 / 発走・締切済 = 灰。
+  // 締切 = close_at (無ければ 発走-120秒 = parse.close_at_for_start と同じ規約)。
+  const nowSec = Math.floor(Date.now() / 1000);
+
   return (
     <nav
       aria-label="同日のレースへ移動"
@@ -70,9 +74,15 @@ export async function RaceNav({ currentId }: { currentId: string }) {
               const isCurrent = r.race_id === currentId;
               const hit = (r.hit_strategies?.length ?? 0) > 0;
               const label = r.race_number > 0 ? `${r.race_number}` : "?";
+              const startAt = r.start_at && r.start_at > 0 ? r.start_at : null;
+              const closeAt =
+                r.close_at && r.close_at > 0 ? r.close_at : startAt != null ? startAt - 120 : null;
+              const bettable = closeAt != null && nowSec < closeAt; // 投票受付中 (締切前)
+              const past = closeAt != null && nowSec >= closeAt;    // 締切・発走済
               const title = [
                 `${v} ${label}R`,
-                r.start_at && r.start_at > 0 ? `発走 ${fmtTime(r.start_at)}` : null,
+                startAt != null ? `発走 ${fmtTime(startAt)}` : null,
+                bettable ? "投票受付中" : past ? "締切済" : null,
                 r.has_result ? (hit ? "結果あり・仮想的中" : "結果あり") : null,
                 r.stage === "score" ? "暫定 (score段階)" : null,
               ]
@@ -80,19 +90,25 @@ export async function RaceNav({ currentId }: { currentId: string }) {
                 .join(" · ");
               const cls = isCurrent
                 ? "bg-(--color-accent) text-white border border-(--color-accent)"
-                : r.has_result
-                  ? "text-(--color-muted) border border-(--color-line) hover:border-(--color-accent) hover:text-(--color-foreground)"
-                  : "text-(--color-foreground) border border-(--color-line) hover:border-(--color-accent)";
+                : bettable
+                  ? "text-(--color-warn) border border-(--color-warn) bg-(--color-warn)/10 hover:bg-(--color-warn)/20"
+                  : past
+                    ? "text-(--color-muted) border border-(--color-line) opacity-55 hover:opacity-100 hover:border-(--color-accent)"
+                    : "text-(--color-foreground) border border-(--color-line) hover:border-(--color-accent)";
               return (
                 <Link
                   key={r.race_id}
                   href={`/predictions/${encodeURIComponent(r.race_id)}`}
                   title={title}
                   aria-current={isCurrent ? "page" : undefined}
-                  className={`relative inline-flex items-center justify-center min-w-7 h-7 px-1 rounded-md text-xs font-bold tabnum ${cls}`}
+                  className={`relative inline-flex flex-col items-center justify-center min-w-9 h-9 px-1 rounded-md leading-none ${cls}`}
                 >
-                  {label}
-                  {/* 仮想的中 (ダッシュボード仮想購入の的中券種あり) は緑ドット */}
+                  <span className="text-xs font-bold tabnum">{label}</span>
+                  {/* 発走時刻 (ユーザ指示 2026-07-06) */}
+                  <span className="text-[8px] tabnum opacity-80 mt-0.5">
+                    {startAt != null ? fmtTime(startAt) : "–"}
+                  </span>
+                  {/* 仮想的中 (ダッシュボード仮想購入の的中券種あり) は緑ドット = 従来どおり */}
                   {hit && (
                     <span
                       aria-hidden
