@@ -165,7 +165,12 @@ def test_nightly_prescanner_status_shape():
 
 
 def test_daily_scanner_due_gate(tmp_path, monkeypatch):
-    """当日キャッチアップ: 発火は「設定時刻以降 × 当日 06:00 以降未スキャン × 未実行 × 有効」(2026-07-06)。"""
+    """当日キャッチアップ: snapshot 被覆 50% までリトライする (2026-07-06 オッズ発売前スキャン事故の修正)。
+
+    初日実機: 09:02 発火 → NAR オッズ発売前で全レース odds_empty → snapshot 0 のまま
+    「1日1回」ガードで以後発火せず当日台帳が空に。→ 発火条件を「被覆達成 or 試行上限まで
+    間隔リトライ」に変更。
+    """
     import datetime
     import json
     import os
@@ -183,32 +188,79 @@ def test_daily_scanner_due_gate(tmp_path, monkeypatch):
     early = datetime.datetime(2026, 7, 6, 8, 0, tzinfo=jst)
 
     assert sc._due(early) is None                       # 時刻前は発火しない
-    assert sc._due(morning) == "20260706"               # ファイル無し → 当日日付で発火
+    assert sc._due(morning) == "20260706"               # ファイル無し → 初回発火
 
-    # 前夜 nightly 産のファイル (mtime が当日 06:00 より前) → 再スキャンする
+    # 前夜 nightly 産のファイル (mtime 昨夜・snapshot 0) → 再スキャンする
     f = tmp_path / "20260706.json"
-    f.write_text(json.dumps({"races": []}), encoding="utf-8")
+    f.write_text(json.dumps(
+        {"races": [], "summary": {"evaluated": 36, "with_snapshot": 0}}), encoding="utf-8")
     stale = datetime.datetime(2026, 7, 5, 21, 30, tzinfo=jst).timestamp()
     os.utime(f, (stale, stale))
     assert sc._due(morning) == "20260706"
 
-    # 当日 06:00 以降にスキャン済 (手動含む) → skip
-    fresh = datetime.datetime(2026, 7, 6, 7, 0, tzinfo=jst).timestamp()
-    os.utime(f, (fresh, fresh))
+    # 直近スキャン済 (mtime が retry 間隔内・snapshot 0 = オッズ発売前) → 間隔を空けて待つ
+    recent = datetime.datetime(2026, 7, 6, 9, 2, tzinfo=jst).timestamp()
+    os.utime(f, (recent, recent))
+    (tmp_path / "daily_scan_state.json").write_text(
+        '{"date": "20260706", "job_id": "x", "attempts": 1}', encoding="utf-8")
     assert sc._due(morning) is None
+    # 間隔経過後は attempts が残っていれば再発火 (= オッズ発売待ちリトライ)
+    later = datetime.datetime(2026, 7, 6, 10, 30, tzinfo=jst)
+    assert sc._due(later) == "20260706"
 
-    # ファイルが stale に戻っても、実行済みガード (state file) があれば二重発火しない
+    # snapshot 被覆が 50% 以上になったら完了 (以後発火しない)
+    f.write_text(json.dumps(
+        {"races": [], "summary": {"evaluated": 36, "with_snapshot": 20}}), encoding="utf-8")
+    os.utime(f, (stale, stale))
+    assert sc._due(later) is None
+
+    # 試行上限に達したら発火しない
+    f.write_text(json.dumps(
+        {"races": [], "summary": {"evaluated": 36, "with_snapshot": 0}}), encoding="utf-8")
     os.utime(f, (stale, stale))
     (tmp_path / "daily_scan_state.json").write_text(
-        '{"date": "20260706", "job_id": "x"}', encoding="utf-8")
-    assert sc._due(morning) is None
-    # 別の日の state なら発火する
+        json.dumps({"date": "20260706", "job_id": "x", "attempts": sc.max_attempts}),
+        encoding="utf-8")
+    assert sc._due(later) is None
+    # 旧形式 state (attempts 無し) は attempts=1 として読む (後方互換)
     (tmp_path / "daily_scan_state.json").write_text(
-        '{"date": "20260705", "job_id": "x"}', encoding="utf-8")
-    assert sc._due(morning) == "20260706"
+        '{"date": "20260706", "job_id": "x"}', encoding="utf-8")
+    assert sc._due(later) == "20260706"
+    # 別の日の state なら attempts=0 扱いで発火する
+    (tmp_path / "daily_scan_state.json").write_text(
+        '{"date": "20260705", "job_id": "x", "attempts": 8}', encoding="utf-8")
+    assert sc._due(later) == "20260706"
     # 無効化フラグ (KEIBA_DAILY_SCAN=0 相当)
     sc.enabled = False
-    assert sc._due(morning) is None
+    assert sc._due(later) is None
+
+
+def test_daily_scanner_waits_for_running_job(tmp_path, monkeypatch):
+    """前回の daily スキャン Job が実行中なら次を発火しない。"""
+    import datetime
+    import json
+    from zoneinfo import ZoneInfo
+    import api.main as m
+    from api.runner import Job
+
+    monkeypatch.setattr(m, "SHOBU_DIR", tmp_path)
+    monkeypatch.setattr(m.ShobuDailyCatchupScanner, "STATE_FILE",
+                        tmp_path / "daily_scan_state.json")
+    sc = m.ShobuDailyCatchupScanner(m.JOBS)
+    sc.enabled = True
+    sc.hour = 9
+    job = m.JOBS.new(label="shobu-daily: test", cmd=["true"])
+    job.status = "running"
+    try:
+        (tmp_path / "daily_scan_state.json").write_text(
+            json.dumps({"date": "20260706", "job_id": job.id, "attempts": 1}),
+            encoding="utf-8")
+        later = datetime.datetime(2026, 7, 6, 12, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+        assert sc._due(later) is None
+        job.status = "failed"   # 終了すれば (間隔さえ経てば) 再発火できる
+        assert sc._due(later) == "20260706"
+    finally:
+        job.status = "failed"
 
 
 def test_daily_scanner_status_shape():

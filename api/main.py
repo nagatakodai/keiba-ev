@@ -611,19 +611,27 @@ class ShobuDailyCatchupScanner:
     (nightly prescanner は前夜21時に**翌日**を 1 回スキャンするだけで、その時刻に make api が
     落ちていた日・前夜に出馬表/オッズが無かった場のレースは当日誰かがボタンを押すまで台帳に
     乗らない)。毎日 `KEIBA_DAILY_SCAN_HOUR` (JST, 既定 9・6-15 にクランプ) 以降の最初の tick で
-    **当日** の shobu スキャン (race_type=all・claude_all=True) を Job として 1 回だけ起動する:
+    **当日** の shobu スキャン (race_type=all・claude_all=True) を Job として起動する:
       - 前夜 nightly が走っていれば指数は再利用 (2026-06-24 機構) されるので当日 Claude コストは
         ほぼゼロ。このスキャンの仕事は当日オッズの付与 + 前夜に無かった場/レースの取り込み。
       - JRA 開催日 (週末) が自動で計測対象に入るのが主目的の一つ (JRA は 9R しか台帳に無い)。
-    起動条件: 当日 `SHOBU_DIR/<today>.json` が**存在しない**か、mtime が**当日 06:00 JST より前**
-    (= 前夜 nightly 産の翌日ファイル等 → 当日オッズで再スキャンする価値がある)。当日 06:00 以降に
-    手動/他経路でスキャン済なら skip。無効化は env `KEIBA_DAILY_SCAN=0`。リサーチ方式は env
-    `KEIBA_DAILY_RESEARCH` (既定 "ab" = レース毎 50/50 A/B)。実行済みガードは
-    `SHOBU_DIR/daily_scan_state.json` に永続 (uvicorn --reload 耐性)。
+
+    **オッズ発売までリトライする (2026-07-06 実障害の修正)**: 初版は「1日1回」だったが、
+    初日 (2026-07-06) 09:02 の実機で **NAR のオッズ発売前** にスキャンし、全 subprocess が
+    odds_empty 早期 return (snapshot 無し・数秒で終了) → `.llm.json` は前夜分があるので
+    36/36「生成成功」→ 推奨0件 → 以後どの常駐ループも対象にせず (refresh/再score は推奨のみ)、
+    **当日の台帳が空のまま確定**する事故を確認した。よって「発火は1回」でなく
+    **「当日ファイルの snapshot 被覆 (summary.with_snapshot/evaluated) が
+    `DONE_SNAPSHOT_RATIO` (0.5) に達するまで、`KEIBA_DAILY_SCAN_RETRY_MIN` (既定60分) 間隔で
+    最大 `KEIBA_DAILY_SCAN_MAX_ATTEMPTS` (既定8) 回」**発火する。間隔判定は当日ファイルの
+    mtime 基準なので手動スキャン直後は自然に待つ。前回 Job が実行中なら発火しない。
+    無効化は env `KEIBA_DAILY_SCAN=0`。リサーチ方式は env `KEIBA_DAILY_RESEARCH`
+    (既定 "ab" = レース毎 50/50 A/B)。試行回数ガードは `SHOBU_DIR/daily_scan_state.json` に
+    永続 (uvicorn --reload 耐性、旧形式 {date,job_id} は attempts=1 として読む)。
     """
 
     STATE_FILE = SHOBU_DIR / "daily_scan_state.json"
-    FRESH_HOUR = 6   # この時刻 (JST) 以降に書かれた当日ファイルは「当日スキャン済」とみなす
+    DONE_SNAPSHOT_RATIO = 0.5   # 当日ファイルの snapshot 被覆がこれ以上なら「オッズ付与済」= 完了
 
     def __init__(self, registry: JobRegistry) -> None:
         self._registry = registry
@@ -635,15 +643,30 @@ class ShobuDailyCatchupScanner:
         except ValueError:
             h = 9
         self.hour = min(15, max(6, h))
+        try:
+            rm = int((os.environ.get("KEIBA_DAILY_SCAN_RETRY_MIN") or "60").strip())
+        except ValueError:
+            rm = 60
+        self.retry_sec = min(240, max(15, rm)) * 60
+        try:
+            ma = int((os.environ.get("KEIBA_DAILY_SCAN_MAX_ATTEMPTS") or "8").strip())
+        except ValueError:
+            ma = 8
+        self.max_attempts = min(16, max(1, ma))
         self.launches = 0
         self.last_job_id: str | None = None
         self.last_launched_date: str | None = None
         self.last_run_at: float | None = None
 
     def status(self) -> dict[str, Any]:
+        st = self._state()
+        today = self._now_jst().strftime("%Y%m%d")
         return {
             "enabled": self.enabled,
             "hour_jst": self.hour,
+            "retry_min": self.retry_sec // 60,
+            "max_attempts": self.max_attempts,
+            "attempts_today": st.get("attempts", 1) if st.get("date") == today else 0,
             "loop_running": self._task is not None and not self._task.done(),
             "launches": self.launches,
             "last_job_id": self.last_job_id,
@@ -671,39 +694,49 @@ class ShobuDailyCatchupScanner:
         from zoneinfo import ZoneInfo
         return datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
 
-    def _already_launched(self, date: str) -> bool:
+    def _state(self) -> dict[str, Any]:
         try:
             st = json.loads(self.STATE_FILE.read_text(encoding="utf-8"))
-            return st.get("date") == date
+            return st if isinstance(st, dict) else {}
         except (OSError, json.JSONDecodeError, ValueError):
-            return False
-
-    def _scanned_today(self, date: str, now: "datetime.datetime") -> bool:
-        """当日ファイルが当日 FRESH_HOUR 時 (JST) 以降に書かれていれば「スキャン済」。
-
-        それより古い mtime (典型: 前夜 nightly が作った翌日ファイル) は当日オッズが乗って
-        いないので再スキャン対象。
-        """
-        path = SHOBU_DIR / f"{date}.json"
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            return False
-        fresh_after = now.replace(hour=self.FRESH_HOUR, minute=0, second=0, microsecond=0)
-        return mtime >= fresh_after.timestamp()
+            return {}
 
     def _due(self, now: "datetime.datetime | None" = None) -> str | None:
-        """発火すべきなら当日日付 (YYYYMMDD) を返す。時刻前/スキャン済/実行済/無効は None。"""
+        """発火すべきなら当日日付 (YYYYMMDD) を返す。
+
+        None になる条件: 無効 / 設定時刻前 / 試行上限到達 / 前回 Job 実行中 /
+        当日ファイルの snapshot 被覆が DONE_SNAPSHOT_RATIO 以上 (=オッズ付与済で完了) /
+        直近スキャン (手動含む・mtime 基準) から retry 間隔が経っていない。
+        """
         if not self.enabled:
             return None
         n = now or self._now_jst()
         if n.hour < self.hour:
             return None
         date = n.strftime("%Y%m%d")
-        if self._already_launched(date):
+        st = self._state()
+        attempts = int(st.get("attempts") or 1) if st.get("date") == date else 0
+        if attempts >= self.max_attempts:
             return None
-        if self._scanned_today(date, n):
-            return None
+        if st.get("date") == date and st.get("job_id"):
+            job = self._registry.get(str(st["job_id"]))
+            if job is not None and job.status in ("pending", "running"):
+                return None   # 前回スキャンがまだ走っている
+        path = SHOBU_DIR / f"{date}.json"
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return date   # 当日ファイル無し → 初回発火
+        try:
+            summ = (json.loads(path.read_text(encoding="utf-8")) or {}).get("summary") or {}
+            evaluated = int(summ.get("evaluated") or 0)
+            with_snap = int(summ.get("with_snapshot") or 0)
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            evaluated, with_snap = 0, 0
+        if evaluated > 0 and with_snap / evaluated >= self.DONE_SNAPSHOT_RATIO:
+            return None   # オッズ付与済 (snapshot 被覆十分) = 当日の仕事完了
+        if (n.timestamp() - mtime) < self.retry_sec:
+            return None   # 直近にスキャン済 (オッズ発売待ち) → 間隔を空ける
         return date
 
     async def _launch(self, date: str) -> None:
@@ -716,15 +749,17 @@ class ShobuDailyCatchupScanner:
             claude_all=True,
             research=(research if research in ("agentic", "prefetch", "ab") else "ab"),
         )
-        job = self._registry.new(label=f"shobu-daily: {date}", cmd=cmd)
+        st = self._state()
+        attempts = int(st.get("attempts") or 1) if st.get("date") == date else 0
+        job = self._registry.new(label=f"shobu-daily: {date} (#{attempts + 1})", cmd=cmd)
         await job.start()
         self.launches += 1
         self.last_job_id = job.id
         self.last_launched_date = date
-        try:   # 実行済みガードを永続 (reload/再起動で二重スキャンしない)
+        try:   # 試行回数ガードを永続 (reload/再起動で二重スキャンしない)
             tmp = self.STATE_FILE.with_suffix(".json.tmp")
             tmp.write_text(json.dumps({
-                "date": date, "job_id": job.id,
+                "date": date, "job_id": job.id, "attempts": attempts + 1,
                 "launched_at": self._now_jst().isoformat(timespec="seconds"),
             }, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self.STATE_FILE)
