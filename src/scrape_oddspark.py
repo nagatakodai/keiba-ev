@@ -746,7 +746,8 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
     # (promote_absent_by_fresh_odds の docstring 参照)。
     from .parse import promote_absent_by_fresh_odds
     _fresh_win = {h.number for h in bets.tanfuku if h.win_odds > 0 or h.place_min > 0}
-    promote_absent_by_fresh_odds(rd.race.horses, _fresh_win)
+    promote_absent_by_fresh_odds(rd.race.horses, _fresh_win,
+                                 start_at=rd.race.start_at or 0)
 
     from . import analyze as az_mod
     from .aptitude import compute_aptitudes

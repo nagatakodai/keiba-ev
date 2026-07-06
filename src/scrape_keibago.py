@@ -720,7 +720,8 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
     # 発動しない (promote_absent_by_fresh_odds の docstring 参照)。
     from .parse import promote_absent_by_fresh_odds
     _fresh_win = {b.key[0] for b in other.get("win", []) if b.odds > 0}
-    promote_absent_by_fresh_odds(rd.race.horses, _fresh_win)
+    promote_absent_by_fresh_odds(rd.race.horses, _fresh_win,
+                                 start_at=rd.race.start_at or 0)
 
     from . import analyze as az_mod
     from .aptitude import compute_aptitudes

@@ -454,3 +454,20 @@ def test_promote_absent_coverage_gate():
     horses[9].absent = True
     assert promote_absent_by_fresh_odds(horses, set(range(1, 9))) == 1  # 9番だけ昇格
     assert horses[8].absent
+
+    # 時間ゲート (2026-07-06 実機: 盛岡R2 朝は被覆 9/11=82% が閾値を超えて無投票2頭を
+    # 誤昇格 — DebaTable 取消マーク無し): 発走45分前より手前では高被覆でも発動しない
+    now = 1_783_300_000
+    horses = field(11)
+    far = now + 3600 * 3   # 発走3時間前
+    assert promote_absent_by_fresh_odds(horses, set(range(1, 10)),
+                                        start_at=far, now=now) == 0
+    assert all(not h.absent for h in horses)
+    near = now + 10 * 60   # 発走10分前 (締切帯) → 従来どおり発動
+    assert promote_absent_by_fresh_odds(horses, set(range(1, 10)),
+                                        start_at=near, now=now) == 2
+    assert [h.number for h in horses if h.absent] == [10, 11]
+    # start_at 不明 (0) は被覆ゲートのみ (従来挙動)
+    horses = field(11)
+    assert promote_absent_by_fresh_odds(horses, set(range(1, 11)),
+                                        start_at=0, now=now) == 1

@@ -40,19 +40,31 @@ def close_at_for_start(start_at: int) -> int:
     return max(0, start_at - CLOSE_LEAD_SEC)
 
 
-def promote_absent_by_fresh_odds(horses, fresh_nums, *, coverage: float = 0.8) -> int:
+def promote_absent_by_fresh_odds(horses, fresh_nums, *, coverage: float = 0.8,
+                                 start_at: int = 0, now: float | None = None,
+                                 lead_sec: int = 45 * 60) -> int:
     """取消/除外の二段ガード: fresh 単勝オッズに載っていない馬を absent に昇格する。
 
-    keibago/JRA/oddspark の 3 経路共通 (2026-07-06 に共通化)。**被覆ゲート付き**:
-    fresh_nums (オッズが数値で付いた馬番集合) が非 absent 馬の `coverage` (既定 0.8)
-    以上を覆うときだけ発動する。NAR の朝は無投票馬がオッズ表に載らないため、ゲート無しだと
-    「オッズに無い = 取消」の即断で出走馬の大半を誤って除外する (実機 2026-07-06 盛岡R2:
-    朝スキャンで 11頭中10頭を absent 化 → 1頭だけの幻レースを snapshot 保存)。実際の
-    取消・除外は 1-2 頭 = 被覆 8割以上に収まるので締切前 (プールが立った後) は従来どおり
+    keibago/JRA/oddspark の 3 経路共通 (2026-07-06 に共通化)。二重ゲート付き:
+
+    ①**時間ゲート**: start_at が既知で発走まで `lead_sec` (既定45分) より遠いときは発動しない。
+      NAR の朝は無投票馬がオッズ表に載らず、「オッズに無い = 取消」が信頼できるのは
+      プールが立つ締切前だけ (実機 2026-07-06 盛岡R2: 朝は被覆 9/11=82% が閾値を超えて
+      無投票2頭を誤昇格 — DebaTable に取消マーク無し)。公式の取消は DebaTable/出馬表の
+      absent フラグ (一段目) が時間帯によらず処理する。
+    ②**被覆ゲート**: fresh_nums (オッズが数値で付いた馬番集合) が非 absent 馬の `coverage`
+      (既定 0.8) 以上を覆うときだけ発動 (実際の取消・除外は 1-2 頭 = 高被覆に収まる。
+      ゲート無しの旧実装は朝スキャンで 11頭中10頭を absent 化 → 1頭だけの幻レースを保存)。
+
+    bet 帯 (締切1-2.5分前)・パドック再score (2-7分前) では両ゲートを自然に通過し従来どおり
     発動する。戻り値は昇格させた頭数。
     """
     if not fresh_nums:
         return 0
+    if start_at and start_at > 0:
+        import time as _time
+        if (now if now is not None else _time.time()) < start_at - lead_sec:
+            return 0
     active = [h for h in horses if not h.absent]
     if not active or len(fresh_nums) < coverage * len(active):
         return 0
