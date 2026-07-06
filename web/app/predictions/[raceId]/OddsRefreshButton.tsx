@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, ChevronDown, Loader2, RefreshCw } from "lucide-react";
 import { Badge, Button } from "@/components/ui";
 import { LogStream } from "@/components/LogStream";
 import { api, type JobInfo } from "@/lib/api";
@@ -88,13 +88,20 @@ export function OddsRefreshButton({
         </span>
       )}
       {job && (
-        <div className="w-72 max-w-[80vw] mt-1">
-          <div className="flex items-center gap-1.5 mb-1 text-xs text-(--color-muted) justify-end">
+        // ライブログは 1 行 (status + job id) に折りたためる (ユーザ指示 2026-07-06)。
+        // 既定は展開。閉じても DOM は残るので SSE ストリームは継続する。
+        <details open className="w-72 max-w-[80vw] mt-1 group">
+          <summary className="flex items-center gap-1.5 mb-1 text-xs text-(--color-muted) justify-end cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+            <ChevronDown
+              className="w-3 h-3 shrink-0 transition-transform group-open:rotate-180"
+              aria-hidden
+            />
+            <span className="group-open:hidden">ログ</span>
             <Badge tone={statusTone(job.status)}>{job.status}</Badge>
             <span className="mono">{job.id.slice(0, 8)}</span>
-          </div>
+          </summary>
           <LogStream key={job.id} url={`/api/jobs/${job.id}/stream`} height="h-40" />
-        </div>
+        </details>
       )}
     </div>
   );
