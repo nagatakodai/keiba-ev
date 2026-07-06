@@ -55,9 +55,27 @@ export async function RaceNav({ currentId }: { currentId: string }) {
     })
     .sort((a, b) => a.first - b.first);
 
-  // 状態色分け (ユーザ指示 2026-07-06): 投票受付中 (締切前) = 黄 / 発走・締切済 = 灰。
+  // 状態色分け (ユーザ指示 2026-07-06): 各場の**次のR (直近の締切前レース) のみ** 黄 /
+  // 発走・締切済 = 灰 / それ以外の未発走 (次の次以降) は普通の色 (同日追記指示)。
   // 締切 = close_at (無ければ 発走-120秒 = parse.close_at_for_start と同じ規約)。
   const nowSec = Math.floor(Date.now() / 1000);
+  const closeOf = (r: PredictionSummary): number | null =>
+    r.close_at && r.close_at > 0
+      ? r.close_at
+      : r.start_at && r.start_at > 0
+        ? r.start_at - 120
+        : null;
+  // 場ごとの「次のR」= 締切が未来のうち最も早いレース
+  const nextBettable = new Map<string, string>();
+  for (const { v, arr } of venues) {
+    const next = arr
+      .filter((r) => {
+        const c = closeOf(r);
+        return c != null && nowSec < c;
+      })
+      .sort((a, b) => (closeOf(a) ?? 0) - (closeOf(b) ?? 0))[0];
+    if (next) nextBettable.set(v, next.race_id);
+  }
 
   return (
     <nav
@@ -75,14 +93,14 @@ export async function RaceNav({ currentId }: { currentId: string }) {
               const hit = (r.hit_strategies?.length ?? 0) > 0;
               const label = r.race_number > 0 ? `${r.race_number}` : "?";
               const startAt = r.start_at && r.start_at > 0 ? r.start_at : null;
-              const closeAt =
-                r.close_at && r.close_at > 0 ? r.close_at : startAt != null ? startAt - 120 : null;
-              const bettable = closeAt != null && nowSec < closeAt; // 投票受付中 (締切前)
+              const closeAt = closeOf(r);
+              // 黄 = 各場の「次のR」だけ (次の次以降の未発走は普通の色)
+              const bettable = nextBettable.get(v) === r.race_id;
               const past = closeAt != null && nowSec >= closeAt;    // 締切・発走済
               const title = [
                 `${v} ${label}R`,
                 startAt != null ? `発走 ${fmtTime(startAt)}` : null,
-                bettable ? "投票受付中" : past ? "締切済" : null,
+                bettable ? "次のR・投票受付中" : past ? "締切済" : null,
                 r.has_result ? (hit ? "結果あり・仮想的中" : "結果あり") : null,
                 r.stage === "score" ? "暫定 (score段階)" : null,
               ]
