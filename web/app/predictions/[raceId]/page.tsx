@@ -18,6 +18,7 @@ import {
   Trophy,
 } from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
+import { RaceNav } from "./RaceNav";
 import { indexVersionTitle } from "@/lib/version";
 import {
   betStyleGuide,
@@ -242,6 +243,9 @@ export default async function PredictionDetailPage({
           </div>
         }
       />
+
+      {/* 同日の他R・他競馬場への動線 (ユーザ指示 2026-07-06) */}
+      <RaceNav currentId={d.race_id} />
 
       {d.index_compare && d.index_compare.length > 0 && (
         <IndexCompareCard
