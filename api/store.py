@@ -1889,8 +1889,15 @@ def _race_features(idx: dict[int, float], mkt: dict[int, float],
         本命-大穴バイアス (FL bias) の per-horse シグナル: 高い = 市場が「勝ち切らないが
         絡む」(3着型) と見る馬。複勝はレンジ下限なので比は系統的にやや高め (レース間で一貫)。
         bet_tables が無い/欠落は None (2026-07-06 追加)
+      - idx1/idx2/idx3: Claude 指数 1/2/3位の **生値** (ユーザ指示 2026-07-06「指数60と指数70で
+        指数1位なのは差があるはず」)。指数は 0-100 のレース内相対スケールだが、v3 (仮指数
+        アンカー±調整) では出走表由来の仮指数が基準になるためレース間でも水準に意味を持ち得る
+        — その仮説を条件として計測可能にする (該当順位の馬がいなければ None)
     """
     c_sorted = sorted(idx.items(), key=lambda kv: (-kv[1], kv[0]))
+    idx1 = c_sorted[0][1] if len(c_sorted) >= 1 else None
+    idx2 = c_sorted[1][1] if len(c_sorted) >= 2 else None
+    idx3 = c_sorted[2][1] if len(c_sorted) >= 3 else None
     gap12 = c_sorted[0][1] - c_sorted[1][1] if len(c_sorted) >= 2 else None
     gap23 = c_sorted[1][1] - c_sorted[2][1] if len(c_sorted) >= 3 else None
     gap34 = c_sorted[2][1] - c_sorted[3][1] if len(c_sorted) >= 4 else None
@@ -1920,6 +1927,7 @@ def _race_features(idx: dict[int, float], mkt: dict[int, float],
                 pw[f"pw_top{i + 1}"] = w_o / p_o
     return {
         "gap12": gap12, "gap23": gap23, "gap34": gap34,
+        "idx1": idx1, "idx2": idx2, "idx3": idx3,
         "top3_rank_gap": top3_rank_gap, "top3_idx_diff": top3_idx_diff,
         "fav_odds": fav_odds, "top3_conc": top3_conc, **pw,
     }
@@ -2250,6 +2258,24 @@ SIGNAL_RULES: list[dict[str, Any]] = [
      "features": {"pw_top2": {"min": 4.0}},
      "discovery": "発見時108R: ROI 102% (n=47, drop-best 90%, 前半126%/後半79%。"
                   "FLバイアス系の対側・市場人気基準64%に対する付加価値が主眼)"},
+    # --- Claude 指数の絶対値 (idx1/2/3) 条件 (ユーザ指示 2026-07-06「Claude指数1,2,3の値が
+    #     どれくらいだったか の条件も計測したい (指数60と70で指数1位なのは差があるはず)」
+    #     → _race_features に idx1/2/3 追加 + sweep から 2 本プレレジ) ---
+    {"key": "win2_top1confident", "label": "単勝2 × 指数1位が高確信",
+     "strategy": "win2",
+     "condition_label": "Claude指数1位の生値 ≥ 80 (確信度の高いレース)",
+     "registered_at": "2026-07-06",
+     "features": {"idx1": {"min": 80}},
+     "discovery": "発見時111R: ROI 114% (n=47, drop-best 100.2%=単発抜きでも100超・"
+                  "前半107%/後半119%と安定・市場人気基準67%。idx 系で n と安定性が最良)"},
+    {"key": "trio1234box_top1confident", "label": "3連複BOX × 指数1位が超高確信",
+     "strategy": "trio1234box",
+     "condition_label": "Claude指数1位の生値 ≥ 85 (突出した確信度)",
+     "registered_at": "2026-07-06",
+     "features": {"idx1": {"min": 85}},
+     "discovery": "発見時111R: ROI 147% (n=25, drop-best 103%, 前半175%/後半122%, "
+                  "市場人気基準37%。⚠ trio1234box は無条件では失効歴 (94Rで有意性消滅) が"
+                  "ある戦略 — idx1≥85 の条件付けで蘇るかの追試枠)"},
 ]
 
 # --- 券種比較グリッド (ユーザ指示 2026-07-05「単勝1,単勝2,単勝3,複勝1,複勝2,複勝3,馬連1-2,

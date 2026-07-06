@@ -172,6 +172,10 @@ export function raceSignalFeatures(
   const gap12 = withClaude.length >= 2 ? withClaude[0].claude_index - withClaude[1].claude_index : null;
   const gap23 = withClaude.length >= 3 ? withClaude[1].claude_index - withClaude[2].claude_index : null;
   const gap34 = withClaude.length >= 4 ? withClaude[2].claude_index - withClaude[3].claude_index : null;
+  // Claude 指数 1/2/3位の生値 (backend _race_features の idx1/2/3 ミラー, 2026-07-06)
+  const idx1 = withClaude.length >= 1 ? withClaude[0].claude_index : null;
+  const idx2 = withClaude.length >= 2 ? withClaude[1].claude_index : null;
+  const idx3 = withClaude.length >= 3 ? withClaude[2].claude_index : null;
   const marketRank = new Map(withMarket.map((i, k) => [i.number, k + 1]));
   const top3 = withClaude.slice(0, 3);
   let top3RankGap: number | null = null;
@@ -210,6 +214,9 @@ export function raceSignalFeatures(
     gap12,
     gap23,
     gap34,
+    idx1,
+    idx2,
+    idx3,
     top3_rank_gap: top3RankGap,
     top3_idx_diff: top3IdxDiff,
     fav_odds: favOdds,

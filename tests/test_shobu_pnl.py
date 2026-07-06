@@ -216,6 +216,24 @@ def test_signal_rules_quinella12_13_prereg():
     assert order.index("quinella12_13") == order.index("quinella13") + 1
 
 
+def test_signal_rules_idx_confidence_prereg():
+    """Claude 指数の絶対値 (idx1) 条件のプレレジ (2026-07-06): win2×idx1≥80 / trio1234box×idx1≥85。"""
+    keys = {r["key"]: r for r in store.SIGNAL_RULES}
+    r1 = keys["win2_top1confident"]
+    assert r1["strategy"] == "win2" and r1["registered_at"] == "2026-07-06"
+    assert r1["features"] == {"idx1": {"min": 80}}
+    r2 = keys["trio1234box_top1confident"]
+    assert r2["strategy"] == "trio1234box" and r2["features"] == {"idx1": {"min": 85}}
+    # 発火判定: idx1=86 は両方 / idx1=82 は win2 側のみ / idx1 None は両方不発火
+    rec = {"flags": {"consensus": True, "style": False, "venue": False}, "n_runners": 10,
+           "features": {"idx1": 86.0}}
+    assert store._rule_matches(r1, rec) and store._rule_matches(r2, rec)
+    rec["features"]["idx1"] = 82.0
+    assert store._rule_matches(r1, rec) and not store._rule_matches(r2, rec)
+    rec["features"]["idx1"] = None
+    assert not store._rule_matches(r1, rec) and not store._rule_matches(r2, rec)
+
+
 def test_signal_rules_win1_place3_prereg():
     """単勝1+複勝3 両方買いの追加プレレジ (2026-07-06 ペア併用スイープ発見・荒れが本命)。"""
     keys = {r["key"]: r for r in store.SIGNAL_RULES}
@@ -1010,12 +1028,17 @@ def test_race_features_top3_and_roughness():
     assert f["fav_odds"] == pytest.approx((100 / 90.0) ** store._MARKET_INDEX_T)
     probs = sorted(((m / 100.0) ** store._MARKET_INDEX_T for m in mkt.values()), reverse=True)
     assert f["top3_conc"] == pytest.approx(sum(probs[:3]) / sum(probs))
+    # Claude 指数 1/2/3位の生値 (ユーザ指示 2026-07-06「指数60と70で指数1位なのは差があるはず」)
+    assert (f["idx1"], f["idx2"], f["idx3"]) == (90.0, 80.0, 78.0)
 
 
 def test_race_features_insufficient_data():
     """計算不能な特徴量は None (指数4頭未満の gap34・市場3頭未満の top3_conc 等)。"""
     f = store._race_features({1: 90.0, 2: 80.0, 3: 70.0}, {1: 80.0, 2: 60.0})
     assert f["gap34"] is None
+    assert (f["idx1"], f["idx2"], f["idx3"]) == (90.0, 80.0, 70.0)
+    f2 = store._race_features({1: 90.0, 2: 80.0}, {1: 80.0, 2: 60.0})
+    assert f2["idx3"] is None              # 指数2頭のみ → idx3 は None (要求ルールは不発火)
     assert f["top3_conc"] is None
     assert f["top3_rank_gap"] is None      # Claude 3位 (馬3) に市場指数が無い
     assert f["top3_idx_diff"] is None
