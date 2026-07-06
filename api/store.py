@@ -1121,6 +1121,8 @@ STRATEGY_DEFS = [
     ("place3", "複勝 (指数3位)", "place"),
     ("quinella12", "馬連 (指数1-2位)", "quinella"),
     ("quinella13", "馬連 (指数1-3位)", "quinella"),
+    # 馬連1-2 と 1-3 の両方買い (ユーザ指示 2026-07-06)。2脚/レース・的中は排反なので高々1脚。
+    ("quinella12_13", "馬連 (1-2位 + 1-3位 両方)", "quinella"),
     ("wide12", "ワイド (指数1-2位)", "wide"),
     ("wide13", "ワイド (指数1-3位)", "wide"),
     ("exacta12", "馬単 (指数1→2位)", "exacta"),
@@ -1309,6 +1311,8 @@ def _strategy_race_legs(
         "place3": _agg([place_leg_3] if place_leg_3 else []),
         "quinella12": _agg([quin_leg]),
         "quinella13": _agg([quin13_leg]),
+        # 両方買い = 既存2脚の合算 (見送りフィルタ ≤1.1 は脚単位でそのまま効く)
+        "quinella12_13": _agg([quin_leg, quin13_leg]),
         "wide12": _agg([wide12_leg]),
         "wide13": _agg([wide13_leg]),
         "exacta12": _agg([exacta_leg]),
@@ -1504,6 +1508,7 @@ STRATEGY_SHORT_LABELS = {
     "place3": "複勝3",
     "quinella12": "馬連1-2",
     "quinella13": "馬連1-3",
+    "quinella12_13": "馬連1-2+1-3",
     "wide12": "ワイド1-2",
     "wide13": "ワイド1-3",
     "exacta12": "馬単1→2",
@@ -2265,6 +2270,22 @@ for _sk in _GRID_STRATEGIES:
             **_cond,
         })
 del _sk, _ck, _clabel, _cond
+
+# --- 馬連1-2 + 1-3 の両方買い (ユーザ指示 2026-07-06「馬連1-2,1-3を両方買った場合の回収率も
+# 研究中シグナルに追加」) --- 2脚/レース (的中は排反なので高々1脚・¥200/レース)。
+# グリッドと同じ固定3条件で追加プレレジ。registered_at は追加日 = 既存グリッド (07-05) の
+# 凍結は不変・prospective 判定もこの日以降の発走のみ。
+for _ck, _clabel, _cond in _GRID_CONDITIONS:
+    SIGNAL_RULES.append({
+        "key": f"grid_quinella12_13_{_ck}",
+        "label": f"quinella12_13 × {_ck}",
+        "strategy": "quinella12_13",
+        "condition_label": _clabel,
+        "registered_at": "2026-07-06",
+        "discovery": "馬連1-2+1-3 両方買い (ユーザ指示 2026-07-06 の追加プレレジ)",
+        **_cond,
+    })
+del _ck, _clabel, _cond
 
 
 def _rule_matches(rule: dict[str, Any], rec: dict[str, Any]) -> bool:

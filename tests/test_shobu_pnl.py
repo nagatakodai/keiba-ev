@@ -185,12 +185,32 @@ def test_strategies_full_hit_payout(dirs):
     assert r["per"]["place2"]["payout"] == 150 and r["per"]["place2"]["hits"] == 1   # 1.5×100
     assert r["per"]["place3"]["payout"] == 200 and r["per"]["place3"]["hits"] == 1   # 2.0×100
     assert r["per"]["quinella12"]["payout"] == 400 and r["per"]["quinella12"]["hits"] == 1
+    # 馬連1-2+1-3 両方買い (2026-07-06 追加): 1-2 的中 + 1-3 不的中 → 2脚¥200 で払戻400。
+    # 的中は排反 (馬連の勝ち組は1つ) なので hits は高々1。
+    assert r["per"]["quinella12_13"] == {
+        "stake": 200, "payout": 400, "bets": 2, "hits": 1, "hit": True}
     assert r["per"]["exacta12"]["payout"] == 600 and r["per"]["exacta12"]["hits"] == 1   # 1→2 着順一致
     assert r["per"]["wide13"]["payout"] == 200 and r["per"]["wide13"]["hits"] == 1   # wide:1-3=2.0
     # 戦略集計 (1レース)
     assert _strat(d, "win1")["roi"] == 3.0 and _strat(d, "win1")["net"] == 200
     assert _strat(d, "place2")["payout"] == 150 and _strat(d, "place3")["payout"] == 200
     assert _strat(d, "quinella12")["payout"] == 400 and _strat(d, "quinella12")["bets"] == 1
+    q = _strat(d, "quinella12_13")
+    assert q["stake"] == 200 and q["payout"] == 400 and q["races_hit"] == 1
+
+
+def test_signal_rules_quinella12_13_prereg():
+    """馬連1-2+1-3 両方買いの追加プレレジ (2026-07-06): 新 key 3本 + 既存グリッドの凍結不変。"""
+    keys = {r["key"]: r for r in store.SIGNAL_RULES}
+    for ck in ("all", "agree", "rough"):
+        r = keys[f"grid_quinella12_13_{ck}"]
+        assert r["registered_at"] == "2026-07-06"
+        assert r["strategy"] == "quinella12_13"
+    # 既存グリッドの registered_at は不変 (定義凍結)
+    assert keys["grid_quinella12_all"]["registered_at"] == "2026-07-05"
+    # 新戦略が STRATEGY_DEFS の馬連グループ (quinella13 の直後) に入っている
+    order = [k for k, _l, _b in store.STRATEGY_DEFS]
+    assert order.index("quinella12_13") == order.index("quinella13") + 1
 
 
 def test_strategies_quinella_needs_both_in_top2(dirs):
