@@ -703,16 +703,12 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         if _h.number in bw_map and bw_map[_h.number][0] > 0:
             _h.body_weight, _h.body_weight_diff = bw_map[_h.number]
 
-    # 取消/除外の二段ガード (2026-06-10 bughunt): fresh 単勝オッズ (発売中) に無い馬は
-    # 取消・除外とみなして absent に昇格する。DebaTable の absent 検出 (一段目) の保険 +
-    # cached netkeiba 出馬表経路 (stale な取消前の馬が残る) も塞ぐ。score の Claude 対象・
-    # 確率 (estimate_probs は absent でフィルタ)・束から外れる。
+    # 取消/除外の二段ガード (2026-06-10 bughunt → 2026-07-06 被覆ゲート付きで共通化):
+    # fresh 単勝に無い馬を absent 昇格。朝の空プール (無投票馬がオッズ表に載らない) では
+    # 発動しない (promote_absent_by_fresh_odds の docstring 参照)。
+    from .parse import promote_absent_by_fresh_odds
     _fresh_win = {b.key[0] for b in other.get("win", []) if b.odds > 0}
-    if _fresh_win:
-        for _h in rd.race.horses:
-            if _h.number not in _fresh_win and not _h.absent:
-                _h.absent = True
-                _h.win_odds = 0.0
+    promote_absent_by_fresh_odds(rd.race.horses, _fresh_win)
 
     from . import analyze as az_mod
     from .aptitude import compute_aptitudes

@@ -412,3 +412,45 @@ def test_parse_refund_payouts_all_types():
     # 枠連複 (2-7) / 枠連単 (7-2) は quinella/exacta に化けない
     assert "quinella:2-7" not in p and "exacta:7-2" not in p
     assert len(p) == 10
+
+
+def test_promote_absent_coverage_gate():
+    """取消二段ガードの被覆ゲート (2026-07-06): 朝の空プールで出走馬の大半を誤除外しない。
+
+    実機事故: 盛岡R2 朝スキャンで単勝オッズが1頭分しか出ておらず、旧実装は残り10頭を
+    「取消」と誤判定 → 1頭だけの幻レースを snapshot 保存した。
+    """
+    from types import SimpleNamespace
+
+    from src.parse import promote_absent_by_fresh_odds
+
+    def field(n):
+        return [SimpleNamespace(number=i, absent=False, win_odds=5.0)
+                for i in range(1, n + 1)]
+
+    # 朝の空プール (11頭中1頭のみオッズ) → 発動しない (全馬残る)
+    horses = field(11)
+    assert promote_absent_by_fresh_odds(horses, {1}) == 0
+    assert all(not h.absent for h in horses)
+
+    # 部分的な流動性 (8頭中5頭 = 62.5% < 80%) → まだ発動しない
+    horses = field(8)
+    assert promote_absent_by_fresh_odds(horses, {1, 2, 3, 4, 5}) == 0
+    assert all(not h.absent for h in horses)
+
+    # 実際の取消 (11頭中10頭にオッズ = 90% ≥ 80%) → 欠けた1頭だけ absent 昇格
+    horses = field(11)
+    assert promote_absent_by_fresh_odds(horses, set(range(1, 11))) == 1
+    assert [h.number for h in horses if h.absent] == [11]
+    assert horses[-1].win_odds == 0.0
+
+    # 全馬カバー → 何もしない / fresh 空 (発売前) → 何もしない
+    horses = field(6)
+    assert promote_absent_by_fresh_odds(horses, set(range(1, 7))) == 0
+    assert promote_absent_by_fresh_odds(horses, set()) == 0
+
+    # 既に absent の馬は分母に入れない (10頭中1頭取消済 + 9頭オッズ = 発動)
+    horses = field(10)
+    horses[9].absent = True
+    assert promote_absent_by_fresh_odds(horses, set(range(1, 9))) == 1  # 9番だけ昇格
+    assert horses[8].absent

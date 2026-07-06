@@ -38,6 +38,31 @@ def close_at_for_start(start_at: int) -> int:
     if start_at <= 0:
         return 0
     return max(0, start_at - CLOSE_LEAD_SEC)
+
+
+def promote_absent_by_fresh_odds(horses, fresh_nums, *, coverage: float = 0.8) -> int:
+    """取消/除外の二段ガード: fresh 単勝オッズに載っていない馬を absent に昇格する。
+
+    keibago/JRA/oddspark の 3 経路共通 (2026-07-06 に共通化)。**被覆ゲート付き**:
+    fresh_nums (オッズが数値で付いた馬番集合) が非 absent 馬の `coverage` (既定 0.8)
+    以上を覆うときだけ発動する。NAR の朝は無投票馬がオッズ表に載らないため、ゲート無しだと
+    「オッズに無い = 取消」の即断で出走馬の大半を誤って除外する (実機 2026-07-06 盛岡R2:
+    朝スキャンで 11頭中10頭を absent 化 → 1頭だけの幻レースを snapshot 保存)。実際の
+    取消・除外は 1-2 頭 = 被覆 8割以上に収まるので締切前 (プールが立った後) は従来どおり
+    発動する。戻り値は昇格させた頭数。
+    """
+    if not fresh_nums:
+        return 0
+    active = [h for h in horses if not h.absent]
+    if not active or len(fresh_nums) < coverage * len(active):
+        return 0
+    promoted = 0
+    for h in horses:
+        if h.number not in fresh_nums and not h.absent:
+            h.absent = True
+            h.win_odds = 0.0
+            promoted += 1
+    return promoted
 from .scrape import (
     extract_race_id,
     fetch_html,
