@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1159,6 +1160,34 @@ def _parse_weather_text(text: str) -> str:
     if weather and track:
         return f"{weather} / {track}"
     return weather or track
+
+
+def normalize_going_word(s: str | None) -> str:
+    """馬場状態の表記 → 公式の全語 ("良" / "稍重" / "重" / "不良")。判定不能は ""。
+
+    keiba.go.jp / JRA 公式は全語、netkeiba は略記 ("稍" / "不") なので両方受ける。
+    略記は**完全一致のみ**展開する ("不明" を 不良 と誤読しない)。全角/半角は NFKC で吸収。
+    """
+    g = unicodedata.normalize("NFKC", s or "").strip()
+    for word in ("不良", "稍重", "重", "良"):   # 「重」より先に「稍重」を判定する
+        if g.startswith(word):
+            return word
+    return {"稍": "稍重", "不": "不良"}.get(g, "")
+
+
+def format_weather_text(weather: str | None, going: str | None) -> str:
+    """Race.weather_text の共通形「天候 / 馬場」(netkeiba 出馬表と同形, 例 "曇 / 良")。
+
+    片方だけ判明なら "曇 / " / " / 良" (区切り "/" は常に残す)、両方不明は ""。
+    読み手 (provisional._today_going / time_eval.target_of) は **"/" の右側を馬場** として
+    読む (provisional は "/" が無いと文字列全体を馬場扱いする) ので、天候だけの時も "/" を
+    残して天候が馬場欄に入らない形に固定する。
+    """
+    w = (weather or "").strip()
+    g = (going or "").strip()
+    if not w and not g:
+        return ""
+    return f"{w} / {g}"
 
 
 def _parse_start_at(text: str, *, race_id: str = "") -> int:

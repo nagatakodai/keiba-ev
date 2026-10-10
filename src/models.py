@@ -13,6 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+# past_runs_ext の上限 (keiba.go.jp / JRA accessU / oddspark HorseDetail の馬柱パース上限と同じ)。
+PAST_RUNS_EXT_MAX = 12
+
 
 @dataclass
 class Horse:
@@ -41,6 +44,11 @@ class Horse:
     horse_id: str = ""         # netkeiba 内部 ID
     interview_comment: str = ""  # コメント (調教師談話など)
     past_runs: list["PastRun"] = field(default_factory=list)  # 馬柱から (直近 5 走)
+    # 対象 race 日付より前の全履歴 (新しい順・leakage 除外済・最大 PAST_RUNS_EXT_MAX 走)。
+    # 表示 / 走破時計の換算 (当レースの距離・馬場への換算比較) 用。公式自給経路
+    # (keiba.go.jp / JRA 公式 / oddspark) の builder が埋め、netkeiba 経路は空のまま。
+    # **past_runs は LightGBM / 仮指数が使う 5 走窓のまま変えない** (学習分布と揃えるため)。
+    past_runs_ext: list["PastRun"] = field(default_factory=list)
 
     @property
     def pure_second(self) -> float:

@@ -16,14 +16,19 @@ venue+kai+day+RR で対応づく。**当日/直近開催のみ** (確定オッ�
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from .ev import LLM_BLEND_DEFAULT, MARKET_BLEND_LIVE
-from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
-from .parse import _parse_time_to_sec, _split_race_id
+from .models import PAST_RUNS_EXT_MAX, BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
+from .parse import _parse_time_to_sec, _split_race_id, format_weather_text, normalize_going_word
 
 _BASE = "https://www.jra.go.jp/JRADB"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -461,6 +466,348 @@ def parse_jra_race_header(html: str) -> dict:
     return out
 
 
+# ------------------------------------------------- 馬場情報 (天候/馬場状態) --
+# 単複ページ (accessO) には馬場状態が無いので JRA 公式「馬場情報」から取る。実機 2026-10-10:
+#   - 静的ページ keiba/baba/index.html (= 開催タブ先頭) / index2.html / index3.html は Shift_JIS。
+#     「馬場状態（10月9日（金曜）正午現在）… 天候：晴 / 芝 良 / ダート 良」と開催日 h2 を持つが、
+#     **当日 (土 14:54) でも前日正午の発表のまま** — ページ上の当日値は JS (baba2025.js の
+#     check_json) が live JSON で上書きしている。
+#   - live JSON: POST /JRADB/accessJ.html CNAME=pw01iwtS3/CD (JS と同じ固定 cname) →
+#     {"kaisai_info": [{"jyoname": "東京", "kaisai_ymd": "20261010", "weather": "晴",
+#       "ba_s": "良" (芝), "ba_d": "良" (ダート), ...}, ...]}。全場 1 POST、翌日分は空欄。
+#     **kaisai_info が空リストの時間帯もある** (同日 15:12 は全場あり → 15:3x は空。JS も空なら
+#     馬場状態欄を消すだけ) — その時は静的ページに落ちる (as_of で発表時点が分かる)。
+# → live JSON を第一源、静的ページを fallback (前日夜の翌日分 = 前日発表はページにだけ載る)。
+_BABA_BASE = "https://www.jra.go.jp/keiba/baba/"
+_BABA_PAGES = ("index.html", "index2.html", "index3.html")
+_BABA_LIVE_URL = f"{_BASE}/accessJ.html"
+_BABA_LIVE_CNAME = "pw01iwtS3/CD"
+_BABA_TTL_SEC = 900.0     # score 段 (締切5-7分前) と bet 段 (1-2.5分前) で共用できる長さ
+_BABA_TIMEOUT = 10.0      # baba2025.js の $.ajax(timeout: 10000) と同じ
+_BABA_CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "cache" / "jra_baba"
+# {YYYYMMDD: {場名: {"fetched_at": unix, "data": {...} | None}}} (None = 照会済み・データ無し)
+_BABA_MEM: dict[str, dict[str, dict]] = {}
+_BABA_WEATHER_CHARS = "晴曇雨雪霧"
+_SJIS_ALIASES = {"shift_jis", "shift-jis", "sjis", "x-sjis", "windows-31j", "cp932", "ms932"}
+
+
+def _norm_jra_venue(s: str | None) -> str:
+    """"東京" / "東京競馬場" / 全角空白混じり → "東京"。"""
+    v = re.sub(r"\s+", "", unicodedata.normalize("NFKC", s or ""))
+    return v[:-3] if v.endswith("競馬場") else v
+
+
+def _norm_weather(s: str | None) -> str:
+    """天候表記 (晴/曇/小雨/雨/小雪/雪 …)。'-' 等の未発表プレースホルダは ""。"""
+    w = re.sub(r"\s+", "", unicodedata.normalize("NFKC", s or ""))
+    return w if any(ch in w for ch in _BABA_WEATHER_CHARS) else ""
+
+
+def parse_jra_baba(html: str) -> dict:
+    """馬場情報の静的ページ (keiba/baba/index*.html) → 取れた項目のみの dict。
+
+    keys: venue ("東京") / date (開催日 YYYYMMDD, h2) / weather ("晴") / 芝 / ダート (良|稍重|重|不良)
+    / as_of ("10月9日（金曜）正午現在") / course (data-current-course "A"/"B"/"C") /
+    tabs ({場名: "index2.html"} — 開催タブ。href は index*.html のみ採用)。
+    静的値は発表時点のスナップショット (当日の更新は live JSON 側。fetch_jra_going 参照)。
+    """
+    out: dict = {}
+    if not html:
+        return out
+    # 開催タブ: <div class="kaisai_tab"> … <div class="current"><a href="index.html">東京競馬場</a>
+    ts = html.find('class="kaisai_tab"')
+    tab_region = ""
+    if ts >= 0:
+        te = html.find('id="baba"', ts)
+        tab_region = html[ts:te if te > ts else ts + 4000]
+    tabs: dict[str, str] = {}
+    for href, name in re.findall(r'<a href="(index\d?\.html)"[^>]*>\s*([^<]+?)\s*</a>', tab_region):
+        v = _norm_jra_venue(name)
+        if v:
+            tabs.setdefault(v, href)
+    if tabs:
+        out["tabs"] = tabs
+    cm = re.search(r'<div class="current">\s*<a href="index\d?\.html"[^>]*>\s*([^<]+?)\s*</a>',
+                   tab_region)
+    tm = re.search(r"<title>[^<]*?馬場情報（\s*([^）<]+?)\s*）", html)
+    venue = _norm_jra_venue(cm.group(1)) if cm else (_norm_jra_venue(tm.group(1)) if tm else "")
+    if venue:
+        out["venue"] = venue
+    dm = re.search(r'class="date"[^>]*>[^<]*?(\d{4})年(\d{1,2})月(\d{1,2})日', html)
+    if dm:
+        out["date"] = f"{int(dm.group(1)):04d}{int(dm.group(2)):02d}{int(dm.group(3)):02d}"
+    km = re.search(r'data-current-course="([A-Za-z])"', html)
+    if km:
+        out["course"] = km.group(1).upper()
+    # 馬場状態ブロック (#course_condition) に限定して 天候 / 芝 / ダート を読む
+    cs = html.find('id="course_condition"')
+    if cs < 0:
+        return out
+    ce = html.find("<!-- /[.line] -->", cs)
+    region = html[cs:ce if ce > cs else cs + 8000]
+    am = re.search(r'馬場状態\s*<span class="time">\s*([^<]*?)\s*</span>', region)
+    if am:
+        s = am.group(1).strip()
+        if len(s) >= 2 and s[0] in "（(" and s[-1] in "）)":
+            s = s[1:-1].strip()
+        if s:
+            out["as_of"] = s
+    wm = re.search(r"天候\s*[:：]\s*(?:<[^>]+>\s*)*([^<\s]+)", region)
+    w = _norm_weather(wm.group(1)) if wm else ""
+    if w:
+        out["weather"] = w
+    for cls, key in (("turf", "芝"), ("dirt", "ダート")):
+        i = region.find(f'class="cell {cls}"')
+        if i < 0:
+            continue
+        j = region.find('class="cell ', i + 1)   # 次のセル (芝→ダート) の手前まで
+        pm = re.search(r"<p[^>]*>\s*([^<]*?)\s*</p>", region[i:j if j > i else len(region)])
+        g = normalize_going_word(pm.group(1)) if pm else ""
+        if g:
+            out[key] = g
+    return out
+
+
+def parse_jra_baba_live(text: str) -> dict[str, dict[str, dict]]:
+    """live JSON (accessJ.html, CNAME=pw01iwtS3/CD) → {開催日 YYYYMMDD: {場名: info}}。
+
+    info = {"weather", "芝", "ダート", "as_of" ("2026年10月10日（土曜日）"), "source": "live"}
+    の取れた項目。weather/芝/ダート が全て空の entry (翌日開催の未発表分) は載せない。
+    JSON でない応答 (cname 変更でエラーページ等) は ValueError (json.JSONDecodeError)。
+    """
+    d = json.loads(text)
+    out: dict[str, dict[str, dict]] = {}
+    for e in (d.get("kaisai_info") if isinstance(d, dict) else None) or []:
+        if not isinstance(e, dict):
+            continue
+        ymd = str(e.get("kaisai_ymd") or "").strip()
+        venue = _norm_jra_venue(str(e.get("jyoname") or ""))
+        if not (len(ymd) == 8 and ymd.isdigit() and venue):
+            continue
+        info: dict = {}
+        w = _norm_weather(str(e.get("weather") or ""))
+        if w:
+            info["weather"] = w
+        for src, key in (("ba_s", "芝"), ("ba_d", "ダート")):
+            g = normalize_going_word(str(e.get(src) or ""))
+            if g:
+                info[key] = g
+        if not info:
+            continue
+        youbi = str(e.get("youbi") or "").strip()
+        info["as_of"] = (f"{int(ymd[:4])}年{int(ymd[4:6])}月{int(ymd[6:])}日"
+                         + (f"（{youbi}）" if youbi else ""))
+        info["source"] = "live"
+        out.setdefault(ymd, {})[venue] = info
+    return out
+
+
+def _decode_jra(raw: bytes, content_type: str = "") -> str:
+    """JRA 公式の応答 bytes → str。宣言 charset (Content-Type → meta) → UTF-8 → cp932 の順に
+    strict で試し、全滅なら cp932 replace。Shift_JIS 宣言は cp932 (上位互換: ①/㈱ 等の機種依存
+    文字も読める) で読む。live JSON は Content-Type に charset が無い Shift_JIS。"""
+    m = re.search(r"charset=[\"']?([\w-]+)", content_type or "", re.I)
+    if m:
+        declared = m.group(1)
+    else:
+        mb = re.search(rb"charset=[\"']?([\w-]+)", raw[:4096], re.I)
+        declared = mb.group(1).decode("ascii", "ignore") if mb else ""
+    declared = declared.lower()
+    if declared in _SJIS_ALIASES:
+        declared = "cp932"
+    for enc in (declared, "utf-8", "cp932"):
+        if not enc:
+            continue
+        try:
+            return raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("cp932", "replace")
+
+
+def _baba_http(url: str, data: dict | None = None, *, timeout: float = _BABA_TIMEOUT) -> str:
+    """馬場情報の取得 (GET / data 付きは form POST) → デコード済 str。通信失敗は例外のまま。
+
+    cname の "/" はエンコードせずに送る (実機で JSON が返ったのと同じ body "CNAME=pw01iwtS3/CD")。
+    """
+    body = urllib.parse.urlencode(data, safe="/").encode("ascii") if data else None
+    req = urllib.request.Request(url, data=body, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return _decode_jra(r.read(), r.headers.get("Content-Type", "") or "")
+
+
+def _baba_usable(d) -> bool:
+    return isinstance(d, dict) and any(d.get(k) for k in ("weather", "芝", "ダート"))
+
+
+def _baba_ts(e) -> float:
+    try:
+        return float(e.get("fetched_at") or 0) if isinstance(e, dict) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _baba_merge(dst: dict, src) -> None:
+    """場ごとに fetched_at の新しい方を残してマージ (別 subprocess の書き込みと競合しても壊れない)。"""
+    if not isinstance(src, dict):
+        return
+    for v, e in src.items():
+        if isinstance(e, dict) and _baba_ts(e) >= _baba_ts(dst.get(v)):
+            dst[v] = e
+
+
+def _baba_cache_lookup(day: str, venue: str, now: float, ttl: float) -> tuple[bool, dict | None]:
+    """(date, 場) の cache を メモリ → ディスク の順に見る。TTL 内なら (True, data|None)。"""
+    mem = _BABA_MEM.setdefault(day, {})
+
+    def _fresh(e) -> bool:
+        return isinstance(e, dict) and abs(now - _baba_ts(e)) <= ttl
+
+    if not _fresh(mem.get(venue)):
+        try:
+            _baba_merge(mem, json.loads(
+                (_BABA_CACHE_DIR / f"{day}.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+    e = mem.get(venue)
+    if _fresh(e):
+        return True, e.get("data")
+    return False, None
+
+
+def _baba_cache_store(day: str, entries: dict[str, dict | None], now: float) -> None:
+    mem = _BABA_MEM.setdefault(day, {})
+    _baba_merge(mem, {v: {"fetched_at": now, "data": d} for v, d in entries.items()})
+    p = _BABA_CACHE_DIR / f"{day}.json"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        merged: dict = {}
+        try:
+            _baba_merge(merged, json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+        _baba_merge(merged, mem)
+        tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, p)   # アトミック (並行 subprocess 対策)
+    except OSError:
+        pass   # cache 書き込み失敗は無害 (次回 refetch するだけ)
+
+
+def _fetch_baba_pages(venue: str, day: str) -> tuple[dict[str, dict], bool]:
+    """静的ページを開催タブで辿って venue のページを探す (最大 3 GET)。→ ({場名: info}, 通信成功)。
+
+    index.html (= 開催タブ先頭) を読み、目的の場でなければタブの href (index2/index3) へ。
+    タブに無い場 = その週は開催なし → 打ち切り。開催日 (h2) が day と一致するページのみ採用
+    (別日の発表値を当日値として使わない)。通信失敗は残りも同様なので打ち切る。
+    """
+    found: dict[str, dict] = {}
+    ok = False
+    tried: list[str] = []
+    queue = [_BABA_PAGES[0]]
+    while queue and len(tried) < len(_BABA_PAGES):
+        page = queue.pop(0)
+        if page in tried:
+            continue
+        tried.append(page)
+        try:
+            html = _baba_http(_BABA_BASE + page)
+        except Exception:  # noqa: BLE001
+            break
+        ok = True
+        info = parse_jra_baba(html)
+        v = info.get("venue", "")
+        if v and info.get("date") == day:
+            d = {k: info[k] for k in ("weather", "芝", "ダート", "as_of") if info.get(k)}
+            if _baba_usable(d):
+                found[v] = {**d, "source": "page"}
+        if v == venue:
+            break
+        tabs = info.get("tabs") or {}
+        if tabs:
+            href = tabs.get(venue)
+            if not href:
+                break
+            if href not in tried:
+                queue.insert(0, href)
+        else:   # タブが読めない (DOM 変化) → 残りのページを順に
+            queue.extend(p for p in _BABA_PAGES if p not in tried and p not in queue)
+    return found, ok
+
+
+def _jst_today() -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d")
+
+
+def fetch_jra_going(venue_name: str, date: str | None = None, *,
+                    ttl_sec: float = _BABA_TTL_SEC) -> dict | None:
+    """JRA 公式の当日 天候/馬場状態 → {"weather": "晴", "芝": "良", "ダート": "良",
+    "as_of": "...", "source": "live"|"page"} (取れた項目のみ)。取れなければ None。
+
+    venue_name は "東京" / "東京競馬場" どちらでも可。date は開催日 YYYYMMDD (省略時 JST 当日)。
+    ①live JSON (馬場情報ページの JS が当日値を描画する元データ・全場 1 POST) → 当該 (date, 場) に
+    値が無ければ ②静的ページ (開催タブで index→index2/3、開催日一致のみ)。going は全語。
+    (date, 場) ごとにメモリ + data/cache/jra_baba/<date>.json へ TTL (既定 15 分) で cache し
+    score/bet 段で JRA を叩き直さない (「データ無し」も TTL 内は cache)。通信失敗は cache せず
+    None。例外は投げない (解析を止めない)。
+    """
+    try:
+        venue = _norm_jra_venue(venue_name)
+        if not venue:
+            return None
+        day = date if (date and len(date) == 8 and date.isdigit()) else _jst_today()
+        now = time.time()
+        hit, data = _baba_cache_lookup(day, venue, now, ttl_sec)
+        if hit:
+            return dict(data) if _baba_usable(data) else None
+        found: dict[str, dict] = {}
+        ok = False
+        try:
+            live = parse_jra_baba_live(
+                _baba_http(_BABA_LIVE_URL, {"CNAME": _BABA_LIVE_CNAME}))
+            ok = True
+            found.update(live.get(day, {}))
+        except Exception:  # noqa: BLE001 — live 不可 (通信失敗 / cname 変更で JSON でない) → 静的ページ
+            pass
+        if not _baba_usable(found.get(venue)):
+            pages, pages_ok = _fetch_baba_pages(venue, day)
+            ok = ok or pages_ok
+            for v, d in pages.items():
+                if not _baba_usable(found.get(v)):
+                    found[v] = d
+        if not ok:
+            return None   # 通信失敗は cache しない (次の段で再試行)
+        entries: dict[str, dict | None] = {v: d for v, d in found.items() if _baba_usable(d)}
+        entries.setdefault(venue, None)
+        _baba_cache_store(day, entries, now)
+        d = entries.get(venue)
+        return dict(d) if d else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def jra_weather_text(info: dict | None, surface: str) -> str:
+    """fetch_jra_going の結果 → Race.weather_text ("晴 / 良", netkeiba 出馬表と同形)。
+
+    馬場は当レースの surface の値 (芝→芝 / ダート→ダート / 障害→芝 / 不明→馬場欄空)。
+    天候も馬場も無ければ ""。
+    """
+    if not info:
+        return ""
+    key = {"芝": "芝", "障害": "芝", "ダート": "ダート"}.get(surface or "", "")
+    return format_weather_text(info.get("weather", ""), info.get(key, "") if key else "")
+
+
+def _overlay_jra_going(race: Race, info: dict | None) -> None:
+    """netkeiba cache 出馬表の Race に JRA 公式の当日 天候/馬場 を載せる (cache は取得時点の値で
+    古い/空のことがある)。馬場が判明しない (天候のみ) 時は既存の値を潰さない。"""
+    wt = jra_weather_text(info, race.surface)
+    if wt and (not race.weather_text or wt.split("/")[-1].strip()):
+        race.weather_text = wt
+
+
 def fetch_jra_bets(loc: JraLoc) -> dict:
     """全券種を段2 POST で取得 → {other_bets, trifecta, consistency, horse_info}。"""
     win: list[BetOdds] = []
@@ -747,7 +1094,8 @@ def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
                        horse_info: dict[int, dict] | None = None,
                        race_header: dict | None = None, *,
                        fetch_past: bool = False,
-                       target_date: tuple[int, int, int] | None = None) -> RaceData:
+                       target_date: tuple[int, int, int] | None = None,
+                       going: dict | None = None) -> RaceData:
     """cache 出馬表が無い場合の RaceData (JRA 公式オッズ + accessU 由来)。
 
     `horse_info` (単複ページ): 馬名/騎手/性齢/馬体重/斤量 → 各馬に乗せる。
@@ -757,6 +1105,9 @@ def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
       (`data/cache/jra_pastruns/<rid>.json`)。score ステージで実行 (時間に余裕)、
       bet ステージは fetch_past=False でキャッシュのみ読む (締切直前の latency 回避)。
     `target_date`: leakage 防止。この日付**以降**の run は除外 + 直近5走に制限。
+      past_runs_ext には同じ除外をかけた全履歴 (最大 PAST_RUNS_EXT_MAX 走) を載せる (表示/時計換算用)。
+    `going` (fetch_jra_going の結果): 天候/馬場 → Race.weather_text ("晴 / 良"、馬場は当レースの
+      surface の値。単複ページには馬場状態が無い)。
     """
     venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
     info = horse_info or {}
@@ -789,11 +1140,13 @@ def build_jra_racedata(netkeiba_rid: str, win_bets: list[BetOdds],
             runs = by_num.get(h.number, [])
             if target_date:   # leakage: 対象 race 日以降を除外
                 runs = [r for r in runs if _date_key_jra(r.date) < target_date]
+            h.past_runs_ext = runs[:PAST_RUNS_EXT_MAX]
             h.past_runs = runs[:5]
     race = Race(cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
                 venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
                 venue_name=venue, race_class=hdr.get("race_class", ""),
                 distance=hdr.get("distance", 0), surface=hdr.get("surface", ""),
+                weather_text=jra_weather_text(going, hdr.get("surface", "")),
                 horses=horses)
     return RaceData(race=race, trifecta=[], other_bets={})
 
@@ -849,6 +1202,11 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
         for bt in ("quinella", "wide", "exacta", "trio"):
             other[bt] = []
 
+    # 当日の天候/馬場状態 (JRA 公式 馬場情報)。単複ページには馬場状態が無いので別取得する
+    # (live JSON → 静的ページ fallback・data/cache/jra_baba に 15 分 cache で score/bet 段共用・
+    # 取れなければ None = weather_text は従来どおり)。
+    going_info = fetch_jra_going(_split_race_id(netkeiba_rid)[0], loc.date)
+
     used_cache = False
     if sh.exists():
         rd = parse_shutuba(gzip.open(sh, "rt", encoding="utf-8").read(), race_id=netkeiba_rid)
@@ -857,6 +1215,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
             runs = parse_past_runs(gzip.open(past, "rt", encoding="utf-8").read())
             for h in rd.race.horses:
                 h.past_runs = runs.get(h.number, [])
+        _overlay_jra_going(rd.race, going_info)
         used_cache = True
     else:
         # leakage 防止用の対象 race 日付 (start_at から JST 日付)。live (発走前) は全履歴が
@@ -869,7 +1228,7 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
             target_date = (d.year, d.month, d.day)
         rd = build_jra_racedata(
             netkeiba_rid, other["win"], horse_info, res.get("race_header") or {},
-            fetch_past=(phase == "score"), target_date=target_date)
+            fetch_past=(phase == "score"), target_date=target_date, going=going_info)
 
     if start_at and not rd.race.start_at:
         from .parse import close_at_for_start

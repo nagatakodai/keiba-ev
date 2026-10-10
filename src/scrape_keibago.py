@@ -19,13 +19,20 @@ from __future__ import annotations
 
 import html as _html
 import re
+import unicodedata
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 
 from .ev import LLM_BLEND_DEFAULT, MARKET_BLEND_LIVE
-from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
-from .parse import VENUE_CODE, _split_race_id, is_nar_race_id
+from .models import PAST_RUNS_EXT_MAX, BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
+from .parse import (
+    VENUE_CODE,
+    _split_race_id,
+    format_weather_text,
+    is_nar_race_id,
+    normalize_going_word,
+)
 
 _BASE = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
 _DATAROOM = "https://www.keiba.go.jp/KeibaWeb/DataRoom"
@@ -288,6 +295,98 @@ def parse_deba_table(html: str) -> list[tuple[int, str, str, bool]]:
         out.append((num, lm.group(2).strip() if lm else "",
                     lm.group(1) if lm else "", absent))
     return out
+
+
+# 出馬表ヘッダ (DebaTable の section.raceTitle > ul.dataArea 1 行目) のレース条件。実機 2026-10-10:
+#   佐賀5R "ダート　1300ｍ（右）　　天候：曇　　馬場：良　　サラブレッド系　一般 別定　…"
+#   高知4R "ダート　1400ｍ（右）　　天候：晴　　馬場：稍重　　サラブレッド系　3歳以上 別定　…"
+#   帯広1R "ダート　200ｍ（直）　　天候：晴　　馬場：1.2　　混合　3歳以上 規定　…" (ばんえいは水分量)
+# 他に "ダート 1000m（外コース・右）" / 盛岡芝 "芝 1700m（左）"、発表前は天候/馬場が無い形
+# ("ダート 1600m（左） サラブレッド系 一般 別定")。全角 ｍ/数字/括弧/コロン は NFKC で吸収する。
+_DEBA_DIST_RE = re.compile(r"(ダート|障害|芝|ダ|障)\s*(\d[\d,]{2,5})\s*m(?:\s*\(([^)]*)\))?")
+_DEBA_WEATHER_RE = re.compile(r"天候\s*:\s*([^\s:]+?)(?=\s|馬場|$)")
+_DEBA_GOING_RE = re.compile(r"馬場\s*:\s*([^\s:]+)")
+_DEBA_SURFACE = {"ダート": "ダート", "ダ": "ダート", "芝": "芝", "障害": "障害", "障": "障害"}
+_WEATHER_CHARS = "晴曇雨雪霧"
+_BANEI_VENUE_CODE = "65"   # netkeiba 場コード (帯広ばんえい)
+
+
+def _deba_header_text(html: str) -> str:
+    """DebaTable のレース条件ヘッダ部分だけを NFKC 正規化 + 空白圧縮したテキストで返す。
+
+    各馬ブロックの馬柱ミニ表 ("佐賀　右1750" / "不良") やコースレコード欄を拾わないよう
+    section.raceTitle に限定する (DOM 変化で見つからなければ最初の馬ブロックより前)。
+    """
+    m = re.search(r'<section class="raceTitle"[^>]*>(.*?)</section>', html, re.DOTALL)
+    if m:
+        region = m.group(1)
+    else:
+        cut = html.find('class="horseNum"')
+        region = html[:cut] if cut >= 0 else html
+    txt = _html.unescape(re.sub(r"<[^>]+>", " ", region))
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", txt)).strip()
+
+
+def parse_deba_header(html: str) -> dict:
+    """出馬表 (DebaTable) のヘッダ → 当レースの条件 dict (取れた項目のみ・何も無ければ {})。
+
+    keys: distance (int, m) / surface ('ダート'|'芝'|'障害') / direction ('右'|'左'|'直'|'') /
+    course ('外'|'内'|'' — 「外コース」等) / weather (例 '曇') /
+    going ('良'|'稍重'|'重'|'不良' — keiba.go.jp と同じ全語) / moisture (ばんえいの馬場水分%, float)。
+    direction/course は距離が取れた時だけ付く ('' = 表記なし)。追加 GET 不要 (analyze_keibago が
+    取得済の DebaTable HTML を渡す)。best-effort: 想定外の入力でも例外を出さず {} を返す。
+    """
+    try:
+        text = _deba_header_text(html or "")
+        out: dict = {}
+        dm = _DEBA_DIST_RE.search(text)
+        if dm:
+            digits = dm.group(2).replace(",", "")
+            dist = int(digits) if digits.isdigit() else 0
+            if 100 <= dist <= 4000:
+                paren = dm.group(3) or ""
+                out["distance"] = dist
+                out["surface"] = _DEBA_SURFACE[dm.group(1)]
+                out["direction"] = next((d for d in ("右", "左", "直") if d in paren), "")
+                out["course"] = "外" if "外" in paren else ("内" if "内" in paren else "")
+        wm = _DEBA_WEATHER_RE.search(text)
+        if wm and any(ch in wm.group(1) for ch in _WEATHER_CHARS):
+            out["weather"] = wm.group(1)
+        gm = _DEBA_GOING_RE.search(text)
+        if gm:
+            going = normalize_going_word(gm.group(1))
+            if going:
+                out["going"] = going
+            else:
+                mm = re.fullmatch(r"(\d+(?:\.\d+)?)%?", gm.group(1))
+                if mm:
+                    out["moisture"] = float(mm.group(1))
+        return out
+    except Exception:  # noqa: BLE001 — ヘッダは best-effort (解析を止めない)
+        return {}
+
+
+def _apply_deba_header(race: Race, hdr: dict, netkeiba_rid: str) -> None:
+    """parse_deba_header の結果を Race に載せる (取れた項目だけ上書き・無ければ既存値のまま)。
+
+    **ばんえい (帯広65) は distance=0 / surface='' / direction='' を維持** — banei LightGBM は
+    netkeiba 出馬表 (「直200m」を距離として読めず 0 / '') の値で学習されており、keiba.go.jp の
+    「ダート 200m（直）」を載せると train/serve skew になる。weather_text は特徴量に入らない
+    (仮指数の馬場因子 / 表示 / 時計換算のみ) のでばんえいでも載せる (馬場欄は水分量で going
+    不明 → "晴 / ")。
+    """
+    if not hdr:
+        return
+    if netkeiba_rid[4:6] != _BANEI_VENUE_CODE:
+        if hdr.get("distance"):
+            race.distance = int(hdr["distance"])
+        if hdr.get("surface"):
+            race.surface = hdr["surface"]
+        if hdr.get("direction"):
+            race.direction = hdr["direction"]
+    wt = format_weather_text(hdr.get("weather", ""), hdr.get("going", ""))
+    if wt:
+        race.weather_text = wt
 
 
 def parse_horse_history(html: str, *, limit: int = 12) -> list[PastRun]:
@@ -571,6 +670,7 @@ def build_keibago_racedata(
     win_odds: dict[int, float],
     *,
     fetch_past: bool = True,
+    race_header: dict | None = None,
 ) -> RaceData:
     """cache 出馬表が無い場合の RaceData を keiba.go.jp の出馬表(DebaTable)から構築。
 
@@ -579,7 +679,12 @@ def build_keibago_racedata(
     estimate_probs が市場主導でなくモデルの edge を反映できる (= netkeiba/oddspark 非依存)。
     leakage 防止: HorseMarkInfo は対象 race 自身も含むので **対象 race 日付以降を除外** +
     直近5走に制限 (netkeiba 馬柱の窓に合わせる)。live (発走前) では対象 race は未走で no-op。
+    past_runs_ext には同じ leakage 除外をかけた全履歴 (最大 PAST_RUNS_EXT_MAX 走) を載せる
+    (表示/時計換算用。past_runs の 5 走窓は LightGBM/仮指数用に不変)。
     取消馬 (absent=True) は Horse.absent を立て、馬柱 fetch も skip する。
+    race_header (parse_deba_header の結果) で距離/馬場/周回/天候・馬場状態を Race に載せる
+    (旧実装は distance=0 固定で LightGBM 特徴量の train/serve skew + Claude 見出し "0m" だった)。
+    ばんえいは distance/surface を載せない (_apply_deba_header 参照)。
     """
     venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
     horse_rows = [Horse(number=n, name=nm, win_odds=win_odds.get(n, 0.0), absent=ab)
@@ -597,12 +702,14 @@ def build_keibago_racedata(
                 if race_date:
                     rk = _date_key(race_date)
                     runs = [r for r in runs if _date_key(r.date) < rk]
+                h.past_runs_ext = runs[:PAST_RUNS_EXT_MAX]
                 h.past_runs = runs[:5]
     race = Race(
         cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
         venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
         venue_name=venue, race_class="", distance=0, horses=horse_rows,
     )
+    _apply_deba_header(race, race_header or {}, netkeiba_rid)
     return RaceData(race=race, trifecta=[], other_bets={})
 
 
@@ -671,7 +778,8 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         used_cache = True
     else:
         win_odds = {b.key[0]: b.odds for b in other["win"] if b.odds > 0}
-        deba = parse_deba_table(_get(_odds_url(loc, "DebaTable")))
+        deba_html = _get(_odds_url(loc, "DebaTable"))
+        deba = parse_deba_table(deba_html)
         if not deba:
             # keiba.go.jp は同時アクセスでレート制限され空/骨組み HTML を返すことがある。
             # 指数再利用の朝スキャンは LLM が走らず 36R 分のスクレイプが4並列・数十秒に
@@ -681,19 +789,24 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
             import time as _time
             for _wait in (3.0, 6.0):
                 _time.sleep(_wait)
-                deba = parse_deba_table(_get(_odds_url(loc, "DebaTable")))
+                deba_html = _get(_odds_url(loc, "DebaTable"))
+                deba = parse_deba_table(deba_html)
                 if deba:
                     break
+        # 取得済 DebaTable のヘッダから当レース条件 (距離/馬場/周回/天候・馬場状態)。追加 GET 無し。
+        # 取れなければ {} → Race は従来値のまま (best-effort)。
+        race_header = parse_deba_header(deba_html)
         if deba:
             # 出馬表 + HorseMarkInfo の馬柱で確率モデルをフル稼働 (公式自給)
-            rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True)
+            rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True,
+                                        race_header=race_header)
         elif not odds_empty:
             # DebaTable 取れず → 単複の馬リストのみ (past_runs なし=市場ブレンド主導)。
             # 単複ページは発売対象馬のみ (取消馬は単勝が数値でなく載らない) → absent=False。
             hl = parse_horse_list(_get(_odds_url(loc, _EP["tanfuku"])))
             rd = build_keibago_racedata(
                 netkeiba_rid, [(n, nm, "", False) for n, nm, _od in hl], win_odds,
-                fetch_past=False)
+                fetch_past=False, race_header=race_header)
         else:
             # 発売前 (odds_empty) で DebaTable も取れない → 出走馬ソースが無く score 不能
             # (単複の馬リストも全馬 0.0 で空になる)。

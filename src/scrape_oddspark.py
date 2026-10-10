@@ -27,7 +27,7 @@ from datetime import datetime
 from urllib.request import Request, urlopen
 
 from .ev import LLM_BLEND_DEFAULT, MARKET_BLEND_LIVE
-from .models import BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
+from .models import PAST_RUNS_EXT_MAX, BetOdds, Horse, PastRun, Race, RaceData, TrifectaOdds
 from .parse import VENUE_CODE, _split_race_id, is_nar_race_id
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
@@ -652,6 +652,7 @@ def build_oddspark_racedata(
         # 窓は netkeiba 馬柱 (直近5走) に揃えてモデルの学習分布と一致させる。
         race_date = (f"{netkeiba_rid[:4]}.{netkeiba_rid[6:8]}.{netkeiba_rid[8:10]}"
                      if is_nar_race_id(netkeiba_rid) else "")
+        # past_runs_ext は同じ leakage 除外の全履歴 (最大 PAST_RUNS_EXT_MAX 走, 表示/時計換算用)。
         for h in horse_rows:
             ln = lineage_by_num.get(h.number, "")
             if ln:
@@ -659,6 +660,7 @@ def build_oddspark_racedata(
                 if race_date:
                     rk = _date_key(race_date)
                     runs = [r for r in runs if _date_key(r.date) < rk]
+                h.past_runs_ext = runs[:PAST_RUNS_EXT_MAX]
                 h.past_runs = runs[:5]
     race = Race(
         cup_id=cup_id, schedule_index=schedule_index, race_number=race_number,
