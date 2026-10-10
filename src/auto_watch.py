@@ -665,6 +665,8 @@ def main(
 ) -> None:
     """1 巡だけ実行。2段: score 帯で考察→指数キャッシュ+**締切前 bet を予約** → 予約時刻 (締切
     bet_lead_sec 秒前) が来た bet を**自動発火** (最新オッズ→束→enqueue)。"""
+    from .automation_lock import exit_if_blocked
+    exit_if_blocked("auto_watch")   # 自動予想・自動投票の封鎖 (2026-10-10, KEIBA_AUTOMATION=1 で解除)
     if (bet_oddspark or bet_ipat):
         console.print(f"[dim]bet enqueue 束 = {_bet_bundle_field()} "
                       f"({_bet_bundle_source()}; env KEIBA_BET_BUNDLE で切替, 既定 ev)[/dim]")

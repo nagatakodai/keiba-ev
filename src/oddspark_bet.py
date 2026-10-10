@@ -1366,6 +1366,8 @@ def _to_netkeiba_rid(arg: str) -> str:
 
 
 def _main() -> None:
+    from .automation_lock import exit_if_blocked
+    exit_if_blocked("oddspark_bet")   # 自動投票の封鎖 (2026-10-10, KEIBA_AUTOMATION=1 で解除)
     argv = sys.argv[1:]
     src = _resolve_bundle_source()
     print(f"[oddspark_bet] 投票束 = {_BUNDLE_FIELDS[src]} ({src}; env KEIBA_BET_BUNDLE / req の bundle_source で切替)")

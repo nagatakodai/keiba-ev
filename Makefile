@@ -229,6 +229,7 @@ odds-capture:
 	$(PY) -m src.odds_capture $(ODDS_CAPTURE_ARGS)
 
 watch-auto:
+	@$(PY) -m src.automation_lock $@
 	@echo "watch-auto: SCORE $(SCORE_WINDOW)〜$(SCORE_TOLERANCE)分 / BET $(WINDOW)±$(TOLERANCE)分 / $(INTERVAL_SEC)秒おき / Ctrl+C で終了"
 	@# bet_scheduler は**投票 OFF (paper) でも常時併走** (2026-06-11 bughunt):
 	@# scheduler 無しだと発火が tick 量子化 (60s + 長い score dispatch) され、混雑日に
@@ -251,6 +252,7 @@ watch-auto:
 # SESSION_ARGS で daemon に --clear / --poll=5 等を渡せる。
 SESSION_ARGS ?=
 watch-auto-bet:
+	@$(PY) -m src.automation_lock $@
 	@echo "watch-auto-bet: 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
 	@echo "  **購入確定は常に人。自動では #gotobuy を押しません。** 投票束=KEIBA_BET_BUNDLE (既定 ev=EV束)"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
@@ -270,6 +272,7 @@ watch-auto-bet:
 # **購入確定は人が目視で押す** (AUTO_PURCHASE_VERIFIED=False の間は --auto-purchase でも実弾停止)。
 # 認証は env (IPAT_INETID/IPAT_SUBSCRIBER/IPAT_PARS/IPAT_PIN)。SESSION_ARGS で daemon に追加引数。
 watch-auto-ipat-bet:
+	@$(PY) -m src.automation_lock $@
 	@echo "watch-auto-ipat-bet: 即PAT 投票ブラウザ起動(ログインしてください) + watch-auto。Ctrl+C で両方終了"
 	@echo "  **購入確定は常に人。AUTO_PURCHASE_VERIFIED=False の間は実弾を撃ちません。** 投票束=KEIBA_BET_BUNDLE (既定 ev=EV束)"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \

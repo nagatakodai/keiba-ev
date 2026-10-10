@@ -349,6 +349,9 @@ export type WatchAutoStatus = {
   ipat_bet_running?: boolean;
   // 投票発火デーモン (bet_scheduler, 締切1分前に精密発火) が稼働中か。
   scheduler_running?: boolean;
+  // 自動予想・自動投票の封鎖中か (2026-10-10, backend src/automation_lock.py)。
+  // true の間は開始が 423 で拒否される。解除は env KEIBA_AUTOMATION=1 で API を起動。
+  automation_locked?: boolean;
   config: {
     // 2段パイプライン: BET 帯 (締切 window〜+tolerance 分前) で投票、SCORE 帯
     // (締切 score_window〜+score_tolerance 分前) で Claude 考察→各馬指数キャッシュ。

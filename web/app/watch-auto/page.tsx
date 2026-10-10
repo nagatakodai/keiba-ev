@@ -332,6 +332,7 @@ export default function WatchAutoPage() {
   };
 
   const running = !!status?.running;
+  const locked = !!status?.automation_locked;
   const job = status?.job;
 
   // 締切バッジを 5 秒間隔で再評価。マウント後に初期化することで SSR との不一致を避ける。
@@ -403,6 +404,18 @@ export default function WatchAutoPage() {
         <Stat label="自動予測分析 件数" value={history.length} />
       </div>
 
+      {locked && (
+        <div className="rounded-xl border border-amber-500/50 bg-amber-500/[0.08] px-4 py-3 text-sm">
+          <p className="font-bold text-amber-300">自動予想・自動投票は一時停止中です (誤作動防止)</p>
+          <p className="mt-1 text-(--color-muted)">
+            watch-auto の開始・自動投票・当日/前夜の全レーススキャン・締切前の自動再score は封鎖されています
+            (結果の自動取得と手動の分析・スキャンは使えます)。解除するには環境変数{" "}
+            <code className="mono">KEIBA_AUTOMATION=1</code> を付けて API を起動してください (例:{" "}
+            <code className="mono">KEIBA_AUTOMATION=1 make dev</code>)。
+          </p>
+        </div>
+      )}
+
       {/* ===== コントロールデッキ (開始/停止 + 設定) ===== */}
       <section
         className={`rounded-xl border overflow-hidden bg-(--color-card) transition-shadow ${
@@ -437,7 +450,9 @@ export default function WatchAutoPage() {
               <p className="text-[11px] text-(--color-muted)">
                 {running
                   ? "watch-auto ループ稼働中 — 当日レースを自動 dispatch しています"
-                  : "停止中 — 設定を確認して開始"}
+                  : locked
+                    ? "一時停止中 — 自動予想・自動投票は封鎖されています"
+                    : "停止中 — 設定を確認して開始"}
               </p>
             </div>
           </div>
@@ -461,9 +476,9 @@ export default function WatchAutoPage() {
                 {busy ? "停止中..." : "停止"}
               </Button>
             ) : (
-              <Button size="lg" disabled={busy} onClick={start}>
+              <Button size="lg" disabled={busy || locked} onClick={start}>
                 <Play size={16} fill="currentColor" aria-hidden />
-                {busy ? "起動中..." : "開始"}
+                {busy ? "起動中..." : locked ? "一時停止中" : "開始"}
               </Button>
             )}
           </div>

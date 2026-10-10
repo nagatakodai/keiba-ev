@@ -46,6 +46,9 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from src.automation_lock import BLOCKED_MESSAGE as AUTOMATION_BLOCKED_MESSAGE
+from src.automation_lock import automation_enabled
+
 from .runner import (
     PY,
     JobRegistry,
@@ -101,26 +104,35 @@ async def lifespan(app: FastAPI):
     """startup: 永続化された watch-auto 状態を読んで should_run=true なら再起動。
     shutdown: 生きている subprocess を全て倒す (オーファン防止)。
     """
-    try:
-        await WATCH.resume_if_needed()
-    except Exception as e:  # noqa: BLE001 - startup を絶対に止めない
-        print(f"[lifespan.startup] watch resume failed: {e}")
+    # 自動予想・自動投票の封鎖 (ユーザ指示 2026-10-10「誤作動を防ぐために一旦ふさいで」)。
+    # 既定は封鎖。KEIBA_AUTOMATION=1 を明示したときだけ watch-auto resume / 自動スキャン /
+    # 締切前再score を起動する。結果の自動取得 (着順・払戻の取得のみ) は封鎖しない。
+    automation = automation_enabled()
+    if not automation:
+        print("[lifespan.startup] 自動予想・自動投票は一時停止中 (KEIBA_AUTOMATION=1 で解除): "
+              "watch-auto resume / 当日・前夜の全レーススキャン / 締切前の自動再score を起動しません")
+    if automation:
+        try:
+            await WATCH.resume_if_needed()
+        except Exception as e:  # noqa: BLE001 - startup を絶対に止めない
+            print(f"[lifespan.startup] watch resume failed: {e}")
     try:
         RESULTS_AUTO.start()  # 予測分析履歴の結果を 5 分毎に自動取得する常駐ループ
     except Exception as e:  # noqa: BLE001
         print(f"[lifespan.startup] results auto start failed: {e}")
-    try:
-        SHOBU_RESCORER.start()  # 勝負レース(推奨)を締切5-7分前に自動再score (パドック込み)
-    except Exception as e:  # noqa: BLE001
-        print(f"[lifespan.startup] shobu rescorer start failed: {e}")
-    try:
-        NIGHTLY_PRESCANNER.start()  # 前日夜間に翌日の勝負レースを全レース解析 (2026-07-05)
-    except Exception as e:  # noqa: BLE001
-        print(f"[lifespan.startup] nightly prescanner start failed: {e}")
-    try:
-        DAILY_SCANNER.start()  # 当日朝の自動キャッチアップスキャン (手動ボタン依存の解消, 2026-07-06)
-    except Exception as e:  # noqa: BLE001
-        print(f"[lifespan.startup] daily scanner start failed: {e}")
+    if automation:
+        try:
+            SHOBU_RESCORER.start()  # 勝負レース(推奨)を締切5-7分前に自動再score (パドック込み)
+        except Exception as e:  # noqa: BLE001
+            print(f"[lifespan.startup] shobu rescorer start failed: {e}")
+        try:
+            NIGHTLY_PRESCANNER.start()  # 前日夜間に翌日の勝負レースを全レース解析 (2026-07-05)
+        except Exception as e:  # noqa: BLE001
+            print(f"[lifespan.startup] nightly prescanner start failed: {e}")
+        try:
+            DAILY_SCANNER.start()  # 当日朝の自動キャッチアップスキャン (手動ボタン依存の解消, 2026-07-06)
+        except Exception as e:  # noqa: BLE001
+            print(f"[lifespan.startup] daily scanner start failed: {e}")
     yield
     try:
         await RESULTS_AUTO.stop()  # 結果取得ループを止めてから残 Job を倒す
@@ -329,6 +341,7 @@ class ShobuPaddockRescorer:
     def status(self) -> dict[str, Any]:
         return {
             "loop_running": self._task is not None and not self._task.done(),
+            "automation_locked": not automation_enabled(),
             "window": "締切5-7分前",
             "rescored": self.rescored,
             "attempts": self.attempts,
@@ -337,6 +350,8 @@ class ShobuPaddockRescorer:
         }
 
     def start(self) -> None:
+        if not automation_enabled():   # 自動予想の封鎖 (2026-10-10): lifespan 以外から呼ばれても起動しない
+            return
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._loop())
 
@@ -509,6 +524,7 @@ class ShobuNightlyPrescanner:
     def status(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "automation_locked": not automation_enabled(),
             "hour_jst": self.hour,
             "loop_running": self._task is not None and not self._task.done(),
             "launches": self.launches,
@@ -518,6 +534,8 @@ class ShobuNightlyPrescanner:
         }
 
     def start(self) -> None:
+        if not automation_enabled():   # 自動予想の封鎖 (2026-10-10): lifespan 以外から呼ばれても起動しない
+            return
         if self.enabled and (self._task is None or self._task.done()):
             self._task = asyncio.create_task(self._loop())
 
@@ -671,6 +689,7 @@ class ShobuDailyCatchupScanner:
         today = self._now_jst().strftime("%Y%m%d")
         return {
             "enabled": self.enabled,
+            "automation_locked": not automation_enabled(),
             "hour_jst": self.hour,
             "retry_min": self.retry_sec // 60,
             "max_attempts": self.max_attempts,
@@ -683,6 +702,8 @@ class ShobuDailyCatchupScanner:
         }
 
     def start(self) -> None:
+        if not automation_enabled():   # 自動予想の封鎖 (2026-10-10): lifespan 以外から呼ばれても起動しない
+            return
         if self.enabled and (self._task is None or self._task.done()):
             self._task = asyncio.create_task(self._loop())
 
@@ -1359,6 +1380,8 @@ class WatchAutoStartRequest(BaseModel):
 
 @app.post("/api/watch-auto/start")
 async def api_watch_start(req: WatchAutoStartRequest) -> dict[str, Any]:
+    if not automation_enabled():   # 自動予想・自動投票の封鎖 (2026-10-10, src/automation_lock.py)
+        raise HTTPException(status_code=423, detail=AUTOMATION_BLOCKED_MESSAGE)
     job = await WATCH.start(
         window=req.window,
         tolerance=req.tolerance,
@@ -1414,6 +1437,7 @@ def api_watch_status() -> dict[str, Any]:
         "job": WATCH.job.to_dict() if WATCH.job else None,
         "bet_job": WATCH.bet_job.to_dict() if WATCH.bet_job else None,
         "ipat_bet_job": WATCH.ipat_bet_job.to_dict() if WATCH.ipat_bet_job else None,
+        "automation_locked": not automation_enabled(),
     }
 
 

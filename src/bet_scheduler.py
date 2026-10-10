@@ -74,6 +74,8 @@ def run_scheduler(
 
 
 def _main() -> None:
+    from .automation_lock import exit_if_blocked
+    exit_if_blocked("bet_scheduler")   # 自動投票の封鎖 (2026-10-10, KEIBA_AUTOMATION=1 で解除)
     argv = sys.argv[1:]
     print(f"[bet_scheduler] 投票束 = {aw._bet_bundle_field()} "
           f"({aw._bet_bundle_source()}; env KEIBA_BET_BUNDLE で切替, 既定 ev)", flush=True)

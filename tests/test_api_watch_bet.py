@@ -19,6 +19,8 @@ def no_spawn(monkeypatch):
         self.status = "running"
     monkeypatch.setattr(runner.Job, "start", _fake_start)
     monkeypatch.setattr(runner, "_save_watch_state", lambda d: None)
+    # 起動ロジック (解除時の挙動) の検証なので封鎖を外す。封鎖時は tests/test_automation_lock.py。
+    monkeypatch.setenv("KEIBA_AUTOMATION", "1")
 
 
 def test_bet_oddspark_on_appends_flag_and_starts_daemon(no_spawn):

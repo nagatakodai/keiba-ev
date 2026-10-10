@@ -6,6 +6,14 @@
 - 但し依然として要確認: 破壊的操作 (reset --hard / force push / branch -D), `.env` 等機密のコミット可能性, hooks の skip。
 - commit message は日本語 conventional 風 (`feat:` / `fix:` / `refactor:` 等)。Co-Authored-By 付け。
 
+## ⚠ 自動予想・自動投票は既定で封鎖中 (2026-10-10 ユーザ指示)
+
+「オートで全レース予想したり自動で投票するのは誤作動を防ぐために一旦ふさいでください」。`make dev` 起動直後に当日キャッチアップスキャン (`ShobuDailyCatchupScanner`) が全 42R を Claude opus で予想し始めた実障害 (起動が `KEIBA_DAILY_SCAN_HOUR`=9時以降・当日ファイル無し → lifespan で即発火) を受け、**自動系を既定で封鎖**した (`src/automation_lock.py`)。下の各節に書かれた「常駐」「自動」機能は、解除するまで動かない。
+- **解除**: 環境変数 `KEIBA_AUTOMATION=1` を明示したときだけ (例 `KEIBA_AUTOMATION=1 make dev`、または .env に記載。シェルの値が .env より優先)。
+- **封鎖中に止まるもの**: API lifespan の watch-auto resume / 当日キャッチアップ・前夜スキャン / 推奨レースの締切前自動再score (各ループの `start()` にも多重ガード)・`POST /api/watch-auto/start` (423 Locked。Web UI はバナー表示 + 開始ボタン無効)・CLI `auto_watch` / `bet_scheduler` / `oddspark_bet` / `ipat_bet` (rc=3)・Makefile `watch-auto` / `watch-auto-bet` / `watch-auto-ipat-bet` / `bet` (入口ガード)。
+- **止まらないもの**: 結果の自動取得 (`ResultAutoFetcher`、着順・払戻の取得のみ)・手動の分析/勝負レーススキャン (ボタン/CLI)・勝負レースページの2分毎オッズ再採点 (Claude 不使用)・`odds_capture`。
+- テスト: `tests/test_automation_lock.py`。`tests/test_api_watch_bet.py` は解除状態の起動ロジック検証なので fixture で `KEIBA_AUTOMATION=1` を立てる。
+
 
 ## netkeiba IP 規制対応
 

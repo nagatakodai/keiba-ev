@@ -549,6 +549,9 @@ class WatchAutoManager:
         score_parallel: bool = False,
         score_queries_per_horse: int = 6,
     ) -> Job:
+        from src.automation_lock import BLOCKED_MESSAGE, automation_enabled
+        if not automation_enabled():   # 自動予想・自動投票の封鎖 (2026-10-10): API 以外の呼び出しも止める
+            raise RuntimeError(BLOCKED_MESSAGE)
         async with self._ensure_lock():
             return await self._start_locked(
                 window=window, tolerance=tolerance,
@@ -984,6 +987,9 @@ class WatchAutoManager:
 
     async def resume_if_needed(self) -> Job | None:
         """lifespan startup から呼ぶ。should_run=true なら前回の config で再起動。"""
+        from src.automation_lock import automation_enabled
+        if not automation_enabled():   # 自動予想・自動投票の封鎖中は resume しない (2026-10-10)
+            return None
         state = _load_watch_state()
         if not state.get("should_run"):
             return None
