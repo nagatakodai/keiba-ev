@@ -32,6 +32,7 @@ import datetime as _dt
 import json
 import math
 import os
+import re
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -55,7 +56,9 @@ K = 8.0              # コース効果 θ の曲線への縮約 (走数換算)
 K_DAY = 3.0          # 開催日馬場差 δ の 0 への縮約
 WINDOW_DAYS = 540    # 学習に使う走の期間 (最新日から遡る)
 MAX_BEHIND = 3.0     # 勝ち時計が分かる走で 3 秒超の大差負けは条件効果の推定から除外 (ノイズ)
-ITERS = 25
+LOAD_SLACK_DAYS = 365  # 再学習時、今日から WINDOW_DAYS+これ より古い行は読み込まない (メモリ節約)
+MAX_ITERS = 500      # 交互最小二乗の上限 (通常 100〜200 回で収束)
+TOL = 1e-7           # 1 反復の最大変化 (log 秒) がこれ未満で収束 = 90 秒のレースで 0.00001 秒未満
 
 
 # ------------------------------------------------------------ 正規化 ----
@@ -85,16 +88,24 @@ def norm_going(g: str) -> str:
     return ""
 
 
-_JUMP_KEYS = ("障害", "J・G", "ジャンプ", "JS", "GJ")
+# 障害の目印 (JRA accessU は障害を「芝」で返すのでレース名で判定する)。JS/GJ は直前が英字でないときだけ
+# (ペガサスJS・中山GJ は障害、YJSF名1・LJS名(C) = ヤング/レディースジョッキーズシリーズは平地)。
+_JUMP_RE = re.compile(r"障害|ジャンプ|J・G|(?<![A-Z])(?:JS|GJ)")
+# 末尾 J の略称 (東京ハイJ / 阪神スプリJ / 三木ホースJ) は芝 2750m 以上のときだけ障害
+# (「次開催は15年ぶりJ」ダ1800・「2025J」ダート のような平地のレース名を拾わないため)。
+_JUMP_TAIL_RE = re.compile(r"(?<![A-Za-z0-9])J$")
+JUMP_MIN_DISTANCE = 2750
 
 
-def norm_surface(surface: str, race_class: str = "") -> str:
-    """芝/ダート/障害。JRA accessU は障害を「芝」で返すのでクラス名で判定する。"""
+def norm_surface(surface: str, race_class: str = "", distance: int = 0) -> str:
+    """芝/ダート/障害。"""
     s = unicodedata.normalize("NFKC", surface or "").strip()
     if s in ("ダ", "ダート"):
         s = "ダート"
-    rc = unicodedata.normalize("NFKC", race_class or "")
-    if any(k in rc for k in _JUMP_KEYS) or s == "障":
+    rc = unicodedata.normalize("NFKC", race_class or "").strip()
+    if s in ("障", "障害") or _JUMP_RE.search(rc):
+        return "障害"
+    if s == "芝" and distance >= JUMP_MIN_DISTANCE and _JUMP_TAIL_RE.search(rc):
         return "障害"
     return s
 
@@ -137,8 +148,8 @@ def valid_flat_time(surface: str, distance: int, own_sec: float) -> bool:
 
 def ledger_row(horse: str, pr: Any) -> dict | None:
     """PastRun → ledger 1 行 (平地・時計が妥当なもののみ)。"""
-    surface = norm_surface(getattr(pr, "surface", ""), getattr(pr, "race_class", ""))
     distance = int(getattr(pr, "distance", 0) or 0)
+    surface = norm_surface(getattr(pr, "surface", ""), getattr(pr, "race_class", ""), distance)
     own = float(getattr(pr, "own_time_sec", 0.0) or 0.0)
     venue = norm_venue(getattr(pr, "venue", ""))
     d = date_key(getattr(pr, "date", ""))
@@ -156,8 +167,12 @@ def _row_key(r: dict) -> tuple:
     return (r["h"], r["d"], r["v"], r["dist"])
 
 
-def load_ledger(paths: Iterable[Path] | None = None) -> list[dict]:
-    """ledger を全ファイルから読み、(馬, 日付, 場, 距離) で重複除去 (後勝ち)。"""
+def load_ledger(paths: Iterable[Path] | None = None, *, min_date: int = 0) -> list[dict]:
+    """ledger を全ファイルから読み、(馬, 日付, 場, 距離) で重複除去 (後勝ち)。
+
+    min_date (YYYYMMDD) より古い行は辞書に入れずに読み飛ばす (学習窓の外は fit でも使わないので、
+    常駐 API の日次再学習でメモリを無駄に使わない)。
+    """
     files = list(paths) if paths is not None else sorted(LEDGER_DIR.glob("*.jsonl"))
     seen: dict[tuple, dict] = {}
     for p in files:
@@ -170,6 +185,8 @@ def load_ledger(paths: Iterable[Path] | None = None) -> list[dict]:
                         continue
                     if not isinstance(r, dict) or not r.get("h") or not r.get("t"):
                         continue
+                    if min_date and int(r.get("d") or 0) < min_date:
+                        continue
                     seen[_row_key(r)] = r
         except OSError:
             continue
@@ -179,24 +196,30 @@ def load_ledger(paths: Iterable[Path] | None = None) -> list[dict]:
 def record_live_runs(rd: Any, race_key: str = "") -> int:
     """解析中のレースの各馬の過去走を live ledger に追記 (換算モデルの学習データを貯める)。
 
-    race_key を渡すと同じレースは月に 1 回だけ記録する (score/bet/オッズ更新のたびに同じ過去走を
-    重ねて書かない)。重複は load 時にも除去される。失敗は呑む。
+    race_key を渡すと **(レース, 馬) ごとに月 1 回だけ** 記録する (score/bet/オッズ更新のたびに同じ
+    過去走を重ねて書かない)。過去走が取れなかった馬は記録済みにしないので、後の保存で取れれば足される。
+    重複は load 時にも除去される。失敗は呑む。
     """
     month = f"{_dt.date.today():%Y%m}"
     idx_path = LEDGER_DIR / f"live-{month}.idx"
+    done: set[str] = set()
     if race_key:
         try:
-            if race_key in idx_path.read_text(encoding="utf-8").split():
-                return 0
+            done = set(idx_path.read_text(encoding="utf-8").split("\n"))
         except OSError:
             pass
     rows: list[dict] = []
+    new_keys: list[str] = []
     for h in getattr(getattr(rd, "race", None), "horses", None) or []:
         runs = getattr(h, "past_runs_ext", None) or getattr(h, "past_runs", None) or []
-        for pr in runs:
-            r = ledger_row(getattr(h, "name", ""), pr)
-            if r is not None:
-                rows.append(r)
+        key = f"{race_key}|{norm_horse(getattr(h, 'name', ''))}" if race_key else ""
+        if key and key in done:
+            continue
+        got = [r for r in (ledger_row(getattr(h, "name", ""), pr) for pr in runs) if r is not None]
+        if got:
+            rows.extend(got)
+            if key:
+                new_keys.append(key)
     if not rows:
         return 0
     try:
@@ -205,9 +228,9 @@ def record_live_runs(rd: Any, race_key: str = "") -> int:
         with open(path, "a", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        if race_key:
+        if new_keys:
             with open(idx_path, "a", encoding="utf-8") as f:
-                f.write(race_key + "\n")
+                f.write("".join(k + "\n" for k in new_keys))
     except OSError:
         return 0
     return len(rows)
@@ -272,7 +295,9 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
     a = np.zeros(nH)
     b = np.full(len(cs_keys), 1.1)
     a_vs = np.zeros(len(vs_keys))
-    for _ in range(ITERS):
+    n_iter = 0
+    for n_iter in range(1, MAX_ITERS + 1):
+        prev_theta, prev_gam, prev_delta = theta.copy(), gam.copy(), delta.copy()
         a = np.bincount(hi, weights=y - theta[ci] - gam[gi] - delta[di], minlength=nH) / np.maximum(nh, 1)
         res_g = np.bincount(gi, weights=y - theta[ci] - a[hi] - delta[di], minlength=nG) / np.maximum(ng, 1)
         base = {g_cs[j]: res_g[j] for j in range(nG) if g_good[j]}
@@ -300,14 +325,23 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         theta = (raw + K * curve) / (nc + K)
         if day_effects:
             delta = np.bincount(di, weights=y - theta[ci] - gam[gi] - a[hi], minlength=nD) / (nd + K_DAY)
+        # 収束: θ は全体の水準が a と入れ替われるので「平均を引いた変化」で見る
+        dth = (theta - prev_theta) - float(np.mean(theta - prev_theta))
+        step = max(float(np.max(np.abs(dth))) if nC else 0.0,
+                   float(np.max(np.abs(gam - prev_gam))) if nG else 0.0,
+                   float(np.max(np.abs(delta - prev_delta))) if nD else 0.0)
+        if n_iter > 1 and step < TOL:
+            break
 
     # 表示用の参考: 条件別の勝ち時計中央値 (馬場別 n>=10 / 全馬場 n>=5)
+    # 1 レース = (場, 日, 芝ダ, 距離, 馬場, 勝ち時計)。ledger 行はレース番号を持たないので勝ち時計で
+    # 同日同条件の別レースを区別する (旧 key は同日同条件を 1 レースに潰し n 過少・中央値が速めに偏った)。
     races: dict[tuple, float] = {}
     for r in rows:
         if r.get("wt"):
-            races[(r["v"], r["d"], r["s"], r["dist"], r["g"])] = r["wt"]
+            races[(r["v"], r["d"], r["s"], r["dist"], r["g"], r["wt"])] = r["wt"]
     pw: dict[str, list[float]] = defaultdict(list)
-    for (v, d, s, dist, g), wt in races.items():
+    for (v, d, s, dist, g, _w), wt in races.items():
         pw[f"{s}|{dist}|{v}|"].append(wt)
         if g:
             pw[f"{s}|{dist}|{v}|{g}"].append(wt)
@@ -320,7 +354,7 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         "data_until": f"{last // 10000:04d}-{last // 100 % 100:02d}-{last % 100:02d}",
         "n_runs": len(use), "n_horses": nH, "n_cells": nC, "n_days": nD,
         "params": {"K": K, "K_DAY": K_DAY, "WINDOW_DAYS": WINDOW_DAYS, "MAX_BEHIND": MAX_BEHIND,
-                   "day_effects": day_effects},
+                   "day_effects": day_effects, "iterations": n_iter},
         "theta": {f"{s}|{d}|{v}": round(float(theta[i]), 6) for i, (s, d, v) in enumerate(cells)},
         "theta_n": {f"{s}|{d}|{v}": int(nc[i]) for i, (s, d, v) in enumerate(cells)},
         "gamma": {f"{c}|{s}|{g}": round(float(gam[i]), 6) for i, (c, s, g) in enumerate(glev)},
@@ -335,7 +369,8 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
 def save_model(model: dict, path: Path | None = None) -> None:
     path = path or MODEL_PATH        # 既定は呼び出し時に解決 (テストの差し替えが効くように)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
+    import threading
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")   # 同時書き込みでも混ざらない
     tmp.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -361,14 +396,19 @@ def load_model(path: Path | None = None) -> dict | None:
 
 
 def rebuild(paths: Iterable[Path] | None = None) -> dict:
-    """ledger 全体から再学習して保存。返り値はモデル dict。"""
-    model = fit(load_ledger(paths))
+    """ledger から再学習して保存。返り値はモデル dict。明らかに学習窓の外の行は読まない。
+
+    学習窓は「ledger の最新日」から WINDOW_DAYS。読み飛ばしは「今日」基準なので、最新データが
+    古い間 (netkeiba 規制後で live ledger が薄い時期) も窓を削らないよう 1 年の余裕を持たせる。
+    """
+    lim = _dt.date.today() - _dt.timedelta(days=WINDOW_DAYS + LOAD_SLACK_DAYS)
+    model = fit(load_ledger(paths, min_date=lim.year * 10000 + lim.month * 100 + lim.day))
     save_model(model)
     return model
 
 
-def rebuild_if_stale(max_age_hours: float = 24.0) -> bool:
-    """モデルが古く (max_age 超) かつ ledger がモデル以降に更新されていれば再学習。常駐ループ用。"""
+def needs_rebuild(max_age_hours: float = 24.0) -> bool:
+    """モデルが古く (max_age 超) かつ ledger がモデル以降に更新されているか。"""
     try:
         m_mtime = MODEL_PATH.stat().st_mtime
     except OSError:
@@ -377,7 +417,12 @@ def rebuild_if_stale(max_age_hours: float = 24.0) -> bool:
     if m_mtime and time.time() - m_mtime < max_age_hours * 3600:
         return False
     newest = max((p.stat().st_mtime for p in LEDGER_DIR.glob("*.jsonl")), default=0.0)
-    if not newest or newest <= m_mtime:
+    return bool(newest) and newest > m_mtime
+
+
+def rebuild_if_stale(max_age_hours: float = 24.0) -> bool:
+    """needs_rebuild なら同じプロセスで再学習。常駐 API は別プロセス (scripts/build_time_model.py) で回す。"""
+    if not needs_rebuild(max_age_hours):
         return False
     rebuild()
     return True
@@ -394,7 +439,20 @@ def log_effect(model: dict, surface: str, distance: int, venue: str, going: str)
         if a is None or b is None:
             return None
         th = a + b * math.log(distance)
-    return th + model["gamma"].get(f"{circuit(venue)}|{surface}|{_going_level(going)}", 0.0)
+    return th + going_effect(model, venue, surface, going)
+
+
+def going_effect(model: dict, venue: str, surface: str, going: str) -> float:
+    """γ(馬場状態)。その circuit で未学習の馬場 (例: 地方の芝 不良) は中央/地方のもう一方の値で補い、
+    それも無ければ 0 (=良扱い)。"""
+    g = _going_level(going)
+    gam = model.get("gamma", {})
+    c = circuit(venue)
+    other = "nar" if c == "jra" else "jra"
+    v = gam.get(f"{c}|{surface}|{g}")
+    if v is None:
+        v = gam.get(f"{other}|{surface}|{g}", 0.0)
+    return float(v)
 
 
 def day_effect(model: dict, venue: str, date: int, surface: str) -> float:

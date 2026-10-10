@@ -119,6 +119,41 @@ function topNumbers(ranks: Map<number, number>): number[] {
     .sort((a, b) => a - b);
 }
 
+// 色付けの比較は「タイム順位あり かつ その指数あり」の同じ馬の集合の中で順位を付け直して行う。
+// (全頭の Claude/市場順位とタイム順位をそのまま比べると、タイム順位の無い馬 (過去走なしの新馬等) の
+//  分だけ片側がずれ、偽の「タイム高評価」が付いていた。2026-10-10 レビュー)。
+type WithinSet = { idx: Map<number, number>; time: Map<number, number>; size: number };
+
+function withinSetRanks(
+  horses: TimeEvalHorse[],
+  rows: IndexCompareRow[],
+  pick: (r: IndexCompareRow) => number | null | undefined,
+): WithinSet {
+  const has = new Set(
+    rows
+      .filter((r) => {
+        const v = pick(r);
+        return v != null && Number.isFinite(v);
+      })
+      .map((r) => r.number),
+  );
+  const cmp = horses.filter((h) => h.rank != null && has.has(h.number));
+  const nums = new Set(cmp.map((h) => h.number));
+  const idx = rankByIndex(
+    rows.filter((r) => nums.has(r.number)),
+    pick,
+  );
+  const time = new Map(
+    [...cmp]
+      .sort((a, b) => (a.rank as number) - (b.rank as number))
+      .map((h, i) => [h.number, i + 1] as [number, number]),
+  );
+  return { idx, time, size: cmp.length };
+}
+
+// 比較集合がこれより小さいと順位差に意味が無いので色付けしない。
+const MIN_COMPARE_SET = 4;
+
 // タイム換算指数 (50 = レース中央値、1 秒速いごとに +10) のセル色。
 function indexCellClass(v: number | null): string {
   if (v == null) return "text-(--color-muted)";
@@ -154,13 +189,15 @@ function finishCell(pos: number | null | undefined) {
 // (緑 = その指標よりタイムの方が高評価 / 赤 = タイムの方が低評価)。
 function CompareRankCell({
   rank,
-  timeRank,
+  number,
+  cmp,
   who,
   topClass,
   first = false,
 }: {
   rank: number | undefined;
-  timeRank: number | null;
+  number: number;
+  cmp: WithinSet;
   who: string;
   topClass: string;
   first?: boolean;
@@ -169,8 +206,12 @@ function CompareRankCell({
   if (rank == null) {
     return <td className={`${base} text-(--color-muted)`}>—</td>;
   }
+  // セルの数字は全頭での順位 (人気順として見慣れた値)。色と説明は比較集合の中での順位差で決める。
+  const ci = cmp.idx.get(number);
+  const ct = cmp.time.get(number);
+  const comparable = ci != null && ct != null && cmp.size >= MIN_COMPARE_SET;
   // 正 = その指標ではタイム順位より下位 (= タイムの方が高く評価している)。
-  const delta = timeRank != null ? rank - timeRank : null;
+  const delta = comparable ? (ci as number) - (ct as number) : null;
   let color = rank === 1 ? topClass : "";
   let note = "";
   if (delta != null && delta >= RANK_GAP_MARK) {
@@ -180,10 +221,13 @@ function CompareRankCell({
     color = "text-rose-300/90";
     note = ` — タイムの方が ${-delta} 位下 (タイム低評価)`;
   }
+  const detail = comparable
+    ? ` (比較: タイム評価のある ${cmp.size} 頭中 ${who} ${ci}位 / タイム ${ct}位${note})`
+    : "";
   return (
     <td
       className={`${base} ${color} ${rank === 1 ? "font-bold" : ""}`}
-      title={`${who} ${rank}位${timeRank != null ? ` / タイム ${timeRank}位` : ""}${note}`}
+      title={`${who} ${rank}位 (全頭)${detail}`}
     >
       {rank}
     </td>
@@ -304,6 +348,10 @@ export function TimeEvalCard({
   const te = timeEval;
   const target = te.target;
   const cond = target ? targetLabel(target) : "";
+  // 換算対象外のカードでは「馬場未発表 → 良と仮定」の良を出さない (ばんえいが「帯広 良」と出ていた)。
+  const condNA = target
+    ? targetLabel(target.going_source === "assumed" ? { ...target, going: "" } : target)
+    : "";
 
   // 換算不能 (ばんえい / 当レース条件不明 等) は理由を控えめに出す (黙って消さない)。
   if (!te.available) {
@@ -311,7 +359,7 @@ export function TimeEvalCard({
       <section className="rounded-xl border border-(--color-line) bg-(--color-card)/70 px-4 py-2.5 text-xs text-(--color-muted) flex flex-wrap items-center gap-x-2 gap-y-1">
         <Timer className="w-3.5 h-3.5 shrink-0" aria-hidden />
         <span className="font-bold">タイム換算比較</span>
-        {cond && <span className="tnum">{cond}</span>}
+        {condNA && <span className="tnum">{condNA}</span>}
         <span>— {te.reason?.trim() || "換算できるデータがありません"}</span>
       </section>
     );
@@ -325,6 +373,8 @@ export function TimeEvalCard({
   const icRows = indexCompare ?? [];
   const claudeRank = rankByIndex(icRows, (r) => r.claude_index);
   const marketRank = rankByIndex(icRows, (r) => r.market_index);
+  const claudeCmp = withinSetRanks(horses, icRows, (r) => r.claude_index);
+  const marketCmp = withinSetRanks(horses, icRows, (r) => r.market_index);
   const icName = new Map(icRows.map((r) => [r.number, r.name]));
   const timeTop = horses.filter((h) => h.rank === 1);
   const timeTopNums = timeTop.map((h) => h.number);
@@ -555,13 +605,15 @@ export function TimeEvalCard({
                     <CompareRankCell
                       first
                       rank={claudeRank.get(h.number)}
-                      timeRank={rank}
+                      number={h.number}
+                      cmp={claudeCmp}
                       who="Claude"
                       topClass="text-violet-300"
                     />
                     <CompareRankCell
                       rank={marketRank.get(h.number)}
-                      timeRank={rank}
+                      number={h.number}
+                      cmp={marketCmp}
                       who="市場"
                       topClass="text-sky-300"
                     />
@@ -601,7 +653,8 @@ export function TimeEvalCard({
       <p className="mt-1 text-[11px] text-(--color-muted)">
         順位比較: Claude / 市場の順位がタイム順位より {RANK_GAP_MARK} 以上下 ={" "}
         <span className="text-emerald-300">緑</span> (タイムの方が高評価)、{RANK_GAP_MARK} 以上上 ={" "}
-        <span className="text-rose-300/90">赤</span> (タイムの方が低評価)。
+        <span className="text-rose-300/90">赤</span> (タイムの方が低評価)。色は「タイム評価と指数の両方がある馬」の中で
+        順位を付け直して比べています (数字は全頭での順位)。
       </p>
     </Card>
   );

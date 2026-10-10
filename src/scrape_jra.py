@@ -717,7 +717,7 @@ def _fetch_baba_pages(venue: str, day: str) -> tuple[dict[str, dict], bool]:
         ok = True
         info = parse_jra_baba(html)
         v = info.get("venue", "")
-        if v and info.get("date") == day:
+        if v and info.get("date") == day and _static_values_current(info.get("as_of", ""), day):
             d = {k: info[k] for k in ("weather", "芝", "ダート", "as_of") if info.get(k)}
             if _baba_usable(d):
                 found[v] = {**d, "source": "page"}
@@ -735,6 +735,20 @@ def _fetch_baba_pages(venue: str, day: str) -> tuple[dict[str, dict], bool]:
     return found, ok
 
 
+def _static_values_current(as_of: str, day: str) -> bool:
+    """静的ページの値を開催日 day の馬場として使ってよいか。
+
+    静的ページは開催当日も「前日正午現在」の発表値のまま (当日値はページの JS が live JSON で描画する)。
+    → 開催日当日以降は、発表時点 (as_of の 月/日) が開催日と一致するときだけ採用する (前日の値を
+    当日の馬場として扱わない)。開催日が未来 (前夜の翌日スキャン等) なら前日発表が最新の予想なので採用。
+    as_of が読めないときは当日以降は不採用 (安全側)。
+    """
+    if day > _jst_today():
+        return True
+    m = re.search(r"(\d{1,2})月(\d{1,2})日", as_of or "")
+    return bool(m) and (int(m.group(1)), int(m.group(2))) == (int(day[4:6]), int(day[6:8]))
+
+
 def _jst_today() -> str:
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -742,7 +756,7 @@ def _jst_today() -> str:
 
 
 def fetch_jra_going(venue_name: str, date: str | None = None, *,
-                    ttl_sec: float = _BABA_TTL_SEC) -> dict | None:
+                    ttl_sec: float = _BABA_TTL_SEC, cache_only: bool = False) -> dict | None:
     """JRA 公式の当日 天候/馬場状態 → {"weather": "晴", "芝": "良", "ダート": "良",
     "as_of": "...", "source": "live"|"page"} (取れた項目のみ)。取れなければ None。
 
@@ -752,6 +766,8 @@ def fetch_jra_going(venue_name: str, date: str | None = None, *,
     (date, 場) ごとにメモリ + data/cache/jra_baba/<date>.json へ TTL (既定 15 分) で cache し
     score/bet 段で JRA を叩き直さない (「データ無し」も TTL 内は cache)。通信失敗は cache せず
     None。例外は投げない (解析を止めない)。
+    cache_only=True は通信せず cache だけを見る (締切直前の bet 段用: 馬場は表示・時計換算にしか
+    使わないので、JRA の馬場ページが詰まっても投票の判断を待たせない。score 段が数分前に埋めている)。
     """
     try:
         venue = _norm_jra_venue(venue_name)
@@ -762,6 +778,8 @@ def fetch_jra_going(venue_name: str, date: str | None = None, *,
         hit, data = _baba_cache_lookup(day, venue, now, ttl_sec)
         if hit:
             return dict(data) if _baba_usable(data) else None
+        if cache_only:
+            return None
         found: dict[str, dict] = {}
         ok = False
         try:
@@ -1205,7 +1223,8 @@ def analyze_jra(netkeiba_rid: str, *, save_snapshot: bool = False, start_at: int
     # 当日の天候/馬場状態 (JRA 公式 馬場情報)。単複ページには馬場状態が無いので別取得する
     # (live JSON → 静的ページ fallback・data/cache/jra_baba に 15 分 cache で score/bet 段共用・
     # 取れなければ None = weather_text は従来どおり)。
-    going_info = fetch_jra_going(_split_race_id(netkeiba_rid)[0], loc.date)
+    going_info = fetch_jra_going(_split_race_id(netkeiba_rid)[0], loc.date,
+                                 cache_only=(phase == "bet"))
 
     used_cache = False
     if sh.exists():

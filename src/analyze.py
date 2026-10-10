@@ -474,8 +474,13 @@ def _append_tool_usage(race_id: str, name: str, query: str) -> None:
         pass
 
 
-def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
-    """score ステージの Claude 指数を `<race_id>.llm.json` に保存 (bet ステージが読む)。"""
+def _save_llm_scores(race_id: str, parsed: dict, *, model: str,
+                     anchor: dict[int, float] | None = None, anchor_sev: int | None = None) -> None:
+    """score ステージの Claude 指数を `<race_id>.llm.json` に保存 (bet ステージが読む)。
+
+    anchor = この採点で Claude に渡した仮指数 (と、その計算時の馬場の重さ 良0/稍1/重2/不3)。
+    snapshot の仮指数・prov_delta は「Claude が実際に見た叩き台」を使う (2026-10-10)。
+    """
     out = _llm_scores_path(race_id)
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -489,6 +494,9 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str) -> None:
         # scale="strength": scores は 0-100 強さ指数 (温度パス)。"prob": 推定勝率 % (後方互換)。
         "scale": parsed.get("scale", "strength"),
         "scores": {str(k): v for k, v in (parsed.get("scores") or {}).items()},
+        # Claude に渡した仮指数 (叩き台) と、その計算時の馬場の重さ (None = 馬場不明で計算)。
+        "provisional": ({str(k): round(float(v), 1) for k, v in anchor.items()} if anchor else None),
+        "provisional_going_sev": anchor_sev,
         "support": {str(k): v for k, v in (parsed.get("support") or {}).items()},
         # alerts: 各馬の直前/軟情報フラグ配列 (例 {"3": ["取消", "馬体重-12kg"]})。記録/表示用。
         "alerts": {str(k): list(v) for k, v in (parsed.get("alerts") or {}).items()},
@@ -642,7 +650,11 @@ def _run_score_stage(
     # 仮指数 (公式出走表だけの市場非依存な叩き台) を解決し Claude に anchor として渡す。
     # Claude は出走表外の検索情報でこれを ±調整する (二段パイプライン第一段, 2026-07-01)。
     # 既存 snapshot にあれば再利用 = 一度計算したら凍結 (オッズ更新で揺れない, ユーザ指摘 2026-07-01)。
-    provisional = _resolve_provisional(race_id, rd) or None
+    # 馬場状態が判明して凍結時と変わっていれば作り直す (2026-10-10: keiba.go.jp/JRA 経路に当日の馬場が
+    # 入ったため、凍結値の馬場と Claude に見せる見出しの馬場が食い違わないように)。実際に渡した値は
+    # .llm.json に保存し、snapshot の仮指数 / prov_delta (Claude − 仮指数) はそれを使う。
+    provisional, prov_sev = _resolve_provisional_with_sev(race_id, rd, for_claude_run=True)
+    provisional = provisional or None
     try:
         # score_horses = dispatcher: KEIBA_SCORE_PARALLEL で並列 score (検索大幅増)、
         # それ以外/失敗時は従来の単一セッション score_horses_stream にフォールバック。
@@ -696,7 +708,7 @@ def _run_score_stage(
     try:
         parsed = llm_mod.parse_horse_scores("".join(chunks))
         if parsed.get("scores"):
-            _save_llm_scores(race_id, parsed, model=model)
+            _save_llm_scores(race_id, parsed, model=model, anchor=provisional, anchor_sev=prov_sev)
             console.print(f"[cyan]score 完了 → {len(parsed['scores'])} 頭に指数付与[/cyan]")
         else:
             console.print("[yellow]score 出力に scores 無し — キャッシュせず[/yellow]")
@@ -886,28 +898,23 @@ def _load_saved_time_eval(race_id: str) -> dict | None:
     return te if isinstance(te, dict) else None
 
 
-def _te_ranked(te: dict | None) -> int:
-    return sum(1 for h in (te or {}).get("horses", []) if h.get("rank"))
-
-
 def _resolve_time_eval(race_id: str, rd) -> dict | None:
     """タイム換算比較 (src/time_eval.py) を計算する。毎回再計算 (馬場状態の発表で換算が変わるため)。
 
-    ただし今回の rd で過去走が取れず全馬未評価・当レース条件が取れない (JRA bet 段の過去走キャッシュ
-    欠落、keibago の DebaTable 空で馬リストへ縮退 等) ときは、既存 snapshot の評価済み値を引き継ぐ
-    (score 段の良い値を空で上書きしない。仮指数の凍結と同じ発想)。失敗しても解析は止めない。
+    今回の rd で過去走が取れない馬・当レース条件が取れない保存 (JRA bet 段の過去走キャッシュ欠落、
+    keibago の DebaTable 空で馬リストへ縮退、レート制限で一部の馬柱が空 等) は、既存 snapshot の評価を
+    馬単位で引き継ぐ (time_eval.merge_previous: 取消馬は落として順位を付け直す)。失敗しても解析は止めない。
     """
     try:
         te = _time_eval_mod.evaluate(rd)
     except Exception as e:  # noqa: BLE001
         console.print(f"[dim]time_eval 失敗 (解析は継続): {e}[/dim]")
         te = None
-    if te and te.get("available") and _te_ranked(te) > 0:
+    runners = {h.number for h in rd.race.horses if not h.absent}
+    try:
+        return _time_eval_mod.merge_previous(te, _load_saved_time_eval(race_id), runners)
+    except Exception:  # noqa: BLE001
         return te
-    prev = _load_saved_time_eval(race_id)
-    if prev and prev.get("available") and _te_ranked(prev) > 0:
-        return prev
-    return te
 
 
 def _print_time_eval(rd) -> None:
@@ -916,6 +923,82 @@ def _print_time_eval(rd) -> None:
         _time_eval_mod.print_time_eval(_time_eval_mod.evaluate(rd), console)
     except Exception as e:  # noqa: BLE001
         console.print(f"[dim]time_eval 表示失敗: {e}[/dim]")
+
+
+def _load_llm_anchor(race_id: str) -> tuple[dict[int, float], int | None] | None:
+    """`.llm.json` に保存された「Claude に渡した仮指数」と馬場の重さ (無ければ None)。"""
+    try:
+        d = json.loads(_llm_scores_path(race_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    anc = d.get("provisional") if isinstance(d, dict) else None
+    if not isinstance(anc, dict) or not anc:
+        return None
+    out: dict[int, float] = {}
+    for k, v in anc.items():
+        try:
+            out[int(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    sev = d.get("provisional_going_sev")
+    return (out, sev if isinstance(sev, int) else None) if out else None
+
+
+def _load_saved_provisional_sev(race_id: str) -> int | None:
+    """既存 snapshot の仮指数を計算したときの馬場の重さ (未記録・不明は None)。"""
+    p = ROOT / "data" / "predictions" / f"{race_id}.json"
+    try:
+        sev = json.loads(p.read_text(encoding="utf-8")).get("provisional_going_sev")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+    return sev if isinstance(sev, int) else None
+
+
+def _rd_going_sev(rd) -> int | None:
+    try:
+        return _provisional_mod._going_sev(_provisional_mod._today_going(rd))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _has_past_runs(rd) -> bool:
+    runners = [h for h in rd.race.horses if not h.absent]
+    return bool(runners) and sum(1 for h in runners if h.past_runs) * 2 >= len(runners)
+
+
+def _resolve_provisional_with_sev(race_id: str, rd, *,
+                                  for_claude_run: bool = False) -> tuple[dict[int, float], int | None]:
+    """仮指数と、それを計算したときの馬場の重さ (良0/稍1/重2/不3, 不明 None) を返す。
+
+    - snapshot 表示用 (for_claude_run=False): Claude が採点済みなら、その採点で **Claude に渡した仮指数**
+      (.llm.json の anchor) を使う → prov_delta (Claude − 仮指数) が「Claude がどれだけ動かしたか」のまま。
+    - Claude に渡すとき (for_claude_run=True): 凍結値を使うが、**馬場状態が判明していて凍結時の馬場と
+      違えば作り直す** (過去走が半数以上の馬にあるときだけ。縮退 rd で全馬 50 にしない)。
+    - それ以外は従来どおり凍結 (_resolve_provisional)。
+    """
+    cur_sev = _rd_going_sev(rd)
+    if not for_claude_run:
+        anc = _load_llm_anchor(race_id)
+        if anc:
+            vals, sev = dict(anc[0]), anc[1]
+            missing = [h.number for h in rd.race.horses if not h.absent and h.number not in vals]
+            if missing:
+                try:
+                    fresh = _provisional_mod.provisional_index(rd)
+                    vals.update({n: fresh[n] for n in missing if n in fresh})
+                except Exception:  # noqa: BLE001
+                    pass
+            return vals, sev
+    prev = _load_saved_provisional(race_id)
+    if prev:
+        frozen_sev = _load_saved_provisional_sev(race_id)
+        if for_claude_run and cur_sev is not None and cur_sev != frozen_sev and _has_past_runs(rd):
+            try:
+                return _provisional_mod.provisional_index(rd), cur_sev
+            except Exception:  # noqa: BLE001
+                pass
+        return _resolve_provisional(race_id, rd), frozen_sev
+    return _resolve_provisional(race_id, rd), cur_sev
 
 
 def _resolve_provisional(race_id: str, rd) -> dict[int, float]:
@@ -1189,7 +1272,7 @@ def _save_prediction_snapshot(
     # 仮指数 (公式出走表だけの市場非依存な叩き台)。Claude 最終指数と併記して「叩き台→調整後」を
     # 可視化する (2026-07-01)。**既存 snapshot にあれば再利用して凍結** — オッズ更新/再score で
     # レース内再正規化により値が揺れるのを防ぐ (ユーザ指摘 2026-07-01: 出走表のみで決めるべき)。
-    _prov = _resolve_provisional(race_id, rd)
+    _prov, _prov_sev = _resolve_provisional_with_sev(race_id, rd)
     # タイム換算比較 (過去走の走破時計を当レース条件に換算, 2026-10-10)。市場・Claude と独立。
     _te = _resolve_time_eval(race_id, rd)
     try:   # 過去走を換算モデルの学習データ (live ledger) に貯める (レース 1 回のみ・失敗は無視)
@@ -1306,6 +1389,9 @@ def _save_prediction_snapshot(
                              or None),
         # 仮指数 (公式出走表だけの市場非依存な叩き台, 0-100)。Claude 最終指数の anchor。
         "provisional_index": ({str(k): v for k, v in _prov.items()} or None),
+        # 仮指数を計算したときの馬場の重さ (良0/稍1/重2/不3, 不明 None)。Claude 再採点時に当日の馬場と
+        # 違えば作り直す判定に使う (2026-10-10)。
+        "provisional_going_sev": _prov_sev,
         # Claude 指数 × 市場指数 × 仮指数 を per-horse で併記した表 (差 = Claude − 市場、
         # prov_delta = Claude − 仮指数、support=補強件数、alerts=直前/軟情報フラグ)。
         "index_compare": _build_index_compare(rd, llm_win_index, llm_support, llm_alerts,

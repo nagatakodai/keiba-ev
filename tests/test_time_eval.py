@@ -251,8 +251,116 @@ def test_snapshot_carries_time_eval(tmp_path, monkeypatch):
     assert snap["time_eval"]["available"] is True
     assert set(snap["time_index"]) == {"1", "2"}
     assert len(tm.load_ledger()) > 0
-    # 次の保存で過去走が取れなくても (全馬未評価) 前回の評価を引き継ぐ
+    # 次の保存で過去走が取れなくても (全馬未評価) 前回の評価を引き継ぐ (今回居ない馬は落とす)
     rd2 = _race(horses=[Horse(number=1, name="アルファ"), Horse(number=2, name="ブラボー")])
     az._save_prediction_snapshot("T-1-1", rd2, [], [], probs=None)
     snap2 = json.loads((tmp_path / "data" / "predictions" / "T-1-1.json").read_text(encoding="utf-8"))
-    assert snap2["time_eval"] == snap["time_eval"]
+    keep = {h["number"]: (h["rank"], h["est_sec"]) for h in snap["time_eval"]["horses"] if h["number"] in (1, 2)}
+    assert {h["number"]: (h["rank"], h["est_sec"]) for h in snap2["time_eval"]["horses"]} == keep
+
+
+# ------------------------------------------------------------ レビュー指摘の回帰テスト (2026-10-10) ----
+
+def _te(horses):
+    return te_mod.evaluate(_race(horses=horses), _model())
+
+
+def test_merge_drops_scratched_and_reranks():
+    """前回の評価を引き継ぐときも、後から取り消した馬は落として順位を付け直す。"""
+    prev = _te(_horses())
+    top = next(h["number"] for h in prev["horses"] if h["rank"] == 1)
+    cur = _te([Horse(number=n, name=f"x{n}") for n in (1, 2, 3)])      # 過去走なし = 全馬未評価
+    runners = {1, 2, 3} - {top}
+    out = te_mod.merge_previous(cur, prev, runners)
+    nums = [h["number"] for h in out["horses"]]
+    assert top not in nums
+    assert [h["rank"] for h in out["horses"] if h["rank"]] == [1]
+    assert out["horses"][0]["gap_sec"] == 0.0
+
+
+def test_merge_carries_over_horses_missing_runs_only_for_same_target():
+    full = _te(_horses())
+    hs = _horses()
+    hs[0].past_runs = []                                                # #1 だけ馬柱取得に失敗
+    partial = _te(hs)
+    assert next(h for h in partial["horses"] if h["number"] == 1)["rank"] is None
+    out = te_mod.merge_previous(partial, full, {1, 2, 3})
+    by = {h["number"]: h for h in out["horses"]}
+    assert by[1]["rank"] is not None and by[1]["est_sec"] == next(
+        h for h in full["horses"] if h["number"] == 1)["est_sec"]
+    # 当レース条件 (馬場状態) が変わったら前回の換算時計は混ぜない
+    wet = te_mod.evaluate(_race(weather_text="雨 / 稍重", horses=hs), _model())
+    out2 = te_mod.merge_previous(wet, full, {1, 2, 3})
+    assert next(h for h in out2["horses"] if h["number"] == 1)["rank"] is None
+
+
+def test_day_adj_none_when_day_not_estimated():
+    h = Horse(number=1, name="アルファ", past_runs=[
+        _pr("2026.09.01", "大井", "ダート", 1400, "良", 89.9),   # δ あり
+        _pr("2026.09.08", "大井", "ダート", 1400, "良", 89.9),   # δ なし (未推定)
+    ])
+    runs = {r["date"]: r for r in _te([h])["horses"][0]["runs"]}
+    assert runs["2026-09-01"]["day_adj_sec"] > 0
+    assert runs["2026-09-08"]["day_adj_sec"] is None
+
+
+@pytest.mark.parametrize("surface,rc,dist,want", [
+    ("ダート", "YJSF名2勝", 1400, "ダート"),     # ヤングジョッキーズシリーズ = 平地
+    ("芝", "YJSF名1", 2000, "芝"),
+    ("ダート", "LJS名(C)", 1400, "ダート"),
+    ("芝", "ペガサスJS", 3000, "障害"),
+    ("芝", "中山GJ", 4250, "障害"),
+    ("芝", "障害4歳上未勝利", 2860, "障害"),
+    ("芝", "東京ハイJ", 3110, "障害"),           # accessU の末尾 J 略称 (芝 2750m 以上)
+    ("ダート", "次開催は15年ぶりJ", 1800, "ダート"),
+    ("ダート", "2025J", 1800, "ダート"),
+    ("芝", "ステイヤーズS", 3600, "芝"),
+])
+def test_jump_detection(surface, rc, dist, want):
+    assert tm.norm_surface(surface, rc, dist) == want
+
+
+def test_par_win_counts_each_race():
+    """同じ日・同じ条件の別レース (勝ち時計が違う) を 1 レースに潰さない。"""
+    rows = []
+    for day in range(6):
+        for k, wt in enumerate((89.0, 87.0)):
+            rows.append({"h": f"h{day}{k}", "d": 20260101 + day, "v": "大井", "s": "ダート", "dist": 1400,
+                         "g": "良", "t": wt, "wt": wt})
+            rows.append({"h": f"h{day}{k}", "d": 20250101 + day, "v": "大井", "s": "ダート", "dist": 1200,
+                         "g": "良", "t": 75.0, "wt": 0.0})
+    m = tm.fit(rows)
+    assert m["par_win"]["ダート|1400|大井|"] == [88.0, 12]
+
+
+def test_record_live_runs_per_horse():
+    """過去走が取れなかった馬は記録済みにしない (後の保存で取れたら足される)。"""
+    hs = _horses()[:2]
+    saved = hs[1].past_runs
+    hs[1].past_runs = []
+    assert tm.record_live_runs(_race(horses=hs), race_key="R-9") > 0
+    hs[1].past_runs = saved
+    assert tm.record_live_runs(_race(horses=hs), race_key="R-9") > 0     # ブラボー分だけ追加
+    assert tm.record_live_runs(_race(horses=hs), race_key="R-9") == 0
+    assert {r["h"] for r in tm.load_ledger()} >= {"アルファ", "ブラボー"}
+
+
+def test_going_effect_falls_back_to_other_circuit():
+    m = _model()
+    m["gamma"]["jra|ダート|不"] = -0.02
+    assert tm.going_effect(m, "大井", "ダート", "不") == -0.02        # 地方に 不 が無ければ中央の値
+    assert tm.going_effect(m, "大井", "ダート", "稍") == -0.01
+    assert tm.going_effect(m, "大井", "芝", "重") == 0.0               # どちらにも無ければ 良扱い
+
+
+def test_fit_converges_and_records_iterations():
+    rnd = random.Random(5)
+    rows = []
+    for h in range(80):
+        ab = rnd.gauss(0, 0.01)
+        for k, d in enumerate((1200, 1400, 1200, 1400)):
+            rows.append({"h": f"h{h}", "d": 20260101 + k, "v": "大井", "s": "ダート", "dist": d, "g": "良",
+                         "t": round((75.0 if d == 1200 else 89.0) * math.exp(ab + rnd.gauss(0, 0.002)), 2),
+                         "wt": 0.0})
+    m = tm.fit(rows)
+    assert 1 < m["params"]["iterations"] < tm.MAX_ITERS

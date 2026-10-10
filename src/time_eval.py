@@ -75,8 +75,8 @@ def _run_record(pr: Any, tgt: dict, model: dict, lt: float) -> tuple[dict, float
     """1 走 → (表示用 dict, 換算時計 or None, 日付)。"""
     venue = tm.norm_venue(getattr(pr, "venue", ""))
     race_class = getattr(pr, "race_class", "") or ""
-    surface = tm.norm_surface(getattr(pr, "surface", ""), race_class)
     distance = int(getattr(pr, "distance", 0) or 0)
+    surface = tm.norm_surface(getattr(pr, "surface", ""), race_class, distance)
     going = tm.norm_going(getattr(pr, "going", ""))
     own = float(getattr(pr, "own_time_sec", 0.0) or 0.0)
     d = tm.date_key(getattr(pr, "date", ""))
@@ -104,7 +104,10 @@ def _run_record(pr: Any, tgt: dict, model: dict, lt: float) -> tuple[dict, float
             dlt = tm.day_effect(model, venue, d, surface)
             conv = own * math.exp(lt - lr - dlt)
             rec["conv_sec"] = _r1(conv)
-            rec["day_adj_sec"] = _r1(own * math.exp(lt - lr) - conv) if dlt else 0.0
+            # 馬場差を推定できた開催日だけ補正量を出す。ledger に無い日 (例: netkeiba 規制後で live
+            # ledger 未蓄積の日) は None = 「未推定」(中立の 0.0 と区別する)。
+            known = f"{venue}|{d}|{surface}" in (model.get("delta") or {})
+            rec["day_adj_sec"] = _r1(own * math.exp(lt - lr) - conv) if known else None
             if surface != tgt["surface"]:
                 rec["kind"] = "surface"
             elif distance != tgt["distance"]:
@@ -179,7 +182,8 @@ def evaluate(rd: Any, model: dict | None = None) -> dict:
         for pr in runs[:SHOW_RUNS]:
             rec, conv, _d = _run_record(pr, tgt, model, lt)
             recs.append(rec)
-            # 推定に使うのは「時計が妥当な平地走」の新しい順 5 本 (検証と同じ数え方: 換算不可でも枠は消費)
+            # 推定に使うのは「時計が妥当な平地走」の新しい順 5 本 (換算データの無いコースでも枠は消費)。
+            # 検証ハーネスとの違いは海外/不明の場の走を枠に数えない点のみ (1.5 万頭中 3 頭が変わる程度)
             counted = rec["note"] not in ("時計なし", "障害", "ばんえい/不明", "海外/不明の場", "時計異常")
             if counted:
                 if valid_i < EST_RUNS and conv is not None:
@@ -201,23 +205,70 @@ def evaluate(rd: Any, model: dict | None = None) -> dict:
             "n_runs": len(recs), "n_used": len(used), "confidence": conf, "runs": recs,
         })
 
-    ests = sorted(r["est_sec"] for r in rows if r["est_sec"] is not None)
-    if ests:
-        best = ests[0]
-        mid = ests[len(ests) // 2] if len(ests) % 2 else (ests[len(ests) // 2 - 1] + ests[len(ests) // 2]) / 2
-        ranked = sorted((r for r in rows if r["est_sec"] is not None), key=lambda r: (r["est_sec"], r["number"]))
-        for k, r in enumerate(ranked, 1):
-            r["rank"] = k
-            r["gap_sec"] = _r1(r["est_sec"] - best)
-            r["index"] = _r1(max(0.0, min(100.0, 50.0 + INDEX_PER_SEC * (mid - r["est_sec"]))))
+    _assign_ranks(rows)
     for r in rows:
         r["est_sec"] = _r1(r["est_sec"])
-    rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0, r["number"]))
     pw = tm.par_win(model, tgt["surface"], tgt["distance"], tgt["venue"],
                     tgt["going"] if tgt["going_source"] == "announced" else "")
     return {"version": tm.VERSION, "available": True, "reason": None,
             "target": {**tgt, "par_sec": _r1(pw[0]) if pw else None, "par_n": pw[1] if pw else None},
             "model": _model_meta(model), "horses": rows}
+
+
+def _assign_ranks(rows: list[dict]) -> None:
+    """推定タイム (est_sec) から 順位・差・指数 を付け直し、順位順に並べる (順位なしは末尾)。"""
+    for r in rows:
+        r["rank"] = r["gap_sec"] = r["index"] = None
+    ranked = sorted((r for r in rows if r.get("est_sec") is not None), key=lambda r: (r["est_sec"], r["number"]))
+    if ranked:
+        ests = [r["est_sec"] for r in ranked]
+        best = ests[0]
+        n = len(ests)
+        mid = ests[n // 2] if n % 2 else (ests[n // 2 - 1] + ests[n // 2]) / 2
+        for k, r in enumerate(ranked, 1):
+            r["rank"] = k
+            r["gap_sec"] = _r1(r["est_sec"] - best)
+            r["index"] = _r1(max(0.0, min(100.0, 50.0 + INDEX_PER_SEC * (mid - r["est_sec"]))))
+    rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0, r["number"]))
+
+
+def _n_ranked(te: dict | None) -> int:
+    return sum(1 for h in (te or {}).get("horses", []) if h.get("rank"))
+
+
+def merge_previous(cur: dict | None, prev: dict | None, runners: set[int]) -> dict | None:
+    """前回 snapshot の time_eval と今回の計算を統合する (保存のたびに再計算するための劣化防止)。
+
+    keiba.go.jp / oddspark は保存のたびに馬柱を取り直し、レート制限等で一部/全部の馬の過去走が空になり得る
+    (JRA の bet 段は過去走キャッシュ頼み)。そこで:
+      - 今回が評価不能 (全馬未評価・条件不明) なら前回を使う
+      - 今回 過去走 0 走の馬は、前回が **同じ当レース条件** (場・芝ダ・距離・馬場状態) で評価済みなら引き継ぐ
+    いずれも **runners (今回の出走馬 = 取消を除く) に居ない馬は落とし**、順位・差・指数を付け直す
+    (前回の値を丸ごと返すと、後から取り消した馬が「タイム1位」のまま残っていた)。
+    """
+    import copy
+    usable_prev = prev if (prev and prev.get("available") and _n_ranked(prev) > 0) else None
+    if cur and cur.get("available") and _n_ranked(cur) > 0:
+        if usable_prev and usable_prev.get("target") == cur.get("target"):
+            old = {h["number"]: h for h in usable_prev.get("horses", [])}
+            out = copy.deepcopy(cur)
+            changed = False
+            for i, h in enumerate(out["horses"]):
+                p = old.get(h["number"])
+                if h.get("n_runs", 0) == 0 and p and p.get("rank"):
+                    out["horses"][i] = copy.deepcopy(p)
+                    changed = True
+            if changed:
+                _assign_ranks(out["horses"])
+            return out
+        return cur
+    if usable_prev:
+        out = copy.deepcopy(usable_prev)
+        if runners:
+            out["horses"] = [h for h in out["horses"] if h["number"] in runners]
+        _assign_ranks(out["horses"])
+        return out if _n_ranked(out) > 0 else cur
+    return cur
 
 
 def time_index(te: dict | None) -> dict[int, float]:

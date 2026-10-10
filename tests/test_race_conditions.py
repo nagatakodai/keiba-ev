@@ -443,7 +443,9 @@ def test_fetch_jra_going_ttl_expiry_refetches(monkeypatch, tmp_path):
 
 
 def test_fetch_jra_going_static_fallback_selects_venue_page(monkeypatch, tmp_path):
-    # live が空 (実機でも時間帯により kaisai_info=[]) → 静的ページを開催タブで辿る
+    # live が空 (実機でも時間帯により kaisai_info=[]) → 静的ページを開催タブで辿る。
+    # 前日 (10/9) 時点の取得 = 開催日 10/10 の前日発表は「最新の予想」として採用される
+    monkeypatch.setattr(jra, "_jst_today", lambda: "20261009")
     calls = _fake_baba(monkeypatch, tmp_path, live=_BABA_LIVE_EMPTY,
                        pages={"index.html": _BABA_TOKYO, "index2.html": _BABA_KYOTO})
     g = jra.fetch_jra_going("京都", "20261010")
@@ -453,6 +455,25 @@ def test_fetch_jra_going_static_fallback_selects_venue_page(monkeypatch, tmp_pat
     # 東京は index.html を読んだ時点で cache 済
     assert jra.fetch_jra_going("東京", "20261010")["source"] == "page"
     assert calls == ["accessJ.html", "index.html", "index2.html"]
+
+
+def test_fetch_jra_going_rejects_previous_day_values_on_race_day(monkeypatch, tmp_path):
+    """開催当日、静的ページは「前日正午現在」のまま → 当日の馬場として使わない (2026-10-10 レビュー)。"""
+    monkeypatch.setattr(jra, "_jst_today", lambda: "20261010")
+    _fake_baba(monkeypatch, tmp_path, live=_BABA_LIVE_EMPTY,
+               pages={"index.html": _BABA_TOKYO, "index2.html": _BABA_KYOTO})
+    assert jra.fetch_jra_going("東京", "20261010") is None
+    assert jra._static_values_current("10月10日（土曜）9時現在", "20261010")
+    assert not jra._static_values_current("10月9日（金曜）正午現在", "20261010")
+    assert not jra._static_values_current("", "20261010")
+    assert jra._static_values_current("10月9日（金曜）正午現在", "20991231")   # 未来日は前日発表を採用
+
+
+def test_fetch_jra_going_cache_only_never_hits_network(monkeypatch, tmp_path):
+    """bet 段は cache だけを見る (JRA の馬場ページが詰まっても投票判断を待たせない)。"""
+    calls = _fake_baba(monkeypatch, tmp_path, live=None, fail=True)
+    assert jra.fetch_jra_going("東京", "20261010", cache_only=True) is None
+    assert calls == []
 
 
 def test_fetch_jra_going_static_date_mismatch_and_unknown_venue(monkeypatch, tmp_path):

@@ -115,13 +115,17 @@ def main() -> int:
     t0 = time.time()
     if args.extract_raw or not RAW_LEDGER.exists():
         extract_raw(args.workers)
-    ledger = tm.load_ledger()
-    print(f"ledger rows (dedup) = {len(ledger):,} from {len(list(tm.LEDGER_DIR.glob('*.jsonl')))} file(s)", flush=True)
+    import datetime as _dt
+    lim = _dt.date.today() - _dt.timedelta(days=tm.WINDOW_DAYS + tm.LOAD_SLACK_DAYS)   # rebuild と同じ
+    ledger = tm.load_ledger(min_date=lim.year * 10000 + lim.month * 100 + lim.day)
+    print(f"ledger rows (dedup, >= {lim}) = {len(ledger):,} from {len(list(tm.LEDGER_DIR.glob('*.jsonl')))} file(s)",
+          flush=True)
     model = tm.fit(ledger)
     tm.save_model(model)
     print(f"saved {tm.MODEL_PATH}: version={model['version']} data_until={model.get('data_until')} "
           f"runs={model.get('n_runs'):,} horses={model.get('n_horses'):,} courses={model.get('n_cells'):,} "
-          f"days={model.get('n_days'):,} ({time.time() - t0:.0f}s)", flush=True)
+          f"days={model.get('n_days'):,} iterations={(model.get('params') or {}).get('iterations')} "
+          f"({time.time() - t0:.0f}s)", flush=True)
     return 0
 
 

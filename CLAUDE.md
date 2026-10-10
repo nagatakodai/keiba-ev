@@ -25,15 +25,17 @@
 
   | | 勝ち馬 AUC (選定/確認) | 推定1位の勝率 | 時計誤差 (中央値・レース平均除去) |
   |---|---|---|---|
-  | 地方 te1 (FE+δ+重み付き平均) | 0.791 / 0.774 | 39.2% / 34.7% | 0.55 秒 |
-  | JRA te1 | 0.719 / 0.719 | 21.1% / 23.3% | 0.50 秒 |
+  | 地方 te1 (FE+δ+重み付き平均) | 0.793 / 0.778 | 39.4% / 35.7% | 0.55 秒 |
+  | JRA te1 | 0.721 / 0.720 | 20.8% / 23.1% | 0.50 秒 |
   | 参考: 素朴 par (P0, 直近3走) | 地方 0.752 / 0.737・JRA 0.683 / 0.689 | | |
   | 参考: 市場 1 番人気 | (AUC ~0.85) | 地方 47% / JRA 32% | |
 
   δ (開催日の馬場差) の有無が最も効き (地方 AUC +0.010〜0.013・誤差 0.58→0.54 秒)、K/窓/大差除外は感度が小さい。**市場を超える情報**: 条件付きロジット (市場の温度 β 自由、te1 の重み付き平均) で地方 α=0.092 CI[0.029, 0.172] (選定)・確認期間の対数尤度 +0.0016/R CI[−0.0005, +0.0037] = **地方でわずかに示唆・確証なし**、JRA は α=−0.03 CI[−0.13, 0.08] で情報なし。→ 単独で賭けに勝つ指標ではなく「比べて読む」ための軸。**確率モデル・EV束・投票には未接続** (接続するなら prospective 検証が先)。
 - **当レース条件が必須 (同日に経路側も修正)**: 距離・芝ダ (+馬場状態) が要る。netkeiba 出馬表はヘッダから。**keiba.go.jp 経路は従来 `Race(distance=0, surface='')` 固定のバグ** (LightGBM 特徴量の train/serve skew・Claude 見出し "0m" の原因でもあった) → 取得済み DebaTable の `section.raceTitle` を `scrape_keibago.parse_deba_header` で読み、距離/芝ダ/周回/天候・馬場を Race に載せる (追加 GET なし。**ばんえいは distance=0/surface='' を維持** = banei LightGBM の学習分布と揃える、馬場欄は水分量なので going 不明)。→ 2026-10-10 以降の keiba.go.jp 経路 snapshot は LightGBM 特徴量・仮指数の距離/馬場因子が設計どおり効く (旧 snapshot と入力が違う。snapshot の distance>0 で区別可)。JRA は単複ページに馬場が無いので `scrape_jra.fetch_jra_going`: **静的な馬場情報ページは当日も前日正午の値のまま**で、ページの JS が叩く `POST /JRADB/accessJ.html CNAME=pw01iwtS3/CD` の JSON (全場の天候・芝/ダ馬場) を優先し、空のときだけ静的ページ (index/index2/index3) へ fallback (data/cache/jra_baba に 15 分 cache)。`Horse.past_runs_ext` = 公式自給 3 経路の全履歴 (最大 12 走・leakage 除外済、`past_runs` の 5 走窓は不変)。馬場状態未発表は「良」で換算し `going_source=assumed` を明示。ばんえい・障害・条件不明は `available=false` + 理由。keiba.go.jp の race_class は未取得 (ヘッダのレース名に含まれる) = 宿題。テスト `tests/test_race_conditions.py`。
 - **既知の限界**: δ は ledger に載っている開催日のみ (netkeiba キャッシュは 2026-05-28 まで → 当面のライブは δ なし相当、ledger 蓄積で改善) / JRA 芝の内回り・外回りは区別なし / クラス補正なし (時計そのものに能力が出る前提) / 地方の大差負けは誤差が大きい。
-- テスト: `tests/test_time_eval.py`。`tests/conftest.py` が全テストで ledger とモデルの保存先を tmp に隔離 (実装初期に既定引数の束縛で本物のモデルを上書きした事故の再発防止)。
+- **多視点敵対レビュー (2026-10-10, 4 観点×独立検証) の反映**: ①障害判定は正規表現 (`(?<![A-Z])JS|GJ` + 末尾 J は芝 2750m 以上のみ) — 旧 substring 判定はヤング/レディースジョッキーズシリーズ (YJS*/LJS*) の平地 212 走を障害扱いしていた ②参考勝ち時計 par_win は 勝ち時計込みのキーでレース単位に集計 (旧は同日同条件を 1 レースに潰し n 過少・速め偏り) ③交互最小二乗は収束判定 (1 反復の最大変化 < 1e-7, 実測 ~190 回。旧固定 25 回は換算で最大 0.15 秒・馬場差で 0.26 秒の未収束) ④前回 snapshot の引き継ぎは `time_eval.merge_previous` で馬単位 (取消馬は落として順位を付け直す・過去走が取れなかった馬だけ同じ当レース条件の前回値を使う) ⑤live ledger の記録済み判定は (レース, 馬) 単位 ⑥馬場差を推定していない開催日の補正は `day_adj_sec=None` (「—」表示、中立の 0.0 と区別) ⑦JRA 馬場: 当日は静的ページの前日正午値を採用しない (as_of の月日が開催日と一致するときだけ・未来日は前日発表を予想として採用)、bet 段は cache のみ (通信で投票判断を待たせない) ⑧**仮指数の馬場**: 経路側で当日の馬場が入ったため、Claude 採点時に馬場が判明して凍結時と違えば仮指数を作り直し、Claude に渡した値と馬場の重さを `.llm.json` (`provisional` / `provisional_going_sev`) に保存、snapshot の仮指数・prov_delta はその値を使う (`analyze._resolve_provisional_with_sev`) ⑨Web の Claude/市場との順位差の色は「タイム順位と指数の両方がある馬」の中で付け直した順位で比較 (旧は母集団違いで偽の「タイム高評価」) ⑩日次再学習は API から別プロセス (`scripts/build_time_model.py`)・失敗時 6h 待機・`GET /api/results/auto` の time_model_* に状態。修正後の検証値は上表。
+- **既知の宿題**: live ledger 行は勝ち時計 (着差) を持たないので大差負け除外が効かない (keiba.go.jp 差 / oddspark 着差 は未パース。netkeiba 由来行が学習窓から外れる 2027 後半までに対応) / oddspark 経路は当レース条件が無く time_eval 不可 (前回 snapshot があれば引き継ぐ)。
+- テスト: `tests/test_time_eval.py`・`tests/test_provisional_anchor.py`・`tests/test_race_conditions.py`。`tests/conftest.py` が全テストで ledger とモデルの保存先を tmp に隔離 (実装初期に既定引数の束縛で本物のモデルを上書きした事故の再発防止)。
 
 
 ## netkeiba IP 規制対応
