@@ -193,6 +193,7 @@ class ResultAutoFetcher:
         self.runs: int = 0
         self.market_agreement_appends: int = 0   # 市場一致シグナルを history に追記した回数
         self.signal_rules_appends: int = 0        # プレレジルール検証を history に追記した回数
+        self.time_model_rebuilds: int = 0         # タイム換算モデルを日次再学習した回数
 
     def status(self) -> dict[str, Any]:
         return {
@@ -204,6 +205,7 @@ class ResultAutoFetcher:
             "last_summary": self.last_summary,
             "market_agreement_appends": self.market_agreement_appends,
             "signal_rules_appends": self.signal_rules_appends,
+            "time_model_rebuilds": self.time_model_rebuilds,
         }
 
     def start(self) -> None:
@@ -276,6 +278,15 @@ class ResultAutoFetcher:
             if row:
                 self.signal_rules_appends += 1
         except Exception:  # noqa: BLE001 - 計測は結果取得ループを止めない
+            pass
+        # タイム換算モデル (src/time_model.py) の日次再学習 (2026-10-10): 解析時に貯まった過去走
+        # (live ledger) を取り込み、netkeiba 規制後の開催日の馬場差も推定できるようにする。
+        # モデルが 24h より古く ledger が更新されているときだけ (数秒のローカル計算・予想や投票はしない)。
+        try:
+            from src.time_model import rebuild_if_stale
+            if await asyncio.to_thread(rebuild_if_stale, 24.0):
+                self.time_model_rebuilds += 1
+        except Exception:  # noqa: BLE001 - 結果取得ループを止めない
             pass
         self.last_run_at = time.time()
         self.runs += 1

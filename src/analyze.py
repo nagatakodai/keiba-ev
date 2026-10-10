@@ -32,6 +32,8 @@ from . import odds_timeline as odds_tl_mod
 from . import portfolio as pf_mod
 from . import provisional as _provisional_mod
 from . import speed_chart as _speed_chart_mod
+from . import time_eval as _time_eval_mod
+from . import time_model as _time_model_mod
 from .aptitude import AptitudeIndex, compute_aptitudes
 from .ev import PXO_FLOOR
 from .features import build_features
@@ -204,6 +206,7 @@ def main(
 
     _print_race_header(rd)
     _print_horse_table(rd)
+    _print_time_eval(rd)
     _print_aptitudes(rd, aptitudes)
     _print_market_signals(rd, market_signals)
     _print_weather(rd)
@@ -871,6 +874,50 @@ def _load_saved_provisional(race_id: str) -> dict[int, float]:
     return out
 
 
+def _load_saved_time_eval(race_id: str) -> dict | None:
+    """既存 snapshot に保存済みの time_eval (無ければ None)。"""
+    p = ROOT / "data" / "predictions" / f"{race_id}.json"
+    if not p.exists():
+        return None
+    try:
+        te = json.loads(p.read_text(encoding="utf-8")).get("time_eval")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return te if isinstance(te, dict) else None
+
+
+def _te_ranked(te: dict | None) -> int:
+    return sum(1 for h in (te or {}).get("horses", []) if h.get("rank"))
+
+
+def _resolve_time_eval(race_id: str, rd) -> dict | None:
+    """タイム換算比較 (src/time_eval.py) を計算する。毎回再計算 (馬場状態の発表で換算が変わるため)。
+
+    ただし今回の rd で過去走が取れず全馬未評価・当レース条件が取れない (JRA bet 段の過去走キャッシュ
+    欠落、keibago の DebaTable 空で馬リストへ縮退 等) ときは、既存 snapshot の評価済み値を引き継ぐ
+    (score 段の良い値を空で上書きしない。仮指数の凍結と同じ発想)。失敗しても解析は止めない。
+    """
+    try:
+        te = _time_eval_mod.evaluate(rd)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]time_eval 失敗 (解析は継続): {e}[/dim]")
+        te = None
+    if te and te.get("available") and _te_ranked(te) > 0:
+        return te
+    prev = _load_saved_time_eval(race_id)
+    if prev and prev.get("available") and _te_ranked(prev) > 0:
+        return prev
+    return te
+
+
+def _print_time_eval(rd) -> None:
+    """CLI: タイム換算比較の表 (netkeiba 経路の analyze 本体で表示)。"""
+    try:
+        _time_eval_mod.print_time_eval(_time_eval_mod.evaluate(rd), console)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]time_eval 表示失敗: {e}[/dim]")
+
+
 def _resolve_provisional(race_id: str, rd) -> dict[int, float]:
     """仮指数を解決 — **既存 snapshot にあれば再利用**、無ければ rd から計算。
 
@@ -1143,6 +1190,12 @@ def _save_prediction_snapshot(
     # 可視化する (2026-07-01)。**既存 snapshot にあれば再利用して凍結** — オッズ更新/再score で
     # レース内再正規化により値が揺れるのを防ぐ (ユーザ指摘 2026-07-01: 出走表のみで決めるべき)。
     _prov = _resolve_provisional(race_id, rd)
+    # タイム換算比較 (過去走の走破時計を当レース条件に換算, 2026-10-10)。市場・Claude と独立。
+    _te = _resolve_time_eval(race_id, rd)
+    try:   # 過去走を換算モデルの学習データ (live ledger) に貯める (レース 1 回のみ・失敗は無視)
+        _time_model_mod.record_live_runs(rd, race_key=race_id)
+    except Exception:  # noqa: BLE001
+        pass
     _lm_model, _lm_mode = _llm_meta(race_id)   # .llm.json のモデル/リサーチ方式 (1回だけ読む)
     snapshot = {
         "race_id": race_id,
@@ -1257,6 +1310,10 @@ def _save_prediction_snapshot(
         # prov_delta = Claude − 仮指数、support=補強件数、alerts=直前/軟情報フラグ)。
         "index_compare": _build_index_compare(rd, llm_win_index, llm_support, llm_alerts,
                                                llm_evidence, llm_paddock, _prov),
+        # タイム換算比較 (te1): 各馬の過去走を当レース条件 (場・芝ダ・距離・馬場状態) に換算した
+        # 推定タイム順。Web の TimeEvalCard / CLI 表。time_index = {馬番: 0-100} (順位を使う側向け)。
+        "time_eval": _te,
+        "time_index": ({str(k): v for k, v in _time_eval_mod.time_index(_te).items()} or None),
     }
     out = ROOT / "data" / "predictions" / f"{race_id}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,258 @@
+"""タイム換算比較 (src/time_model.py + src/time_eval.py, te1)。
+
+ユーザ指示 (2026-10-10): 過去走の走破時計を、当レースと同条件ならそのまま、別距離・別馬場なら当レース
+条件に換算して比較する。換算モデルは同じ馬が別条件を走った差から条件効果を推定する固定効果モデル。
+"""
+from __future__ import annotations
+
+import json
+import math
+import random
+
+import pytest
+
+from src import time_eval as te_mod
+from src import time_model as tm
+from src.models import Horse, PastRun, Race, RaceData
+
+
+# ------------------------------------------------------------ helpers ----
+
+def _race(venue="大井", surface="ダート", distance=1400, weather_text="晴 / 良", horses=None,
+          venue_id=44, start_at=0):
+    return RaceData(race=Race(cup_id="x", schedule_index=1, race_number=1, venue_id=venue_id,
+                              venue_name=venue, race_class="C1", distance=distance, surface=surface,
+                              weather_text=weather_text, start_at=start_at, horses=horses or []),
+                    trifecta=[])
+
+
+def _pr(date, venue, surface, distance, going, own, race_class="", finish=None):
+    # keibago/JRA 形式: winner_time_sec に自走時計・diff 0
+    return PastRun(date=date, venue=venue, surface=surface, distance=distance, going=going,
+                   winner_time_sec=own, time_diff_sec=0.0, race_class=race_class, finish_pos=finish)
+
+
+def _model():
+    """手組みの換算モデル: 大井ダート 1200/1400/1600 と 川崎ダート1400、良/稍。"""
+    return {
+        "version": "te1", "fitted_at": "2026-10-10T00:00:00+09:00", "data_until": "2026-05-28",
+        "n_runs": 100, "params": {"day_effects": True},
+        "theta": {"ダート|1200|大井": math.log(75.0), "ダート|1400|大井": math.log(89.0),
+                  "ダート|1600|大井": math.log(104.0), "ダート|1400|川崎": math.log(90.0),
+                  "芝|1400|東京": math.log(82.0)},
+        "theta_n": {},
+        "gamma": {"nar|ダート|良": 0.0, "nar|ダート|稍": -0.01, "jra|芝|良": 0.0},
+        "a_vs": {"大井|ダート": math.log(89.0) - 1.1 * math.log(1400)},
+        "b": {"nar|ダート": 1.1, "jra|芝": 1.1},
+        "delta": {"大井|20260901|ダート": 0.01},
+        "par_win": {"ダート|1400|大井|": [88.0, 50]},
+    }
+
+
+# ------------------------------------------------------------ 正規化 ----
+
+def test_normalizers():
+    assert tm.norm_venue("Ｊ函館") == "函館"
+    assert tm.norm_venue("帯広(ば)") == "帯広"
+    assert tm.norm_venue("名古") == "名古屋"
+    assert tm.norm_going("稍重") == "稍" and tm.norm_going("不良") == "不" and tm.norm_going("－") == ""
+    assert tm.date_key("2026.3.1") == 20260301 and tm.date_key("2026/03/01") == 20260301
+    assert tm.norm_surface("芝", "障害4歳上未勝利") == "障害"     # JRA accessU は障害を芝で返す
+    assert tm.norm_surface("ダ") == "ダート"
+    assert tm.norm_horse("(地)ドウデュース ") == "ドウデュース"
+    assert tm.valid_flat_time("ダート", 1400, 88.0)
+    assert not tm.valid_flat_time("ダート", 1400, 52.0)           # 負担重量を時計と誤認した行
+    assert not tm.valid_flat_time("障害", 2860, 190.0)
+
+
+# ------------------------------------------------------------ fit ----
+
+def test_fit_recovers_condition_effects():
+    """同じ馬が別距離を走るデータから、距離間の時計比を復元できる (クラス構成に依らない)。"""
+    rnd = random.Random(3)
+    true = {1200: 75.0, 1400: 89.0, 1600: 104.0}
+    rows = []
+    for h in range(300):
+        ability = rnd.gauss(0.0, 0.01)
+        # 強い馬ほど長距離を多く走る (= 条件ごとのクラス構成の偏り) 状況でも比が保たれること
+        dists = [1200, 1400] if ability < 0 else [1400, 1600]
+        for k in range(4):
+            d = dists[k % 2]
+            t = true[d] * math.exp(ability + rnd.gauss(0.0, 0.002))
+            rows.append({"h": f"h{h}", "d": 20260101 + k, "v": "大井", "s": "ダート", "dist": d,
+                         "g": "良", "t": round(t, 2), "wt": 0.0})
+    m = tm.fit(rows, day_effects=False)
+    r = math.exp(m["theta"]["ダート|1400|大井"] - m["theta"]["ダート|1200|大井"])
+    assert r == pytest.approx(89.0 / 75.0, rel=0.004)
+    r2 = math.exp(m["theta"]["ダート|1600|大井"] - m["theta"]["ダート|1400|大井"])
+    assert r2 == pytest.approx(104.0 / 89.0, rel=0.004)
+    json.dumps(m, allow_nan=False)
+
+
+# ------------------------------------------------------------ evaluate ----
+
+def _horses():
+    a = Horse(number=1, name="アルファ", past_runs=[
+        _pr("2026.09.20", "大井", "ダート", 1400, "良", 88.5, finish=1),   # 同条件
+        _pr("2026.08.30", "大井", "ダート", 1200, "良", 75.0),             # 距離換算
+        _pr("2026.08.10", "川崎", "ダート", 1400, "良", 90.5),             # 同距離 (他場)
+    ])
+    b = Horse(number=2, name="ブラボー", past_runs=[
+        _pr("2026.09.21", "大井", "ダート", 1600, "稍重", 104.5),
+        _pr("2026.09.01", "大井", "ダート", 1400, "良", 89.9),             # δ=+0.01 の遅い日
+        _pr("2026.08.01", "東京", "芝", 1400, "良", 82.5),                 # 芝ダ換算
+    ])
+    c = Horse(number=3, name="チャーリー", past_runs=[
+        _pr("2026.09.15", "大井", "障害", 2600, "良", 170.0),              # 対象外
+        _pr("2026.09.01", "シャティン", "芝", 1400, "良", 81.0),            # 海外 → 対象外
+        _pr("2026.08.20", "大井", "ダート", 1400, "良", 52.0),              # 時計異常 → 対象外
+    ])
+    d = Horse(number=4, name="デルタ", absent=True, past_runs=[_pr("2026.09.20", "大井", "ダート", 1400, "良", 85.0)])
+    return [a, b, c, d]
+
+
+def test_evaluate_same_and_converted_runs():
+    te = te_mod.evaluate(_race(horses=_horses()), _model())
+    assert te["available"] is True and te["version"] == "te1"
+    assert te["target"] == {"venue": "大井", "surface": "ダート", "distance": 1400, "going": "良",
+                            "going_source": "announced", "par_sec": 88.0, "par_n": 50}
+    by = {h["number"]: h for h in te["horses"]}
+    assert 4 not in by                                   # 取消馬は出さない
+    a_runs = by[1]["runs"]
+    assert a_runs[0]["kind"] == "same" and a_runs[0]["conv_sec"] == 88.5   # 同条件は生時計のまま
+    assert a_runs[1]["kind"] == "distance"
+    assert a_runs[1]["conv_sec"] == pytest.approx(round(75.0 * 89.0 / 75.0, 1))   # 1200→1400 換算
+    assert a_runs[2]["kind"] == "same_dist"
+    assert a_runs[2]["conv_sec"] == pytest.approx(round(90.5 * 89.0 / 90.0, 1))   # 川崎→大井
+    assert by[1]["same_n"] == 1 and by[1]["same_best_sec"] == 88.5
+    # 開催日の馬場差 (δ=+0.01 = 時計の掛かる日) は換算で速くし、補正量を +秒で出す
+    b_runs = by[2]["runs"]
+    assert b_runs[1]["day_adj_sec"] > 0 and b_runs[1]["conv_sec"] < 89.9
+    assert b_runs[2]["kind"] == "surface"
+    # 対象外の走は理由付きで並べるが推定には使わない
+    notes = [r["note"] for r in by[3]["runs"]]
+    assert notes == ["障害", "海外/不明の場", "時計異常"]
+    assert by[3]["est_sec"] is None and by[3]["rank"] is None and by[3]["confidence"] == "none"
+    # 順位・差・指数
+    ranked = [h for h in te["horses"] if h["rank"]]
+    assert [h["rank"] for h in ranked] == [1, 2]
+    assert ranked[0]["gap_sec"] == 0.0 and ranked[1]["gap_sec"] > 0
+    assert ranked[0]["index"] > 50 > ranked[1]["index"]
+    assert te["horses"][-1]["number"] == 3               # 順位なしは末尾
+    json.dumps(te, allow_nan=False)                      # NaN が混ざると詳細 API が 500 になる
+
+
+def test_evaluate_weighted_mean_matches_definition():
+    """推定タイム = 重み (新しさ×距離の近さ×芝ダ×同場) 付き平均 (検証で選んだ集約と同一定義)。"""
+    m = _model()
+    te = te_mod.evaluate(_race(horses=_horses()[:1]), m)
+    runs = te["horses"][0]["runs"]
+    convs = [88.5, 75.0 * 89.0 / 75.0, 90.5 * 89.0 / 90.0]
+    ws = [0.85 ** 0 * 1.15,
+          0.85 ** 1 * math.exp(-abs(math.log(1400 / 1200)) / 0.2) * 1.15,
+          0.85 ** 2 * 1.0]
+    want = sum(w * c for w, c in zip(ws, convs)) / sum(ws)
+    assert te["horses"][0]["est_sec"] == pytest.approx(round(want, 1))
+    assert [r["weight"] for r in runs] == [pytest.approx(round(w, 3)) for w in ws]
+
+
+def test_going_assumed_when_not_announced():
+    te = te_mod.evaluate(_race(weather_text="", horses=_horses()[:1]), _model())
+    assert te["target"]["going"] == "良" and te["target"]["going_source"] == "assumed"
+    te2 = te_mod.evaluate(_race(weather_text="曇 / 稍重", horses=_horses()[:1]), _model())
+    assert te2["target"]["going"] == "稍" and te2["target"]["going_source"] == "announced"
+    # 稍 (γ=-0.01) に換算すると良より速い
+    assert te2["horses"][0]["est_sec"] < te["horses"][0]["est_sec"]
+
+
+@pytest.mark.parametrize("kw,reason", [
+    ({"venue": "帯広", "venue_id": 65, "distance": 0, "surface": ""}, "ばんえい"),
+    ({"surface": "障害", "distance": 2860}, "障害"),
+    ({"distance": 0, "surface": ""}, "不明"),
+    ({"venue": "シャティン"}, "換算データ"),
+])
+def test_unavailable_cases(kw, reason):
+    te = te_mod.evaluate(_race(horses=_horses(), **kw), _model())
+    assert te["available"] is False and reason in te["reason"] and te["horses"] == []
+    json.dumps(te, allow_nan=False)
+
+
+def test_unavailable_without_model():
+    te = te_mod.evaluate(_race(horses=_horses()))   # conftest で MODEL_PATH は空の tmp
+    assert te["available"] is False and "make time-model" in te["reason"]
+
+
+def test_market_independent_and_deterministic():
+    hs = _horses()
+    te1 = te_mod.evaluate(_race(horses=hs), _model())
+    for h in hs:
+        h.win_odds = 99.9
+    te2 = te_mod.evaluate(_race(horses=hs), _model())
+    assert te1 == te2
+
+
+def test_same_day_runs_are_dropped():
+    """当日以降の走は使わない (過去レース再解析で結果が混入しない安全策)。"""
+    import datetime as dt
+    start = int(dt.datetime(2026, 9, 20, 15, 0, tzinfo=dt.timezone(dt.timedelta(hours=9))).timestamp())
+    te = te_mod.evaluate(_race(horses=_horses()[:1], start_at=start), _model())
+    dates = [r["date"] for r in te["horses"][0]["runs"]]
+    assert "2026-09-20" not in dates and dates[0] == "2026-08-30"
+
+
+def test_past_runs_ext_preferred():
+    h = Horse(number=1, name="エコー", past_runs=[_pr("2026.09.20", "大井", "ダート", 1400, "良", 88.5)])
+    h.past_runs_ext = h.past_runs + [_pr("2026.07.01", "大井", "ダート", 1400, "良", 87.9)]
+    te = te_mod.evaluate(_race(horses=[h]), _model())
+    assert te["horses"][0]["n_runs"] == 2 and te["horses"][0]["same_best_sec"] == 87.9
+
+
+def test_time_index_and_cli_print(capsys):
+    te = te_mod.evaluate(_race(horses=_horses()), _model())
+    idx = te_mod.time_index(te)
+    assert set(idx) == {1, 2} and all(0 <= v <= 100 for v in idx.values())
+    from rich.console import Console
+    te_mod.print_time_eval(te, Console(width=140), detail=True)
+    out = capsys.readouterr().out
+    assert "タイム換算比較" in out and "アルファ" in out and "🔍" not in out
+
+
+def test_fmt_time():
+    assert te_mod.fmt_time(72.8) == "1:12.8"
+    assert te_mod.fmt_time(58.4) == "58.4"
+    assert te_mod.fmt_time(59.96) == "1:00.0"
+    assert te_mod.fmt_time(None) == "—"
+
+
+# ------------------------------------------------------------ ledger ----
+
+def test_record_live_runs_once_per_race():
+    rd = _race(horses=_horses())
+    n1 = tm.record_live_runs(rd, race_key="R-1")
+    n2 = tm.record_live_runs(rd, race_key="R-1")
+    assert n1 > 0 and n2 == 0
+    rows = tm.load_ledger()
+    # 障害・海外・時計異常・(取消馬も過去走は有効) は ledger に入らない/入る を確認
+    assert all(r["s"] in ("芝", "ダート") for r in rows)
+    assert not any(r["t"] == 52.0 for r in rows)
+    assert {r["h"] for r in rows} >= {"アルファ", "ブラボー"}
+
+
+def test_snapshot_carries_time_eval(tmp_path, monkeypatch):
+    """analyze の snapshot に time_eval / time_index が載り、過去走が live ledger に貯まる。"""
+    from src import analyze as az
+    from src import odds_timeline as otl
+    monkeypatch.setattr(az, "ROOT", tmp_path)
+    monkeypatch.setattr(otl, "TIMELINE_DIR", tmp_path / "odds_timeline", raising=False)
+    tm.save_model(_model())
+    rd = _race(horses=_horses())
+    az._save_prediction_snapshot("T-1-1", rd, [], [], probs=None)
+    snap = json.loads((tmp_path / "data" / "predictions" / "T-1-1.json").read_text(encoding="utf-8"))
+    assert snap["time_eval"]["available"] is True
+    assert set(snap["time_index"]) == {"1", "2"}
+    assert len(tm.load_ledger()) > 0
+    # 次の保存で過去走が取れなくても (全馬未評価) 前回の評価を引き継ぐ
+    rd2 = _race(horses=[Horse(number=1, name="アルファ"), Horse(number=2, name="ブラボー")])
+    az._save_prediction_snapshot("T-1-1", rd2, [], [], probs=None)
+    snap2 = json.loads((tmp_path / "data" / "predictions" / "T-1-1.json").read_text(encoding="utf-8"))
+    assert snap2["time_eval"] == snap["time_eval"]

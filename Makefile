@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train par segments retrain holdout api api-noreload web web-install dev dev-noreload test watch-auto-bet watch-auto-ipat-bet bet odds-capture
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train par segments retrain holdout time-model api api-noreload web web-install dev dev-noreload test watch-auto-bet watch-auto-ipat-bet bet odds-capture
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -159,6 +159,15 @@ holdout:
 PAR_WORKERS ?= 8
 par:
 	$(PY) scripts/build_par_table.py --workers $(PAR_WORKERS)
+
+# --- タイム換算モデル (src/time_model.py, te1) ---
+# 過去走の走破時計を当レース条件 (場・芝ダ・距離・馬場状態) に換算する条件効果を学習
+# → data/cache/time_model.json。初回は data/raw の netkeiba 馬柱+結果表から ledger を抽出 (~2.5分)、
+# 以後は解析時に貯まる live ledger を足して数秒で再学習 (API 常駐ループでも 1 日 1 回自動)。
+# TIME_ARGS=--extract-raw で raw ledger を作り直す。検証は scripts/time_eval_backtest.py。
+TIME_ARGS ?=
+time-model:
+	$(PY) scripts/build_time_model.py $(TIME_ARGS)
 
 # --- セグメント別モデル学習 (jra / nar / banei) + β/λ/T MLE ---
 # ばんえい (帯広 65) は別競技なので平地 NAR から分離して独立学習 (lgbm_banei.txt)。
