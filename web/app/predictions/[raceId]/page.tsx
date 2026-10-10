@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
 import { RaceNav } from "./RaceNav";
+import { TimeEvalCard } from "@/components/TimeEvalCard";
 import { indexVersionTitle } from "@/lib/version";
 import {
   betStyleGuide,
@@ -250,6 +251,13 @@ export default async function PredictionDetailPage({
           </Link>
         </div>
       </div>
+
+      {/* タイム換算比較 (主役カード): 過去走の走破時計を当レース条件に換算した推定タイム順に
+          各馬を並べ、Claude 指数順位・市場順位と比較する。旧 snapshot (time_eval 欠落/null) は
+          何も出さず、available=false は理由を控えめに表示する (カード側で分岐)。 */}
+      {d.time_eval && (
+        <TimeEvalCard timeEval={d.time_eval} finish={finish} indexCompare={d.index_compare} />
+      )}
 
       {d.index_compare && d.index_compare.length > 0 && (
         <IndexCompareCard

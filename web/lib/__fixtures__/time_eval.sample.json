@@ -1,0 +1,227 @@
+{
+  "_note": "手動確認用の time_eval サンプル (型は lib/api.ts の TimeEval)。ok = 換算可能なレース (3頭: 同条件/他場同距離/距離換算/芝ダ換算/対象外の走を含み、#8 は順位なし)、unavailable = 換算不能 (available=false) の例。snapshot の top-level time_eval に貼り付けて表示を確認する。",
+  "ok": {
+    "version": "te1",
+    "available": true,
+    "reason": null,
+    "target": {
+      "venue": "大井",
+      "surface": "ダート",
+      "distance": 1200,
+      "going": "良",
+      "going_source": "assumed",
+      "par_sec": 73.0,
+      "par_n": 412
+    },
+    "model": {
+      "fitted_at": "2026-10-09T03:12:00",
+      "data_until": "2026-10-08",
+      "n_runs": 182340,
+      "day_effects": true
+    },
+    "horses": [
+      {
+        "number": 5,
+        "name": "サンプルスター",
+        "rank": 1,
+        "est_sec": 72.8,
+        "gap_sec": 0.0,
+        "index": 51.5,
+        "same_n": 2,
+        "same_best_sec": 72.9,
+        "same_best_going": "良",
+        "conv_best_sec": 72.6,
+        "n_runs": 5,
+        "n_used": 4,
+        "confidence": "high",
+        "runs": [
+          {
+            "date": "2026-09-13",
+            "venue": "大井",
+            "surface": "ダート",
+            "distance": 1200,
+            "going": "良",
+            "race_class": "C1",
+            "finish_pos": 1,
+            "own_sec": 72.9,
+            "conv_sec": 72.7,
+            "day_adj_sec": 0.2,
+            "kind": "same",
+            "weight": 1.0,
+            "note": null
+          },
+          {
+            "date": "2026-08-20",
+            "venue": "大井",
+            "surface": "ダート",
+            "distance": 1200,
+            "going": "稍",
+            "race_class": "C1",
+            "finish_pos": null,
+            "own_sec": 73.4,
+            "conv_sec": 73.5,
+            "day_adj_sec": -0.1,
+            "kind": "same",
+            "weight": 0.85,
+            "note": null
+          },
+          {
+            "date": "2026-07-30",
+            "venue": "川崎",
+            "surface": "ダート",
+            "distance": 1400,
+            "going": "良",
+            "race_class": "C1",
+            "finish_pos": 2,
+            "own_sec": 87.1,
+            "conv_sec": 72.6,
+            "day_adj_sec": 0.3,
+            "kind": "distance",
+            "weight": 0.6,
+            "note": null
+          },
+          {
+            "date": "2026-07-01",
+            "venue": "船橋",
+            "surface": "ダート",
+            "distance": 1200,
+            "going": "重",
+            "race_class": "C2",
+            "finish_pos": 3,
+            "own_sec": 72.5,
+            "conv_sec": 73.0,
+            "day_adj_sec": -0.4,
+            "kind": "same_dist",
+            "weight": 0.7,
+            "note": null
+          },
+          {
+            "date": "2026-05-04",
+            "venue": "大井",
+            "surface": "ダート",
+            "distance": 1600,
+            "going": "良",
+            "race_class": "C2",
+            "finish_pos": null,
+            "own_sec": null,
+            "conv_sec": null,
+            "day_adj_sec": null,
+            "kind": "excluded",
+            "weight": null,
+            "note": "走破時計なし"
+          }
+        ]
+      },
+      {
+        "number": 3,
+        "name": "テストランナー",
+        "rank": 2,
+        "est_sec": 73.1,
+        "gap_sec": 0.3,
+        "index": 48.5,
+        "same_n": 0,
+        "same_best_sec": null,
+        "same_best_going": null,
+        "conv_best_sec": 72.9,
+        "n_runs": 3,
+        "n_used": 3,
+        "confidence": "mid",
+        "runs": [
+          {
+            "date": "2026-09-20",
+            "venue": "船橋",
+            "surface": "ダート",
+            "distance": 1000,
+            "going": "良",
+            "race_class": "C1",
+            "finish_pos": 2,
+            "own_sec": 60.4,
+            "conv_sec": 73.2,
+            "day_adj_sec": 0.0,
+            "kind": "distance",
+            "weight": 0.8,
+            "note": null
+          },
+          {
+            "date": "2026-08-25",
+            "venue": "川崎",
+            "surface": "ダート",
+            "distance": 1500,
+            "going": "稍",
+            "race_class": "C1",
+            "finish_pos": null,
+            "own_sec": 95.0,
+            "conv_sec": 73.4,
+            "day_adj_sec": -0.2,
+            "kind": "distance",
+            "weight": 0.5,
+            "note": null
+          },
+          {
+            "date": "2026-06-15",
+            "venue": "東京",
+            "surface": "芝",
+            "distance": 1400,
+            "going": "良",
+            "race_class": "2歳未勝利",
+            "finish_pos": 1,
+            "own_sec": 82.3,
+            "conv_sec": 72.9,
+            "day_adj_sec": 0.1,
+            "kind": "surface",
+            "weight": 0.3,
+            "note": "芝→ダ換算"
+          }
+        ]
+      },
+      {
+        "number": 8,
+        "name": "フィクスチャー",
+        "rank": null,
+        "est_sec": null,
+        "gap_sec": null,
+        "index": null,
+        "same_n": 0,
+        "same_best_sec": null,
+        "same_best_going": null,
+        "conv_best_sec": null,
+        "n_runs": 1,
+        "n_used": 0,
+        "confidence": "none",
+        "runs": [
+          {
+            "date": "2026-04-10",
+            "venue": "シャティン",
+            "surface": "芝",
+            "distance": 1200,
+            "going": "",
+            "race_class": null,
+            "finish_pos": null,
+            "own_sec": 69.5,
+            "conv_sec": null,
+            "day_adj_sec": null,
+            "kind": "excluded",
+            "weight": null,
+            "note": "海外のため対象外"
+          }
+        ]
+      }
+    ]
+  },
+  "unavailable": {
+    "version": "te1",
+    "available": false,
+    "reason": "ばんえいは換算対象外",
+    "target": {
+      "venue": "帯広",
+      "surface": "ダート",
+      "distance": 200,
+      "going": "",
+      "going_source": "",
+      "par_sec": null,
+      "par_n": null
+    },
+    "model": null,
+    "horses": []
+  }
+}

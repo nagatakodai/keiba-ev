@@ -99,6 +99,77 @@ export type HorseBestTime = {
   runs: number;
 };
 
+// --- タイム換算 (time_eval, 換算モデル te1〜) ---
+// 各馬の過去走の走破時計を「当レース条件 (同場・同馬場・同距離・同馬場状態)」に換算し、
+// 集約した推定タイムで各馬を並べる決定論評価。snapshot の top-level `time_eval` を
+// api/store.get_prediction が素通しする。旧 snapshot は欠落 (or null) → 何も描かない。
+// 数値は backend で丸め済み・NaN は来ない。
+
+// 過去走 1 件の換算内訳 (runs は新しい順)。
+export type TimeEvalRun = {
+  date: string;                 // "2026-09-13"
+  venue: string;                // "大井"
+  surface: string;              // "芝" | "ダート" | "障害" | ""
+  distance: number;             // m (不明は 0)
+  going: string;                // "良" | "稍" | "重" | "不" | ""
+  race_class?: string | null;
+  finish_pos?: number | null;   // 1..3 のみ判明、それ以外は null
+  own_sec: number | null;       // 生の走破時計 (秒)
+  conv_sec: number | null;      // 当レース条件への換算タイム (対象外は null)
+  // 開催日の馬場差補正 (秒)。+ = その日は時計の掛かる馬場だった → 換算タイムは速くなる。
+  day_adj_sec?: number | null;
+  //   same      = 同場・同馬場・同距離 (生時計をそのまま比較できる)
+  //   same_dist = 他場の同馬場・同距離
+  //   distance  = 同馬場の別距離 (換算)
+  //   surface   = 芝↔ダの別馬場 (換算・信頼度低)
+  //   excluded  = 換算対象外 (障害 / ばんえい / 海外 / 時計欠落 / コース不明)
+  kind: "same" | "same_dist" | "distance" | "surface" | "excluded";
+  weight?: number | null;       // 推定タイム集約時の重み
+  note?: string | null;         // 対象外の理由など
+};
+
+// 1 頭分の換算結果。horses は rank 順 (順位なしは末尾)。
+export type TimeEvalHorse = {
+  number: number;
+  name: string;
+  rank: number | null;          // 1 = 推定タイム最速。null = 使える走が無い
+  est_sec: number | null;       // 当レース条件での推定タイム
+  gap_sec: number | null;       // est_sec − レース内最速 est_sec (1 位は 0.0)
+  index: number | null;         // 0-100: 50 = レース中央値、1 秒速いごとに +10
+  same_n: number;               // 同条件の走数
+  same_best_sec: number | null; // 同条件のベスト生時計
+  same_best_going?: string | null;
+  conv_best_sec: number | null; // 換算タイムのベスト
+  n_runs: number;               // 対象とした過去走数
+  n_used: number;               // est_sec に使った走数
+  confidence: "high" | "mid" | "low" | "none";
+  runs: TimeEvalRun[];          // 新しい順
+};
+
+export type TimeEval = {
+  version: string;              // "te1"
+  available: boolean;
+  // available=false の理由 (例 "ばんえいは換算対象外" / "当レースの距離・馬場が不明")。
+  reason?: string | null;
+  target: {
+    venue: string;
+    surface: string;
+    distance: number;
+    going: string;
+    // assumed = 馬場状態が未発表のため「良」として換算した。
+    going_source: "announced" | "assumed" | "";
+    par_sec?: number | null;    // 当条件の標準的な勝ちタイム (参考)
+    par_n?: number | null;
+  };
+  model?: {
+    fitted_at?: string | null;
+    data_until?: string | null;
+    n_runs?: number | null;
+    day_effects?: boolean | null;
+  } | null;
+  horses: TimeEvalHorse[];
+};
+
 // 各馬の適性指数 (0-100 / 同レース内相対) + 因子内訳 + 主要根拠。
 // total は重み付け平均。snapshot は total 降順で配列化されている。
 export type HorseAptitude = {
@@ -283,6 +354,8 @@ export type PredictionDetail = {
   market_signals?: MarketSignal[];
   // 持ち時計 (同 venue × 同距離 × 同 surface での best own_time_sec)。速い順。
   horse_best_times?: HorseBestTime[];
+  // タイム換算比較 (過去走の走破時計を当レース条件に換算した推定タイム)。旧 snapshot は欠落。
+  time_eval?: TimeEval | null;
   // どの確率モデルが使われたか (lgbm = LightGBM 学習済 / linear-fallback = 線形 softmax)
   model_info?: {
     available?: boolean;
