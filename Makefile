@@ -340,47 +340,64 @@ web-install:
 	cd $(WEB_DIR) && (pnpm install || npm install)
 
 web:
-	cd $(WEB_DIR) && (pnpm dev || npm run dev)
+	cd $(WEB_DIR) && $(if $(DEV_WEB_ENV),export $(DEV_WEB_ENV) && ,)(pnpm dev $(DEV_WEB_ARGS) || npm run dev -- $(DEV_WEB_ARGS))
 
 # --- API + Web を 1 コマンドで起動 (make api + make web を同じ端末で並走) ---
 # Ctrl+C で両方停止 (API は lifespan shutdown で常駐 Job を片付けてから抜けるので数秒待つ。
-# 接続待ちで止まらなければもう一度 Ctrl+C で強制終了)。
-# - 起動前に両ポートの使用中を検査 (別端末の make api / make web の止め忘れで半端に起動するのを防ぐ)。
+# 接続待ちで止まらなければもう一度 Ctrl+C で強制終了)。Ctrl+\ も同じ停止経路。
+# - 起動前に両ポートの使用中 (ss + 127.0.0.1 接続) と Node.js 20+ を検査し、半端な起動 (API だけ立つ) を防ぐ。
 # - API が終了したら web も止めて終了 (web だけ残っても API に届かない)。
 # - web が落ちても API は止めない (watch-auto・投票 daemon・結果自動取得などの常駐ループを巻き込まない)。
-# - 端末を閉じたら両方停止。hangup が make にしか届かない起動形態 (wsl.exe -- make dev / VS Code タスク等で
-#   make がセッションリーダー。make は SIGHUP を子に転送しない) でも、端末喪失を検知して後始末する。
+# - 停止時は自分 (このレシピの bash) の子孫だけに SIGTERM を送る。make 自身・呼び出し元スクリプト・
+#   tee・-j の兄弟ターゲットは巻き込まない (setsid 済みの API Job は lifespan shutdown が片付ける)。
+# - 端末を閉じたら両方停止。make がセッションリーダーで SIGHUP が子に届かない起動形態 (VS Code タスク等。
+#   make は SIGHUP を子に転送しない) でも、前面ジョブとして起動していれば端末喪失 (stdin/stdout) を検知して
+#   後始末する。`make dev & disown` / setsid / nohup で意図的に切り離した実行は端末を閉じても止めない。
+# - wsl.exe から直接起動するときは対話シェル経由で (~/.bashrc の nvm / claude を PATH に入れるため):
+#   wsl.exe -- bash -ic "make -C ~/keiba-ev dev"
 # - 投票 daemon の headful ブラウザは uvicorn の env を継承するので DISPLAY のある端末 (WSLg 等) で起動する。
-# - dev-noreload は --reload なし版 (コード変更のたびに投票 daemon が再起動→再ログインになるのを避ける)。
-# - API_PORT / WEB_PORT を上書きしたときは web の API 向き先 (API_BASE / API_TARGET) と next dev の -p も追従。
+# - dev-noreload は --reload なし版。投票ブラウザを使う日は (自動投票の封鎖解除込みで)
+#   KEIBA_AUTOMATION=1 make dev-noreload (--reload はコード変更のたびに投票 daemon が再起動→再ログイン)。
+# - API_PORT / WEB_PORT を上書きしたときは web の API 向き先 (API_BASE / API_TARGET) と next dev の -p も追従
+#   (make web も同じ上書きを受け付ける)。API には端末の stdin を渡す (breakpoint()/pdb が make api 同様に使える)。
 dev: DEV_API_RELOAD := --reload
 dev-noreload: DEV_API_RELOAD :=
 DEV_WEB_ENV = $(if $(filter-out file,$(origin API_PORT)),API_BASE=http://localhost:$(API_PORT) API_TARGET=http://localhost:$(API_PORT))
 DEV_WEB_ARGS = $(if $(filter-out file,$(origin WEB_PORT)),-p $(WEB_PORT))
+DEV_PORT_OVERRIDES = $(if $(filter-out file,$(origin API_PORT)), API_PORT=$(API_PORT))$(if $(filter-out file,$(origin WEB_PORT)), WEB_PORT=$(WEB_PORT))
 dev dev-noreload:
 	@bash -c '\
 		for p in $(API_PORT) $(WEB_PORT); do \
-			if (: </dev/tcp/127.0.0.1/$$p) 2>/dev/null; then \
+			if [ -n "$$(ss -Hltn "sport = :$$p" 2>/dev/null)" ] || (: </dev/tcp/127.0.0.1/$$p) 2>/dev/null; then \
 				echo "$@: ポート $$p は既に使用中です。別端末の make api / make web (または前回の make dev) を止めてから再実行してください。" >&2; \
 				exit 1; \
 			fi; \
 		done; \
-		stop() { trap "" INT TERM HUP; kill 0 2>/dev/null; wait; }; \
+		nv=$$(node -p "parseInt(process.versions.node)" 2>/dev/null); \
+		if [ "$${nv:-0}" -lt 20 ] 2>/dev/null || [ -z "$$nv" ]; then \
+			echo "$@: Node.js 20 以上が見つかりません (node=$${nv:-なし}。nvm 未読込?)。wsl.exe から起動するなら wsl.exe -- bash -ic \"make -C ~/keiba-ev dev\"" >&2; \
+			exit 1; \
+		fi; \
+		command -v claude >/dev/null 2>&1 || echo "$@: ⚠ claude CLI が PATH にありません (Claude 指数は生成されません)" >&2; \
+		pg=$$(ps -o pgid= -p $$$$ | tr -d " "); \
+		desc() { local c; for c in $$(pgrep -g "$$pg" -P "$$1" 2>/dev/null); do desc "$$c"; echo "$$c"; done; }; \
+		stop() { trap "" INT TERM HUP QUIT; if command -v pgrep >/dev/null 2>&1 && [ -n "$$pg" ]; then kill $$(desc $$$$) 2>/dev/null; else kill 0 2>/dev/null; fi; wait; }; \
 		trap stop EXIT; \
-		trap "exit 130" INT TERM HUP; \
+		trap "stop; trap - INT; kill -INT $$$$" INT; \
+		trap "exit 143" TERM; trap "exit 129" HUP; trap "exit 131" QUIT; \
 		echo "$@: API http://localhost:$(API_PORT)$(if $(DEV_API_RELOAD),, (--reload なし)) + Web http://localhost:$(WEB_PORT) を起動 / Ctrl+C で両方停止"; \
-		$(PY) -m uvicorn api.main:app $(DEV_API_RELOAD) --port $(API_PORT) & api=$$!; \
+		$(PY) -m uvicorn api.main:app $(DEV_API_RELOAD) --port $(API_PORT) 0<&0 & api=$$!; \
 		(cd $(WEB_DIR) && if command -v pnpm >/dev/null 2>&1; then \
 			exec env $(DEV_WEB_ENV) pnpm dev $(DEV_WEB_ARGS); \
 		else \
 			exec env $(DEV_WEB_ENV) npm run dev -- $(DEV_WEB_ARGS); \
 		fi) & web=$$!; \
-		[ -t 1 ] && ontty=1; \
+		case "$$(ps -o stat= -p $$$$ 2>/dev/null)" in *+*) [ -t 0 ] && intty=1; [ -t 1 ] && ontty=1;; esac; \
 		while kill -0 $$api 2>/dev/null; do \
-			if [ -n "$$ontty" ] && [ ! -t 1 ]; then exit 129; fi; \
+			if { [ -n "$$intty" ] && [ ! -t 0 ]; } || { [ -n "$$ontty" ] && [ ! -t 1 ]; }; then exit 129; fi; \
 			if [ -n "$$web" ] && ! kill -0 $$web 2>/dev/null; then \
 				wait $$web; wrc=$$?; web=; \
-				echo "$@: web (next dev) が終了しました (rc=$$wrc)。API は稼働を継続します — web だけ再起動するなら別端末で make web (依存未導入なら make web-install)。Ctrl+C で API も停止。" >&2; \
+				echo "$@: web (next dev) が終了しました (rc=$$wrc)。API は稼働を継続します — web だけ再起動するなら別端末で make web$(DEV_PORT_OVERRIDES) (依存未導入なら make web-install)。Ctrl+C で API も停止。" >&2; \
 			fi; \
 			sleep 2; \
 		done; \

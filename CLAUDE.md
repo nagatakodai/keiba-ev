@@ -529,9 +529,9 @@ python scripts/fetch_trifecta_odds_holdout.py  # validation 291 races の trifec
                                              # → これで `make holdout` が Plan A/B/C/H1 real-odds ROI も出す
 
 # FastAPI バックエンド + Next.js フロント
-make dev      # api + web を 1 コマンドで並走 (Ctrl+C で両方停止。投票 daemon を回すなら make dev-noreload)
+make dev      # api + web を 1 コマンドで並走 (Ctrl+C で両方停止。投票ブラウザを使う日は KEIBA_AUTOMATION=1 make dev-noreload)
 make api      # uvicorn :9788  (keirin ev-api 8787 と完全にずらす。「788」は keiba シグネチャ)
 make web      # next dev :3788 (keirin web 3000 と被らないように)
 ```
 
-`make dev` の停止規約 (Makefile 参照、pty で Ctrl+C/SIGHUP/片側死亡を実機検証済 2026-10-10): 起動前に両ポートの使用中を検査 / **API が落ちたら web も止めて終了**・**web が落ちても API は止めない** (watch-auto・投票 daemon・結果自動取得の常駐ループを巻き込まない) / Ctrl+C は API の lifespan shutdown (常駐 Job の片付け) を待ってから戻る (SSE 接続が残って止まらなければ 2 回目の Ctrl+C で強制終了) / 端末を閉じたら両方停止 (make がセッションリーダーで SIGHUP が子に届かない起動形態でも端末喪失を検知)。
+`make dev` の停止規約 (Makefile 参照。pty で Ctrl+C / Ctrl+\ / SIGHUP / 片側死亡 / ラッパー起動 / disown / tee を実機検証、2026-10-10 の多視点敵対レビュー指摘を反映済): 起動前に両ポートの使用中 (ss + 127.0.0.1) と Node.js 20+ を検査 (claude CLI 不在は警告のみ) / **API が落ちたら web も止めて終了**・**web が落ちても API は止めない** (watch-auto・投票 daemon・結果自動取得の常駐ループを巻き込まない) / 停止時は**レシピ bash の子孫だけ**に SIGTERM (`kill 0` は make 自身・呼び出し元スクリプト・tee・-j の兄弟まで落とし rc=143/Terminated になっていたため廃止。setsid 済み API Job は lifespan が片付ける) / Ctrl+C は API の lifespan shutdown を待ってから make ごと SIGINT 終了 (SSE 接続で止まらなければ 2 回目の Ctrl+C で強制終了)・Ctrl+\ も同じ停止経路 (uvicorn は & 起動で SIGQUIT 無視を継承するため) / 端末を閉じたら両方停止 (前面ジョブで起動したときだけ stdin/stdout の端末喪失を監視 = make がセッションリーダーで SIGHUP が子に届かない形態も拾う。`& disown`/setsid/nohup で切り離した実行は make api 同様に生き残る) / wsl.exe 直起動は `wsl.exe -- bash -ic "make -C ~/keiba-ev dev"` (非対話だと nvm の node・~/.local/bin の claude が PATH に無い) / API に端末 stdin を渡す (breakpoint() 可) / API_PORT・WEB_PORT 上書きは make web も追従。

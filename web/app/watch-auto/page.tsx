@@ -411,7 +411,8 @@ export default function WatchAutoPage() {
             watch-auto の開始・自動投票・当日/前夜の全レーススキャン・締切前の自動再score は封鎖されています
             (結果の自動取得と手動の分析・スキャンは使えます)。解除するには環境変数{" "}
             <code className="mono">KEIBA_AUTOMATION=1</code> を付けて API を起動してください (例:{" "}
-            <code className="mono">KEIBA_AUTOMATION=1 make dev</code>)。
+            <code className="mono">KEIBA_AUTOMATION=1 make dev</code>。投票ブラウザを使う日は再ログインを避けるため{" "}
+            <code className="mono">KEIBA_AUTOMATION=1 make dev-noreload</code>)。
           </p>
         </div>
       )}

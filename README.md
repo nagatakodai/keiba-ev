@@ -111,7 +111,7 @@ make api    # FastAPI    (localhost:9788)
 make web    # Next.js    (localhost:3788)
 ```
 
-投票ブラウザ (オッズパーク / 即PAT) を常駐させる日は、コード変更での再起動 (再ログイン) を避けるため `make dev-noreload` を使います。
+投票ブラウザ (オッズパーク / 即PAT) を常駐させる日は、自動投票の封鎖を解除しつつコード変更での再起動 (再ログイン) を避けるため `KEIBA_AUTOMATION=1 make dev-noreload` を使います。Windows から直接起動する場合は `wsl.exe -- bash -ic "make -C ~/keiba-ev dev"` (対話シェル経由で nvm の Node と claude CLI を読み込む)。
 
 - **ダッシュボード (地方 / 中央 / ばんえい)**: Claude 指数上位の 3 連単 BOX・券種別戦略くらべの仮想収支 (指数バージョン別)、研究中シグナルのプレレジ台帳、買い方マトリクス
 - **今日の勝負レース (`/shobu`)**: 当日 (または翌日) 全レースをスキャンし、Claude 指数と市場の順位乖離でスクリーニング。2 分毎の最新オッズ再採点・Claude モデル / リサーチ方式の選択
