@@ -1,4 +1,4 @@
-.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train par segments retrain holdout api api-noreload web web-install test watch-auto-bet watch-auto-ipat-bet bet odds-capture
+.PHONY: setup setup-uv install browsers clean run run-haiku run-sonnet run-no-llm refresh verify watch watch-auto record fetch-result fetch-result-list fetch-result-process calibrate backtest bulk-fetch bulk-enum dataset train par segments retrain holdout api api-noreload web web-install dev dev-noreload test watch-auto-bet watch-auto-ipat-bet bet odds-capture
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
@@ -341,3 +341,49 @@ web-install:
 
 web:
 	cd $(WEB_DIR) && (pnpm dev || npm run dev)
+
+# --- API + Web を 1 コマンドで起動 (make api + make web を同じ端末で並走) ---
+# Ctrl+C で両方停止 (API は lifespan shutdown で常駐 Job を片付けてから抜けるので数秒待つ。
+# 接続待ちで止まらなければもう一度 Ctrl+C で強制終了)。
+# - 起動前に両ポートの使用中を検査 (別端末の make api / make web の止め忘れで半端に起動するのを防ぐ)。
+# - API が終了したら web も止めて終了 (web だけ残っても API に届かない)。
+# - web が落ちても API は止めない (watch-auto・投票 daemon・結果自動取得などの常駐ループを巻き込まない)。
+# - 端末を閉じたら両方停止。hangup が make にしか届かない起動形態 (wsl.exe -- make dev / VS Code タスク等で
+#   make がセッションリーダー。make は SIGHUP を子に転送しない) でも、端末喪失を検知して後始末する。
+# - 投票 daemon の headful ブラウザは uvicorn の env を継承するので DISPLAY のある端末 (WSLg 等) で起動する。
+# - dev-noreload は --reload なし版 (コード変更のたびに投票 daemon が再起動→再ログインになるのを避ける)。
+# - API_PORT / WEB_PORT を上書きしたときは web の API 向き先 (API_BASE / API_TARGET) と next dev の -p も追従。
+dev: DEV_API_RELOAD := --reload
+dev-noreload: DEV_API_RELOAD :=
+DEV_WEB_ENV = $(if $(filter-out file,$(origin API_PORT)),API_BASE=http://localhost:$(API_PORT) API_TARGET=http://localhost:$(API_PORT))
+DEV_WEB_ARGS = $(if $(filter-out file,$(origin WEB_PORT)),-p $(WEB_PORT))
+dev dev-noreload:
+	@bash -c '\
+		for p in $(API_PORT) $(WEB_PORT); do \
+			if (: </dev/tcp/127.0.0.1/$$p) 2>/dev/null; then \
+				echo "$@: ポート $$p は既に使用中です。別端末の make api / make web (または前回の make dev) を止めてから再実行してください。" >&2; \
+				exit 1; \
+			fi; \
+		done; \
+		stop() { trap "" INT TERM HUP; kill 0 2>/dev/null; wait; }; \
+		trap stop EXIT; \
+		trap "exit 130" INT TERM HUP; \
+		echo "$@: API http://localhost:$(API_PORT)$(if $(DEV_API_RELOAD),, (--reload なし)) + Web http://localhost:$(WEB_PORT) を起動 / Ctrl+C で両方停止"; \
+		$(PY) -m uvicorn api.main:app $(DEV_API_RELOAD) --port $(API_PORT) & api=$$!; \
+		(cd $(WEB_DIR) && if command -v pnpm >/dev/null 2>&1; then \
+			exec env $(DEV_WEB_ENV) pnpm dev $(DEV_WEB_ARGS); \
+		else \
+			exec env $(DEV_WEB_ENV) npm run dev -- $(DEV_WEB_ARGS); \
+		fi) & web=$$!; \
+		[ -t 1 ] && ontty=1; \
+		while kill -0 $$api 2>/dev/null; do \
+			if [ -n "$$ontty" ] && [ ! -t 1 ]; then exit 129; fi; \
+			if [ -n "$$web" ] && ! kill -0 $$web 2>/dev/null; then \
+				wait $$web; wrc=$$?; web=; \
+				echo "$@: web (next dev) が終了しました (rc=$$wrc)。API は稼働を継続します — web だけ再起動するなら別端末で make web (依存未導入なら make web-install)。Ctrl+C で API も停止。" >&2; \
+			fi; \
+			sleep 2; \
+		done; \
+		wait $$api; rc=$$?; \
+		echo "$@: API が終了しました (rc=$$rc)。web も停止して終了します。" >&2; \
+		exit $$rc'
