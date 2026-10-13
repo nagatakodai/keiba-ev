@@ -14,8 +14,10 @@
   - watch-auto の開始 (Web UI・POST /api/watch-auto/start)
   - CLI の自動予想・投票: auto_watch / bet_scheduler / oddspark_bet / ipat_bet
     (Makefile の watch-auto / watch-auto-bet / watch-auto-ipat-bet / bet も入口で止まる)
-止まらないもの: 結果の自動取得 (着順・払戻の取得のみ)、手動の分析・勝負レーススキャン
-(ボタン/CLI)、odds_capture (オッズの記録のみ)。
+止まらないもの: 結果の自動取得 (着順・払戻の取得のみ)、その結果取得ループが 1 日 1 回行う
+タイム換算モデルの再学習と地方競馬全国協会の公式データ (月次 CSV) の同期 (予想・投票ではない。
+止めるときは KEIBA_NAR_OFFICIAL=0)、手動の分析・勝負レーススキャン (ボタン/CLI)、
+odds_capture (オッズの記録のみ)。
 """
 from __future__ import annotations
 

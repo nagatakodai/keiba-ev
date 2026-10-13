@@ -329,3 +329,28 @@ def test_shobu_scan_request_research_default_ab():
     assert m.ShobuScanRequest().research == "ab"
     assert m.ShobuScanRequest(research="agentic").research == "agentic"
     assert m.ShobuScanRequest(research="prefetch").research == "prefetch"
+
+
+def test_time_model_rebuild_backs_off_when_official_sync_still_due(monkeypatch):
+    """学習 (rc=0) の後も公式データの同期が済んでいない (試行の記録すら残らない失敗) なら 3 時間は再起動しない。"""
+    import asyncio
+    import time as _time
+
+    from api import main as m
+    from src import nar_official, time_model
+    f = m.ResultAutoFetcher()
+    calls = {"build": 0}
+
+    async def fake_build():
+        calls["build"] += 1
+        return 0, "ok"
+
+    monkeypatch.setattr(f, "_rebuild_time_model", fake_build)
+    monkeypatch.setattr(time_model, "needs_rebuild", lambda *_a, **_k: False)
+    monkeypatch.setattr(nar_official, "sync_due", lambda *_a, **_k: True)
+    asyncio.run(f._maybe_rebuild_time_model())
+    assert calls["build"] == 1 and f.time_model_rebuilds == 1
+    assert f.time_model_retry_after > _time.time() + 2.5 * 3600 and "still due" in f.time_model_last_error
+    asyncio.run(f._maybe_rebuild_time_model())          # 次の tick: 待ち中なので起動しない
+    assert calls["build"] == 1
+    assert "time_model_official" in f.status()

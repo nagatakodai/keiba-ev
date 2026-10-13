@@ -60,13 +60,18 @@ def target_of(race: Any) -> dict:
 def _unavailable(target: dict, reason: str, model: dict | None = None) -> dict:
     return {"version": tm.VERSION, "available": False, "reason": reason,
             "target": {**target, "par_sec": None, "par_n": None},
-            "model": _model_meta(model), "horses": []}
+            "model": _model_meta(model, target.get("venue", "")), "horses": []}
 
 
-def _model_meta(model: dict | None) -> dict | None:
+def _model_meta(model: dict | None, venue: str = "") -> dict | None:
+    """表示用のモデル情報。data_until は当レースの circuit (中央/地方) の最新データ日 — 地方は公式データで
+    当月まで揃う一方、中央は netkeiba キャッシュ + 解析時の live 行だけなので、全体の最新日を出すと中央の
+    レースで学習データの新しさを過大に見せてしまう (2026-10-13)。"""
     if not model:
         return None
-    return {"fitted_at": model.get("fitted_at"), "data_until": model.get("data_until"),
+    by_c = model.get("data_until_by_circuit") or {}
+    until = by_c.get(tm.circuit(venue)) if venue else None
+    return {"fitted_at": model.get("fitted_at"), "data_until": until or model.get("data_until"),
             "n_runs": model.get("n_runs"),
             "day_effects": bool((model.get("params") or {}).get("day_effects"))}
 
@@ -212,7 +217,7 @@ def evaluate(rd: Any, model: dict | None = None) -> dict:
                     tgt["going"] if tgt["going_source"] == "announced" else "")
     return {"version": tm.VERSION, "available": True, "reason": None,
             "target": {**tgt, "par_sec": _r1(pw[0]) if pw else None, "par_n": pw[1] if pw else None},
-            "model": _model_meta(model), "horses": rows}
+            "model": _model_meta(model, tgt["venue"]), "horses": rows}
 
 
 def _assign_ranks(rows: list[dict]) -> None:

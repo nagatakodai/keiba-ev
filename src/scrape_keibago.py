@@ -311,19 +311,21 @@ _WEATHER_CHARS = "晴曇雨雪霧"
 _BANEI_VENUE_CODE = "65"   # netkeiba 場コード (帯広ばんえい)
 
 
-def _deba_header_text(html: str) -> str:
-    """DebaTable のレース条件ヘッダ部分だけを NFKC 正規化 + 空白圧縮したテキストで返す。
+def _deba_title_region(html: str) -> tuple[str, bool]:
+    """DebaTable のレース条件ヘッダ部分 (section.raceTitle) の HTML と、section が見つかったか。
 
     各馬ブロックの馬柱ミニ表 ("佐賀　右1750" / "不良") やコースレコード欄を拾わないよう
     section.raceTitle に限定する (DOM 変化で見つからなければ最初の馬ブロックより前)。
     """
-    m = re.search(r'<section class="raceTitle"[^>]*>(.*?)</section>', html, re.DOTALL)
+    m = re.search(r'<section class="raceTitle[^"]*"[^>]*>(.*?)</section>', html, re.DOTALL)
     if m:
-        region = m.group(1)
-    else:
-        cut = html.find('class="horseNum"')
-        region = html[:cut] if cut >= 0 else html
-    txt = _html.unescape(re.sub(r"<[^>]+>", " ", region))
+        return m.group(1), True
+    cut = html.find('class="horseNum"')
+    return (html[:cut] if cut >= 0 else html), False
+
+
+def _norm_text(fragment: str) -> str:
+    txt = _html.unescape(re.sub(r"<[^>]+>", " ", fragment))
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", txt)).strip()
 
 
@@ -332,13 +334,22 @@ def parse_deba_header(html: str) -> dict:
 
     keys: distance (int, m) / surface ('ダート'|'芝'|'障害') / direction ('右'|'左'|'直'|'') /
     course ('外'|'内'|'' — 「外コース」等) / weather (例 '曇') /
-    going ('良'|'稍重'|'重'|'不良' — keiba.go.jp と同じ全語) / moisture (ばんえいの馬場水分%, float)。
+    going ('良'|'稍重'|'重'|'不良' — keiba.go.jp と同じ全語) / moisture (ばんえいの馬場水分%, float) /
+    race_name (h3 のレース名, NFKC。"…杯C2-4" のようにクラス表記を含む → Race.race_class)。
     direction/course は距離が取れた時だけ付く ('' = 表記なし)。追加 GET 不要 (analyze_keibago が
     取得済の DebaTable HTML を渡す)。best-effort: 想定外の入力でも例外を出さず {} を返す。
     """
     try:
-        text = _deba_header_text(html or "")
+        region, in_section = _deba_title_region(html or "")
+        text = _norm_text(region)
         out: dict = {}
+        # レース名は section.raceTitle の h3 だけ (section が無い骨組み/DOM 変化のページは、先頭のナビの
+        # <h3 class="naviTitle">オッズ</h3> をレース名と取り違えるので読まない → 公式データで補う)
+        hm = re.search(r"<h3[^>]*>(.*?)</h3>", region, re.DOTALL) if in_section else None
+        if hm:
+            name = _norm_text(hm.group(1))
+            if name:
+                out["race_name"] = name
         dm = _DEBA_DIST_RE.search(text)
         if dm:
             digits = dm.group(2).replace(",", "")
@@ -377,6 +388,10 @@ def _apply_deba_header(race: Race, hdr: dict, netkeiba_rid: str) -> None:
     """
     if not hdr:
         return
+    # 当レースのクラス (レース名にクラス表記を含む: "…杯C2-4" / "B3-5" / "…JpnI")。仮指数のクラス因子と
+    # Claude 見出しが使う (LightGBM 特徴量は当レースの race_class を使わない)。旧実装は常に "" (2026-10-13 修正)。
+    if hdr.get("race_name"):
+        race.race_class = str(hdr["race_name"])
     if netkeiba_rid[4:6] != _BANEI_VENUE_CODE:
         if hdr.get("distance"):
             race.distance = int(hdr["distance"])
@@ -793,9 +808,13 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
                 deba = parse_deba_table(deba_html)
                 if deba:
                     break
-        # 取得済 DebaTable のヘッダから当レース条件 (距離/馬場/周回/天候・馬場状態)。追加 GET 無し。
-        # 取れなければ {} → Race は従来値のまま (best-effort)。
+        # 取得済 DebaTable のヘッダから当レース条件 (距離/馬場/周回/天候・馬場状態/レース名)。追加 GET 無し。
+        # 距離かレース名が取れなかったときだけ地方競馬全国協会の公式データ (当日ファイル, 2 分 cache・
+        # 短い timeout) で欠けた項目を補う。それでも取れなければ Race は従来値のまま (best-effort)。
         race_header = parse_deba_header(deba_html)
+        from .nar_official import fill_race_header
+        # bet 段 (締切 1〜2.5 分前) は通信しない = 手元の公式キャッシュだけ (score 段の当日ファイルが残っている)
+        race_header = fill_race_header(race_header, netkeiba_rid, allow_download=(phase != "bet"))
         if deba:
             # 出馬表 + HorseMarkInfo の馬柱で確率モデルをフル稼働 (公式自給)
             rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True,

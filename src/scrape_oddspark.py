@@ -631,12 +631,17 @@ def build_oddspark_racedata(
     tanfuku: list[OddsparkHorse], netkeiba_rid: str,
     *, horse_options: list[tuple[int, str]] | None = None,
     fetch_past: bool = True,
+    race_header: dict | None = None,
+    allow_official_download: bool = True,
 ) -> RaceData:
     """cached 出馬表が無い場合の RaceData (oddspark 由来)。
 
     fetch_past=True で各馬の HorseDetail から **馬柱 (past_runs) を取得**し Horse に付与
     → build_features が効き、estimate_probs が市場主導でなくモデルの edge を出せる。
     horse_options (selectHorseNb 由来) を渡せば全出走馬を確実に載せる。
+    race_header (parse_deba_header と同じ形) を省略すると公式データ (src/nar_official.py) から引く
+    ({} を渡すと引かない = テスト・オフライン用)。allow_official_download=False は手元の公式キャッシュだけ
+    (bet 段: 締切直前に通信で待たせない)。
     """
     venue, schedule_index, race_number, cup_id = _split_race_id(netkeiba_rid)
     win_by_num = {h.number: h.win_odds for h in tanfuku}
@@ -667,6 +672,15 @@ def build_oddspark_racedata(
         venue_id=int(netkeiba_rid[4:6]) if netkeiba_rid[4:6].isdigit() else 0,
         venue_name=venue, race_class="", distance=0, horses=horse_rows,
     )
+    # 当レース条件 (距離/芝ダ/回り/天候・馬場/レース名) は oddspark のページに無いので、地方競馬全国協会の
+    # 公式データ (当日ファイル, 2 分 cache) から補う (2026-10-13)。取れなければ従来どおり distance=0
+    # (タイム換算比較は「条件不明」・前回 snapshot があれば引き継ぐ)。ばんえいの扱いは keiba.go.jp 経路と同じ。
+    if race_header is None and is_nar_race_id(netkeiba_rid):
+        from .nar_official import official_race_header
+        race_header = official_race_header(netkeiba_rid, allow_download=allow_official_download)
+    if race_header:
+        from .scrape_keibago import _apply_deba_header
+        _apply_deba_header(race, race_header, netkeiba_rid)
     rd = RaceData(race=race, trifecta=[], other_bets={})
     return overlay_oddspark_odds(rd, tanfuku)
 
@@ -714,7 +728,8 @@ def analyze_oddspark(netkeiba_rid: str, *, save_snapshot: bool = False, start_at
         overlay_oddspark_odds(rd, bets.tanfuku)
         used_cache = True
     else:
-        rd = build_oddspark_racedata(bets.tanfuku, netkeiba_rid, horse_options=bets.horses)
+        rd = build_oddspark_racedata(bets.tanfuku, netkeiba_rid, horse_options=bets.horses,
+                                     allow_official_download=(phase != "bet"))
 
     # 発走時刻 (discovery 由来) を補完: cache に無い/0 のときのみ上書き
     if start_at and not rd.race.start_at:

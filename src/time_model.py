@@ -18,8 +18,14 @@
 
 学習データ (ledger = 1 馬 1 走の走破時計):
   - data/cache/time_ledger/netkeiba_raw.jsonl: data/raw の netkeiba 馬柱 + 結果表 (全着時計) から一度だけ抽出
+  - data/cache/time_ledger/nar_official-YYYYMM.jsonl: 地方競馬全国協会の公式データ (src/nar_official.py, 月次 CSV)
+    の **地方全レース・全着** の走破時計 + 勝ち時計 + 馬場。学習窓ぶんを月 1 ファイルで持ち、当月は毎日取り直す
+    → netkeiba 規制後 (2026-06〜) の地方の開催日の馬場差 δ も推定でき、大差負け除外も効く (2026-10-13)。
   - data/cache/time_ledger/live-YYYYMM.jsonl: 解析時に取得した過去走 (keiba.go.jp / JRA 公式 / oddspark) を追記
-    → netkeiba 規制後の開催日 (2026-06〜) の馬場差もデータが貯まるほど推定できるようになる。
+    → 中央は公式の一括データが無いので、netkeiba 規制後の開催日の馬場差はこれが貯まるほど推定できるようになる。
+  同じ走 (馬・日・場・距離) は後のファイルが勝つ (live → nar_official → netkeiba_raw の順。ただし勝ち時計 wt と
+  レース番号 r は後の行に無ければ前の行から引き継ぐ)。公式と netkeiba は重なる 94,993 走で時計・馬場が完全一致、
+  勝ち時計も両方にある 93,704 走で一致 (netkeiba は 1,289 走で勝ち時計を欠く)。
 モデルは data/cache/time_model.json。`make time-model` または API 常駐ループの日次再学習で更新。
 
 検証 (scripts/time_eval_backtest.py, walk-forward・月初より前のデータだけで学習):
@@ -57,6 +63,8 @@ K_DAY = 3.0          # 開催日馬場差 δ の 0 への縮約
 WINDOW_DAYS = 540    # 学習に使う走の期間 (最新日から遡る)
 MAX_BEHIND = 3.0     # 勝ち時計が分かる走で 3 秒超の大差負けは条件効果の推定から除外 (ノイズ)
 LOAD_SLACK_DAYS = 365  # 再学習時、今日から WINDOW_DAYS+これ より古い行は読み込まない (メモリ節約)
+DENSE_MIN_ROWS = 50  # 学習窓の起点に使う「データが揃った日」: その circuit の一括データ (netkeiba_raw / 公式) の
+                     # 1 日の走数がこれ以上 (実データは 1 日 69〜500 走。live 行は数えない — fit 参照)
 MAX_ITERS = 500      # 交互最小二乗の上限 (通常 100〜200 回で収束)
 TOL = 1e-7           # 1 反復の最大変化 (log 秒) がこれ未満で収束 = 90 秒のレースで 0.00001 秒未満
 
@@ -89,8 +97,10 @@ def norm_going(g: str) -> str:
 
 
 # 障害の目印 (JRA accessU は障害を「芝」で返すのでレース名で判定する)。JS/GJ は直前が英字でないときだけ
-# (ペガサスJS・中山GJ は障害、YJSF名1・LJS名(C) = ヤング/レディースジョッキーズシリーズは平地)。
-_JUMP_RE = re.compile(r"障害|ジャンプ|J・G|(?<![A-Z])(?:JS|GJ)")
+# (ペガサスJS・中山GJ・中山GJJGI・牛若丸JSOP は障害、YJSF名1・LJS名(C) = ヤング/レディースジョッキーズ
+# シリーズは平地)。GJ の直後が S = ＧＪＳ (ゴールデンジョッキーズシリーズ, 地方の平地, 2026-10-13 公式データで
+# 発見) も平地。
+_JUMP_RE = re.compile(r"障害|ジャンプ|J・G|(?<![A-Z])(?:JS|GJ(?!S))")
 # 末尾 J の略称 (東京ハイJ / 阪神スプリJ / 三木ホースJ) は芝 2750m 以上のときだけ障害
 # (「次開催は15年ぶりJ」ダ1800・「2025J」ダート のような平地のレース名を拾わないため)。
 _JUMP_TAIL_RE = re.compile(r"(?<![A-Za-z0-9])J$")
@@ -168,7 +178,8 @@ def _row_key(r: dict) -> tuple:
 
 
 def load_ledger(paths: Iterable[Path] | None = None, *, min_date: int = 0) -> list[dict]:
-    """ledger を全ファイルから読み、(馬, 日付, 場, 距離) で重複除去 (後勝ち)。
+    """ledger を全ファイルから読み、(馬, 日付, 場, 距離) で重複除去 (後勝ち・ただし勝ち時計 wt とレース番号 r は
+    後の行に無ければ前の行の値を引き継ぐ — netkeiba_raw は公式データにある勝ち時計を 1,289 走で欠いている)。
 
     min_date (YYYYMMDD) より古い行は辞書に入れずに読み飛ばす (学習窓の外は fit でも使わないので、
     常駐 API の日次再学習でメモリを無駄に使わない)。
@@ -176,6 +187,7 @@ def load_ledger(paths: Iterable[Path] | None = None, *, min_date: int = 0) -> li
     files = list(paths) if paths is not None else sorted(LEDGER_DIR.glob("*.jsonl"))
     seen: dict[tuple, dict] = {}
     for p in files:
+        live = Path(p).name.startswith("live-")      # 解析時の過去走 (学習窓の起点の判定に数えない — fit 参照)
         try:
             with open(p, encoding="utf-8") as f:
                 for line in f:
@@ -187,7 +199,16 @@ def load_ledger(paths: Iterable[Path] | None = None, *, min_date: int = 0) -> li
                         continue
                     if min_date and int(r.get("d") or 0) < min_date:
                         continue
-                    seen[_row_key(r)] = r
+                    if live:
+                        r["_src"] = "live"
+                    k = _row_key(r)
+                    prev = seen.get(k)
+                    if prev is not None:
+                        if not r.get("wt") and prev.get("wt"):
+                            r["wt"] = prev["wt"]
+                        if not r.get("r") and prev.get("r"):
+                            r["r"] = prev["r"]
+                    seen[k] = r
         except OSError:
             continue
     return list(seen.values())
@@ -247,10 +268,49 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
     if not rows:
         return {"version": VERSION, "theta": {}, "gamma": {}, "a_vs": {}, "b": {}, "delta": {},
                 "par_win": {}, "n_runs": 0}
-    last = max(r["d"] for r in rows)
-    ld = _dt.date(last // 10000, last // 100 % 100, last % 100) - _dt.timedelta(days=WINDOW_DAYS)
-    lim = ld.year * 10000 + ld.month * 100 + ld.day
-    use = [r for r in rows if r["d"] >= lim and (not r.get("wt") or r["t"] - r["wt"] <= MAX_BEHIND)]
+    # 学習窓は中央/地方ごとに「その circuit で一括データが揃った最新日 (1 日 DENSE_MIN_ROWS 走以上・今日以前)」から
+    # WINDOW_DAYS 遡る (それより新しい行は全部使う)。地方は公式データで当月まで揃う一方、中央は netkeiba
+    # キャッシュ (〜2026-05) + 解析時の live 行だけ。全体の最新日や「最新の 1 行」で切ると、中央の窓が
+    # live 行 1 つで数か月ぶん削れ、表示する「〜までの走破時計で学習」も実態より新しく見えてしまう
+    # (2026-10-13 レビュー: 1 行で中央の 2,756 走が窓外・換算が中央値 0.15 秒動いた)。walk-forward 検証は
+    # 両 circuit とも評価月の直前まで揃った状態で窓を切っていたので、検証値はこの定義と一致する。
+    # 起点の「揃った日」は一括データ (netkeiba_raw / 公式) の行だけで数える: live 行は各馬の過去 12 走ぶんが
+    # 最近の開催日に積み上がる (107 レース解析で 1 日 60〜80 走) ので、数えると揃っていない日が起点になる。
+    # 一括データの無い circuit (立ち上げ直後・テスト) だけ live 行も数える。
+    today = _dt.date.today()
+    today_i = today.year * 10000 + today.month * 100 + today.day
+    bulk_day: dict[tuple[str, int], int] = defaultdict(int)
+    all_day: dict[tuple[str, int], int] = defaultdict(int)
+    for r in rows:
+        if r["d"] <= today_i:
+            k = (circuit(r["v"]), r["d"])
+            all_day[k] += 1
+            if r.get("_src") != "live":
+                bulk_day[k] += 1
+    bulk_c = {c for c, _d in bulk_day}
+    per_day = dict(bulk_day)
+    for k, n in all_day.items():
+        if k[0] not in bulk_c:
+            per_day[k] = n
+    last_c: dict[str, int] = {}
+    any_c: dict[str, int] = {}
+    for (c, d), n in per_day.items():
+        any_c[c] = max(any_c.get(c, 0), d)
+        if n >= DENSE_MIN_ROWS:
+            last_c[c] = max(last_c.get(c, 0), d)
+    for c, d in any_c.items():
+        last_c.setdefault(c, d)            # 揃った日が無い circuit (テスト・立ち上げ直後) は最新日
+    if not last_c:                         # 全行が未来日付 (誤パース) — 窓を切れないので各 circuit の最大日を使う
+        for r in rows:
+            c = circuit(r["v"])
+            last_c[c] = max(last_c.get(c, 0), r["d"])
+    last = max(last_c.values())
+    lim_c: dict[str, int] = {}
+    for c, lc in last_c.items():
+        ld = _dt.date(lc // 10000, lc // 100 % 100, lc % 100) - _dt.timedelta(days=WINDOW_DAYS)
+        lim_c[c] = ld.year * 10000 + ld.month * 100 + ld.day
+    use = [r for r in rows if r["d"] >= lim_c.get(circuit(r["v"]), 0)
+           and (not r.get("wt") or r["t"] - r["wt"] <= MAX_BEHIND)]
     cnt: dict[str, int] = defaultdict(int)
     for r in use:
         cnt[r["h"]] += 1
@@ -334,14 +394,24 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
             break
 
     # 表示用の参考: 条件別の勝ち時計中央値 (馬場別 n>=10 / 全馬場 n>=5)
-    # 1 レース = (場, 日, 芝ダ, 距離, 馬場, 勝ち時計)。ledger 行はレース番号を持たないので勝ち時計で
-    # 同日同条件の別レースを区別する (旧 key は同日同条件を 1 レースに潰し n 過少・中央値が速めに偏った)。
-    races: dict[tuple, float] = {}
+    # 1 レース = レース番号 r がある行 (地方の公式データ) は (場, 日, R)。無い行 (netkeiba / live) は
+    # (場, 日, 芝ダ, 距離, 馬場, 勝ち時計) で同日同条件の別レースを区別する (旧 key は同日同条件を 1 レースに
+    # 潰し n 過少・中央値が速めに偏った。勝ち時計が同じ別レースも 4.6% ある → r があれば r で数える)。
+    # r の無い行は、同じ (場, 日, 芝ダ, 距離, 馬場, 勝ち時計) の r 付きレースがあれば二重に数えない。
+    races_r: dict[tuple, tuple] = {}
     for r in rows:
-        if r.get("wt"):
-            races[(r["v"], r["d"], r["s"], r["dist"], r["g"], r["wt"])] = r["wt"]
+        if r.get("wt") and r.get("r"):
+            races_r[(r["v"], r["d"], r["r"])] = (r["v"], r["d"], r["s"], r["dist"], r["g"], r["wt"])
+    seen_wkeys = set(races_r.values())
+    races: dict[tuple, float] = {k: v[5] for k, v in races_r.items()}
+    for r in rows:
+        if r.get("wt") and not r.get("r"):
+            wk = (r["v"], r["d"], r["s"], r["dist"], r["g"], r["wt"])
+            if wk not in seen_wkeys:
+                races[wk] = r["wt"]
     pw: dict[str, list[float]] = defaultdict(list)
-    for (v, d, s, dist, g, _w), wt in races.items():
+    for key, wt in races.items():
+        v, d, s, dist, g = (races_r[key][:5] if key in races_r else key[:5])
         pw[f"{s}|{dist}|{v}|"].append(wt)
         if g:
             pw[f"{s}|{dist}|{v}|{g}"].append(wt)
@@ -352,6 +422,8 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         "version": VERSION,
         "fitted_at": _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).isoformat(timespec="seconds"),
         "data_until": f"{last // 10000:04d}-{last // 100 % 100:02d}-{last % 100:02d}",
+        "data_until_by_circuit": {c: f"{v // 10000:04d}-{v // 100 % 100:02d}-{v % 100:02d}"
+                                  for c, v in sorted(last_c.items())},
         "n_runs": len(use), "n_horses": nH, "n_cells": nC, "n_days": nD,
         "params": {"K": K, "K_DAY": K_DAY, "WINDOW_DAYS": WINDOW_DAYS, "MAX_BEHIND": MAX_BEHIND,
                    "day_effects": day_effects, "iterations": n_iter},

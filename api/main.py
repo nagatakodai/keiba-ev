@@ -211,7 +211,17 @@ class ResultAutoFetcher:
             "time_model_rebuilds": self.time_model_rebuilds,
             "time_model_last_attempt_at": self.time_model_last_attempt_at,
             "time_model_last_error": self.time_model_last_error,
+            "time_model_official": self._official_status(),
         }
+
+    @staticmethod
+    def _official_status() -> dict[str, Any] | None:
+        """地方の公式データ (src/nar_official.py) の同期状態 (通信なし・失敗は None)。"""
+        try:
+            from src.nar_official import status
+            return status()
+        except Exception:  # noqa: BLE001
+            return None
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -284,26 +294,7 @@ class ResultAutoFetcher:
                 self.signal_rules_appends += 1
         except Exception:  # noqa: BLE001 - 計測は結果取得ループを止めない
             pass
-        # タイム換算モデル (src/time_model.py) の日次再学習 (2026-10-10): 解析時に貯まった過去走
-        # (live ledger) を取り込み、netkeiba 規制後の開催日の馬場差も推定できるようにする。
-        # モデルが 24h より古く ledger が更新されているときだけ (数秒のローカル計算・予想や投票はしない)。
-        # 再学習は別プロセス (ledger 全読み込みのピークメモリを uvicorn に載せない)。失敗したら 6 時間は
-        # 再試行しない (毎 tick の全件読み込みを避ける)。状態は GET /api/results/auto の time_model_*。
-        if time.time() >= self.time_model_retry_after:
-            try:
-                from src.time_model import needs_rebuild
-                if await asyncio.to_thread(needs_rebuild, 24.0):
-                    self.time_model_last_attempt_at = time.time()
-                    rc, tail = await asyncio.to_thread(self._rebuild_time_model)
-                    if rc == 0:
-                        self.time_model_rebuilds += 1
-                        self.time_model_last_error = None
-                    else:
-                        self.time_model_last_error = f"rc={rc}: {tail}"
-                        self.time_model_retry_after = time.time() + 6 * 3600
-            except Exception as e:  # noqa: BLE001 - 結果取得ループを止めない
-                self.time_model_last_error = repr(e)[:300]
-                self.time_model_retry_after = time.time() + 6 * 3600
+        await self._maybe_rebuild_time_model()
         self.last_run_at = time.time()
         self.runs += 1
         self.last_summary = {
@@ -314,17 +305,68 @@ class ResultAutoFetcher:
             "not_due": summary.get("not_due", 0),
         }
 
+    async def _maybe_rebuild_time_model(self) -> None:
+        # タイム換算モデル (src/time_model.py) の日次再学習 (2026-10-10): 解析時に貯まった過去走
+        # (live ledger) を取り込み、netkeiba 規制後の開催日の馬場差も推定できるようにする。
+        # モデルが 24h より古く ledger が更新されているとき、または地方の公式データ (src/nar_official.py,
+        # 月次 CSV は毎日 02:00 頃更新) に取り直すべき月があるとき (2026-10-13) だけ。予想や投票はしない。
+        # 再学習は別プロセス (公式データの取得 + ledger 全読み込みのピークメモリを uvicorn に載せない)。
+        # 失敗したら 6 時間は再試行しない (毎 tick の全件読み込みを避ける)。公式データの取得失敗は
+        # build_time_model.py が呑んで学習は続け、nar_official.sync_due が 3 時間は再判定しない。
+        # 状態は GET /api/results/auto の time_model_*。
+        if time.time() >= self.time_model_retry_after:
+            try:
+                from src.nar_official import sync_due
+                from src.time_model import needs_rebuild
+                if (await asyncio.to_thread(needs_rebuild, 24.0)
+                        or await asyncio.to_thread(sync_due)):
+                    self.time_model_last_attempt_at = time.time()
+                    rc, tail = await self._rebuild_time_model()
+                    if rc == 0:
+                        self.time_model_rebuilds += 1
+                        self.time_model_last_error = None
+                        if await asyncio.to_thread(sync_due):
+                            # 学習はできたが公式データの同期が済んでいない (キャッシュに書けない・壊れた月 等で
+                            # 試行の記録すら残らない) → 毎 tick の再起動・再取得を避けて 3 時間待つ
+                            self.time_model_last_error = ("nar_official sync still due after build "
+                                                          "(time_model_official を参照)")
+                            self.time_model_retry_after = time.time() + 3 * 3600
+                    else:
+                        self.time_model_last_error = f"rc={rc}: {tail}"
+                        self.time_model_retry_after = time.time() + 6 * 3600
+            except Exception as e:  # noqa: BLE001 - 結果取得ループを止めない
+                self.time_model_last_error = repr(e)[:300]
+                self.time_model_retry_after = time.time() + 6 * 3600
+
     @staticmethod
-    def _rebuild_time_model() -> tuple[int, str]:
-        """scripts/build_time_model.py を別プロセスで実行 → (rc, 出力末尾)。"""
-        import subprocess
+    async def _rebuild_time_model() -> tuple[int, str]:
+        """scripts/build_time_model.py を別プロセス (別セッション) で実行 → (rc, 出力末尾)。
+
+        asyncio のサブプロセスにして、API の停止/reload (タスクの cancel) で子をプロセスグループごと止める
+        (旧実装は to_thread(subprocess.run) で、reload や停止が学習 + 公式データ取得の完了まで待たされた)。
+        """
+        import signal
         root = Path(__file__).resolve().parents[1]
+        proc = await asyncio.create_subprocess_exec(
+            PY, str(root / "scripts" / "build_time_model.py"), cwd=str(root),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+
+        def _kill() -> None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+
         try:
-            r = subprocess.run([PY, str(root / "scripts" / "build_time_model.py")], cwd=str(root),
-                               capture_output=True, text=True, timeout=900)
-        except subprocess.TimeoutExpired:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=900)
+        except asyncio.TimeoutError:
+            _kill()
             return 124, "timeout"
-        return r.returncode, ((r.stdout or "") + (r.stderr or ""))[-300:]
+        except asyncio.CancelledError:
+            _kill()
+            raise
+        rc = proc.returncode if proc.returncode is not None else 1
+        return rc, (out or b"").decode("utf-8", "replace")[-300:]
 
     async def _loop(self) -> None:
         # 起動後しばらく待ってから初回実行 (起動直後の負荷集中 / reload 連打での暴発を避ける)。

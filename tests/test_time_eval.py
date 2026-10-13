@@ -315,6 +315,13 @@ def test_day_adj_none_when_day_not_estimated():
     ("ダート", "次開催は15年ぶりJ", 1800, "ダート"),
     ("ダート", "2025J", 1800, "ダート"),
     ("芝", "ステイヤーズS", 3600, "芝"),
+    # ゴールデンジョッキーズシリーズ (地方の平地, 2026-10-13: 公式データで 水沢 2025-12-09 R9 を障害扱いしていた)
+    ("ダート", "オッズパークＧＪＳキャンペーン賞Ｂ２", 1400, "ダート"),
+    ("ダート", "ＧＪＳ第１戦", 1400, "ダート"),
+    ("芝", "中山GJ(J・G1)", 4250, "障害"),
+    ("芝", "京都JS", 3170, "障害"),
+    ("芝", "中山GJJGI", 4260, "障害"),            # netkeiba 表記 (グレード付き) も障害のまま
+    ("芝", "牛若丸JSOP", 3170, "障害"),
 ])
 def test_jump_detection(surface, rc, dist, want):
     assert tm.norm_surface(surface, rc, dist) == want
@@ -364,3 +371,14 @@ def test_fit_converges_and_records_iterations():
                          "wt": 0.0})
     m = tm.fit(rows)
     assert 1 < m["params"]["iterations"] < tm.MAX_ITERS
+
+
+def test_model_meta_reports_target_circuit_data_until():
+    """地方は公式データで当月まで・中央は 2026-05 まで — 表示する「学習データの新しさ」は当レースの circuit の値。"""
+    from src import time_eval as te
+    m = {"fitted_at": "2026-10-13T04:00:00+09:00", "data_until": "2026-10-12", "n_runs": 1,
+         "data_until_by_circuit": {"jra": "2026-05-28", "nar": "2026-10-12"}, "params": {"day_effects": True}}
+    assert te._model_meta(m, "東京")["data_until"] == "2026-05-28"
+    assert te._model_meta(m, "大井")["data_until"] == "2026-10-12"
+    assert te._model_meta({"data_until": "2026-05-28"}, "大井")["data_until"] == "2026-05-28"   # 旧モデル
+    assert te._model_meta(None, "大井") is None

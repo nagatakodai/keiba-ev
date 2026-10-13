@@ -1,12 +1,14 @@
 """タイム換算モデル (src/time_model.py, te1) の学習データ抽出 + 学習。
 
-  python scripts/build_time_model.py                # ledger を全部読んで学習 → data/cache/time_model.json
+  python scripts/build_time_model.py                # 公式データ同期 → ledger を全部読んで学習 → data/cache/time_model.json
   python scripts/build_time_model.py --extract-raw  # data/raw から netkeiba_raw.jsonl を作り直してから学習
+  python scripts/build_time_model.py --no-official  # 地方の公式データ (keiba.go.jp) を取りに行かない (手元の ledger だけ)
 
 data/raw の netkeiba キャッシュ (馬柱 5 走 + 結果表の全着時計) は netkeiba 規制で増えないので、
-netkeiba_raw.jsonl は初回 (ファイルが無いとき) だけ自動で抽出する。以後は解析時に追記される
-live-YYYYMM.jsonl (keiba.go.jp / JRA 公式 / oddspark の過去走) が加わって再学習される。
-読み取り専用 (data/raw は読むだけ)。`make time-model` から呼ぶ。
+netkeiba_raw.jsonl は初回 (ファイルが無いとき) だけ自動で抽出する。地方は地方競馬全国協会の公式データ
+(src/nar_official.py の月次 CSV → nar_official-YYYYMM.jsonl) を学習窓ぶん同期する (確定した月は 1 回だけ・
+当月は 1 日 1 回まで)。中央は解析時に追記される live-YYYYMM.jsonl (JRA 公式 accessU の過去走) が加わる。
+data/raw は読むだけ。`make time-model` と API 常駐ループの日次再学習から呼ぶ。
 """
 from __future__ import annotations
 
@@ -111,10 +113,24 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--extract-raw", action="store_true", help="data/raw から netkeiba_raw.jsonl を作り直す")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--no-official", action="store_true",
+                    help="地方の公式データ (keiba.go.jp) を同期しない (環境変数 KEIBA_NAR_OFFICIAL=0 と同じ)")
+    ap.add_argument("--official-since", default=None, help="公式データを同期する最初の月 YYYYMM (既定: 学習窓の始まり)")
     args = ap.parse_args()
     t0 = time.time()
     if args.extract_raw or not RAW_LEDGER.exists():
         extract_raw(args.workers)
+    if not args.no_official:
+        # 通信失敗でも手元の ledger で学習は続ける (取得失敗は meta に残り、API は 3 時間後に再試行する)
+        try:
+            from src import nar_official
+            res = nar_official.sync(since=args.official_since, log=lambda m: print(m, flush=True))
+            print(f"nar_official: {'DISABLED (KEIBA_NAR_OFFICIAL=0) ' if res['disabled'] else ''}"
+                  f"downloaded={len(res['downloaded'])} cached={len(res['cached'])} "
+                  f"missing={res['missing'] or '-'} failed={res['failed'] or '-'} "
+                  f"deferred={res['deferred'] or '-'} ledger_written={len(res['ledger_written'])}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"nar_official sync failed (続行): {e!r}", flush=True)
     import datetime as _dt
     lim = _dt.date.today() - _dt.timedelta(days=tm.WINDOW_DAYS + tm.LOAD_SLACK_DAYS)   # rebuild と同じ
     ledger = tm.load_ledger(min_date=lim.year * 10000 + lim.month * 100 + lim.day)

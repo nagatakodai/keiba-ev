@@ -11,6 +11,8 @@ fixture は 2026-10-10 の実機 HTML / JSON から必要部分だけを切り�
 """
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from src import provisional
@@ -80,7 +82,7 @@ _DEBA_BANEI = _deba(_LI_BANEI, h3="夫よ、早く税理士になれよ杯Ｃ２
 def test_parse_deba_header_saga():
     h = kg.parse_deba_header(_DEBA_SAGA)
     assert h == {"distance": 1300, "surface": "ダート", "direction": "右", "course": "",
-                 "weather": "曇", "going": "良"}
+                 "weather": "曇", "going": "良", "race_name": "コスモス特別B"}
 
 
 def test_parse_deba_header_kochi_heavyish():
@@ -92,11 +94,13 @@ def test_parse_deba_header_kochi_heavyish():
 def test_parse_deba_header_without_weather_going():
     # 天候/馬場の発表前。馬ブロックの「不良」「重」を当レースの馬場と取り違えない。
     h = kg.parse_deba_header(_deba("ダート　1600ｍ（左）　　サラブレッド系　一般 別定", horses=_HORSES))
-    assert h == {"distance": 1600, "surface": "ダート", "direction": "左", "course": ""}
+    assert h == {"distance": 1600, "surface": "ダート", "direction": "左", "course": "",
+                 "race_name": "コスモス特別B"}
     # section.raceTitle の外に「天候：/馬場：」形の記述があっても拾わない (ヘッダに限定)
     decoy = '<div class="raceInfo">前走 ダート　1800ｍ（右）　天候：雨　馬場：不良</div>'
     h2 = kg.parse_deba_header(_deba("ダート　1600ｍ（左）　　サラブレッド系", horses=decoy + _HORSES))
-    assert h2 == {"distance": 1600, "surface": "ダート", "direction": "左", "course": ""}
+    assert h2 == {"distance": 1600, "surface": "ダート", "direction": "左", "course": "",
+                  "race_name": "コスモス特別B"}
 
 
 def test_parse_deba_header_outer_course_and_turf():
@@ -554,3 +558,134 @@ def test_analyze_jra_sets_weather_text_from_going(monkeypatch):
     r = res["rd"].race
     assert asked == [("京都", "20321010")]
     assert (r.distance, r.surface, r.weather_text) == (1800, "ダート", "曇 / 重")
+
+
+# ------------------------------------------- 当レースのクラス / 公式データ補完 (2026-10-13) --
+
+def test_header_race_name_sets_race_class_including_banei():
+    rd = kg.build_keibago_racedata("202655101005", [(1, "A", "", False)], {}, fetch_past=False,
+                                   race_header=kg.parse_deba_header(_DEBA_SAGA))
+    assert rd.race.race_class == "コスモス特別B"
+    # ばんえいも race_class は載せる (LightGBM 特徴量は当レースの race_class を使わない・仮指数のクラス因子用)
+    rb = kg.build_keibago_racedata("202665101001", [(1, "A", "", False)], {}, fetch_past=False,
+                                   race_header=kg.parse_deba_header(_DEBA_BANEI))
+    assert rb.race.race_class == "夫よ、早く税理士になれよ杯C2-4" and rb.race.distance == 0
+    from src.speed_index import class_index
+    assert class_index(rb.race.race_class) == -8
+
+
+def _official_month_with(rid: str, *, surface="ダート", dist=1400, turn="右", weather="曇", going="重",
+                         name="Ｃ１－３") -> None:
+    """tmp の公式月次キャッシュに 1 レース分 (rid の場・日付・R) を置く (通信なし)。"""
+    import datetime as dt
+    import io
+    import zipfile
+
+    from src import nar_official as no
+    from src.parse import VENUE_CODE
+    venue = VENUE_CODE[rid[4:6]] if rid[4:6] != "65" else "帯広ば"
+    ymd = rid[:4] + rid[6:10]
+    hdr = ("競馬場,競走年月日,レース番号,発走時刻,競走種類名称,レース名,芝ダート区分,回り,距離,天候,馬場,頭数,条件")
+    row = f"{venue},{ymd},{int(rid[10:12])},1500,普通,{name},{surface},{turn},{dist},{weather},{going},8,一般"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(f"{ymd[:6]}_racelist.csv", ("﻿" + hdr + "\n" + row + "\n").encode("utf-8"))
+    ym = ymd[:6]
+    no.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    no.monthly_zip_path(ym).write_bytes(buf.getvalue())
+    no._write_meta(ym, {"downloaded_at": dt.datetime(2026, 10, 13, 9, 0, tzinfo=no.JST).isoformat()})
+
+
+def test_oddspark_racedata_gets_conditions_from_official(monkeypatch):
+    """oddspark 経路は当レース条件を持たない → 公式データ (月次キャッシュ) から距離・芝ダ・馬場・クラスを補う。"""
+    _official_month_with("202655091012")
+    horses = [op.OddsparkHorse(1, "ウマA", 3.0, 1.2, 1.8, lineage_nb="")]
+    rd = op.build_oddspark_racedata(horses, "202655091012", fetch_past=False)
+    r = rd.race
+    assert (r.distance, r.surface, r.direction, r.weather_text, r.race_class) == \
+        (1400, "ダート", "右", "曇 / 重", "C1-3")
+    from src import time_eval
+    assert time_eval.target_of(r) == {"venue": "佐賀", "surface": "ダート", "distance": 1400,
+                                      "going": "重", "going_source": "announced"}
+    # 公式に無いレースは従来どおり条件不明 (例外なし)
+    rd2 = op.build_oddspark_racedata(horses, "202655091011", fetch_past=False)
+    assert (rd2.race.distance, rd2.race.surface, rd2.race.race_class) == (0, "", "")
+    # race_header={} を明示すると公式データを引かない
+    rd3 = op.build_oddspark_racedata(horses, "202655091012", fetch_past=False, race_header={})
+    assert rd3.race.distance == 0
+
+
+def test_oddspark_banei_keeps_distance_zero_with_official_header():
+    _official_month_with("202665091005", surface="", dist=200, turn="直", weather="晴", going="1.1",
+                         name="ばんえいＢ２－１")
+    horses = [op.OddsparkHorse(1, "ウマA", 3.0, 1.2, 1.8, lineage_nb="")]
+    rd = op.build_oddspark_racedata(horses, "202665091005", fetch_past=False)
+    assert (rd.race.distance, rd.race.surface, rd.race.weather_text) == (0, "", "晴 / ")
+    assert rd.race.race_class == "ばんえいB2-1"
+
+
+def test_keibago_fill_header_from_official_when_deba_header_missing():
+    """DebaTable のヘッダが取れない (DOM 変化・骨組み HTML) ときだけ公式データで補う。"""
+    from src.nar_official import fill_race_header
+    _official_month_with("202644091003", dist=1200, going="稍重", name="Ｂ３")
+    hdr = fill_race_header(kg.parse_deba_header("<html><body></body></html>"), "202644091003")
+    rd = kg.build_keibago_racedata("202644091003", [(1, "A", "", False)], {}, fetch_past=False, race_header=hdr)
+    assert (rd.race.distance, rd.race.surface, rd.race.weather_text, rd.race.race_class) == \
+        (1200, "ダート", "曇 / 稍重", "B3")
+    # ヘッダが揃っていれば公式データは見ない (ヘッダの値のまま)
+    full = kg.parse_deba_header(_DEBA_SAGA)
+    assert fill_race_header(full, "202644091003") == full
+
+
+def test_parse_deba_header_fallback_ignores_navi_h3():
+    """section.raceTitle が無いページ (DOM 変化・骨組み) ではナビの <h3>オッズ</h3> をレース名にしない。"""
+    html = ('<h3 class="naviTitle">オッズ</h3><ul class="dataArea"><li>ダート 1400m（右） 天候：晴 馬場：重</li></ul>'
+            '<td class="horseNum">1</td>')
+    h = kg.parse_deba_header(html)
+    assert "race_name" not in h and h["distance"] == 1400
+    # class 名が増えた section (raceTitle clearfix) は section として読む
+    renamed = _DEBA_SAGA.replace('class="raceTitle"', 'class="raceTitle clearfix"')
+    assert kg.parse_deba_header(renamed)["race_name"] == "コスモス特別B"
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.parametrize("phase,allow", [("bet", False), ("score", True)])
+def test_keibago_header_fill_never_downloads_in_bet_phase(monkeypatch, phase, allow):
+    """bet 段 (締切 1〜2.5 分前) は公式データの補完で通信しない (手元のキャッシュだけ)。"""
+    from src import nar_official
+    from src.models import BetOdds
+    monkeypatch.setattr(kg, "find_keibago_race",
+                        lambda rid: kg.KeibagoLoc(race_date="2026/10/13", race_no=99, baba_code="21", venue="川崎"))
+    monkeypatch.setattr(kg, "fetch_keibago_bets", lambda loc: {
+        "other_bets": {"win": [BetOdds(bet_type="win", key=(1,), odds=2.0)]}, "trifecta": [],
+        "consistency": {"ok": True}, "body_weights": {}})
+    monkeypatch.setattr(kg, "_get", lambda url, **_k: "<html><body></body></html>")   # ヘッダの無い出馬表
+    seen: dict = {}
+
+    def fake_fill(hdr, rid, *, allow_download=True):
+        seen["allow"] = allow_download
+        raise _Stop
+
+    monkeypatch.setattr(nar_official, "fill_race_header", fake_fill)
+    monkeypatch.setattr(kg, "parse_deba_table", lambda html: [(1, "A", "", False)])
+    with pytest.raises(_Stop):
+        kg.analyze_keibago("202645101399", phase=phase)
+    assert seen["allow"] is allow
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_oddspark_official_header_respects_allow_download(monkeypatch, allow):
+    from src import nar_official
+    seen: dict = {}
+
+    def fake_header(rid, *, allow_download=True):
+        seen["allow"] = allow_download
+        return {}
+
+    monkeypatch.setattr(nar_official, "official_race_header", fake_header)
+    horses = [op.OddsparkHorse(1, "ウマA", 3.0, 1.2, 1.8, lineage_nb="")]
+    op.build_oddspark_racedata(horses, "202655101012", fetch_past=False, allow_official_download=allow)
+    assert seen["allow"] is allow
