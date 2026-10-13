@@ -149,3 +149,24 @@ def test_all_scores_in_range_and_absent_excluded():
     out = P.provisional_index(rd)
     assert 3 not in out                      # absent は除外
     assert all(0.0 <= v <= 100.0 for v in out.values())
+
+
+def test_class_is_ignored_outside_jra_but_used_in_jra():
+    """地方・ばんえいの仮指数はクラスを使わない (2026-10-13: keiba.go.jp の過去走は自走時計しか無く、クラスが
+    時計を潰して公式データ再現で勝ち馬 AUC −0.024)。全角/半角・クラスの高低を変えても同じ値。中央は使う。"""
+    def build(vid, cls_a, cls_b, target):
+        a = _horse(1, "A", [_past(finish_pos=None, time_diff=0.8, race_class=cls_a, surface="ダート")
+                           for _ in range(3)])
+        b = _horse(2, "B", [_past(finish_pos=None, time_diff=0.8, race_class=cls_b, surface="ダート")
+                           for _ in range(3)])
+        c = _horse(3, "C", _weak_runs())
+        rd = _race([a, b, c], surface="ダート", race_class=target)
+        rd.race.venue_id = vid
+        return P.provisional_index(rd), P.provisional_breakdown(rd)
+    nar1, br1 = build(44, "Ｃ２四組", "Ａ１", "Ｂ３－５")
+    nar2, br2 = build(44, "C3", "C3", "")
+    assert nar1 == nar2 and nar1[1] == nar1[2] and br1 == br2
+    banei, _ = build(65, "Ｃ２－１", "Ａ１－１", "Ｂ２－１")
+    assert banei[1] == banei[2]
+    jra, _ = build(5, "1勝", "3勝", "2勝")
+    assert jra[2] > jra[1]                       # 中央: 上のクラスで同じ時計の B が上

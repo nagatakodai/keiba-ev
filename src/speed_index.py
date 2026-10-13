@@ -20,6 +20,8 @@ Notes:
 """
 from __future__ import annotations
 
+import unicodedata
+
 from .models import PastRun
 
 
@@ -55,10 +57,16 @@ def _interp_distance_factor(distance: int, surface: str) -> float:
 # --- クラス指数 (出走したクラスの強さ補正、高いほど強いクラス) ---
 # JRA / NAR 共通の粗い分類。フルマッチではなく部分一致で判定。
 def class_index(race_class: str) -> int:
-    """レースクラス名から指数を返す。判定不能は 0。"""
+    """レースクラス名から指数を返す。判定不能は 0。
+
+    NFKC 正規化してから判定する (2026-10-13): keiba.go.jp (地方公式) の馬柱・出馬表は全角表記
+    ("Ｃ２四組" / "Ｂ３－５" / "ＧⅠ") で、旧実装は ASCII 前提の部分一致に掛からず全て 0 だった
+    (学習側 netkeiba の "C2ー4組" = −8 と食い違う train/serve skew)。netkeiba 側の表記 37 万件は
+    正規化しても値が 1 件も変わらないことを確認済 (学習済み LightGBM の入力分布は不変)。
+    """
     if not race_class:
         return 0
-    s = race_class
+    s = unicodedata.normalize("NFKC", race_class)
     # JRA/交流 重賞 — 算用数字 (G1)・ローマ数字1文字 (GⅠ)・**ASCII ローマ数字 (GI/GII/GIII,
     # netkeiba 馬柱の実表記)** をすべて受ける。ASCII は GIII ⊃ GII ⊃ GI の包含があるので
     # 長い表記から先に判定する (2026-06-11 bughunt 第5R: 旧実装は ASCII 表記を一切見ず
@@ -183,8 +191,14 @@ def _base_time(surface: str, distance: int, venue: str = "") -> float:
 # --- スピード指数 ---
 
 
-def speed_index(past: PastRun) -> float:
-    """1 走分のスピード指数を返す。データ欠損時は 0.0。"""
+def speed_index(past: PastRun, *, with_class: bool = True) -> float:
+    """1 走分のスピード指数を返す。データ欠損時は 0.0。
+
+    with_class=False はクラス指数の項を足さない (2026-10-13): 地方の仮指数/適性は、自走時計しか無い
+    過去走 (keiba.go.jp 馬柱 = 着差・斤量・上がり無し) だとクラス 1 段 (2 点) が時計 1.2〜2.5 秒ぶんに効いて
+    時計の情報を潰す (公式データ再現で仮指数の勝ち馬 AUC −0.016〜−0.024)。LightGBM の特徴量は学習時と
+    同じく with_class=True のまま。
+    """
     own = past.own_time_sec
     if own <= 0 or past.distance <= 0 or not past.surface:
         return 0.0
@@ -193,30 +207,31 @@ def speed_index(past: PastRun) -> float:
         return 0.0
     df = _interp_distance_factor(past.distance, past.surface)
     gi = going_index(past.going, past.surface)
-    ci = class_index(past.race_class)
+    ci = class_index(past.race_class) if with_class else 0
     weight_adj = (past.weight_kg - 55.0) * 2.0 if past.weight_kg > 0 else 0.0
     return (bt - own) * df + gi + weight_adj + ci + 80.0
 
 
-def best_speed_index(runs: list[PastRun]) -> float:
+def best_speed_index(runs: list[PastRun], *, with_class: bool = True) -> float:
     """直近走の中での最大指数。データなしは 0.0。"""
     if not runs:
         return 0.0
-    vals = [speed_index(r) for r in runs]
+    vals = [speed_index(r, with_class=with_class) for r in runs]
     vals = [v for v in vals if v > 0]
     return max(vals) if vals else 0.0
 
 
-def mean_recent_speed_index(runs: list[PastRun], n: int = 3) -> float:
+def mean_recent_speed_index(runs: list[PastRun], n: int = 3, *, with_class: bool = True) -> float:
     """直近 n 走の単純平均。"""
     if not runs:
         return 0.0
-    vals = [speed_index(r) for r in runs[:n]]
+    vals = [speed_index(r, with_class=with_class) for r in runs[:n]]
     vals = [v for v in vals if v > 0]
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def weighted_recent_speed_index(runs: list[PastRun], weights: tuple[float, ...] = (0.5, 0.3, 0.2)) -> float:
+def weighted_recent_speed_index(runs: list[PastRun], weights: tuple[float, ...] = (0.5, 0.3, 0.2),
+                                *, with_class: bool = True) -> float:
     """直近 N 走 (len(weights)) を重み付け平均。weights は新しい走から。"""
     if not runs or not weights:
         return 0.0
@@ -224,7 +239,7 @@ def weighted_recent_speed_index(runs: list[PastRun], weights: tuple[float, ...] 
     num = 0.0
     den = 0.0
     for i in range(n):
-        v = speed_index(runs[i])
+        v = speed_index(runs[i], with_class=with_class)
         if v <= 0:
             continue
         num += v * weights[i]

@@ -174,7 +174,13 @@ export default async function PredictionDetailPage({
           // 必ず非空を返すのでタイトルが消えない。badge 群は items-center で揃える。
           <span className="flex items-center gap-3">
             <span>{raceTitle(d)}</span>
-            {d.race_class && <Badge tone="muted">{d.race_class}</Badge>}
+            {d.race_class && (
+              <Badge tone="muted">
+                <span className="inline-block max-w-[16rem] truncate align-bottom" title={d.race_class}>
+                  {d.race_class}
+                </span>
+              </Badge>
+            )}
             {d.model_info?.engine === "lgbm" ? (
               <span title={`LightGBM ${d.model_info.n_features ?? "?"} features, trained ${d.model_info.trained_at ?? "?"}`}>
                 <Badge tone="info">LGBM</Badge>

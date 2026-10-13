@@ -176,7 +176,12 @@ function RaceRow({
             </span>
           </span>
           {p.race_class && (
-            <Badge tone={raceClassTone(p.race_class)}>{p.race_class}</Badge>
+            <Badge tone={raceClassTone(p.race_class)}>
+              {/* keiba.go.jp 経路はレース名全体 (協賛名入り) なので長い名前は省略・全体は title */}
+              <span className="inline-block max-w-[12rem] truncate align-bottom" title={p.race_class}>
+                {p.race_class}
+              </span>
+            </Badge>
           )}
           {/* score 段の暫定プレビュー (Claude 指数出力時に早出し)。bet 段で確定版に上書きされる。 */}
           {p.stage === "score" && <Badge tone="muted">暫定</Badge>}

@@ -229,6 +229,12 @@ def main(argv: list[str] | None = None) -> int:
     ab_since = _norm_date(args.ab_since)
     modes, itt = collect(since, ab_since)
     print(render(modes, itt, since, ab_since))
+    # 2026-10-13: prefetch 腕の各馬「近況」クエリのクラス表記が変わった (keiba.go.jp/oddspark の race_class に
+    # レース名全体が入るようになり、短いクラス表記 _class_token だけを使うよう変更)。前後を混ぜると腕の定義が違う。
+    cut = "2026-10-13"
+    if (since or "0000") < cut or ab_since < cut:
+        print(f"\n[注意] 集計期間が {cut} (prefetch の近況クエリ変更) をまたいでいます。腕の定義が途中で変わって"
+              f"いるので、判定には --since {cut.replace('-', '')} --ab-since {cut.replace('-', '')} の結果も確認すること。")
     return 0
 
 

@@ -315,14 +315,25 @@ export function parsePlanLabel(label: string): PlanLetter | null {
   return m[1].toUpperCase() as PlanLetter;
 }
 
+// クラスの短い表記 (backend src/research_prefetch._class_token と同じ規則)。keiba.go.jp / oddspark 経路の
+// race_class はレース名全体 (協賛名・記念名入り, 2026-10-13〜) なので、色分けはこの短い表記で決める
+// (旧実装の部分一致は競輪由来の GP/G1/F1/チャレンジ 判定で「KING2歳」が G2 色・「…チャレンジ…」が淡色になった)。
+// 地方のクラス (C2/B3/A1) があればそれを優先、無ければ 準重賞 を除く 重賞・オープン・2勝クラス・JpnI 等。
+const CLASS_TOKEN_RE =
+  /(?<![A-Za-z])(?:[ABC]\d{1,2}|[123]勝クラス|新馬|未勝利|オープン|OP(?![A-Za-z])|Jpn(?:III|II|I|[123])(?![A-Za-z])|G(?:III|II|I|[123])(?![A-Za-z])|(?<!準)重賞)/g;
+
+export function raceClassShort(c: string): string {
+  const hits = Array.from((c ?? "").normalize("NFKC").matchAll(CLASS_TOKEN_RE), (m) => m[0]);
+  return hits.find((t) => /^[ABC]\d/.test(t)) ?? hits[0] ?? "";
+}
+
 export function raceClassTone(
   c: string,
 ): "good" | "warn" | "magenta" | "muted" | "default" {
-  const u = (c ?? "").toUpperCase();
-  if (u.includes("GP") || u.includes("G1")) return "magenta";
-  if (u.includes("G2") || u.includes("G3")) return "warn";
-  if (u.includes("F1")) return "good";
-  if (u.includes("F2") || u.includes("チャレンジ")) return "muted";
+  const t = raceClassShort(c);
+  if (/^(?:G(?:I|1)|Jpn(?:I|1))$/.test(t)) return "magenta";
+  if (/^(?:G|Jpn)/.test(t)) return "warn";
+  if (t === "重賞" || t === "オープン" || t === "OP") return "good";
   return "default";
 }
 

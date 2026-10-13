@@ -49,6 +49,19 @@ def test_build_queries_templates_and_jockey_dedup():
     assert rq["kind"] == "recent" and "3勝クラス" in rq["query"]
 
 
+def test_recent_query_uses_short_class_token_only():
+    """keiba.go.jp/oddspark は race_class にレース名全体 (協賛名) が入る → 馬ごとの近況クエリは短いクラスだけ。"""
+    rd = _mk_race(2)
+    rd.race.race_class = "柿生(かきお)スプリント3歳上オープン"
+    race_level, per_horse = rp.build_queries(rd)
+    assert per_horse[1][1]["query"] == '"ホース1" 東京 オープン'
+    assert "柿生(かきお)スプリント3歳上オープン" in race_level[2]["query"]      # preview はレース名のまま
+    rd.race.race_class = "夫よ、早く税理士になれよ杯Ｃ２－４"
+    assert rp.build_queries(rd)[1][1][1]["query"] == '"ホース1" 東京 C2'
+    rd.race.race_class = "コスモス特別"                                       # クラス表記なし → 付けない
+    assert rp.build_queries(rd)[1][1][1]["query"] == '"ホース1" 東京'
+
+
 # ---------- fetch_dossier ----------
 
 def _fake_search_factory(calls: list[str]):

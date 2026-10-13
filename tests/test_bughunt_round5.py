@@ -189,3 +189,21 @@ def test_recently_failed_phase_filter(tmp_path, monkeypatch):
     assert aw._recently_failed("X", now, cooldown_sec=120, phase="score") is True
     # phase 未指定は従来挙動 (全 phase 対象)
     assert aw._recently_failed("X", now, cooldown_sec=120) is True
+
+
+def test_class_index_fullwidth_keibago_strings():
+    """keiba.go.jp (地方公式) の全角表記もクラス指数になる (2026-10-13: 旧実装は全て 0 = train/serve skew)。"""
+    from src.speed_index import class_index
+    assert class_index("Ｃ２四組") == class_index("C2ー4組") == -8
+    assert class_index("Ｂ３－５") == -4
+    assert class_index("Ａ２－１") == 5
+    assert class_index("ＪｐｎⅠ") == 20
+    assert class_index("東京大賞典ＧＩ３上選定馬重賞") == 20
+    assert class_index("２歳新馬") == -3
+
+
+def test_graded_weight_fullwidth():
+    from src.aptitude import _graded_weight, _normalize_grade_tag
+    assert _graded_weight("ＪｐｎⅠ") == _graded_weight("JpnI") == 10.0
+    assert _normalize_grade_tag("羽田盃ＪｐｎⅠ") == "G1"
+    assert _graded_weight("Ｃ２四組") == 0.0

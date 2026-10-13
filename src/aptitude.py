@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from .features import FeatureVec, build_features
+from .speed_index import weighted_recent_speed_index
 from .models import Horse, PastRun, RaceData
 
 # ---------- 重賞実績 ----------
@@ -48,10 +50,10 @@ def _grade_rank(tag: str) -> int:
 
 
 def _graded_weight(race_class: str) -> float:
-    """race_class 文字列 → 重み (0 = 重賞でない)。"""
+    """race_class 文字列 → 重み (0 = 重賞でない)。全角表記 (keiba.go.jp の "ＪｐｎⅠ" 等) は NFKC で揃える。"""
     if not race_class:
         return 0.0
-    m = _GRADED_RE.search(race_class)
+    m = _GRADED_RE.search(unicodedata.normalize("NFKC", race_class))
     if not m:
         return 0.0
     tag = m.group(1)
@@ -134,7 +136,7 @@ def graded_summary(past_runs: list[PastRun]) -> str:
 
 
 def _normalize_grade_tag(race_class: str) -> str:
-    m = _GRADED_RE.search(race_class)
+    m = _GRADED_RE.search(unicodedata.normalize("NFKC", race_class or ""))
     if not m:
         return ""
     tag = m.group(1)
@@ -350,11 +352,15 @@ def compute_aptitudes(
 
     graded_texts: dict[int, str] = {}
 
+    # 地方・ばんえいの能力はクラス項抜きの SI (仮指数と同じ理由・2026-10-13 — keiba.go.jp の過去走は自走時計
+    # しか無くクラスが時計を潰す。中央と LightGBM 特徴量 (fv) は従来どおりクラス込み)。
+    jra = 1 <= int(getattr(rd.race, "venue_id", 0) or 0) <= 10
     for h in horses:
         fv = feats.get(h.number)
         if fv is None:
             continue
-        raw_ability[h.number] = _ability_raw(fv)
+        raw_ability[h.number] = (_ability_raw(fv) if jra
+                                 else float(weighted_recent_speed_index(h.past_runs or [], with_class=False)))
         raw_dist[h.number] = _distance_fit_raw(fv)
         raw_last3f[h.number] = _last3f_raw(fv)
         raw_surface[h.number] = _surface_fit_raw(fv)

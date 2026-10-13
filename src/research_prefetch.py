@@ -29,7 +29,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import time
+import unicodedata
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -68,6 +70,23 @@ def _race_date(rd: RaceData) -> dt.date:
     return dt.datetime.now(_JST).date()
 
 
+_CLASS_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z])(?:[ABC]\d{1,2}|[123]勝クラス|新馬|未勝利|オープン|OP(?![A-Za-z])"
+    r"|Jpn(?:III|II|I|[123])(?![A-Za-z])|G(?:III|II|I|[123])(?![A-Za-z])|(?<!準)重賞)")
+
+
+def _class_token(race_class: str) -> str:
+    """馬ごとの近況クエリ用の短いクラス表記 (C2 / B3 / 未勝利 / 2勝クラス / JpnI ...)。無ければ ""。
+
+    keiba.go.jp / oddspark 経路は 2026-10-13 から race_class にレース名全体 (協賛名・記念名を含む) が入るので、
+    そのまま馬名クエリに足すと今日のレース名で馬の近況を検索してしまう (レース級の preview にだけ全体を使う)。
+    地方のクラス (C2/B3/A1) があればそれを優先する (協賛名の「…GI昇格記念C2四」「重賞予想会…C1C2」で
+    左端の GI/重賞 を取らない)。「準重賞」は重賞にしない。web/components/ui.tsx raceClassShort と同じ規則。
+    """
+    hits = [m.group(0) for m in _CLASS_TOKEN_RE.finditer(unicodedata.normalize("NFKC", race_class or ""))]
+    return next((t for t in hits if t[0] in "ABC" and t[1:2].isdigit()), hits[0] if hits else "")
+
+
 def build_queries(rd: RaceData) -> tuple[list[dict[str, str]], dict[int, list[dict[str, str]]]]:
     """固定テンプレのクエリ集合 (実測分布ベース) を組む。
 
@@ -80,6 +99,7 @@ def build_queries(rd: RaceData) -> tuple[list[dict[str, str]], dict[int, list[di
     date_ja = f"{d.year}年{d.month}月{d.day}日"
     venue = r.venue_name or ""
     cls = (r.race_class or "").strip()
+    cls_token = _class_token(cls)
     surface = (r.surface or "").strip()
 
     race_level: list[dict[str, str]] = [
@@ -101,8 +121,8 @@ def build_queries(rd: RaceData) -> tuple[list[dict[str, str]], dict[int, list[di
             # 実測 43%: 直前情報 (パドック/馬体重/気配) — 最重要バケット。
             {"kind": "paddock",
              "query": f'"{name}" {venue} パドック OR 馬体重 OR 気配 OR 歩様 {date_ja}'},
-            # 実測 21%: 馬名+場+クラス の近況確認。
-            {"kind": "recent", "query": f'"{name}" {venue} {cls}'.strip()},
+            # 実測 21%: 馬名+場+クラス の近況確認 (クラスは短い表記だけ)。
+            {"kind": "recent", "query": f'"{name}" {venue} {cls_token}'.strip()},
         ]
 
     # 騎手 (実測 4%): ユニーク騎手のみ・多頭数レースでの爆発を上限で抑える。

@@ -134,11 +134,28 @@ def _recency(i: int) -> float:
     return _RECENCY ** i
 
 
-def _si_runs(h) -> list[tuple[int, PastRun, float]]:
+def _uses_class(rd) -> bool:
+    """クラス (race_class) を仮指数に使うか — 中央のみ (2026-10-13)。
+
+    地方・ばんえいはクラスを一切使わない (SI のクラス項・似レース/着差の質/クラス昇降の格): keiba.go.jp の
+    全角クラス表記 (Ｃ２四組) を NFKC で読めるようにした結果、自走時計しか無い地方の過去走ではクラスが
+    時計を潰し、公式データ再現 (2025-10〜2026-09, 13,664R) で勝ち馬 AUC −0.024・1 位勝率 −2.8pt。
+    クラス無しは修正前 (全角が 0 点 ≒ クラス無し) と同等 (2025-10〜2026-09: +0.001 AUC・+0.2pt /
+    2026-06〜09: +0.002 AUC・+0.6pt、いずれも CI が 0 を跨ぐ) で、netkeiba 馬柱でも中立。
+    中央はクラスを外すと 1 位勝率 −2.5pt なので使い続ける。
+    """
+    return _segment_of_rd(rd) == "jra"
+
+
+def _cls(race_class: str, ctx) -> int:
+    return class_index(race_class) if ctx.get("use_class", True) else 0
+
+
+def _si_runs(h, ctx) -> list[tuple[int, PastRun, float]]:
     """(index, run, SI) で SI>0 の直近走のみ (時計が取れた走)。"""
     out = []
     for i, r in enumerate((h.past_runs or [])[:_RECENT]):
-        si = speed_index(r)
+        si = speed_index(r, with_class=ctx.get("use_class", True))
         if si > 0:
             out.append((i, r, si))
     return out
@@ -161,7 +178,7 @@ def _run_goodness(r: PastRun) -> float:
 
 def _base_speed_raw(h, ctx) -> Optional[float]:
     """絶対能力: 西田式SI の近走減衰加重(65%) + 自己最高(35%)。"""
-    runs = _si_runs(h)
+    runs = _si_runs(h, ctx)
     if not runs:
         return None
     num = den = 0.0
@@ -176,7 +193,7 @@ def _base_speed_raw(h, ctx) -> Optional[float]:
 
 def _similar_race_raw(h, ctx) -> Optional[float]:
     """似レース好走: 今日と似た条件(芝ダ/距離/格/馬場)の走を相似度加重し、勝ち/好走を上乗せ。"""
-    runs = _si_runs(h)
+    runs = _si_runs(h, ctx)
     if not runs:
         return None
     d0, surf0, ci0, sev0 = ctx["dist"], ctx["surf"], ctx["class"], ctx["sev"]
@@ -185,7 +202,7 @@ def _similar_race_raw(h, ctx) -> Optional[float]:
         surf_k = 1.0 if (surf0 and r.surface == surf0) else (
             0.0 if ("障" in (r.surface or "")) != ("障" in (surf0 or "")) else 0.15)
         dist_k = math.exp(-((r.distance - d0) / 300.0) ** 2) if (d0 and r.distance) else 0.5
-        class_k = math.exp(-abs(class_index(r.race_class) - ci0) / 4.0)
+        class_k = math.exp(-abs(_cls(r.race_class, ctx) - ci0) / 4.0)
         sev_i = _going_sev(r.going)
         going_k = math.exp(-abs(sev_i - sev0) / 1.5) if (sev_i is not None and sev0 is not None) else 0.8
         sim = surf_k * dist_k * class_k * going_k
@@ -198,7 +215,7 @@ def _similar_race_raw(h, ctx) -> Optional[float]:
 
 def _distance_raw(h, ctx) -> Optional[float]:
     """距離適性: 今日の距離帯で出せる時計(距離ガウス加重SI) × 経験外距離ペナルティ。"""
-    runs = _si_runs(h)
+    runs = _si_runs(h, ctx)
     if not runs:
         return None
     d0, surf0 = ctx["dist"], ctx["surf"]
@@ -224,7 +241,7 @@ def _distance_raw(h, ctx) -> Optional[float]:
 
 def _going_raw(h, ctx) -> Optional[float]:
     """馬場適性: 今日の馬場区分で見込めるSIを、同馬場走→個体平均へベイズ縮小 + 道悪巧者。"""
-    runs = _si_runs(h)
+    runs = _si_runs(h, ctx)
     if not runs:
         return None
     sev0 = ctx["sev"]
@@ -299,7 +316,7 @@ def _perf_quality_raw(h, ctx) -> Optional[float]:
             terms.append(math.exp(-max(0.0, td) / 0.8)); wts.append(0.5)
         if r.field_size and r.field_size > 0:
             field_q = (math.log(max(r.field_size, 2)) / math.log(12.0)) * \
-                max(0.0, min(1.0, (class_index(r.race_class) - ci0 + 10) / 20.0))
+                max(0.0, min(1.0, (_cls(r.race_class, ctx) - ci0 + 10) / 20.0))
             terms.append(field_q); wts.append(0.35)
         if r.last_3f_sec and r.last_3f_sec > 0 and r.surface:
             par = 34.5 if "芝" in r.surface else 37.0
@@ -321,8 +338,8 @@ def _class_context_raw(h, ctx) -> Optional[float]:
     if not runs:
         return None
     ci0 = ctx["class"]
-    placed = [class_index(r.race_class) for r in runs if r.finish_pos in (1, 2, 3)]
-    allc = [class_index(r.race_class) for r in runs]
+    placed = [_cls(r.race_class, ctx) for r in runs if r.finish_pos in (1, 2, 3)]
+    allc = [_cls(r.race_class, ctx) for r in runs]
     proven = max(placed) if placed else (max(allc) if allc else ci0)
     move = max(-8.0, min(8.0, proven - ci0))
     fit_frac = sum(1 for c in allc if abs(c - ci0) <= 3) / len(allc) if allc else 0.0
@@ -372,11 +389,13 @@ def provisional_index(rd: RaceData, feats=None) -> dict[int, float]:
     if not horses:
         return {}
     r = rd.race
+    use_class = _uses_class(rd)
     ctx = {
         "dist": getattr(r, "distance", 0) or 0,
         "surf": getattr(r, "surface", "") or "",
-        "class": class_index(getattr(r, "race_class", "") or ""),
+        "class": class_index(getattr(r, "race_class", "") or "") if use_class else 0,
         "sev": _going_sev(_today_going(rd)),
+        "use_class": use_class,
     }
     # 因子ごとに raw → ロバスト正規化 (レース内)。
     factor_scores: dict[str, dict[int, Optional[float]]] = {}
@@ -404,11 +423,13 @@ def provisional_breakdown(rd: RaceData) -> dict[int, dict[str, Optional[float]]]
     if not horses:
         return {}
     r = rd.race
+    use_class = _uses_class(rd)
     ctx = {
         "dist": getattr(r, "distance", 0) or 0,
         "surf": getattr(r, "surface", "") or "",
-        "class": class_index(getattr(r, "race_class", "") or ""),
+        "class": class_index(getattr(r, "race_class", "") or "") if use_class else 0,
         "sev": _going_sev(_today_going(rd)),
+        "use_class": use_class,
     }
     factor_scores: dict[str, dict[int, Optional[float]]] = {}
     for name, fn in _FACTORS.items():

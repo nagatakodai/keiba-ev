@@ -264,3 +264,27 @@ def test_normalize_going_variants():
     assert _normalize_going("不良") == "不"
     assert _normalize_going("") == ""
     assert _normalize_going("不明") == "不"  # 不で始まる → 不 (誤検出だが許容)
+
+
+def test_ability_ignores_class_outside_jra():
+    """地方の能力 (ability) はクラス項抜きの SI (仮指数と同じ理由)。中央は従来どおりクラス込み。"""
+    from src.aptitude import compute_aptitudes
+    from src.models import Horse, PastRun, Race, RaceData
+
+    def runs(cls):
+        return [PastRun(date="2026.04.11", venue="大井", race_class=cls, surface="ダート", distance=1200,
+                        going="良", winner_time_sec=73.0, time_diff_sec=0.5, weight_kg=55.0) for _ in range(3)]
+
+    def ability(vid):
+        race = Race(cup_id="X", schedule_index=1, race_number=1, venue_id=vid, venue_name="大井",
+                    race_class="", distance=1200, surface="ダート")
+        race.horses = [Horse(number=1, name="A", past_runs=runs("Ｃ３")),
+                       Horse(number=2, name="B", past_runs=runs("Ａ１")),
+                       Horse(number=3, name="C", past_runs=[])]
+        apt = compute_aptitudes(RaceData(race=race, trifecta=[]))
+        return apt[1].ability, apt[2].ability
+
+    a_nar, b_nar = ability(44)
+    assert a_nar == b_nar
+    a_jra, b_jra = ability(5)
+    assert b_jra > a_jra
