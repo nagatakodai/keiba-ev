@@ -689,3 +689,60 @@ def test_oddspark_official_header_respects_allow_download(monkeypatch, allow):
     horses = [op.OddsparkHorse(1, "ウマA", 3.0, 1.2, 1.8, lineage_nb="")]
     op.build_oddspark_racedata(horses, "202655101012", fetch_past=False, allow_official_download=allow)
     assert seen["allow"] is allow
+
+
+_TANFUKU_ENTRIES = """
+<table>
+<tr><th>枠</th><th>馬番</th><th>馬名</th><th>単勝</th><th>複勝</th><th></th><th>性齢</th><th>馬体重</th><th>重量</th><th>騎手</th><th>場</th><th>調教師</th></tr>
+<tr><td>1</td><td>1</td><td>アルファ</td><td>3.1</td><td>1.2-</td><td>1.6</td><td>牡4</td><td>480（+2）</td><td>▲53.0</td><td>笹川翼</td><td>大井</td><td>荒山勝</td></tr>
+<tr><td>2</td><td>2</td><td>ブラボー</td><td>5.0</td><td>1.5-</td><td>2.0</td><td>セン5</td><td>500（-4）</td><td>56.0</td><td>矢野貴</td><td>大井</td><td>森下淳</td></tr>
+<tr><td>3</td><td>3</td><td>チャーリー</td><td>取消</td><td></td><td></td><td>牝3</td><td></td><td>54.0</td><td>山本聡</td><td>大井</td><td>藤田輝</td></tr>
+</table>
+"""
+
+
+def test_parse_tanfuku_entries_today_fields():
+    e = kg.parse_tanfuku_entries(_TANFUKU_ENTRIES)
+    assert e[1] == {"bracket": 1, "sex_age": "牡4", "weight": 53.0, "jockey": "笹川翼", "trainer": "荒山勝"}
+    assert e[2]["sex_age"] == "セ5" and e[2]["weight"] == 56.0               # セン馬は netkeiba と同じ「セ」
+    assert e[3]["jockey"] == "山本聡"                                         # 取消行でも出走表の項目は読む
+
+
+def test_builder_applies_today_entries_before_official():
+    entries = kg.parse_tanfuku_entries(_TANFUKU_ENTRIES)
+    rd = kg.build_keibago_racedata("202644101001", [(1, "アルファ", "", False), (2, "ブラボー", "", False)],
+                                   {1: 3.1}, fetch_past=False, entries=entries)
+    a, b = rd.race.horses
+    assert (a.jockey_name, a.weight_kg, a.sex_age, a.bracket, a.trainer_name) == ("笹川翼", 53.0, "牡4", 1, "荒山勝")
+    assert rd.official_enrich["entries_filled"] == 0                          # 当日ページで埋まった = 公式は触らない
+    assert rd.official_enrich["runners_no_jockey"] == 0
+
+
+def test_builder_counts_runners_without_jockey():
+    """当日ページにも公式データにも出走表が無い = 騎手不明の頭数を残す (縮退レースを後から探す用)。"""
+    rd = kg.build_keibago_racedata("202644101001", [(1, "アルファ", "", False), (2, "ブラボー", "", False)],
+                                   {1: 3.1}, fetch_past=False)
+    assert rd.official_enrich["runners_no_jockey"] == 2
+
+
+@pytest.mark.parametrize("phase,allow", [("bet", False), ("score", True)])
+def test_keibago_enrichment_downloads_only_in_score_phase(monkeypatch, phase, allow):
+    from src import nar_official
+    from src.models import BetOdds
+    monkeypatch.setattr(kg, "find_keibago_race",
+                        lambda rid: kg.KeibagoLoc(race_date="2026/10/13", race_no=99, baba_code="21", venue="川崎"))
+    monkeypatch.setattr(kg, "fetch_keibago_bets", lambda loc: {
+        "other_bets": {"win": [BetOdds(bet_type="win", key=(1,), odds=2.0)]}, "trifecta": [],
+        "consistency": {"ok": True}, "body_weights": {}, "entries": {}})
+    monkeypatch.setattr(kg, "_get", lambda url, **_k: _DEBA_SAGA)
+    monkeypatch.setattr(kg, "parse_deba_table", lambda html: [(1, "A", "", False)])
+    seen: dict = {}
+
+    def fake_enrich(rd, rid, *, banei=False, allow_download=False):
+        seen["allow"] = allow_download
+        raise _Stop
+
+    monkeypatch.setattr(nar_official, "enrich_racedata", fake_enrich)
+    with pytest.raises(_Stop):
+        kg.analyze_keibago("202645101399", phase=phase)
+    assert seen["allow"] is allow

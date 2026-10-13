@@ -191,13 +191,15 @@ def _base_time(surface: str, distance: int, venue: str = "") -> float:
 # --- スピード指数 ---
 
 
-def speed_index(past: PastRun, *, with_class: bool = True) -> float:
+def speed_index(past: PastRun, *, with_class: bool = True, with_weight: bool = True) -> float:
     """1 走分のスピード指数を返す。データ欠損時は 0.0。
 
     with_class=False はクラス指数の項を足さない (2026-10-13): 地方の仮指数/適性は、自走時計しか無い
     過去走 (keiba.go.jp 馬柱 = 着差・斤量・上がり無し) だとクラス 1 段 (2 点) が時計 1.2〜2.5 秒ぶんに効いて
     時計の情報を潰す (公式データ再現で仮指数の勝ち馬 AUC −0.016〜−0.024)。LightGBM の特徴量は学習時と
     同じく with_class=True のまま。
+    with_weight=False は斤量の項 ((斤量−55)×2) を足さない (2026-10-14): 1kg = 2 点 ≒ ダ1200m で 1.4 秒ぶんと
+    時計より大きく効き、地方の仮指数/適性では公式データ再現で悪化した (仮指数 AUC −0.008・適性の能力 −0.026)。
     """
     own = past.own_time_sec
     if own <= 0 or past.distance <= 0 or not past.surface:
@@ -208,30 +210,31 @@ def speed_index(past: PastRun, *, with_class: bool = True) -> float:
     df = _interp_distance_factor(past.distance, past.surface)
     gi = going_index(past.going, past.surface)
     ci = class_index(past.race_class) if with_class else 0
-    weight_adj = (past.weight_kg - 55.0) * 2.0 if past.weight_kg > 0 else 0.0
+    weight_adj = (past.weight_kg - 55.0) * 2.0 if (with_weight and past.weight_kg > 0) else 0.0
     return (bt - own) * df + gi + weight_adj + ci + 80.0
 
 
-def best_speed_index(runs: list[PastRun], *, with_class: bool = True) -> float:
+def best_speed_index(runs: list[PastRun], *, with_class: bool = True, with_weight: bool = True) -> float:
     """直近走の中での最大指数。データなしは 0.0。"""
     if not runs:
         return 0.0
-    vals = [speed_index(r, with_class=with_class) for r in runs]
+    vals = [speed_index(r, with_class=with_class, with_weight=with_weight) for r in runs]
     vals = [v for v in vals if v > 0]
     return max(vals) if vals else 0.0
 
 
-def mean_recent_speed_index(runs: list[PastRun], n: int = 3, *, with_class: bool = True) -> float:
+def mean_recent_speed_index(runs: list[PastRun], n: int = 3, *, with_class: bool = True,
+                            with_weight: bool = True) -> float:
     """直近 n 走の単純平均。"""
     if not runs:
         return 0.0
-    vals = [speed_index(r, with_class=with_class) for r in runs[:n]]
+    vals = [speed_index(r, with_class=with_class, with_weight=with_weight) for r in runs[:n]]
     vals = [v for v in vals if v > 0]
     return sum(vals) / len(vals) if vals else 0.0
 
 
 def weighted_recent_speed_index(runs: list[PastRun], weights: tuple[float, ...] = (0.5, 0.3, 0.2),
-                                *, with_class: bool = True) -> float:
+                                *, with_class: bool = True, with_weight: bool = True) -> float:
     """直近 N 走 (len(weights)) を重み付け平均。weights は新しい走から。"""
     if not runs or not weights:
         return 0.0
@@ -239,7 +242,7 @@ def weighted_recent_speed_index(runs: list[PastRun], weights: tuple[float, ...] 
     num = 0.0
     den = 0.0
     for i in range(n):
-        v = speed_index(runs[i], with_class=with_class)
+        v = speed_index(runs[i], with_class=with_class, with_weight=with_weight)
         if v <= 0:
             continue
         num += v * weights[i]

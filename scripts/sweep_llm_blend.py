@@ -34,6 +34,7 @@ RESULT_DIR = ROOT / "data" / "results"
 JST = ZoneInfo("Asia/Tokyo")
 CUTOFF = "2026-06-21T19:04:27"          # 市場非依存 era の開始 (api/store と同値)
 V2_SINCE, V3_SINCE = "2026-06-28", "2026-07-01T15:13:17"
+V4_SINCE = "2026-10-14T05:00:00"        # 地方の入力を公式データで補完 (src/llm.INDEX_V4_SINCE と同値)
 
 T_GRID = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 60.0, 100.0]
 W_GRID = [0.0, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0]
@@ -111,7 +112,8 @@ def _load_races() -> list[dict]:
             continue
         z = sum(mkt.values())
         f_mkt = {k: v / z for k, v in mkt.items()}
-        version = ("v3" if scored >= V3_SINCE else "v2" if scored >= V2_SINCE else "v1")
+        version = ("v4" if scored >= V4_SINCE else "v3" if scored >= V3_SINCE
+                   else "v2" if scored >= V2_SINCE else "v1")
         races.append({"f": f_mkt, "idx": idx, "support": support,
                       "winners": winners, "ts": start_at, "version": version})
     races.sort(key=lambda r: r["ts"])

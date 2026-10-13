@@ -1003,6 +1003,9 @@ export type SignalRule = {
   features: Record<string, { min?: number; max?: number }> | null;
   insample: SignalRuleStats; // 全期間 (発見データ込み・楽観) — 参考
   prospective: SignalRuleStats; // 登録後のみ — 確証判定はこちらだけ
+  // 登録後のうち現行の指数版 (current_version) で採点したレースだけ (2026-10-14〜, 補助列)。
+  // v4 で地方の Claude 指数の叩き台が変わったため、版をまたいだ prospective と並べて見る。
+  prospective_current?: SignalRuleStats;
   market_baseline: { races: number; hits: number; roi: number }; // 同条件で市場人気順に同じ買い方 (基準線)
   insample_vs_baseline: SignalVsBaseline | null; // 対市場Δ 全期間 (参考)
   prospective_vs_baseline: SignalVsBaseline | null; // 対市場Δ 登録後のみ (表の「対市場Δ」列)
@@ -1017,6 +1020,7 @@ export type SignalWalkforward = SignalRuleStats & {
 export type SignalRules = {
   point_cost: number;
   races: number;
+  current_version?: string; // 現行の Claude 指数の版 (prospective_current の対象)
   min_confirm: number; // 確証に必要な登録後レース数
   min_broken: number;
   rules: SignalRule[];
@@ -1047,6 +1051,14 @@ export type SignalRulesResponse = {
       prospective: { races: number; roi: number; roi_ci_low: number; roi_ci_high: number };
       // 対市場Δ (登録後・ペア比較)。2026-07-06 より前の history 行には無い (optional)。
       vs_baseline?: { n: number; delta: number; ci_low: number; ci_high: number } | null;
+      // 登録後のうち現行の指数版だけ。2026-10-14 より前の history 行には無い (optional)。
+      prospective_current?: {
+        version: string;
+        races: number;
+        roi: number;
+        roi_ci_low: number;
+        roi_ci_high: number;
+      };
     }>;
     walkforward: Array<{ key: string; races: number; roi: number }>;
   }>;

@@ -143,6 +143,9 @@ def _uses_class(rd) -> bool:
     クラス無しは修正前 (全角が 0 点 ≒ クラス無し) と同等 (2025-10〜2026-09: +0.001 AUC・+0.2pt /
     2026-06〜09: +0.002 AUC・+0.6pt、いずれも CI が 0 を跨ぐ) で、netkeiba 馬柱でも中立。
     中央はクラスを外すと 1 位勝率 −2.5pt なので使い続ける。
+    同じ理由で地方・ばんえいの SI は斤量の項も足さない (2026-10-14: 公式データで過去走の斤量が埋まるように
+    なると 1kg = 2 点が時計より大きく効き、再現 8,392R で仮指数 AUC −0.008・1 位勝率 −1.0pt。外すと
+    着差の補完と合わせて補完前より +0.028 AUC・+1.4pt)。
     """
     return _segment_of_rd(rd) == "jra"
 
@@ -155,7 +158,8 @@ def _si_runs(h, ctx) -> list[tuple[int, PastRun, float]]:
     """(index, run, SI) で SI>0 の直近走のみ (時計が取れた走)。"""
     out = []
     for i, r in enumerate((h.past_runs or [])[:_RECENT]):
-        si = speed_index(r, with_class=ctx.get("use_class", True))
+        full = ctx.get("use_class", True)
+        si = speed_index(r, with_class=full, with_weight=full)
         if si > 0:
             out.append((i, r, si))
     return out
@@ -374,7 +378,8 @@ def _robust_scores(raws: dict[int, Optional[float]]) -> dict[int, Optional[float
         if v is None:
             out[k] = None
         else:
-            z = (v - med) / scale
+            # 極端に小さい MAD (ほぼ同値の馬ばかり) で z が数十万になり exp が溢れる (OverflowError) のを防ぐ
+            z = max(-60.0, min(60.0, (v - med) / scale))
             out[k] = 100.0 / (1.0 + math.exp(-z / 1.3))
     return out
 

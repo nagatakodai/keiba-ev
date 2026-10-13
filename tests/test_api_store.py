@@ -376,3 +376,26 @@ def test_get_timeline(tmp_path, monkeypatch):
     assert d2 is not None and d2["result"] is None
     assert store.get_timeline("20260611-5-11") is None
     assert store.get_timeline("../etc/passwd") is None
+
+
+def test_index_version_v4_official_enrich_cutover():
+    """v4 = 地方の入力を公式データで補完 (2026-10-14〜)。v4 刻印でも採点が配備前なら v3。"""
+    from api.store import index_version_of
+    from src.llm import INDEX_V4_SINCE
+    idx = {"index_compare": [{"number": 1, "claude_index": 80.0}]}
+    assert index_version_of({**idx, "llm_scored_at": INDEX_V4_SINCE}) == "v4"
+    assert index_version_of({**idx, "llm_scored_at": "2026-10-13T20:00:00"}) == "v3"
+    assert index_version_of({"index_version": "v4", "llm_scored_at": "2026-10-13T20:00:00"}) == "v3"
+    assert index_version_of({"index_version": "v4", "llm_scored_at": "2026-10-15T09:00:00"}) == "v4"
+
+
+def test_model_no_info_when_most_runners_lack_past_runs():
+    """EV束の無情報ガード: 過去走のある馬が半数未満なら (斤量で fundamental が一様でなくても) 無情報扱い。"""
+    from src import analyze
+    from src.models import Horse, PastRun, Race, RaceData
+    hs = [Horse(number=i, name=f"H{i}", weight_kg=50.0 + i) for i in range(1, 7)]
+    hs[0].past_runs = [PastRun(date="2026.09.01", venue="大井", surface="ダート", distance=1200, going="良",
+                               winner_time_sec=73.0)]
+    race = Race(cup_id="", schedule_index=0, race_number=1, venue_id=44, venue_name="大井", race_class="",
+                distance=1200, surface="ダート", horses=hs)
+    assert analyze._model_no_info(RaceData(race=race, trifecta=[], other_bets={})) is True

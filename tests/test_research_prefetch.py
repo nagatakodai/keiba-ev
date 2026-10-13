@@ -201,3 +201,13 @@ def test_dispatcher_default_unchanged(monkeypatch):
     monkeypatch.setattr(llm, "score_horses_prefetch", _boom_prefetch)
     monkeypatch.setattr(llm, "score_horses_stream", _ok_stream)
     assert ("result", "OK") in list(llm.score_horses(rd))
+
+
+def test_no_jockey_queries_for_nar_races():
+    """地方は騎手クエリを出さない (公式の 3 文字略称は検索に向かず、research A/B の prefetch 腕の定義を保つ)。"""
+    rd = _mk_race(4, jockeys=["山本聡", "矢野貴", "笹川翼", "和田譲"])
+    rd.race.venue_id = 44
+    race_level, _ = rp.build_queries(rd)
+    assert [q["kind"] for q in race_level] == ["track", "scratch", "preview"]
+    rd.race.venue_id = 5
+    assert sum(1 for q in rp.build_queries(rd)[0] if q["kind"] == "jockey") == 4

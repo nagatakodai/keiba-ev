@@ -36,6 +36,7 @@ import datetime as _dt
 import io
 import json
 import os
+import re
 import threading
 import time
 import unicodedata
@@ -889,6 +890,246 @@ def fill_race_header(hdr: dict | None, netkeiba_rid: str, *, allow_download: boo
         elif not hdr.get(k) and hdr.get(k) != 0:
             hdr[k] = v
     return hdr
+
+
+# ------------------------------------------------------------ 過去走・出走馬の補完 ----
+# keiba.go.jp の馬柱 (HorseMarkInfo) / oddspark の HorseDetail は自走時計しか持たず、着差・斤量・上がり・通過順・
+# 騎手・馬体重が無い。出馬表 (DebaTable) にも騎手・斤量・性齢が無い。学習データ (netkeiba 馬柱・出馬表) は全部
+# 持っているので、LightGBM の特徴量・仮指数・適性・Claude に渡す前走表がその分だけ学習時とずれていた。
+# 公式データ (手元のキャッシュ。score 段だけ当日ファイルを 2 分に 1 回まで取る) から同じ走 (馬名・日付・場・R) の
+# 値を埋める。公式データ再現 (2025-10〜12 + 2026-06〜09, 8,392R・実装そのもの・リークなし):
+# LightGBM NAR 勝ち馬 AUC 0.741 → 0.762・1 位勝率 +2.7pt・log-loss −0.072 (全月・全場で正、主役は上がり>通過>当日の
+# 斤量)、本番の fundamental +0.012 AUC・+0.9pt。仮指数は +0.028 AUC・+1.4pt (主役は着差。地方の SI は斤量の項を使わない —
+# 入れると +0.019 AUC・1 位勝率は変わらず)。適性は地方の総合から上がりを外して補完前と同値。
+# ただし市場 (確定単勝オッズ) を超える情報は補完前後とも無い (α<0) — ランキングと較正の改善であって賭けの edge ではない。
+# 値の形は netkeiba 馬柱と同じにする (同じ走 85,086 件で突き合わせ: 着差=自走−勝ち時計 は完全一致、
+# 通過順は「並走は同じ位置」「直線の地点を除き最後の 4 か所」で一致、騎手は公式の 3 文字略称)。
+
+_STRAIGHT_WORDS = ("正面", "直線")      # 公式のコーナー名称のうち netkeiba の通過順に入らない地点 (向正面/最初の直線 等)
+_SEX = {"セン": "セ"}                   # 性齢は netkeiba 出馬表と同じ表記 (セン馬は「セ」)
+_MARK_RE = re.compile(r"[^\d.]")
+
+
+def _corner_ranks(s: str) -> dict[int, int]:
+    """コーナー通過順 '1,10,(5,9)-3,4' → {馬番: 位置}。( ) の並走は同じ位置 (netkeiba 馬柱と同じ)、
+    次の馬は並走の頭数ぶん後ろ ((5,9) の次は 5 番手)。"""
+    pos: dict[int, int] = {}
+    k = 0
+    for grp, single in re.findall(r"\(([^)]*)\)|(\d+)", unicodedata.normalize("NFKC", s or "")):
+        members = [int(x) for x in re.findall(r"\d+", grp)] if grp else [int(single)]
+        for m in members:
+            pos.setdefault(m, k + 1)
+        k += len(members)
+    return pos
+
+
+def passing_of(corners: list[tuple[str, str]], num: int) -> str:
+    """[(コーナー名称, 通過順)] と馬番 → netkeiba 馬柱と同じ通過順 ('3-3-2-1')。直線の地点を除いた最後の 4 か所。"""
+    out = []
+    for name, s in corners:
+        if not s or any(w in (name or "") for w in _STRAIGHT_WORDS):
+            continue
+        p = _corner_ranks(s).get(num)
+        if p:
+            out.append(p)
+    return "-".join(str(p) for p in out[-4:])
+
+
+def _num(s: str) -> float:
+    v = _MARK_RE.sub("", unicodedata.normalize("NFKC", s or ""))
+    try:
+        return float(v) if v else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _signed(s: str) -> int:
+    t = unicodedata.normalize("NFKC", s or "").replace("±", "").strip()
+    try:
+        return int(t) if t not in ("", "+", "-") else 0
+    except ValueError:
+        return 0
+
+
+def _scan_zip(path: Path, names: set[str] | None) -> dict[tuple[str, int, str], dict]:
+    """ZIP (月次 or 当日) → {(馬名キー, 日付, 場の前方 2 文字): 1 走の記録}。names を渡すとその馬だけ (メモリ節約)。
+
+    記録 = レース番号・馬番・枠番・自走時計・勝ち時計・斤量・上がり・騎手・馬体重(増減)・通過順・頭数・人気・着順・
+    性・齢・調教師 (結果の無い = これからのレースは自走時計なし)。読めなければ {}。
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            members = {n.rsplit("/", 1)[-1].rsplit(".", 1)[0].split("_")[-1]: n for n in z.namelist()}
+            if "horselist" not in members:
+                return {}
+            race_rows = list(csv.reader(io.StringIO(z.read(members["racelist"]).decode("utf-8-sig", "replace")))) \
+                if "racelist" in members else []
+            horse_rows = list(csv.reader(io.StringIO(z.read(members["horselist"]).decode("utf-8-sig", "replace"))))
+    except (OSError, zipfile.BadZipFile, KeyError, csv.Error):
+        return {}
+    races: dict[tuple[str, int, int], tuple[list[tuple[str, str]], int]] = {}
+    if race_rows:
+        hd = {c.strip(): i for i, c in enumerate(race_rows[0])}
+        iv, idt, irn = hd.get("競馬場"), hd.get("競走年月日"), hd.get("レース番号")
+        ifs = hd.get("頭数")
+        corner_cols = [(hd.get(f"コーナー名称{i}"), hd.get(f"コーナー通過順{i}")) for i in range(1, 9)]
+        if None not in (iv, idt, irn):
+            for r in race_rows[1:]:
+                if len(r) < len(hd):
+                    continue
+                corners = [(r[a].strip(), r[b].strip()) for a, b in corner_cols if a is not None and b is not None
+                           and r[b].strip()]
+                races[(r[iv].strip(), _int(r[idt]), _int(r[irn]))] = (corners, _int(r[ifs]) if ifs is not None else 0)
+    hd = {c.strip(): i for i, c in enumerate(horse_rows[0])} if horse_rows else {}
+    need = ("競馬場", "競走年月日", "レース番号", "馬番", "馬名", "着順", "タイム")
+    if any(c not in hd for c in need):
+        return {}
+    g = lambda r, c: (r[hd[c]].strip() if c in hd and hd[c] < len(r) else "")  # noqa: E731
+    winners: dict[tuple[str, int, int], float] = {}
+    for r in horse_rows[1:]:
+        if g(r, "着順") == "1":
+            sec = parse_time(g(r, "タイム"))
+            if sec:
+                key = (g(r, "競馬場"), _int(g(r, "競走年月日")), _int(g(r, "レース番号")))
+                winners[key] = min(sec, winners.get(key, sec))
+    out: dict[tuple[str, int, str], dict] = {}
+    for r in horse_rows[1:]:
+        h = tm.norm_horse(g(r, "馬名"))
+        if not h or (names is not None and h not in names):
+            continue
+        venue, d, rn = g(r, "競馬場"), _int(g(r, "競走年月日")), _int(g(r, "レース番号"))
+        num = _int(g(r, "馬番"))
+        corners, field = races.get((venue, d, rn), ([], 0))
+        fin = unicodedata.normalize("NFKC", g(r, "着順"))
+        out[(h, d, venue[:2])] = {
+            "venue": venue, "date": d, "race_no": rn, "num": num, "bracket": _int(g(r, "枠番")),
+            "own": parse_time(g(r, "タイム")), "winner": winners.get((venue, d, rn)),
+            "weight": _num(g(r, "負担重量")), "last3f": _num(g(r, "上がり3F")),
+            "jockey": " ".join(g(r, "騎手名").split()), "trainer": " ".join(g(r, "調教師").split()),
+            "bw": _int(g(r, "馬体重")), "bwd": _signed(g(r, "馬体重増減")),
+            "passing": passing_of(corners, num) if corners else "", "field": field,
+            "pop": _int(g(r, "人気")), "fin": int(fin) if fin.isdigit() else None,
+            "sex": g(r, "性"), "age": _int(g(r, "齢")), "name": g(r, "馬名"),
+        }
+    return out
+
+
+def _records_for(names: set[str], dates: set[int]) -> dict[tuple[str, int, str], dict]:
+    """必要な月 (dates の月) の月次キャッシュ + 当日キャッシュから、names の馬の記録を集める (通信なし)。
+
+    当日ファイル (2 分ごと更新) の日付の行は **当日ファイルの値を優先** する (月次は前夜 02:00 時点なので、当日の
+    騎手変更・斤量・馬体重・今日のレースの結果が無い)。空の項目だけは月次の値を残す。
+    """
+    recs: dict[tuple[str, int, str], dict] = {}
+    for ym in sorted({f"{d // 100:06d}" for d in dates if d}):
+        p = monthly_zip_path(ym)
+        if p.exists():
+            recs.update(_scan_zip(p, names))
+    for d in sorted(dates):
+        p = daily_cache_for(d)
+        if p is None:
+            continue
+        for k, v in _scan_zip(p, names).items():
+            if k not in recs:
+                recs[k] = v
+                continue
+            merged = dict(recs[k])
+            for f, val in v.items():
+                if val not in ("", None, 0):
+                    merged[f] = val
+            recs[k] = merged
+    return recs
+
+
+def enrich_racedata(rd: Any, netkeiba_rid: str = "", *, banei: bool = False, allow_download: bool = False) -> dict:
+    """公式データ (手元のキャッシュだけ・通信なし) で地方の RaceData を補う。返り値は件数の内訳 (ログ・テスト用)。
+
+    - 過去走 (past_runs / past_runs_ext、地方の走だけ): 勝ち時計・着差 (= 自走 − 勝ち時計)・斤量・上がり・騎手・
+      馬体重(増減)・通過順・頭数・人気・馬番。**空/0 の項目だけ**埋め、自走時計が公式と 0.15 秒以上ずれる・R が違う
+      走は別の走とみなして触らない (同名馬の取り違え防止)。中央の走 (Ｊ函館 等) は公式データに無いので触らない。
+    - 当レースの出走馬: 騎手・斤量・性齢・調教師・枠番・馬体重 (発表済みのとき) を、馬番と馬名が一致する行から
+      空/0 の項目だけ。結果 (着順・タイム) は使わない (= 発走前に分かる情報だけ・リークしない)。
+    - ばんえいは既定で触らない (banei=False): 本番の keiba.go.jp 経路はばんえいの過去走を持たない (200m を拾わない)
+      ので、足せるのは当日のそり重量だけで効果なし (再現 −0.007 AUC, n.s.)。公式とnetkeibaのばんえいの項目は一致。
+    - allow_download=True (score 段) は当レースが今日なら当日ファイルを先に更新する (2 分に 1 回まで)。bet 段は
+      手元のキャッシュだけ。
+    """
+    st = {"past_total": 0, "past_filled": 0, "past_mismatch": 0, "entries_filled": 0}
+    try:
+        from .parse import VENUE_CODE, is_nar_race_id
+        race = getattr(rd, "race", rd)
+        rid = str(netkeiba_rid or "")
+        is_banei = rid[4:6] == "65" or tm.norm_venue(getattr(race, "venue_name", "")) == "帯広"
+        if is_banei and not banei:
+            return st
+        horses = [h for h in (getattr(race, "horses", None) or []) if not getattr(h, "absent", False)]
+        names = {tm.norm_horse(getattr(h, "name", "")) for h in horses} - {""}
+        runs_by_h: list[tuple[str, list]] = []
+        dates: set[int] = set()
+        for h in horses:
+            seen: dict[int, Any] = {}
+            for pr in list(getattr(h, "past_runs_ext", None) or []) + list(getattr(h, "past_runs", None) or []):
+                seen.setdefault(id(pr), pr)
+            runs = [pr for pr in seen.values() if tm.norm_venue(getattr(pr, "venue", "")) not in tm.JRA_VENUES]
+            runs_by_h.append((tm.norm_horse(getattr(h, "name", "")), runs))
+            dates.update(tm.date_key(getattr(pr, "date", "")) for pr in runs)
+        target_date = int(rid[:4] + rid[6:10]) if len(rid) >= 12 and rid.isdigit() and is_nar_race_id(rid) else 0
+        if allow_download and target_date and target_date == _today_int(_now()):
+            fetch_daily()
+        recs = _records_for(names, dates | ({target_date} if target_date else set()))
+        for hname, runs in runs_by_h:
+            for pr in runs:
+                st["past_total"] += 1
+                d = tm.date_key(getattr(pr, "date", ""))
+                rec = recs.get((hname, d, tm.norm_venue(getattr(pr, "venue", ""))[:2]))
+                if rec is None or not rec.get("own"):
+                    continue
+                own = float(getattr(pr, "own_time_sec", 0.0) or 0.0)
+                rno = int(getattr(pr, "race_no", 0) or 0)
+                if (own > 0 and abs(own - rec["own"]) > 0.15) or (rno and rec["race_no"] and rno != rec["race_no"]):
+                    st["past_mismatch"] += 1
+                    continue
+                if rec.get("winner") and rec["winner"] <= rec["own"] + 1e-9 and not getattr(pr, "time_diff_sec", 0):
+                    pr.winner_time_sec = round(rec["winner"], 2)
+                    pr.time_diff_sec = round(max(rec["own"] - rec["winner"], 0.0), 2)
+                for attr, key in (("weight_kg", "weight"), ("last_3f_sec", "last3f"), ("body_weight", "bw"),
+                                  ("field_size", "field"), ("popularity", "pop"), ("horse_number", "num")):
+                    if not getattr(pr, attr, 0) and rec.get(key):
+                        setattr(pr, attr, rec[key])
+                if not getattr(pr, "body_weight_diff", 0) and rec.get("bw") and rec.get("bwd"):
+                    pr.body_weight_diff = rec["bwd"]
+                for attr, key in (("jockey", "jockey"), ("passing", "passing")):
+                    if not (getattr(pr, attr, "") or "").strip() and rec.get(key):
+                        setattr(pr, attr, rec[key])
+                st["past_filled"] += 1
+        # 当レースの出走馬 (発走前に分かる項目だけ)
+        if target_date:
+            venue = VENUE_CODE.get(rid[4:6], "")
+            rn = int(rid[10:12])
+            by_num = {rec["num"]: rec for (h, d, _v), rec in recs.items()
+                      if d == target_date and rec["race_no"] == rn and rec["venue"][:2] == venue[:2]}
+            for h in horses:
+                rec = by_num.get(int(getattr(h, "number", 0) or 0))
+                if rec is None or tm.norm_horse(rec["name"]) != tm.norm_horse(getattr(h, "name", "")):
+                    continue
+                filled = False
+                for attr, val in (("jockey_name", rec["jockey"]), ("trainer_name", rec["trainer"]),
+                                  ("sex_age", f"{_SEX.get(rec['sex'], rec['sex'])}{rec['age']}"
+                                   if rec["sex"] and rec["age"] else "")):
+                    if not (getattr(h, attr, "") or "").strip() and val:
+                        setattr(h, attr, val)
+                        filled = True
+                for attr, val in (("weight_kg", rec["weight"]), ("bracket", rec["bracket"]),
+                                  ("body_weight", rec["bw"])):
+                    if not getattr(h, attr, 0) and val:
+                        setattr(h, attr, val)
+                        filled = True
+                if not getattr(h, "body_weight_diff", 0) and rec["bw"] and rec["bwd"] and h.body_weight == rec["bw"]:
+                    h.body_weight_diff = rec["bwd"]
+                st["entries_filled"] += int(filled)
+    except Exception:  # noqa: BLE001 — 補完は best-effort (解析を止めない)
+        return st
+    return st
 
 
 def _cli(argv: list[str]) -> int:

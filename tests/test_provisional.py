@@ -170,3 +170,29 @@ def test_class_is_ignored_outside_jra_but_used_in_jra():
     assert banei[1] == banei[2]
     jra, _ = build(5, "1勝", "3勝", "2勝")
     assert jra[2] > jra[1]                       # 中央: 上のクラスで同じ時計の B が上
+
+
+def test_nar_speed_index_ignores_past_weight_but_jra_uses_it():
+    """地方の仮指数の SI は斤量の項を足さない (公式データで過去走の斤量が埋まると 1kg=2点が時計より効いた)。"""
+    def build(vid, wa, wb):
+        def runs(w):
+            out = []
+            for _ in range(3):
+                r = _past(finish_pos=None, time_diff=0.8, surface="ダート")
+                r.weight_kg = w
+                out.append(r)
+            return out
+        rd = _race([_horse(1, "A", runs(wa)), _horse(2, "B", runs(wb)), _horse(3, "C", _weak_runs())],
+                   surface="ダート")
+        rd.race.venue_id = vid
+        return P.provisional_index(rd)
+    nar = build(44, 50.0, 58.0)
+    assert nar[1] == nar[2]
+    jra = build(5, 50.0, 58.0)
+    assert jra[2] > jra[1]
+
+
+def test_robust_scores_do_not_overflow_on_tiny_mad():
+    raws = {1: 1.0, 2: 1.0 + 1e-12, 3: 1.0, 4: -5e5}
+    out = P._robust_scores(raws)
+    assert all(0.0 <= v <= 100.0 for v in out.values())

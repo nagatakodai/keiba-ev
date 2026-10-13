@@ -160,6 +160,38 @@ def parse_body_weights(html: str) -> dict[int, tuple[int, int]]:
     return out
 
 
+def parse_tanfuku_entries(html: str) -> dict[int, dict]:
+    """単複ページ (OddsTanFuku) → {馬番: {bracket, sex_age, weight, jockey, trainer}} (当日の出走表・追加リクエスト不要)。
+
+    行 = [枠, 馬番, 馬名, 単勝, 複勝min, 複勝max, 性齢, 馬体重(増減), 重量, 騎手, 場, 調教師]。bet 段でも毎回取り直す
+    ページなので、当日の騎手変更・減量 (☆▲△◇★ 等の印は外す) まで最新。騎手は地方競馬全国協会の 3 文字略称
+    (公式データの過去走と同じ表記 = 乗替り判定が揃う)。性齢のセン馬は netkeiba と同じ「セ」に揃える。
+    取り出せない項目は入れない (2026-10-14)。
+    """
+    out: dict[int, dict] = {}
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html or "", re.DOTALL):
+        c = _cells(row)
+        if len(c) < 10 or not c[1].isdigit():
+            continue
+        rec: dict = {}
+        if c[0].isdigit():
+            rec["bracket"] = int(c[0])
+        sa = unicodedata.normalize("NFKC", c[6]).strip().replace("セン", "セ")
+        if re.fullmatch(r"(牡|牝|セ)\d{1,2}", sa):
+            rec["sex_age"] = sa
+        w = _f(unicodedata.normalize("NFKC", c[8]))
+        if w and 30 <= w <= 1200:            # 平地 48〜60kg / ばんえいはそり重量
+            rec["weight"] = float(w)
+        j = " ".join(c[9].split())
+        if j and not j.isdigit():
+            rec["jockey"] = j
+        if len(c) > 11 and c[11].strip():
+            rec["trainer"] = " ".join(c[11].split())
+        if rec:
+            out[int(c[1])] = rec
+    return out
+
+
 _COMBO_RE = re.compile(
     r"<td[^>]*>\s*(\d+(?:-\d+){1,2})\s*</td>\s*<td[^>]*>(.*?)</td>", re.DOTALL
 )
@@ -622,6 +654,7 @@ def fetch_keibago_bets(loc: KeibagoLoc) -> dict:
     tan_html = _get(_odds_url(loc, _EP["tanfuku"]))
     win, place = parse_tanfuku(tan_html)
     body_weights = parse_body_weights(tan_html)   # 単複HTMLから馬体重(増減)も抽出 (追加GET無し)
+    entries = parse_tanfuku_entries(tan_html)     # 同じく当日の騎手・斤量・性齢・枠・調教師 (2026-10-14)
     quinella = parse_quinella(_get(_odds_url(loc, _EP["quinella"])))
     wide = parse_wide(_get(_odds_url(loc, _EP["wide"])))
     exacta = parse_exacta(_get(_odds_url(loc, _EP["exacta"])))
@@ -636,6 +669,7 @@ def fetch_keibago_bets(loc: KeibagoLoc) -> dict:
         "other_bets": other_bets,
         "trifecta": trifecta,
         "body_weights": body_weights,
+        "entries": entries,
         "consistency": check_consistency(other_bets, trifecta),
     }
 
@@ -686,6 +720,8 @@ def build_keibago_racedata(
     *,
     fetch_past: bool = True,
     race_header: dict | None = None,
+    entries: dict[int, dict] | None = None,
+    official_download: bool = False,
 ) -> RaceData:
     """cache 出馬表が無い場合の RaceData を keiba.go.jp の出馬表(DebaTable)から構築。
 
@@ -725,7 +761,46 @@ def build_keibago_racedata(
         venue_name=venue, race_class="", distance=0, horses=horse_rows,
     )
     _apply_deba_header(race, race_header or {}, netkeiba_rid)
-    return RaceData(race=race, trifecta=[], other_bets={})
+    apply_entries(race, entries or {})
+    rd = RaceData(race=race, trifecta=[], other_bets={})
+    _enrich_from_official(rd, netkeiba_rid, allow_download=official_download)
+    return rd
+
+
+def apply_entries(race: Race, entries: dict[int, dict]) -> int:
+    """単複ページの当日の出走表 (parse_tanfuku_entries) を出走馬に載せる (載せた頭数)。公式データの補完より先に
+    呼ぶ = 当日ページの値が優先 (公式の月次は前夜時点・当日ファイルも 2 分遅れ)。"""
+    n = 0
+    for h in race.horses:
+        e = entries.get(h.number)
+        if not e:
+            continue
+        for attr, key in (("jockey_name", "jockey"), ("weight_kg", "weight"), ("sex_age", "sex_age"),
+                          ("trainer_name", "trainer"), ("bracket", "bracket")):
+            if e.get(key):
+                setattr(h, attr, e[key])
+        n += 1
+    return n
+
+
+def _enrich_from_official(rd: RaceData, netkeiba_rid: str, *, allow_download: bool = False) -> dict:
+    """地方競馬全国協会の公式データで過去走の着差/斤量/上がり/通過順/騎手/馬体重と出走馬の騎手/斤量/性齢を補う
+    (keiba.go.jp の馬柱・出馬表には無い = 学習データ netkeiba とのずれ)。allow_download=True は score 段
+    (当日ファイルを 2 分に 1 回まで取る)、既定は手元のキャッシュだけ。件数は rd.official_enrich に残す (snapshot 用)。"""
+    from .nar_official import enrich_racedata
+    st = dict(enrich_racedata(rd, netkeiba_rid, allow_download=allow_download))
+    # 補完後も騎手が空の出走馬 = 当日ページにも公式データにも出走表が無い (月替わりの翌日スキャン・公式キャッシュが
+    # 古い等)。過去走だけ補完されて騎手・斤量が欠けた縮退レースを後から探せるよう件数を残す。
+    st["runners_no_jockey"] = sum(1 for h in rd.race.horses
+                                  if not h.absent and not (h.jockey_name or "").strip())
+    rd.official_enrich = st
+    if st.get("past_total") or st.get("entries_filled"):
+        print(f"[nar_official] 過去走 {st['past_filled']}/{st['past_total']} 走・出走馬 {st['entries_filled']} 頭を"
+              f"公式データで補完 (不一致で見送り {st['past_mismatch']})", flush=True)
+    if st.get("past_filled") and st["runners_no_jockey"]:
+        print(f"[nar_official] 注意: 出走馬 {st['runners_no_jockey']} 頭の騎手・斤量が不明 "
+              f"(当日の出走表が公式データにまだ無い)。乗替り判定はしない", flush=True)
+    return st
 
 
 def _tag_snapshot_source(race_id: str, source: str) -> None:
@@ -818,14 +893,16 @@ def analyze_keibago(netkeiba_rid: str, *, save_snapshot: bool = False, start_at:
         if deba:
             # 出馬表 + HorseMarkInfo の馬柱で確率モデルをフル稼働 (公式自給)
             rd = build_keibago_racedata(netkeiba_rid, deba, win_odds, fetch_past=True,
-                                        race_header=race_header)
+                                        race_header=race_header, entries=res.get("entries"),
+                                        official_download=(phase != "bet"))
         elif not odds_empty:
             # DebaTable 取れず → 単複の馬リストのみ (past_runs なし=市場ブレンド主導)。
             # 単複ページは発売対象馬のみ (取消馬は単勝が数値でなく載らない) → absent=False。
             hl = parse_horse_list(_get(_odds_url(loc, _EP["tanfuku"])))
             rd = build_keibago_racedata(
                 netkeiba_rid, [(n, nm, "", False) for n, nm, _od in hl], win_odds,
-                fetch_past=False, race_header=race_header)
+                fetch_past=False, race_header=race_header, entries=res.get("entries"),
+                official_download=(phase != "bet"))
         else:
             # 発売前 (odds_empty) で DebaTable も取れない → 出走馬ソースが無く score 不能
             # (単複の馬リストも全馬 0.0 で空になる)。

@@ -566,3 +566,159 @@ def test_fit_anchor_ignores_live_rows(tmp_path, monkeypatch):
     m = tm.fit(tm.load_ledger([live, bulk]))
     assert m["data_until_by_circuit"] == {"jra": "2026-05-20"}
     assert "ダート|1400|東京" in m["theta"]
+
+
+# ---------------------------------------------------------------- 過去走・出走馬の補完 ----
+
+_RACE_HDR_C = _RACE_HDR + ",コーナー名称1,コーナー名称2,コーナー名称3,コーナー通過順1,コーナー通過順2,コーナー通過順3"
+
+
+def _race_row_c(venue, date, rn, dist, corners: list[tuple[str, str]], going="良"):
+    names = [c[0] for c in corners] + [""] * (3 - len(corners))
+    orders = [f'"{c[1]}"' for c in corners] + [""] * (3 - len(corners))     # 実ファイルと同じく引用符付き (カンマを含む)
+    return _race_row(venue, date, rn, "Ｃ２一組", "ダート", "右", dist, "晴", going) + "," + ",".join(names + orders)
+
+
+def _hrow(venue, date, rn, num, name, fin, time_s, *, weight="56", last3f="38.0", jockey="山本聡", bw="480",
+          bwd="+2", sex="牡", age="4", pop=1, trainer="調教師", bracket=1):
+    return ",".join([venue, str(date), str(rn), str(bracket), "白", str(num), name, sex, str(age), "鹿毛", "20220401", "父",
+                     "母", "母父", jockey, "大井", weight, "0-0-0-0", trainer, "大井", "馬主", "牧場", bw, bwd,
+                     "0-0-0-0", "", "", "", "", "", "", fin, time_s, "", last3f, str(pop)])
+
+
+def _zip_c(prefix, racelist, horselist):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(f"{prefix}_racelist.csv", (_BOM + "\n".join([_RACE_HDR_C, *racelist]) + "\n").encode("utf-8"))
+        z.writestr(f"{prefix}_horselist.csv", (_BOM + "\n".join([_HORSE_HDR, *horselist]) + "\n").encode("utf-8"))
+    return buf.getvalue()
+
+
+def test_corner_ranks_and_passing_follow_netkeiba_convention():
+    assert no._corner_ranks("1,10,(5,9)-3,4") == {1: 1, 10: 2, 5: 3, 9: 3, 3: 5, 4: 6}   # 並走は同じ位置
+    corners = [("最初の直線", "2,1,3"), ("第2コーナー", "1,2,3"), ("第3コーナー", "(1,2),3"), ("第4コーナー", "3,1,2")]
+    assert no.passing_of(corners, 2) == "2-1-3"                     # 直線の地点は数えない
+    six = [(f"{i}角", "1,2") for i in range(1, 7)]
+    assert no.passing_of(six, 2) == "2-2-2-2"                        # 最後の 4 か所
+
+
+def _keibago_like(date, venue, rn, own, *, race_class="Ｃ２一組"):
+    from src.models import PastRun
+    return PastRun(date=date, venue=venue, race_no=rn, race_class=race_class, surface="ダート", distance=1200,
+                   going="良", field_size=0, horse_number=0, popularity=0, finish_pos=None,
+                   winner_time_sec=own, time_diff_sec=0.0)
+
+
+def _enrich_fixture():
+    """2026-06: 大井 6/2 R1 (アルファ 2 着・ブラボー 1 着) と 6/20 R5 (当レース = 出走表のみ)。"""
+    races = [_race_row_c("大井", 20260602, 1, 1200, [("3角", "2,(1,3)"), ("4角", "2,1,3")]),
+             _race_row_c("大井", 20260620, 5, 1200, [])]
+    horses = [_hrow("大井", 20260602, 1, 1, "アルファ", "2", "1134", weight="★52", last3f="38.4", jockey="山本聡",
+                    bw="470", bwd="-4"),
+              _hrow("大井", 20260602, 1, 2, "ブラボー", "1", "1131", weight="56", last3f="37.9", jockey="矢野貴"),
+              _hrow("大井", 20260602, 1, 3, "チャーリー", "3", "1140"),
+              _hrow("大井", 20260620, 5, 4, "アルファ", "", "", weight="▲53", jockey="笹川翼", bw="", bwd="",
+                    sex="セン", age="5", bracket=3),
+              _hrow("大井", 20260620, 5, 7, "ブラボー", "", "", weight="56", jockey="矢野貴", bw="", bwd="")]
+    no.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    no.monthly_zip_path("202606").write_bytes(_zip_c("202606", races, horses))
+
+
+def _rd_for_enrich():
+    from src.models import Horse, Race, RaceData
+    a = Horse(number=4, name="アルファ")
+    a.past_runs_ext = [_keibago_like("2026.06.02", "大井", 1, 73.4),
+                       _keibago_like("2026.05.01", "Ｊ東京", 3, 84.0)]          # 中央の走は触らない
+    a.past_runs = a.past_runs_ext[:5]
+    b = Horse(number=7, name="ブラボー")
+    b.past_runs = b.past_runs_ext = [_keibago_like("2026.06.02", "大井", 1, 73.9)]  # 時計が 0.8 秒ずれ = 別の走
+    race = Race(cup_id="", schedule_index=0, race_number=5, venue_id=44, venue_name="大井", race_class="",
+                distance=1200, surface="ダート", horses=[a, b])
+    return RaceData(race=race, trifecta=[], other_bets={})
+
+
+def test_enrich_racedata_fills_past_runs_and_entries():
+    _enrich_fixture()
+    rd = _rd_for_enrich()
+    st = no.enrich_racedata(rd, "202644062005")
+    a, b = rd.race.horses
+    pr = a.past_runs[0]
+    assert (pr.winner_time_sec, pr.time_diff_sec) == (73.1, 0.3) and pr.own_time_sec == pytest.approx(73.4)
+    assert (pr.weight_kg, pr.last_3f_sec, pr.jockey, pr.passing, pr.body_weight, pr.body_weight_diff) == \
+        (52.0, 38.4, "山本聡", "2-2", 470, -4)                     # 3角 "2,(1,3)" = 並走で 2 番手 / 4角 2 番手
+    assert (pr.horse_number, pr.popularity) == (1, 1)
+    jra = a.past_runs_ext[1]
+    assert (jra.time_diff_sec, jra.weight_kg, jra.jockey) == (0.0, 0.0, "")      # 中央の走は公式データに無い
+    assert b.past_runs[0].time_diff_sec == 0.0 and b.past_runs[0].weight_kg == 0.0  # 時計が合わない走は触らない
+    # 当レース: 騎手・斤量 (減量記号を外す)・性齢 (セン→セ)・枠番。結果は使わない
+    assert (a.jockey_name, a.weight_kg, a.sex_age, a.bracket, a.trainer_name) == ("笹川翼", 53.0, "セ5", 3, "調教師")
+    assert (b.jockey_name, b.weight_kg) == ("矢野貴", 56.0)
+    assert st == {"past_total": 2, "past_filled": 1, "past_mismatch": 1, "entries_filled": 2}   # 地方の走だけ数える
+
+
+def test_enrich_racedata_keeps_existing_values_and_skips_banei():
+    _enrich_fixture()
+    rd = _rd_for_enrich()
+    a = rd.race.horses[0]
+    a.jockey_name, a.weight_kg = "既存騎手", 55.0
+    a.past_runs[0].jockey = "既存"
+    no.enrich_racedata(rd, "202644062005")
+    assert (a.jockey_name, a.weight_kg, a.past_runs[0].jockey) == ("既存騎手", 55.0, "既存")   # 空の項目だけ埋める
+    rd2 = _rd_for_enrich()
+    assert no.enrich_racedata(rd2, "202665062005")["past_total"] == 0            # ばんえいは既定で触らない
+    assert rd2.race.horses[0].past_runs[0].time_diff_sec == 0.0
+
+
+def test_enrich_racedata_without_cache_is_a_noop():
+    rd = _rd_for_enrich()
+    st = no.enrich_racedata(rd, "202644062005")
+    assert st["past_filled"] == 0 and st["entries_filled"] == 0
+    assert rd.race.horses[0].past_runs[0].time_diff_sec == 0.0
+
+
+def test_keibago_builder_enriches_from_official_cache(monkeypatch):
+    from src import scrape_keibago as kg
+    _enrich_fixture()
+    monkeypatch.setattr(kg, "fetch_horse_past_runs",
+                        lambda code: [_keibago_like("2026/06/02", "大井", 1, 73.4)] if code == "A" else [])
+    rd = kg.build_keibago_racedata("202644062005", [(4, "アルファ", "A", False), (7, "ブラボー", "", False)],
+                                   {4: 3.0}, fetch_past=True)
+    a = rd.race.horses[0]
+    assert a.past_runs[0].time_diff_sec == 0.3 and a.past_runs[0].passing == "2-2" and a.jockey_name == "笹川翼"
+
+
+def test_daily_file_overrides_monthly_for_its_date(_net_on, monkeypatch):
+    """当日ファイルの日付の行は当日ファイルの値が優先 (騎手変更・斤量・馬体重)。空の項目は月次を残す。"""
+    today = no._now().date()
+    ymd = today.year * 10000 + today.month * 100 + today.day
+    ym = f"{ymd // 100:06d}"
+    monthly = _zip_c(ym, [_race_row_c("大井", ymd, 5, 1200, [])],
+                     [_hrow("大井", ymd, 5, 4, "アルファ", "", "", weight="56", jockey="山本聡", bw="", bwd="",
+                            trainer="調教師A")])
+    daily = _zip_c(f"{ymd}", [_race_row_c("大井", ymd, 5, 1200, [])],
+                   [_hrow("大井", ymd, 5, 4, "アルファ", "", "", weight="▲53", jockey="笹川翼", bw="470", bwd="-4",
+                          trainer="")])
+    _put_month(ym, no._now(), monthly)
+    calls = []
+    monkeypatch.setattr(no, "_download", lambda url, **_k: calls.append(url) or daily)
+    from src.models import Horse, Race, RaceData
+    h = Horse(number=4, name="アルファ")
+    race = Race(cup_id="", schedule_index=0, race_number=5, venue_id=44, venue_name="大井", race_class="",
+                distance=1200, surface="ダート", horses=[h])
+    rid = f"{today.year:04d}44{today.month:02d}{today.day:02d}05"
+    no.enrich_racedata(RaceData(race=race, trifecta=[], other_bets={}), rid)          # 既定は通信しない
+    assert calls == [] and (h.jockey_name, h.weight_kg) == ("山本聡", 56.0)          # 当日ファイルが無い = 月次
+    h2 = Horse(number=4, name="アルファ")
+    race.horses = [h2]
+    no.enrich_racedata(RaceData(race=race, trifecta=[], other_bets={}), rid, allow_download=True)
+    assert len(calls) == 1
+    assert (h2.jockey_name, h2.weight_kg, h2.body_weight, h2.body_weight_diff, h2.trainer_name) == \
+        ("笹川翼", 53.0, 470, -4, "調教師A")                                          # 空の調教師は月次の値
+
+
+def test_enrich_never_downloads_for_other_days(_net_on, monkeypatch):
+    calls = []
+    monkeypatch.setattr(no, "_download", lambda url, **_k: calls.append(url) or b"")
+    _enrich_fixture()
+    no.enrich_racedata(_rd_for_enrich(), "202644062005", allow_download=True)       # 当レースが今日でない
+    assert calls == []

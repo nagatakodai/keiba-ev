@@ -1219,6 +1219,42 @@ def test_prospective_excludes_post_start_scored(dirs):
     assert p1["prospective"]["races"] == 1     # 発走後採点 (post-1) は確証母集団から除外
 
 
+def test_prospective_current_splits_by_index_version(dirs, tmp_path, monkeypatch):
+    """登録後 (prospective) は版をまたいでプールし、現行の指数版だけの成績を prospective_current に分ける。
+
+    v4 (2026-10-14〜) で地方の仮指数 (Claude 指数の叩き台) が公式データ補完で変わったため、登録後の
+    母集団が途中で別の計器に切り替わる。★判定 (status) は従来どおり prospective・定義は凍結のまま。
+    """
+    import datetime as dt
+    from src.llm import INDEX_V4_SINCE, INDEX_VERSION
+    sh, pr, rs = dirs
+    reg = store.SIGNAL_RULES[0]["registered_at"]
+    day_old = (dt.date.fromisoformat(reg) + dt.timedelta(days=1)).isoformat()
+    day_new = (dt.date.fromisoformat(INDEX_V4_SINCE[:10]) + dt.timedelta(days=1)).isoformat()
+    for rid, day, ver in (("old-1", day_old, "v3"), ("new-1", day_new, INDEX_VERSION)):
+        (sh / f"{day.replace('-', '')}.json").write_text(json.dumps({
+            "generated_at": f"{day}T10:00:00+09:00",
+            "races": [{"race_id": rid, "recommended": True, "venue": "A", "race_no": 1,
+                       "race_type": "nar", "n_runners": 8, "start_at": _jst_unix(day, 12)}],
+        }), encoding="utf-8")
+        snap = _snap(8, _IDX8, market={1: 95.0, 2: 60.0, 3: 40.0}, index_version=ver)
+        snap["llm_scored_at"] = f"{day}T11:50:00"
+        (pr / f"{rid}.json").write_text(json.dumps(snap), encoding="utf-8")
+        (rs / f"{rid}.json").write_text(json.dumps(_result_fo(
+            [1, 4, 5], 0, {"win:1": 2.0, "place:1": 1.4, "place:4": 1.6,
+                           "wide:1-4": 3.0, "trio:1-4-5": 20.0})), encoding="utf-8")
+    cur = store.compute_signal_rules()
+    assert cur["current_version"] == INDEX_VERSION
+    p1 = next(r for r in cur["rules"] if r["key"] == "place1_consensus")
+    assert p1["prospective"]["races"] == 2              # 版をまたいだプール (★判定はこちら)
+    assert p1["prospective_current"]["races"] == 1      # 現行版で採点した new-1 だけ
+    assert p1["prospective_current"]["roi"] == pytest.approx(1.4)
+    monkeypatch.setattr(store, "SIGNAL_RULES_HISTORY", tmp_path / "sig_hist.jsonl")
+    row = store.append_signal_rules_history()
+    h = next(r for r in row["rules"] if r["key"] == "place1_consensus")
+    assert h["prospective_current"]["version"] == INDEX_VERSION and h["prospective_current"]["races"] == 1
+
+
 def test_consensus_tiebreak_by_number(dirs):
     """市場指数の同点は馬番昇順で市場#1 を決める (market_ranked/_strategy_race_legs と同一規約)。
 

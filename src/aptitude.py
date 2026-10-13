@@ -192,6 +192,10 @@ _WEIGHTS = {
     "graded_record": 1.0,
 }
 _W_SUM = sum(_WEIGHTS.values())
+# 地方・ばんえいは上がり (last3f) を総合に入れない (2026-10-14): 公式データで地方の過去走に上がりが入るように
+# なると、総合の勝ち馬 AUC が再現 8,392R で −0.009 (上がりのサブスコアは地方では弱い・追込馬の多くが情報なし扱い)。
+# 外すと補完前の水準に戻る。表示用の last3f サブスコアは計算を続ける。
+_WEIGHTS_NAR = {k: v for k, v in _WEIGHTS.items() if k != "last3f"}
 
 
 # 適性指数の表示レンジ。同レース内最弱が APTITUDE_FLOOR、最強が APTITUDE_CEIL になる
@@ -352,15 +356,17 @@ def compute_aptitudes(
 
     graded_texts: dict[int, str] = {}
 
-    # 地方・ばんえいの能力はクラス項抜きの SI (仮指数と同じ理由・2026-10-13 — keiba.go.jp の過去走は自走時計
-    # しか無くクラスが時計を潰す。中央と LightGBM 特徴量 (fv) は従来どおりクラス込み)。
+    # 地方・ばんえいの能力はクラス項・斤量項抜きの SI (仮指数と同じ理由・2026-10-13/14 — クラス 1 段・斤量 1kg が
+    # 時計より大きく効き、公式データで過去走の斤量が埋まると再現で能力の AUC −0.026。中央と LightGBM 特徴量 (fv)
+    # は従来どおり込み)。
     jra = 1 <= int(getattr(rd.race, "venue_id", 0) or 0) <= 10
     for h in horses:
         fv = feats.get(h.number)
         if fv is None:
             continue
         raw_ability[h.number] = (_ability_raw(fv) if jra
-                                 else float(weighted_recent_speed_index(h.past_runs or [], with_class=False)))
+                                 else float(weighted_recent_speed_index(h.past_runs or [], with_class=False,
+                                                                        with_weight=False)))
         raw_dist[h.number] = _distance_fit_raw(fv)
         raw_last3f[h.number] = _last3f_raw(fv)
         raw_surface[h.number] = _surface_fit_raw(fv)
@@ -418,7 +424,8 @@ def compute_aptitudes(
         )
         # 総合 = 重み付け平均 (_WEIGHTS のキーのみ加算 → TOP-4 改訂で除外した因子は
         # 自動的に total に乗らない。除外 sub-score 自体は上で compute 済 = 表示用に残る)。
-        ai.total = sum(_WEIGHTS[k] * getattr(ai, k) for k in _WEIGHTS) / _W_SUM
+        wts = _WEIGHTS if jra else _WEIGHTS_NAR
+        ai.total = sum(wts[k] * getattr(ai, k) for k in wts) / sum(wts.values())
 
         # reasons
         reasons: list[str] = []

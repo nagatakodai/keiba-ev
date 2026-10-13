@@ -27,6 +27,7 @@ import {
   raceTimingStatus,
   savedAtDate,
 } from "@/components/ui";
+import { INDEX_VERSION } from "@/lib/version";
 
 type RaceHit = CalibrationReport["races"][number];
 
@@ -187,7 +188,7 @@ function RaceRow({
           {p.stage === "score" && <Badge tone="muted">暫定</Badge>}
           {/* 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限)。ユーザ指示 2026-06-30 */}
           {p.index_version && (
-            <Badge tone={p.index_version === "v2" ? "info" : "muted"}>{p.index_version}</Badge>
+            <Badge tone={p.index_version === INDEX_VERSION ? "info" : "muted"}>{p.index_version}</Badge>
           )}
         </Link>
         {/* **1 ラベル原則** (2026-05-29 ユーザ指示):

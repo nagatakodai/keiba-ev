@@ -682,6 +682,10 @@ def build_oddspark_racedata(
         from .scrape_keibago import _apply_deba_header
         _apply_deba_header(race, race_header, netkeiba_rid)
     rd = RaceData(race=race, trifecta=[], other_bets={})
+    # 過去走の着差/斤量/上がり/通過順/騎手/馬体重と出走馬の騎手/斤量/性齢/馬体重を公式データで補う
+    # (oddspark には出走表の騎手・斤量が無いので公式の当日ファイルが頼り。score 段は 2 分に 1 回まで取り直す)
+    from .scrape_keibago import _enrich_from_official
+    _enrich_from_official(rd, netkeiba_rid, allow_download=allow_official_download)
     return overlay_oddspark_odds(rd, tanfuku)
 
 

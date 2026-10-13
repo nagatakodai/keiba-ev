@@ -56,21 +56,25 @@ def get_shobu_result(date: str | None = None) -> dict[str, Any] | None:
 
 
 def index_version_of(snap: dict[str, Any]) -> str | None:
-    """snapshot の Claude 指数 方針バージョン (β=市場由来 / v1=補強3件 / v2=無制限 / v3=仮指数アンカー・現行)。
+    """snapshot の Claude 指数 方針バージョン (β=市場由来 / v1=補強3件 / v2=無制限 / v3=仮指数アンカー /
+    v4=地方の入力を公式データで補完・現行)。
 
     明示の `index_version` (2026-06-30〜 保存) があればそれを返す。無い旧 snapshot は **採点日時で推定**:
     Claude 指数が無ければ None、市場由来 cutoff (2026-06-21 19:04) 以前は **β** (score プロンプトに
     単勝オッズ列があり市場由来だった頃・ユーザ指示 2026-06-30「β版として残して表示」)、それ以降
     INDEX_V2_SINCE (2026-06-28) 未満は v1、INDEX_V3_SINCE (2026-07-01 15:13 = 仮指数アンカー移行
-    dbff5b2) 未満は v2、以降は v3。
+    dbff5b2) 未満は v2、INDEX_V4_SINCE (2026-10-14 = 地方の入力を公式データで補完) 未満は v3、以降は v4。
+    v4 の刻印でも採点日時が INDEX_V4_SINCE より前なら v3 (配備前に採点した指数を配備後に保存し直した snapshot)。
 
     「Claude 指数あり」は index_compare の行に **claude_index が実際に入っているか** で判定する
     (market-only refresh の snapshot は market_index のみの行を持つため、行の存在だけ見ると
     指数ゼロのレースが β/v1/v2 に誤分類され version 母数が過大になる)。
     """
-    from src.llm import INDEX_V2_SINCE, INDEX_V3_SINCE
+    from src.llm import INDEX_V2_SINCE, INDEX_V3_SINCE, INDEX_V4_SINCE
     v = snap.get("index_version")
     if v:
+        if v == "v4" and _scored_at(snap) < INDEX_V4_SINCE:
+            return "v3"
         # 仮指数アンカー移行 (07-01 15:13) 〜 INDEX_VERSION="v3" 反映までの間に保存された
         # snapshot は "v2" が誤刻印されている → 採点日時で v3 に矯正 (真の v2 は cutoff 前のみ)。
         if v == "v2" and _scored_at(snap) >= INDEX_V3_SINCE:
@@ -85,6 +89,8 @@ def index_version_of(snap: dict[str, Any]) -> str | None:
         return "β"
     if scored < INDEX_V2_SINCE:
         return "v1"
+    if scored >= INDEX_V4_SINCE:
+        return "v4"
     return "v3" if scored >= INDEX_V3_SINCE else "v2"
 
 
@@ -1945,6 +1951,7 @@ def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
       - flags: {consensus: Claude#1==市場1番人気 (同点は馬番昇順の明示タイブレーク),
         style: 拮抗型=True, venue: JRA=True}
       - n_runners / per (Claude 指数順の戦略脚) / mper (市場人気順で同じ買い方、組めなければ None)
+      - index_version: Claude 指数の方針バージョン (`index_version_of`。プレレジ登録後を版で分けて見る用)
     **ts 昇順で返す** (walk-forward がそのまま時系列で歩ける)。
     """
     import datetime as _dt
@@ -2015,6 +2022,7 @@ def _tagged_eval_races(point_cost: int = 100) -> list[dict[str, Any]]:
             "date": date,
             "recorded_at": r_ts if isinstance(r_ts, str) else None,
             "scored_pre_start": bool(start_iso) and bool(scored) and scored < start_iso,
+            "index_version": index_version_of(snap),
             "flags": {"consensus": agree, "style": competitive, "venue": jra},
             "n_runners": detail.get("n_runners") or 0,
             # 上位3頭ギャップ + 荒れ具合 + FL バイアスの数値特徴量 (プレレジ features 条件用)。
@@ -2470,9 +2478,15 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
         レースのみ** の ROI + CI — 確証判定はこちらだけ
       - market_baseline: 同条件で市場人気順に同じ買い方をした ROI (Claude 指数の付加価値の基準線)
       - status: accumulating / promising / confirmed★ / broken (判定は `_rule_status`)
+      - prospective_current: prospective のうち **現行の指数版 (INDEX_VERSION) で採点したレースだけ**。
+        v4 (2026-10-14〜) で地方の Claude 指数の叩き台 (仮指数) が公式データ補完で変わり、登録後の母集団が
+        途中で別の計器に切り替わったため、版をまたいだプール (prospective) と並べて見る補助列。
+        status (確証★/破綻) は従来どおり prospective で判定し、ルール定義も凍結のまま (再登録しない)。
+        ★が付いたら現行版だけでも維持されているかを確かめる (実弾接続プロトコルの hold-out は現行版で行う)。
     `dead_cell` は見送り規律 (拮抗型×市場不一致) の根拠表示用、`walkforward` はマトリクス
     best セル追従の正直な成績 (これが 100% を大きく割る限りセル追従は機能していない)。
     """
+    from src.llm import INDEX_VERSION as cur_version
     records = _tagged_eval_races(point_cost)
     rules_out: list[dict[str, Any]] = []
     for rule in SIGNAL_RULES:
@@ -2485,6 +2499,10 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
                       if r["date"] and r["date"] >= rule["registered_at"]
                       and r["scored_pre_start"]
                       and (got := _agreement_pairs([r["per"]], keys))]
+        pros_cur_pairs = [got[0] for r in matched
+                          if r["date"] and r["date"] >= rule["registered_at"]
+                          and r["scored_pre_start"] and r.get("index_version") == cur_version
+                          and (got := _agreement_pairs([r["per"]], keys))]
         mkt_pairs = [got[0] for r in matched if r["mper"] is not None
                      and (got := _agreement_pairs([r["mper"]], keys))]
         # 対市場Δ (ペア比較): per と mper の両方が組めたレースだけを **同一レースの対** にする
@@ -2528,6 +2546,8 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
             "features": rule.get("features") or None,
             "insample": insample,
             "prospective": prospective,
+            # 登録後のうち現行の指数版だけ (v3→v4 の計器切替をまたがない部分, 2026-10-14)。
+            "prospective_current": _signal_stats(pros_cur_pairs),
             "market_baseline": {
                 "races": len(mkt_pairs),
                 "hits": sum(1 for p in mkt_pairs if p[1] > 0),
@@ -2582,6 +2602,7 @@ def compute_signal_rules(point_cost: int = 100) -> dict[str, Any]:
     return {
         "point_cost": point_cost,
         "races": len(records),
+        "current_version": cur_version,
         "min_confirm": SIGNAL_RULE_MIN_CONFIRM,
         "min_broken": SIGNAL_RULE_MIN_BROKEN,
         "rules": rules_out,
@@ -2626,6 +2647,14 @@ def append_signal_rules_history() -> dict[str, Any] | None:
                  "roi": round(r["prospective"]["roi"], 4),
                  "roi_ci_low": round(r["prospective"]["roi_ci_low"], 4),
                  "roi_ci_high": round(r["prospective"]["roi_ci_high"], 4),
+             },
+             # 登録後のうち現行の指数版だけ (2026-10-14〜。それより前の history 行には無い)。
+             "prospective_current": {
+                 "version": cur["current_version"],
+                 "races": r["prospective_current"]["races"],
+                 "roi": round(r["prospective_current"]["roi"], 4),
+                 "roi_ci_low": round(r["prospective_current"]["roi_ci_low"], 4),
+                 "roi_ci_high": round(r["prospective_current"]["roi_ci_high"], 4),
              },
              # 対市場Δ (登録後・ペア比較) — CI 下限>0 への遷移を時系列で追えるよう compact に残す。
              "vs_baseline": (

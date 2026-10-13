@@ -76,6 +76,17 @@ def test_snapshot_uses_anchor_claude_saw(root):
     assert vals == anchor and sev == 2
 
 
+def test_llm_scores_keep_official_enrich(root):
+    """採点時の公式データ補完の件数を .llm.json に残す (地方の入力が補完済みだったかの記録, 2026-10-14)。"""
+    parsed = {"scores": {1: 70, 2: 50}, "support": {}, "scale": "strength"}
+    st = {"past_total": 10, "past_filled": 9, "past_mismatch": 0, "entries_filled": 2, "runners_no_jockey": 0}
+    az._save_llm_scores("R-5", parsed, model="test", anchor={1: 60.0, 2: 40.0}, official_enrich=st)
+    saved = json.loads(az._llm_scores_path("R-5").read_text(encoding="utf-8"))
+    assert saved["official_enrich"] == st
+    az._save_llm_scores("R-6", parsed, model="test")
+    assert json.loads(az._llm_scores_path("R-6").read_text(encoding="utf-8"))["official_enrich"] is None
+
+
 def test_legacy_wrapper_unchanged(root):
     """既存の _resolve_provisional (dict を返す凍結ロジック) は従来どおり。"""
     _write_snapshot(root, "R-4", {1: 71.0, 2: 42.0, 3: 55.0}, None)

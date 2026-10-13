@@ -335,9 +335,12 @@ def build_features(rd: RaceData) -> dict[int, FeatureVec]:
             if d_last:
                 fv.days_since_last_run = _days_between(today, d_last)
 
-        # 騎手乗り替わり
+        # 騎手乗り替わり — 今日の騎手が分からない (出馬表に無い・公式データ未取得) ときは判定しない
+        # (旧実装は前走の騎手だけ分かると全馬「乗替り」になった)。空白の有無 ("武 豊" / "武豊") は同じ騎手。
         if runs:
-            fv.jockey_change = bool(runs[0].jockey) and runs[0].jockey != h.jockey_name
+            prev_j = "".join((runs[0].jockey or "").split())
+            today_j = "".join((h.jockey_name or "").split())
+            fv.jockey_change = bool(prev_j) and bool(today_j) and prev_j != today_j
 
         out[h.number] = fv
     return out

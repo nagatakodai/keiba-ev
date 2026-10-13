@@ -229,12 +229,14 @@ def main(argv: list[str] | None = None) -> int:
     ab_since = _norm_date(args.ab_since)
     modes, itt = collect(since, ab_since)
     print(render(modes, itt, since, ab_since))
-    # 2026-10-13: prefetch 腕の各馬「近況」クエリのクラス表記が変わった (keiba.go.jp/oddspark の race_class に
-    # レース名全体が入るようになり、短いクラス表記 _class_token だけを使うよう変更)。前後を混ぜると腕の定義が違う。
-    cut = "2026-10-13"
-    if (since or "0000") < cut or ab_since < cut:
-        print(f"\n[注意] 集計期間が {cut} (prefetch の近況クエリ変更) をまたいでいます。腕の定義が途中で変わって"
-              f"いるので、判定には --since {cut.replace('-', '')} --ab-since {cut.replace('-', '')} の結果も確認すること。")
+    # 腕の定義・入力が途中で変わった日 (前後を混ぜて判定しない):
+    #   2026-10-13: prefetch の各馬「近況」クエリのクラスを短い表記に (keiba.go.jp/oddspark の race_class がレース名全体に)
+    #   2026-10-14: 地方の Claude 入力に公式データの補完 (前走の着差/上り/通過・出走馬の騎手/斤量/性齢)・仮指数の SI を
+    #               時計のみに = Claude 指数 v4 (両腕とも入力が変わる。prefetch の騎手クエリは地方では出さないまま)
+    for cut in ("2026-10-13", "2026-10-14"):
+        if (since or "0000") < cut or ab_since < cut:
+            print(f"\n[注意] 集計期間が {cut} (腕の定義/入力の変更) をまたいでいます。判定には "
+                  f"--since {cut.replace('-', '')} --ab-since {cut.replace('-', '')} の結果も確認すること。")
     return 0
 
 

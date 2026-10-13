@@ -1225,7 +1225,7 @@ def api_shobu_indexed_pnl(point_cost: int = 100, box_size: int = 5,
 
     全出走馬に Claude 指数が付いて結果が確定したレースを上位 box_size 頭の3連単 BOX で集計。
     勝負レース(推奨)収支 (/api/shobu/pnl) とは別カードでダッシュボードに併記する全数指標。
-    `version` ("v1"/"v2"/"v3"/"β") で Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30)。
+    `version` ("v1"/"v2"/"v3"/"v4"/"β") で Claude 指数バージョン毎に分離 (ユーザ指示 2026-06-30)。
     `venue` ("nar"/"jra") で 地方/中央 に分離 (ユーザ指示 2026-07-05)。
     """
     return compute_indexed_pnl(point_cost=point_cost, box_size=box_size, version=version,
@@ -1240,7 +1240,7 @@ def api_shobu_strategies_pnl(point_cost: int = 100,
 
     各レースで win1(1位単勝) / place1,2,3(複勝) / quinella12(馬連) / wide12,13(ワイド) /
     exacta12(馬単) / trifecta123 / trio123 / trio1234box / wide123box を仮定し戦略ごとに収支集計。
-    `version` ("v1"/"v2"/"v3"/"β") で Claude 指数バージョン毎に分離。
+    `version` ("v1"/"v2"/"v3"/"v4"/"β") で Claude 指数バージョン毎に分離。
     `venue` ("nar"/"jra") で 地方/中央 に分離 (ユーザ指示 2026-07-05)。
     """
     return compute_shobu_strategies_pnl(point_cost=point_cost, version=version, venue=venue)
@@ -1254,7 +1254,7 @@ def api_shobu_indexed_strategies_pnl(point_cost: int = 100,
 
     ユーザ指示 (2026-06-30): 「単勝のみ・複勝のみ・指数1-2の馬連も計測して過去分全て表示」。
     母集団は BOX の indexed-pnl と揃える (shobu 評価レース全体) → ダッシュボードに併記。
-    `version` ("v1"/"v2"/"v3"/"β") で Claude 指数バージョン毎に分離 (新しい版が上)。
+    `version` ("v1"/"v2"/"v3"/"v4"/"β") で Claude 指数バージョン毎に分離 (新しい版が上)。
     `venue` ("nar"/"jra") で 地方/中央 に分離 (ユーザ指示 2026-07-05)。
     """
     return compute_indexed_strategies_pnl(point_cost=point_cost, version=version, venue=venue)
@@ -1266,7 +1266,7 @@ def api_shobu_venue_breakdown(point_cost: int = 100,
     """**競馬場 (venue) 毎の内訳** 仮想収支 (ユーザ指示 2026-06-30: 競馬場毎にカードで内訳)。
 
     BOX収支 + 戦略くらべ を venue で group 集計。市場由来 Claude 指数 (〜2026-06-21 19:04) は
-    計測対象外。`version` ("v1"/"v2"/"v3"/"β") で Claude 指数バージョン毎に分離。
+    計測対象外。`version` ("v1"/"v2"/"v3"/"v4"/"β") で Claude 指数バージョン毎に分離。
     """
     return compute_venue_breakdown(point_cost=point_cost, version=version)
 

@@ -20,7 +20,7 @@ import {
 import { TrifectaStakePreview } from "./TrifectaStakePreview";
 import { RaceNav } from "./RaceNav";
 import { TimeEvalCard } from "@/components/TimeEvalCard";
-import { indexVersionTitle } from "@/lib/version";
+import { INDEX_VERSION, indexVersionTitle } from "@/lib/version";
 import {
   betStyleGuide,
   combinedGuide,
@@ -194,7 +194,7 @@ export default async function PredictionDetailPage({
             {/* 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限)。ユーザ指示 2026-06-30 */}
             {d.index_version && (
               <span title={indexVersionTitle(d.index_version)}>
-                <Badge tone={d.index_version === "v2" ? "info" : "muted"}>
+                <Badge tone={d.index_version === INDEX_VERSION ? "info" : "muted"}>
                   指数 {d.index_version}
                 </Badge>
               </span>

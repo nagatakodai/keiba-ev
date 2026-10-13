@@ -514,13 +514,17 @@ function MarketAgreementCard({ data }: { data: MarketAgreementResponse }) {
 function SignalRuleRow({
   rule,
   minConfirm,
+  currentVersion,
   strategySpan,
 }: {
   rule: SignalRule;
   minConfirm: number;
+  currentVersion?: string;
   strategySpan?: number;
 }) {
   const p = rule.prospective;
+  // 登録後のうち現行の指数版だけ (v3→v4 の計器切替をまたがない部分)。★判定は p のまま。
+  const pc = rule.prospective_current;
   const i = rule.insample;
   // 対市場Δ (登録後・ペア比較)。CI 下限 > 0 (beats_baseline) で緑、0 跨ぎは淡色、n<5 は null=「—」。
   const vsBase = rule.prospective_vs_baseline;
@@ -593,6 +597,12 @@ function SignalRuleRow({
               {p.races}/{minConfirm}R ・ 的中 {fmtPct(p.hits / p.races, 0)} ・ CI[
               {fmtRoiPct(p.roi_ci_low)},{fmtRoiPct(p.roi_ci_high)}]
             </span>
+            {pc && currentVersion && (
+              <span className="block text-[9px] text-(--color-muted) leading-tight">
+                うち {currentVersion}:{" "}
+                {pc.races > 0 ? `${fmtRoiPct(pc.roi)} (${pc.races}R)` : "0R"}
+              </span>
+            )}
           </>
         ) : (
           <span className="text-(--color-muted)">
@@ -695,6 +705,7 @@ function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
                     key={r.key}
                     rule={r}
                     minConfirm={c.min_confirm}
+                    currentVersion={c.current_version}
                     strategySpan={i === 0 ? g.length : undefined}
                   />
                 )),
@@ -738,7 +749,9 @@ function SignalRulesCard({ data }: { data: SignalRulesResponse }) {
             ルール − 市場人気基準 の ROI 差 (レース単位ペア bootstrap の 95%CI・
             <span className="text-emerald-200">緑 = CI 下限 &gt; 0 で基準線に確定的に勝つ</span>
             ・確証★判定とは独立の補助列・5R 未満は「—」。定義上基準と同じ買い目になるルールは
-            Δ=0 が正しい)。
+            Δ=0 が正しい)。「うち {c.current_version ?? "現行版"}」= 登録後のうち現行の Claude
+            指数の版で採点したレースだけの ROI (v4 = 2026-10-14〜 地方の入力を公式データで補完し、
+            Claude 指数の叩き台が変わった。★が付いたら現行版だけでも維持されているかを確認する)。
           </span>
         </div>
       </div>
@@ -776,7 +789,7 @@ function VersionMeasurementSection({
   strategies,
   nowMs,
 }: {
-  version: "v1" | "v2" | "v3" | "β";
+  version: "v1" | "v2" | "v3" | "v4" | "β";
   box: ShobuPnl | null;
   strategies: StrategiesPnl | null;
   nowMs: number;
@@ -825,11 +838,13 @@ export async function DashboardView({ venue }: { venue: DashboardVenue }) {
   // 計測系は venue で 地方/中央 を分離 (2026-07-05)。研究系カード (プレレジ台帳・市場一致
   // マトリクス) は venue を条件/軸として内包するグローバル研究台帳なので **地方ページにのみ**
   // フィルタ無しで表示する (中央ページには出さない・重複もしない)。
-  const [boxV3, boxV2, boxV1, stratV3, stratV2, stratV1, marketAgree, signalRules] =
+  const [boxV4, boxV3, boxV2, boxV1, stratV4, stratV3, stratV2, stratV1, marketAgree, signalRules] =
     await Promise.all([
+      api.indexedPnl(100, "v4", venue).catch(() => null),
       api.indexedPnl(100, "v3", venue).catch(() => null),
       api.indexedPnl(100, "v2", venue).catch(() => null),
       api.indexedPnl(100, "v1", venue).catch(() => null),
+      api.indexedStrategiesPnl(100, "v4", venue).catch(() => null),
       api.indexedStrategiesPnl(100, "v3", venue).catch(() => null),
       api.indexedStrategiesPnl(100, "v2", venue).catch(() => null),
       api.indexedStrategiesPnl(100, "v1", venue).catch(() => null),
@@ -838,7 +853,7 @@ export async function DashboardView({ venue }: { venue: DashboardVenue }) {
     ]);
 
   // API 未接続: どのバージョンも取れなければ明示のエラーカードを出す。
-  if (!boxV3 && !boxV2 && !boxV1) {
+  if (!boxV4 && !boxV3 && !boxV2 && !boxV1) {
     return (
       <Page>
         <AutoRefresh seconds={15} />
@@ -862,7 +877,7 @@ export async function DashboardView({ venue }: { venue: DashboardVenue }) {
       <PageHeader
         eyebrow="Keiba EV Terminal"
         title={title}
-        subtitle={`${venueLabel} の shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v3=仮指数アンカー・現行 / v2=補強根拠無制限 / v1=3件上限)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。`}
+        subtitle={`${venueLabel} の shobu 評価レースの仮想収支 (上位N頭3連単BOX + 単純戦略くらべ) を Claude 指数バージョン毎に表示 (v4=地方の入力を公式データで補完・現行 / v3=仮指数アンカー / v2=補強根拠無制限 / v1=3件上限)。競馬場別の内訳は上部メニューの「競馬場別」へ。15 秒おきに自動更新。`}
       />
 
       {/* ====== 研究中シグナル: プレレジ検証 + 市場一致マトリクス (地方ページのみ・全 venue の
@@ -870,7 +885,8 @@ export async function DashboardView({ venue }: { venue: DashboardVenue }) {
       {signalRules && <SignalRulesCard data={signalRules} />}
       {marketAgree && <MarketAgreementCard data={marketAgree} />}
 
-      {/* ====== v3 (現行・仮指数アンカー) を上、v2 / v1 (旧) を下 ====== */}
+      {/* ====== v4 (現行・公式データ補完) を上、v3 / v2 / v1 (旧) を下 ====== */}
+      <VersionMeasurementSection version="v4" box={boxV4} strategies={stratV4} nowMs={nowMs} />
       <VersionMeasurementSection version="v3" box={boxV3} strategies={stratV3} nowMs={nowMs} />
       <VersionMeasurementSection version="v2" box={boxV2} strategies={stratV2} nowMs={nowMs} />
       <VersionMeasurementSection version="v1" box={boxV1} strategies={stratV1} nowMs={nowMs} />

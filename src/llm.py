@@ -34,11 +34,15 @@ LAST_RESEARCH_MODE = "agentic"
 #   v3 = **仮指数アンカー方式** — 市場非依存の仮指数 (出走表ベース機械計算) を anchor に
 #        Claude が ±調整する二段パイプライン (2026-07-01 commit dbff5b2〜、±20 クランプ 78612b4)。
 #        根拠の無い馬は仮指数据え置きになるため生成分布が v2 と別物 = 系列を分離する。
+#   v4 = **地方の入力を公式データで補完** (2026-10-14〜): keiba.go.jp/oddspark の前走に着差・上り・通過順・斤量・騎手・
+#        馬体重、出走馬に騎手・斤量・性齢が入る (Claude の前走戦績・出走馬表) + 地方の仮指数 (アンカー) の SI を時計のみ
+#        (クラス・斤量の項なし) に。アンカーの 1 位が 28% のレースで変わる (AUC +0.028) = 生成過程が v3 と別物。
 # snapshot 保存時に `index_version` を刻む。古い snapshot は scored 日時で推定する
-# (INDEX_V3_SINCE 以降 v3 / INDEX_V2_SINCE 以降 v2 / それ以前は v1)。
-INDEX_VERSION = "v3"
+# (INDEX_V4_SINCE 以降 v4 / INDEX_V3_SINCE 以降 v3 / INDEX_V2_SINCE 以降 v2 / それ以前は v1)。
+INDEX_VERSION = "v4"
 INDEX_V2_SINCE = "2026-06-28"
 INDEX_V3_SINCE = "2026-07-01T15:13:17"   # dbff5b2 のコミット時刻 (JST)
+INDEX_V4_SINCE = "2026-10-14T05:00:00"   # 公式データ補完の配備時刻 (JST)
 
 
 def _start_kill_timer(proc: "subprocess.Popen", timeout: int):

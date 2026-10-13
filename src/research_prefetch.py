@@ -126,8 +126,11 @@ def build_queries(rd: RaceData) -> tuple[list[dict[str, str]], dict[int, list[di
         ]
 
     # 騎手 (実測 4%): ユニーク騎手のみ・多頭数レースでの爆発を上限で抑える。
+    # 地方は出さない (2026-10-14): 地方の騎手名は公式データ/単複ページの 3 文字略称 ("山本聡") で検索に向かず、
+    # 2026-10-14 までの地方レースは騎手名が空 = 騎手クエリ 0 本だった → research A/B の prefetch 腕の定義を保つ。
     seen: set[str] = set()
-    for h in horses:
+    jra = 1 <= int(getattr(r, "venue_id", 0) or 0) <= 10
+    for h in horses if jra else []:
         j = (getattr(h, "jockey_name", "") or "").strip()
         if not j or j in seen or len(seen) >= _MAX_JOCKEY_QUERIES:
             continue

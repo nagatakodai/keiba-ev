@@ -288,3 +288,29 @@ def test_ability_ignores_class_outside_jra():
     assert a_nar == b_nar
     a_jra, b_jra = ability(5)
     assert b_jra > a_jra
+
+
+def test_nar_total_excludes_last3f_and_ability_ignores_weight():
+    from src.aptitude import compute_aptitudes
+    from src.models import Horse, PastRun, Race, RaceData
+
+    def runs(w, l3):
+        return [PastRun(date="2026.04.11", venue="大井", race_class="", surface="ダート", distance=1200, going="良",
+                        winner_time_sec=73.0, time_diff_sec=0.5, weight_kg=w, last_3f_sec=l3) for _ in range(3)]
+
+    def apt(vid):
+        race = Race(cup_id="X", schedule_index=1, race_number=1, venue_id=vid, venue_name="大井", race_class="",
+                    distance=1200, surface="ダート")
+        race.horses = [Horse(number=1, name="A", past_runs=runs(50.0, 36.0)),
+                       Horse(number=2, name="B", past_runs=runs(58.0, 40.0)),
+                       Horse(number=3, name="C", past_runs=[])]
+        return compute_aptitudes(RaceData(race=race, trifecta=[]))
+
+    nar = apt(44)
+    assert nar[1].ability == nar[2].ability                     # 斤量の差は地方の能力に効かない
+    assert nar[1].last3f != nar[2].last3f                       # 上がりのサブスコアは表示用に残る
+    assert nar[1].total == nar[2].total                         # が、地方の総合には入らない
+    for a in nar.values():                                      # 地方の総合 = 能力・馬場・重賞の 3 つ
+        assert a.total == (a.ability + a.going_fit + a.graded_record) / 3
+    for a in apt(5).values():                                   # 中央は上がりも入れた 4 つ
+        assert a.total == (a.ability + a.going_fit + a.last3f + a.graded_record) / 4

@@ -475,11 +475,14 @@ def _append_tool_usage(race_id: str, name: str, query: str) -> None:
 
 
 def _save_llm_scores(race_id: str, parsed: dict, *, model: str,
-                     anchor: dict[int, float] | None = None, anchor_sev: int | None = None) -> None:
+                     anchor: dict[int, float] | None = None, anchor_sev: int | None = None,
+                     official_enrich: dict | None = None) -> None:
     """score ステージの Claude 指数を `<race_id>.llm.json` に保存 (bet ステージが読む)。
 
     anchor = この採点で Claude に渡した仮指数 (と、その計算時の馬場の重さ 良0/稍1/重2/不3)。
     snapshot の仮指数・prov_delta は「Claude が実際に見た叩き台」を使う (2026-10-10)。
+    official_enrich = この採点時の出走表・過去走を地方の公式データで補完した件数 (2026-10-14〜、
+    経路が補完しないときは None)。凍結済みの仮指数を使い回した採点では、仮指数そのものは凍結時の入力。
     """
     out = _llm_scores_path(race_id)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -497,6 +500,7 @@ def _save_llm_scores(race_id: str, parsed: dict, *, model: str,
         # Claude に渡した仮指数 (叩き台) と、その計算時の馬場の重さ (None = 馬場不明で計算)。
         "provisional": ({str(k): round(float(v), 1) for k, v in anchor.items()} if anchor else None),
         "provisional_going_sev": anchor_sev,
+        "official_enrich": official_enrich,
         "support": {str(k): v for k, v in (parsed.get("support") or {}).items()},
         # alerts: 各馬の直前/軟情報フラグ配列 (例 {"3": ["取消", "馬体重-12kg"]})。記録/表示用。
         "alerts": {str(k): list(v) for k, v in (parsed.get("alerts") or {}).items()},
@@ -708,7 +712,8 @@ def _run_score_stage(
     try:
         parsed = llm_mod.parse_horse_scores("".join(chunks))
         if parsed.get("scores"):
-            _save_llm_scores(race_id, parsed, model=model, anchor=provisional, anchor_sev=prov_sev)
+            _save_llm_scores(race_id, parsed, model=model, anchor=provisional, anchor_sev=prov_sev,
+                             official_enrich=getattr(rd, "official_enrich", None))
             console.print(f"[cyan]score 完了 → {len(parsed['scores'])} 頭に指数付与[/cyan]")
         else:
             console.print("[yellow]score 出力に scores 無し — キャッシュせず[/yellow]")
@@ -966,6 +971,12 @@ def _has_past_runs(rd) -> bool:
     return bool(runners) and sum(1 for h in runners if h.past_runs) * 2 >= len(runners)
 
 
+def _model_no_info(rd) -> bool:
+    """EV束を組まない「モデル無情報」: fundamental が一様縮退、または過去走のある馬が半数未満 (= 特徴量は今日の
+    斤量・馬体重くらい)。2026-10-14: 公式データで出走馬の斤量が埋まると一様判定だけでは過去走なしを見逃した。"""
+    return ev_mod.fundamental_no_info(rd) or not _has_past_runs(rd)
+
+
 def _resolve_provisional_with_sev(race_id: str, rd, *,
                                   for_claude_run: bool = False) -> tuple[dict[int, float], int | None]:
     """仮指数と、それを計算したときの馬場の重さ (良0/稍1/重2/不3, 不明 None) を返す。
@@ -1170,7 +1181,10 @@ def _save_prediction_snapshot(
     model_no_info = True
     if probs is not None:
         try:
-            model_no_info = ev_mod.fundamental_no_info(rd)
+            # 過去走のある馬が半数未満 = 特徴量は今日の斤量・馬体重くらいしか無い → 無情報扱い
+            # (2026-10-14: 公式データで出走馬の斤量が埋まると fundamental が厳密な一様でなくなり、
+            # 一様判定だけでは DebaTable 欠落時の過去走なしレースを見逃した)
+            model_no_info = _model_no_info(rd)
         except Exception:  # noqa: BLE001
             model_no_info = False   # 判定不能なら従来動作 (組む) に倒す
         if model_no_info:
@@ -1371,8 +1385,11 @@ def _save_prediction_snapshot(
         "llm_blend": llm_blend,
         "llm_scored_at": llm_scored_at,
         "llm_fallback": llm_win_index is None,
-        # 補強根拠 (evidence) 方針バージョン (v1=3件上限 / v2=無制限・現行)。Claude 指数があるときのみ刻む。
+        # Claude 指数の方針バージョン (v1/v2/v3/v4 — src/llm.py)。Claude 指数があるときのみ刻む。
         "index_version": (llm_mod.INDEX_VERSION if llm_win_index is not None else None),
+        # 地方の公式データで補完した件数 (src/nar_official.enrich_racedata, 2026-10-14〜)。補完が効いた
+        # レースかどうかの分割キー (v4 でもキャッシュ不足で補完されないレースがある)。経路が補完しないときは None。
+        "official_enrich": getattr(rd, "official_enrich", None),
         # 指数生成のモデルとリサーチ方式 (agentic=LLM検索 / prefetch=固定クエリ Tavily 直, 2026-07-05)。
         # .llm.json から読む (score 段の実績値)。A/B 比較の分割キー。指数なしは None。
         "llm_research_mode": (_lm_mode if llm_win_index is not None else None),
