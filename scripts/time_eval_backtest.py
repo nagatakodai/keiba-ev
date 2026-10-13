@@ -10,7 +10,8 @@
   AUCw  レース内で勝ち馬が他馬より速く推定された割合 (0.5=ランダム)
   AUC3  同 3 着以内
   ρtime 推定タイムと実際の走破時計の順位相関 (レース平均)
-  MADdm レース中央値を除いた推定と実時計の差の中央値 (秒)
+  MADdm レース中央値を除いた推定と実時計の差の中央値 (秒, 推定は 0.1 秒丸めなので 0.05 秒刻み)
+  MAE   レース平均を除いた推定と実時計の差の平均 (秒, 連続量 — 条件を比べるときはこちら)
   top1  推定 1 位の勝率 / ROI 推定 1 位の単勝 ¥100 均等買い (確定オッズ)
   fav   市場 1 番人気 (確定オッズ最小) の勝率 / ROI
 2026-10-10 実測 (選定 1-3月 / 確認 4-5月): 地方 AUCw 0.79/0.77, JRA 0.72/0.72。市場 1 番人気の top1
@@ -62,9 +63,12 @@ def _one(rid: str) -> dict | None:
     if not te.get("available"):
         return {"rid": rid, "available": False}
     est = {h["number"]: h["est_sec"] for h in te["horses"] if h["est_sec"] is not None}
+    # 推定 1 位は time_eval の順位 (丸める前の推定で付けた rank==1)。丸めた est の最小 + 馬番で選ぶと
+    # 0.1 秒単位の同タイムで別の馬になる (1 割のレース)
+    top = next((h["number"] for h in te["horses"] if h.get("rank") == 1), None)
     odds = {h.number: h.win_odds for h in rd.race.horses if not h.absent and h.win_odds}
     runners = [h.number for h in rd.race.horses if not h.absent and h.number in times]
-    return {"rid": rid, "available": True, "est": est, "times": times, "runners": runners,
+    return {"rid": rid, "available": True, "est": est, "top": top, "times": times, "runners": runners,
             "winner": res["finish_order"][0], "top3": res["finish_order"][:3],
             "win_payout": fo.get(f"win:{res['finish_order'][0]}"), "odds": odds}
 
@@ -98,10 +102,11 @@ def _metrics(rows: list[dict]) -> dict:
             pe = np.array([p[0] for p in pairs])
             ac = np.array([p[1] for p in pairs])
             A["mad"].extend(np.abs((pe - np.median(pe)) - (ac - np.median(ac))).tolist())
+            A["mae"].extend(np.abs((pe - pe.mean()) - (ac - ac.mean())).tolist())
             ra, rb = np.argsort(np.argsort(pe)), np.argsort(np.argsort(ac))
             if np.std(ra) and np.std(rb):
                 A["rho"].append(float(np.corrcoef(ra, rb)[0, 1]))
-        top = min(est, key=lambda n: (est[n], n))
+        top = r.get("top") or min(est, key=lambda n: (est[n], n))
         A["top1"].append(1.0 if top == r["winner"] else 0.0)
         A["pay"].append(100.0 * (r["win_payout"] or 0.0) if top == r["winner"] else 0.0)
         if r["odds"]:
@@ -111,7 +116,7 @@ def _metrics(rows: list[dict]) -> dict:
         A["races"].append(1)
     m = lambda k: float(np.mean(A[k])) if A[k] else float("nan")  # noqa: E731
     return {"races": len(A["races"]), "aucw": m("aucw"), "auc3": m("auc3"), "rho": m("rho"),
-            "mad": float(np.median(A["mad"])) if A["mad"] else float("nan"), "top1": m("top1"),
+            "mad": float(np.median(A["mad"])) if A["mad"] else float("nan"), "mae": m("mae"), "top1": m("top1"),
             "roi": float(np.sum(A["pay"]) / max(1, 100 * len(A["pay"])) * 100), "fav": m("fav"),
             "favroi": float(np.sum(A["favpay"]) / max(1, 100 * len(A["favpay"])) * 100)}
 
@@ -120,13 +125,19 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--no-day", action="store_true", help="開催日の馬場差 δ を使わない (比較用)")
+    ap.add_argument("--with-official", action="store_true",
+                    help="学習 ledger に地方の公式データ (nar_official-*.jsonl) も入れる (中央・地方とも評価月の直前まで"
+                         "揃った状態。本番の中央データ停止 2026-05-24〜 = 中央の馬場差なしは再現しない)")
     args = ap.parse_args()
     from src.dataset import _iter_race_ids
     raw = tm.LEDGER_DIR / "netkeiba_raw.jsonl"
     if not raw.exists():
         print("netkeiba_raw.jsonl がありません: python scripts/build_time_model.py --extract-raw")
         return 1
-    ledger = tm.load_ledger([raw])          # live は使わない (data/raw の期間内で完結させる)
+    # live は使わない (data/raw の期間内で完結させる)。--with-official は公式データ (評価月より前の行だけが
+    # 学習に入る) を足す。公式は netkeiba と重なる走で時計・馬場・勝ち時計が完全一致 (2026-10-13 確認)。
+    files = ([*sorted(tm.LEDGER_DIR.glob("nar_official-*.jsonl"))] if args.with_official else []) + [raw]
+    ledger = tm.load_ledger(files)
     rids = [r for r in _iter_race_ids() if r[4:6] != "65"]
     by_month: dict[tuple, list[str]] = defaultdict(list)
     for rid in rids:
@@ -155,11 +166,11 @@ def main() -> int:
                     seg = "jra" if r["rid"][4:6] in JRA_CODES else "nar"
                     out[("tune" if lo in TUNE else "test", seg)].append(r)
         print(f"month {lo}: {len(month_rids)} races (model runs={model.get('n_runs'):,})", flush=True)
-    print(f"\n{'win':<5}{'seg':<4}{'races':>6}{'AUCw':>7}{'AUC3':>7}{'ρtime':>7}{'MADdm':>7}{'top1':>7}{'ROI':>7}{'fav1':>7}{'favROI':>8}")
+    print(f"\n{'win':<5}{'seg':<4}{'races':>6}{'AUCw':>7}{'AUC3':>7}{'ρtime':>7}{'MADdm':>7}{'MAE':>7}{'top1':>7}{'ROI':>7}{'fav1':>7}{'favROI':>8}")
     for (win, seg), rows in sorted(out.items(), key=lambda kv: (kv[0][0] != "tune", kv[0][1])):
         m = _metrics(rows)
         print(f"{win:<5}{seg:<4}{m['races']:>6}{m['aucw']:>7.3f}{m['auc3']:>7.3f}{m['rho']:>7.3f}{m['mad']:>7.3f}"
-              f"{m['top1']:>7.3f}{m['roi']:>7.1f}{m['fav']:>7.3f}{m['favroi']:>8.1f}")
+              f"{m['mae']:>7.3f}{m['top1']:>7.3f}{m['roi']:>7.1f}{m['fav']:>7.3f}{m['favroi']:>8.1f}")
     unav = sum(1 for rows in out.values() for r in rows if not r.get("available"))
     print(f"(available=False races: {unav})")
     return 0
