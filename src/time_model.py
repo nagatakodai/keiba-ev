@@ -1,11 +1,14 @@
-"""走破時計の条件換算モデル (te1)。
+"""走破時計の条件換算モデル (te1〜te2)。
 
 「別の距離・馬場・競馬場で走った時計を、当レースの条件ならどれくらいの時計か」に換算するための
 条件効果を、**同じ馬が別条件を走った差** から推定する (固定効果モデル)。勝ち時計の中央値で基準
 タイムを作る方式と違い、条件ごとのクラス構成の偏り (例: 大井2000m は上級条件が多く勝ち時計が
 速い) が混入しない。
 
-    log(走破時計) = θ(芝ダ, 距離, 場) + γ(中央/地方, 芝ダ, 馬場状態) + δ(場, 開催日, 芝ダ) + a(馬) + ε
+    log(走破時計) = θ(芝ダ, 距離, 場) + γ_v(場, 芝ダ, 馬場状態) + δ(場, 開催日, 芝ダ) + a(馬) + ε
+
+  (te2, 2026-10-14〜: 馬場状態効果は場別 γ_v。中央/地方全体の γ へ K_GOING 走分で縮約し、δ から馬場状態ぶんを
+   γ_v へ移す再中心化を行う。te1 は γ(中央/地方, 芝ダ, 馬場状態) 1 本だった)
 
   θ: 条件 (コース) 効果。サンプルの少ないコースは場ごとの log 距離曲線 a(場,芝ダ)+b(中央地方,芝ダ)·log距離
      へ K 走分の重みで縮約 (未出走コースは曲線そのもの)。
@@ -49,7 +52,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER_DIR = ROOT / "data" / "cache" / "time_ledger"
 MODEL_PATH = ROOT / "data" / "cache" / "time_model.json"
-VERSION = "te1"
+VERSION = "te2"       # te1 = 2026-10-10 / te2 = 2026-10-14 (場別の馬場状態効果 γ_v + 新しい集約 src/time_eval.py)
 
 JRA_VENUES = {"札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"}
 # 地方の場名 (JRA accessU は 2 文字に切り詰める: 名古→名古屋)。海外・不明は換算対象外。
@@ -60,6 +63,10 @@ _VENUE_ALIAS = {"名古": "名古屋"}
 # 学習パラメータ (2026-10-10 walk-forward で確認。K/窓/大差除外は感度が小さく、δ の有無だけが効く)
 K = 8.0              # コース効果 θ の曲線への縮約 (走数換算)
 K_DAY = 3.0          # 開催日馬場差 δ の 0 への縮約
+VENUE_GOING = True   # False = 旧 te1 (馬場状態の効果は中央/地方 1 本・δ の再中心化なし)。検証スクリプトの比較用
+K_GOING = 30.0       # 場別の馬場状態効果 γ_v を、中央/地方全体の γ へ縮約する走数 (2026-10-14。場ごとに向きが違う:
+                     # 同じ馬・同じコース・60 日以内の 道悪−良 で 水沢 不良 −3.0% / 高知 −2.4% / 浦和 −1.8% だが
+                     # 大井 不良 +0.7% / 船橋・川崎・笠松・園田 重 +0.7〜0.8% と逆向き。地方 1 本 (不良 −0.56%) はどの場にも合わない)
 WINDOW_DAYS = 540    # 学習に使う走の期間 (最新日から遡る)
 MAX_BEHIND = 3.0     # 勝ち時計が分かる走で 3 秒超の大差負けは条件効果の推定から除外 (ノイズ)
 LOAD_SLACK_DAYS = 365  # 再学習時、今日から WINDOW_DAYS+これ より古い行は読み込まない (メモリ節約)
@@ -263,6 +270,13 @@ def _going_level(g: str) -> str:
     return g or "良"
 
 
+def going_group(g: str) -> str:
+    """集約 (time_eval) 用の馬場状態の括り: 良 / 稍 / 渋 (重・不良)。重と不良は効果が近く (中央ダ −1.1% / −1.35%)、
+    分けると「馬場込みの同条件」の走が足りなくなるので 1 つに。空 (不明) は良扱い (換算モデルと同じ)。"""
+    g = norm_going(g) if g not in ("", "良", "稍", "重", "不") else g
+    return "渋" if g in ("重", "不") else (g or "良")
+
+
 def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
     """固定効果モデルを当てはめて、換算に必要なパラメータ dict を返す (JSON 化可能)。"""
     if not rows:
@@ -323,6 +337,9 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
     cidx = {c: i for i, c in enumerate(cells)}
     glev = sorted({(circuit(r["v"]), r["s"], _going_level(r["g"])) for r in use})
     gidx = {g: i for i, g in enumerate(glev)}
+    # 場別の馬場状態セル (場, 芝ダ, 馬場)。実際に換算で使う γ はこちら (中央/地方全体の γ へ K_GOING で縮約)
+    vlev = sorted({(r["v"], r["s"], _going_level(r["g"])) for r in use})
+    vidx = {k: i for i, k in enumerate(vlev)}
     horses = sorted({r["h"] for r in use})
     hidx = {h: i for i, h in enumerate(horses)}
     days = sorted({(r["v"], r["d"], r["s"]) for r in use})
@@ -331,13 +348,18 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
     y = np.array([math.log(r["t"]) for r in use])
     ci = np.array([cidx[(r["s"], r["dist"], r["v"])] for r in use])
     gi = np.array([gidx[(circuit(r["v"]), r["s"], _going_level(r["g"]))] for r in use])
+    vi = np.array([vidx[(r["v"], r["s"], _going_level(r["g"]))] for r in use])
     hi = np.array([hidx[r["h"]] for r in use])
     di = np.array([didx[(r["v"], r["d"], r["s"])] for r in use])
-    nC, nG, nH, nD = len(cells), len(glev), len(horses), len(days)
+    nC, nG, nV, nH, nD = len(cells), len(glev), len(vlev), len(horses), len(days)
     nc = np.bincount(ci, minlength=nC).astype(float)
     nh = np.bincount(hi, minlength=nH).astype(float)
     ng = np.bincount(gi, minlength=nG).astype(float)
+    nv = np.bincount(vi, minlength=nV).astype(float)
     nd = np.bincount(di, minlength=nD).astype(float)
+    v_vs = [(k[0], k[1]) for k in vlev]                       # 場別セル → (場, 芝ダ) : 良 を基準にする単位
+    v_good = np.array([k[2] == "良" for k in vlev])
+    v_prior = np.array([gidx.get((circuit(k[0]), k[1], k[2]), -1) for k in vlev])   # 縮約先 = 全体の γ
 
     logd = np.array([math.log(c[1]) for c in cells])
     vs_keys = sorted({(c[2], c[0]) for c in cells})
@@ -351,18 +373,29 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
 
     theta = np.bincount(ci, weights=y, minlength=nC) / np.maximum(nc, 1)
     gam = np.zeros(nG)
+    gamv = np.zeros(nV)
     delta = np.zeros(nD)
     a = np.zeros(nH)
     b = np.full(len(cs_keys), 1.1)
     a_vs = np.zeros(len(vs_keys))
     n_iter = 0
     for n_iter in range(1, MAX_ITERS + 1):
-        prev_theta, prev_gam, prev_delta = theta.copy(), gam.copy(), delta.copy()
-        a = np.bincount(hi, weights=y - theta[ci] - gam[gi] - delta[di], minlength=nH) / np.maximum(nh, 1)
-        res_g = np.bincount(gi, weights=y - theta[ci] - a[hi] - delta[di], minlength=nG) / np.maximum(ng, 1)
+        prev_theta, prev_gam, prev_delta = theta.copy(), gamv.copy(), delta.copy()
+        a = np.bincount(hi, weights=y - theta[ci] - gamv[vi] - delta[di], minlength=nH) / np.maximum(nh, 1)
+        res = y - theta[ci] - a[hi] - delta[di]
+        # 全体 (中央/地方 × 芝ダ × 馬場) の γ: 場別 γ_v の縮約先 (良 = 0)
+        res_g = np.bincount(gi, weights=res, minlength=nG) / np.maximum(ng, 1)
         base = {g_cs[j]: res_g[j] for j in range(nG) if g_good[j]}
         gam = np.array([res_g[j] - base.get(g_cs[j], 0.0) for j in range(nG)])
-        raw = np.bincount(ci, weights=y - a[hi] - gam[gi] - delta[di], minlength=nC)
+        # 場別 γ_v: その場の良に対する差を、走数 n_v と K_GOING で全体の γ へ縮約 (良 = 0)
+        res_v = np.bincount(vi, weights=res, minlength=nV) / np.maximum(nv, 1)
+        base_v = {v_vs[j]: res_v[j] for j in range(nV) if v_good[j]}
+        raw_v = np.array([res_v[j] - base_v.get(v_vs[j], 0.0) for j in range(nV)])
+        prior_v = np.array([gam[v_prior[j]] if v_prior[j] >= 0 else 0.0 for j in range(nV)])
+        gamv = np.where(v_good, 0.0, (nv * raw_v + K_GOING * prior_v) / (nv + K_GOING))
+        if not VENUE_GOING:
+            gamv = prior_v                                               # 旧 te1: 全体の γ をそのまま使う
+        raw = np.bincount(ci, weights=y - a[hi] - gamv[vi] - delta[di], minlength=nC)
         mean_c = raw / np.maximum(nc, 1)
         for k in range(len(cs_keys)):
             m = csi == k
@@ -384,11 +417,29 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         curve = a_vs[vsi] + b[csi] * logd
         theta = (raw + K * curve) / (nc + K)
         if day_effects:
-            delta = np.bincount(di, weights=y - theta[ci] - gam[gi] - a[hi], minlength=nD) / (nd + K_DAY)
+            delta = np.bincount(di, weights=y - theta[ci] - gamv[vi] - a[hi], minlength=nD) / (nd + K_DAY)
+        if day_effects and VENUE_GOING:
+            # 再中心化: δ の「馬場状態セル (場, 芝ダ, 馬場) ごとの平均」を γ_v (良との差) と θ (良の水準) へ移す。
+            # 馬場状態は開催日ごとに決まるので δ と γ_v は見分けが付きにくく、放っておくと道悪の効果の一部が
+            # δ に残る (2026-10-14 実測: 水沢 重 の日の δ 平均 −0.83%・大井 不良 +0.47%)。今日 (δ 未知) や
+            # δ を推定していない日の換算には γ_v しか効かないので、馬場状態の効果は γ_v に集め、δ は
+            # 「その馬場状態の日として速かったか遅かったか」だけにする。学習データ上の当てはめは変わらない。
+            mv = np.bincount(vi, weights=delta[di], minlength=nV) / np.maximum(nv, 1)
+            base_mv = {v_vs[j]: mv[j] for j in range(nV) if v_good[j]}
+            level = np.array([base_mv.get(v_vs[j], 0.0) for j in range(nV)])
+            gamv = np.where(v_good, 0.0, gamv + (mv - level))
+            tr_run = mv[vi]                                                   # 各走から δ を引く量
+            delta = delta - np.bincount(di, weights=tr_run, minlength=nD) / np.maximum(nd, 1)
+            vs_of_cell = np.array([vs_index[(c[2], c[0])] for c in cells])
+            lev_vs = np.zeros(len(vs_keys))
+            for j in range(nV):
+                if v_good[j]:
+                    lev_vs[vs_index[v_vs[j]]] = mv[j]
+            theta = theta + lev_vs[vs_of_cell]
         # 収束: θ は全体の水準が a と入れ替われるので「平均を引いた変化」で見る
         dth = (theta - prev_theta) - float(np.mean(theta - prev_theta))
         step = max(float(np.max(np.abs(dth))) if nC else 0.0,
-                   float(np.max(np.abs(gam - prev_gam))) if nG else 0.0,
+                   float(np.max(np.abs(gamv - prev_gam))) if nV else 0.0,
                    float(np.max(np.abs(delta - prev_delta))) if nD else 0.0)
         if n_iter > 1 and step < TOL:
             break
@@ -425,11 +476,16 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         "data_until_by_circuit": {c: f"{v // 10000:04d}-{v // 100 % 100:02d}-{v % 100:02d}"
                                   for c, v in sorted(last_c.items())},
         "n_runs": len(use), "n_horses": nH, "n_cells": nC, "n_days": nD,
-        "params": {"K": K, "K_DAY": K_DAY, "WINDOW_DAYS": WINDOW_DAYS, "MAX_BEHIND": MAX_BEHIND,
-                   "day_effects": day_effects, "iterations": n_iter},
+        "params": {"K": K, "K_DAY": K_DAY, "K_GOING": K_GOING, "venue_going": VENUE_GOING,
+                   "WINDOW_DAYS": WINDOW_DAYS, "MAX_BEHIND": MAX_BEHIND, "day_effects": day_effects,
+                   "iterations": n_iter},
         "theta": {f"{s}|{d}|{v}": round(float(theta[i]), 6) for i, (s, d, v) in enumerate(cells)},
         "theta_n": {f"{s}|{d}|{v}": int(nc[i]) for i, (s, d, v) in enumerate(cells)},
         "gamma": {f"{c}|{s}|{g}": round(float(gam[i]), 6) for i, (c, s, g) in enumerate(glev)},
+        # 場別の馬場状態効果 (換算で実際に使う。無い場・馬場は gamma → もう一方の circuit の順で補う)
+        "gamma_venue": ({f"{v}|{s}|{g}": round(float(gamv[i]), 6) for i, (v, s, g) in enumerate(vlev)}
+                        if VENUE_GOING else {}),
+        "gamma_venue_n": {f"{v}|{s}|{g}": int(nv[i]) for i, (v, s, g) in enumerate(vlev)},
         "a_vs": {f"{v}|{s}": round(float(a_vs[i]), 6) for i, (v, s) in enumerate(vs_keys)},
         "b": {f"{c}|{s}": round(float(b[i]), 6) for i, (c, s) in enumerate(cs_keys)},
         "delta": ({f"{v}|{d}|{s}": round(float(delta[i]), 6) for i, (v, d, s) in enumerate(days)
@@ -515,16 +571,30 @@ def log_effect(model: dict, surface: str, distance: int, venue: str, going: str)
 
 
 def going_effect(model: dict, venue: str, surface: str, going: str) -> float:
-    """γ(馬場状態)。その circuit で未学習の馬場 (例: 地方の芝 不良) は中央/地方のもう一方の値で補い、
-    それも無ければ 0 (=良扱い)。"""
+    """γ(馬場状態)。場別の値 (gamma_venue, 2026-10-14〜) → その circuit の値 → もう一方の circuit の値 の順。
+    どれも無ければ 0 (=良扱い)。"""
+    return going_effect_detail(model, venue, surface, going)[0]
+
+
+def going_effect_detail(model: dict, venue: str, surface: str, going: str) -> tuple[float, str, int]:
+    """(γ, 出どころ "venue"|"circuit"|"other"|"none", 学習に使った走数)。表示用の内訳付き版。"""
     g = _going_level(going)
+    if g == "良":
+        return 0.0, "venue", int((model.get("gamma_venue_n") or {}).get(f"{venue}|{surface}|{g}", 0))
+    gv = model.get("gamma_venue") or {}
+    key = f"{venue}|{surface}|{g}"
+    if key in gv:
+        return float(gv[key]), "venue", int((model.get("gamma_venue_n") or {}).get(key, 0))
     gam = model.get("gamma", {})
     c = circuit(venue)
     other = "nar" if c == "jra" else "jra"
     v = gam.get(f"{c}|{surface}|{g}")
-    if v is None:
-        v = gam.get(f"{other}|{surface}|{g}", 0.0)
-    return float(v)
+    if v is not None:
+        return float(v), "circuit", 0
+    v = gam.get(f"{other}|{surface}|{g}")
+    if v is not None:
+        return float(v), "other", 0
+    return 0.0, "none", 0
 
 
 def day_effect(model: dict, venue: str, date: int, surface: str) -> float:

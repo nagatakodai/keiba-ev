@@ -113,9 +113,11 @@ def _horses():
 
 def test_evaluate_same_and_converted_runs():
     te = te_mod.evaluate(_race(horses=_horses()), _model())
-    assert te["available"] is True and te["version"] == "te1"
-    assert te["target"] == {"venue": "大井", "surface": "ダート", "distance": 1400, "going": "良",
-                            "going_source": "announced", "par_sec": 88.0, "par_n": 50}
+    assert te["available"] is True and te["version"] == tm.VERSION
+    assert {k: te["target"][k] for k in ("venue", "surface", "distance", "going", "going_source", "par_sec", "par_n")} == {
+        "venue": "大井", "surface": "ダート", "distance": 1400, "going": "良",
+        "going_source": "announced", "par_sec": 88.0, "par_n": 50}
+    assert te["target"]["going_effect"]["group"] == "良" and te["target"]["going_effect"]["pct"] == 0.0
     by = {h["number"]: h for h in te["horses"]}
     assert 4 not in by                                   # 取消馬は出さない
     a_runs = by[1]["runs"]
@@ -143,17 +145,23 @@ def test_evaluate_same_and_converted_runs():
 
 
 def test_evaluate_weighted_mean_matches_definition():
-    """推定タイム = 重み (新しさ×距離の近さ×芝ダ×同場) 付き平均 (検証で選んだ集約と同一定義)。"""
+    """推定タイム = 重み (新しさ × 種別 × 別距離なら距離の近さと同場) 付き平均。1 頭だけなら中央値寄せは
+    自分自身へ (= 重み付き平均のまま)。"""
     m = _model()
+    P = te_mod.params()
     te = te_mod.evaluate(_race(horses=_horses()[:1]), m)
-    runs = te["horses"][0]["runs"]
+    h = te["horses"][0]
     convs = [88.5, 75.0 * 89.0 / 75.0, 90.5 * 89.0 / 90.0]
-    ws = [0.85 ** 0 * 1.15,
-          0.85 ** 1 * math.exp(-abs(math.log(1400 / 1200)) / 0.2) * 1.15,
-          0.85 ** 2 * 1.0]
+    ws = [P["RECENCY_DECAY"] ** 0 * P["KIND_W"]["same"],
+          P["RECENCY_DECAY"] ** 1 * P["KIND_W"]["distance"]
+          * math.exp(-abs(math.log(1400 / 1200)) / P["DIST_SCALE"]) * P["SAME_VENUE_W"],
+          P["RECENCY_DECAY"] ** 2 * P["KIND_W"]["same_dist"]]
     want = sum(w * c for w, c in zip(ws, convs)) / sum(ws)
-    assert te["horses"][0]["est_sec"] == pytest.approx(round(want, 1))
-    assert [r["weight"] for r in runs] == [pytest.approx(round(w, 3)) for w in ws]
+    assert h["est_raw_sec"] == pytest.approx(round(want, 1))
+    assert h["est_sec"] == pytest.approx(round(want, 1)) and h["shrink"] == pytest.approx(
+        round(P["SHRINK_W0"] / (sum(ws) + P["SHRINK_W0"]), 2))
+    assert [r["weight"] for r in h["runs"]] == [pytest.approx(round(w, 3)) for w in ws]
+    assert h["evidence"] == pytest.approx(round(sum(ws), 2))
 
 
 def test_going_assumed_when_not_announced():
@@ -382,3 +390,173 @@ def test_model_meta_reports_target_circuit_data_until():
     assert te._model_meta(m, "大井")["data_until"] == "2026-10-12"
     assert te._model_meta({"data_until": "2026-05-28"}, "大井")["data_until"] == "2026-05-28"   # 旧モデル
     assert te._model_meta(None, "大井") is None
+
+
+# ------------------------------------------------------------ te2 (2026-10-14): 馬場込み同条件・弱い換算・適性 ----
+
+def _model2():
+    """場別の馬場差 γ_v 付きモデル: 大井 ダ 渋 (重/不) は良より 1.5% 速い、川崎は +0.5% 遅い。"""
+    m = _model()
+    m["gamma"] = {"nar|ダート|良": 0.0, "nar|ダート|稍": -0.002, "nar|ダート|重": -0.005, "nar|ダート|不": -0.008}
+    m["gamma_venue"] = {"大井|ダート|重": -0.015, "大井|ダート|不": -0.015, "川崎|ダート|重": 0.005}
+    m["gamma_venue_n"] = {"大井|ダート|重": 300, "大井|ダート|不": 120, "川崎|ダート|重": 90}
+    m["par_win"] = {"ダート|1400|大井|": [88.0, 50], "ダート|1400|大井|重": [87.0, 12]}
+    return m
+
+
+def test_going_group_and_same_condition_includes_going():
+    """同条件 (same) は馬場状態 (良/稍/渋) まで同じ走だけ。同コースで馬場が違う走は same_course。"""
+    assert tm.going_group("重") == "渋" and tm.going_group("不良") == "渋" and tm.going_group("") == "良"
+    h = Horse(number=1, name="A", past_runs=[
+        _pr("2026.09.20", "大井", "ダート", 1400, "重", 87.0),     # 当レース 重 → same
+        _pr("2026.09.10", "大井", "ダート", 1400, "不良", 87.2),   # 不良も渋 → same
+        _pr("2026.08.30", "大井", "ダート", 1400, "良", 88.6),     # 馬場だけ違う → same_course
+    ])
+    te = te_mod.evaluate(_race(weather_text="雨 / 重", horses=[h]), _model2())
+    row = te["horses"][0]
+    assert [r["kind"] for r in row["runs"]] == ["same", "same", "same_course"]
+    assert row["same_n"] == 2 and row["same_best_sec"] == 87.0 and row["same_best_going"] == "重"
+    assert row["course_n"] == 3 and row["course_best_sec"] == 87.0
+    # 良の走は 大井 の重 (−1.5%) に換算されて速くなる
+    assert row["runs"][2]["conv_sec"] < 88.6
+    ge = te["target"]["going_effect"]
+    assert ge["going"] == "重" and ge["group"] == "渋" and ge["source"] == "venue" and ge["n"] == 300
+    assert ge["pct"] == -1.5 and ge["sec"] == pytest.approx(round(87.0 * (math.exp(-0.015) - 1), 1))
+
+
+def test_conversion_runs_get_weaker_weights_than_same_condition():
+    P = te_mod.params()
+    h = Horse(number=1, name="A", past_runs=[
+        _pr("2026.09.20", "東京", "芝", 1400, "良", 82.0),        # 芝ダ換算
+        _pr("2026.09.10", "大井", "ダート", 1200, "良", 75.0),     # 距離換算
+        _pr("2026.08.30", "川崎", "ダート", 1400, "良", 90.0),     # 他場同距離
+        _pr("2026.08.20", "大井", "ダート", 1400, "良", 88.5),     # 同条件 (4 走前でも)
+    ])
+    te = te_mod.evaluate(_race(horses=[h]), _model())
+    w = {r["kind"]: r["weight"] for r in te["horses"][0]["runs"]}
+    assert w["same"] > w["same_dist"] > w["distance"] > w["surface"]
+    assert w["surface"] == pytest.approx(round(P["RECENCY_DECAY"] ** 0 * P["KIND_W"]["surface"], 3))
+    assert w["same"] == pytest.approx(round(P["RECENCY_DECAY"] ** 3 * P["KIND_W"]["same"], 3))
+
+
+def test_weak_evidence_is_shrunk_toward_field_median():
+    """同条件の無い (芝ダ換算 1 走だけの) 馬は、証拠が十分な馬の中央値へ寄る = 換算の運だけで 1 位にならない。"""
+    strong = []
+    for i in range(3):
+        strong.append(Horse(number=i + 1, name=f"S{i}", past_runs=[
+            _pr("2026.09.20", "大井", "ダート", 1400, "良", 88.0 + 0.3 * i),
+            _pr("2026.09.01", "大井", "ダート", 1400, "良", 88.2 + 0.3 * i),
+            _pr("2026.08.10", "大井", "ダート", 1400, "良", 88.1 + 0.3 * i)]))
+    weak = Horse(number=9, name="W", past_runs=[_pr("2026.09.20", "東京", "芝", 1400, "良", 78.0)])  # 換算 84.6 = 飛び抜けて速い
+    te = te_mod.evaluate(_race(horses=strong + [weak]), _model())
+    by = {h["number"]: h for h in te["horses"]}
+    assert by[9]["est_raw_sec"] < 86.0 and by[9]["confidence"] == "low"
+    assert by[9]["shrink"] > 0.5 and by[9]["est_sec"] > by[9]["est_raw_sec"]      # 中央値へ寄った
+    assert by[1]["shrink"] < 0.15                                                   # 証拠が十分な馬はほぼ据え置き
+    assert te["target"]["prior_sec"] == pytest.approx(by[2]["est_raw_sec"], abs=0.11)  # 寄せ先 = 強い馬の中央値
+    # 寄せ無し (W0=0) なら生の重み付き平均そのまま
+    saved = te_mod.params()["SHRINK_W0"]
+    te_mod.set_params(SHRINK_W0=0.0)
+    try:
+        te0 = te_mod.evaluate(_race(horses=strong + [weak]), _model())
+        assert next(h for h in te0["horses"] if h["number"] == 9)["est_sec"] == by[9]["est_raw_sec"]
+    finally:
+        te_mod.set_params(SHRINK_W0=saved)
+    json.dumps(te, allow_nan=False)
+
+
+def test_confidence_levels_by_core_evidence():
+    same = lambda d, t: _pr(d, "大井", "ダート", 1400, "良", t)  # noqa: E731
+    hs = [
+        Horse(number=1, name="high", past_runs=[same("2026.09.20", 88.0), same("2026.09.01", 88.2), same("2026.08.10", 88.1)]),
+        Horse(number=2, name="mid", past_runs=[same("2026.09.20", 88.0), _pr("2026.09.01", "大井", "ダート", 1200, "良", 75.0)]),
+        Horse(number=3, name="low", past_runs=[_pr("2026.09.20", "東京", "芝", 1400, "良", 82.0),
+                                             _pr("2026.09.01", "大井", "ダート", 1200, "良", 75.0)]),
+        Horse(number=4, name="none", past_runs=[]),
+    ]
+    te = te_mod.evaluate(_race(horses=hs), _model())
+    assert {h["number"]: h["confidence"] for h in te["horses"]} == {1: "high", 2: "mid", 3: "low", 4: "none"}
+
+
+def test_fit_labels_distance_surface_going():
+    """距離 / 芝ダ / 馬場 の適性 = 近い条件の走と それ以外の走の換算時計の差 (負 = 得意)。"""
+    h = Horse(number=1, name="A", past_runs=[
+        _pr("2026.09.20", "大井", "ダート", 1400, "重", 86.0, finish=1),    # 当条件 (重) で速い
+        _pr("2026.09.01", "大井", "ダート", 1400, "良", 89.5),             # 良では遅い
+        _pr("2026.08.20", "大井", "ダート", 1600, "良", 104.0),            # 別距離
+        _pr("2026.08.01", "東京", "芝", 1400, "良", 82.0),                 # 芝
+    ])
+    te = te_mod.evaluate(_race(weather_text="雨 / 重", horses=[h]), _model2())
+    f = te["horses"][0]["fit"]
+    assert f["going"]["n_like"] == 1 and f["going"]["n_other"] == 2          # 馬場は同じ芝ダ (ダート) の走だけで比べる
+    assert f["going"]["delta_sec"] < -0.3 and f["going"]["label"] == "得意" and f["going"]["top3_like"] == 1
+    assert f["distance"]["n_like"] == 3 and f["distance"]["n_other"] == 1    # ±10% = 1400 のみ (1600 は外)
+    assert f["surface"]["n_like"] == 3 and f["surface"]["n_other"] == 1
+    assert f["surface"]["label"] in ("得意", "普通", "不安")
+    # 未経験 / 実績のみ
+    h2 = Horse(number=2, name="B", past_runs=[_pr("2026.09.20", "東京", "芝", 1400, "良", 82.0)])
+    f2 = te_mod.evaluate(_race(horses=[h2]), _model2())["horses"][0]["fit"]
+    assert f2["surface"]["label"] == "未経験" and f2["going"]["label"] == "—"     # 同じ芝ダの走が無い
+    h3 = Horse(number=3, name="C", past_runs=[_pr("2026.09.20", "大井", "ダート", 1400, "良", 88.0)])
+    f3 = te_mod.evaluate(_race(horses=[h3]), _model2())["horses"][0]["fit"]
+    assert f3["distance"]["label"] == f3["surface"]["label"] == f3["going"]["label"] == "実績のみ"
+
+
+def test_merge_ignores_display_only_target_fields():
+    """par (標準勝ち時計) が再学習で変わっても、条件が同じなら前回の評価を引き継ぐ。"""
+    full = _te(_horses())
+    hs = _horses()
+    hs[0].past_runs = []
+    partial = _te(hs)
+    partial["target"]["par_sec"] = 87.5
+    partial["target"]["going_effect"] = {"going": "良", "group": "良", "pct": 0.0, "sec": 0.0, "source": "venue", "n": 999}
+    out = te_mod.merge_previous(partial, full, {1, 2, 3})
+    assert next(h for h in out["horses"] if h["number"] == 1)["rank"] is not None
+
+
+def test_fit_learns_venue_level_going_effects():
+    """同じ馬が同じ場で 良 と 重 を走った差から、場ごとに向きの違う馬場差を復元する (大井 速い / 船橋 遅い)。"""
+    rnd = random.Random(7)
+    truth = {"大井": -0.02, "船橋": +0.01}
+    rows = []
+    for v, eff in truth.items():
+        for h in range(150):
+            ab = rnd.gauss(0.0, 0.01)
+            for k in range(6):
+                g = "重" if k % 2 else "良"
+                t = 89.0 * math.exp(ab + (eff if g == "重" else 0.0) + rnd.gauss(0.0, 0.002))
+                rows.append({"h": f"{v}{h}", "d": 20260101 + k * 3, "v": v, "s": "ダート", "dist": 1400,
+                             "g": g, "t": round(t, 2), "wt": 0.0})
+    m = tm.fit(rows)
+    assert m["gamma_venue"]["大井|ダート|重"] == pytest.approx(-0.02, abs=0.002)
+    assert m["gamma_venue"]["船橋|ダート|重"] == pytest.approx(+0.01, abs=0.002)
+    assert m["gamma_venue"]["大井|ダート|良"] == 0.0
+    # δ (開催日差) に馬場状態の効果が残らない (再中心化)
+    import statistics as st
+    d_heavy = [m["delta"].get(f"大井|{20260101 + k * 3}|ダート", 0.0) for k in range(6) if k % 2]
+    assert abs(st.mean(d_heavy)) < 0.002
+    # 旧モデル (場別なし) は 2 場の平均に潰れる
+    tm.VENUE_GOING = False
+    try:
+        m_old = tm.fit(rows)
+    finally:
+        tm.VENUE_GOING = True
+    assert m_old["gamma_venue"] == {} and -0.012 < m_old["gamma"]["nar|ダート|重"] < 0.0
+    assert tm.going_effect(m, "大井", "ダート", "重") == pytest.approx(-0.02, abs=0.002)
+    assert tm.going_effect(m_old, "大井", "ダート", "重") == m_old["gamma"]["nar|ダート|重"]
+
+
+def test_going_effect_detail_fallback_order():
+    m = _model2()
+    assert tm.going_effect_detail(m, "大井", "ダート", "重") == (-0.015, "venue", 300)
+    assert tm.going_effect_detail(m, "船橋", "ダート", "重") == (-0.005, "circuit", 0)      # 場別が無ければ全体
+    m["gamma"]["jra|ダート|不"] = -0.02
+    del m["gamma"]["nar|ダート|不"]
+    assert tm.going_effect_detail(m, "船橋", "ダート", "不") == (-0.02, "other", 0)
+    assert tm.going_effect_detail(m, "大井", "芝", "重")[1] == "none"
+    assert tm.going_effect_detail(m, "大井", "ダート", "良")[0] == 0.0
+
+
+def test_set_params_rejects_unknown():
+    with pytest.raises(KeyError):
+        te_mod.set_params(NOPE=1)

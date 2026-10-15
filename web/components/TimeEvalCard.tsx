@@ -1,13 +1,14 @@
 // タイム換算比較カード (予測詳細ページの主役カード, 換算モデル te1〜)。
 //
-// snapshot の `time_eval` を表示する: 各馬の過去走の走破時計を当レース条件 (同場・同馬場・
+// snapshot の `time_eval` を表示する: 各馬の過去走の走破時計を当レース条件 (同場・同芝ダ・
 // 同距離・同馬場状態) に換算し、集約した「推定タイム」の速い順に並べる決定論評価。
-// 同条件の走は生時計のまま、それ以外は換算モデルで当条件へ寄せる。横に Claude 指数の順位と
-// 市場指数の順位 (= 人気順) を並べ、3 つの見立てを一目で比較できるようにする。
+// 馬場状態まで同じ「同条件」の走を最重視し、距離・芝ダの換算は弱く、同条件の無い馬はレース中央値へ
+// 寄せる (te2, 2026-10-14)。各馬の 距離 / 芝ダ / 馬場 の適性 (近い条件の走と それ以外の走の換算差) も出す。
+// 横に Claude 指数の順位と市場指数の順位 (= 人気順) を並べ、3 つの見立てを一目で比較できるようにする。
 // server component (client JS なし)。各馬の換算内訳はネイティブ <details> で展開する。
 import { CircleCheck, Timer, TriangleAlert } from "lucide-react";
 import { Badge, type BadgeTone, Card } from "@/components/ui";
-import type { PredictionDetail, TimeEval, TimeEvalHorse, TimeEvalRun } from "@/lib/api";
+import type { PredictionDetail, TimeEval, TimeEvalFit, TimeEvalHorse, TimeEvalRun } from "@/lib/api";
 import { fmtRaceTime, fmtSignedSec } from "@/lib/raceTime";
 
 type IndexCompareRow = NonNullable<PredictionDetail["index_compare"]>[number];
@@ -19,7 +20,7 @@ const HIT_ROW_BG = "bg-emerald-500/10";
 const ZEBRA_BG = "bg-[rgba(148,163,184,0.045)]";
 const HOVER_BG = "group-hover:bg-[rgba(52,211,153,0.07)]";
 // 本表の列数 (内訳行の colSpan 計算用)。
-const N_COLS = 12;
+const N_COLS = 15;
 // Claude / 市場の順位がタイム順位とこれ以上ずれたら色で示す。
 const RANK_GAP_MARK = 3;
 
@@ -35,10 +36,19 @@ function HitMark({ place }: { place: number }) {
 type KindMeta = { label: string; tone: BadgeTone; title: string };
 
 const KIND_META = {
-  same: { label: "同条件", tone: "good", title: "同じ競馬場・馬場・距離 — 走破時計をそのまま比較" },
-  same_dist: { label: "同距離", tone: "info", title: "他場の同じ馬場・距離 — 場の差を換算" },
-  distance: { label: "距離換算", tone: "default", title: "同じ馬場の別距離 — 距離差を換算" },
-  surface: { label: "芝ダ換算", tone: "warn", title: "芝↔ダートの換算 (信頼度低)" },
+  same: {
+    label: "同条件",
+    tone: "good",
+    title: "同じ競馬場・芝ダ・距離・馬場状態 (良/稍/渋=重・不良) — 走破時計をそのまま比較 (最重視)",
+  },
+  same_course: {
+    label: "同コース",
+    tone: "info",
+    title: "同じ競馬場・芝ダ・距離で馬場状態だけ違う — この場の馬場差で換算",
+  },
+  same_dist: { label: "同距離", tone: "default", title: "他場の同じ芝ダ・距離 — 場の差を換算" },
+  distance: { label: "距離換算", tone: "muted", title: "同じ芝ダの別距離 — 距離差を換算 (弱め)" },
+  surface: { label: "芝ダ換算", tone: "warn", title: "芝↔ダートの換算 (最も弱い)" },
   excluded: {
     label: "対象外",
     tone: "muted",
@@ -46,7 +56,51 @@ const KIND_META = {
   },
 } satisfies Record<TimeEvalRun["kind"], KindMeta>;
 
-const KIND_ORDER: readonly string[] = ["same", "same_dist", "distance", "surface", "excluded"];
+const KIND_ORDER: readonly string[] = ["same", "same_course", "same_dist", "distance", "surface", "excluded"];
+
+// 適性ラベル (backend の time_eval._fit_block が決める) → バッジの色。
+const FIT_TONE: Record<string, BadgeTone> = {
+  得意: "good",
+  普通: "default",
+  不安: "warn",
+  未経験: "muted",
+  実績のみ: "info",
+};
+
+// 距離 / 芝ダ / 馬場 の適性セル: ラベル + 換算差 (秒) + 近い条件の走数。
+function FitCell({ fit, axis }: { fit: TimeEvalFit | null | undefined; axis: string }) {
+  if (!fit || fit.label === "—") {
+    return (
+      <td className="py-1.5 pr-3 text-(--color-muted)" title={`${axis}適性: 比べられる走がありません`}>
+        —
+      </td>
+    );
+  }
+  const tone = FIT_TONE[fit.label] ?? "muted";
+  const delta = fit.delta_sec;
+  const detail = [
+    `${axis}適性: ${fit.label}`,
+    `当レースに近い条件 ${fit.n_like}走 / それ以外 ${fit.n_other}走`,
+    delta != null ? `換算タイムの差 ${fmtSignedSec(delta)} 秒 (近い条件 − それ以外。負 = 当条件の方が走れている)` : "",
+    fit.best_sec != null ? `近い条件のベスト換算 ${fmtRaceTime(fit.best_sec)}` : "",
+    fit.n_like > 0 ? `近い条件で 3着内 ${fit.top3_like} 回 (着順が分かる走のみ)` : "",
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  return (
+    <td className="py-1.5 pr-3 whitespace-nowrap" title={detail}>
+      <span className="inline-flex items-center gap-1">
+        <Badge tone={tone}>{fit.label}</Badge>
+        {delta != null && (
+          <span className={`text-[11px] tnum ${delta <= -0.3 ? "text-emerald-300" : delta >= 0.3 ? "text-amber-300" : "text-(--color-muted)"}`}>
+            {fmtSignedSec(delta)}
+          </span>
+        )}
+        {fit.n_like > 0 && <span className="text-[10px] text-(--color-muted) tnum">{fit.n_like}走</span>}
+      </span>
+    </td>
+  );
+}
 
 // 未知の kind (backend 側の将来拡張) でも落ちないよう muted で素通しする。
 function kindMeta(kind: string): KindMeta {
@@ -384,11 +438,17 @@ export function TimeEvalCard({
   const assumed = target?.going_source === "assumed";
   const par = target?.par_sec ?? null;
   const parN = target?.par_n ?? null;
+  // 当レースの馬場状態が 良 に対して時計をどれだけ動かすか (この場で学習した値)。良のときは出さない。
+  const ge = target?.going_effect ?? null;
+  const geShow = !!ge && ge.group !== "良" && ge.source !== "none";
+  const geSource =
+    ge?.source === "venue" ? "この場の学習値" : ge?.source === "circuit" ? "中央/地方全体の学習値 (この場の例が無い)" : "もう一方 (中央/地方) の学習値";
 
   const model = te.model ?? null;
   const dayEffects = !!model?.day_effects;
+  const venueGoing = !!model?.venue_going;
   const modelNote = model?.data_until
-    ? `（${model.data_until} までの走破時計で学習${dayEffects ? "・開催日の馬場差補正あり" : ""}）`
+    ? `（${model.data_until} までの走破時計で学習${dayEffects ? "・開催日の馬場差補正あり" : ""}${venueGoing ? "・場別の馬場状態差" : ""}）`
     : dayEffects
       ? "（開催日の馬場差補正あり）"
       : "";
@@ -430,7 +490,7 @@ export function TimeEvalCard({
         </span>
       }
     >
-      {(timeTop.length > 0 || par != null) && (
+      {(timeTop.length > 0 || par != null || geShow) && (
         <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
           {timeTop.length > 0 && (
             <TopChip
@@ -469,10 +529,27 @@ export function TimeEvalCard({
             ) : (
               <Badge tone="warn">タイム1位 ≠ 市場1位</Badge>
             ))}
+          {geShow && ge && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 tnum ${
+                (ge.sec ?? ge.pct) < 0
+                  ? "border-sky-500/40 bg-sky-500/10 text-sky-200"
+                  : "border-amber-500/40 bg-amber-500/10 text-amber-200"
+              }`}
+              title={`${target.surface}の${ge.going}: 良に対して ${fmtSignedSec(ge.pct, 2)}% (${geSource}${ge.n ? `・${ge.n} 走` : ""})。換算と推定タイムに織り込み済み`}
+            >
+              <span className="font-bold">馬場 {ge.going}</span>
+              <span>
+                {ge.sec != null ? `良より ${fmtSignedSec(ge.sec)} 秒` : `良より ${fmtSignedSec(ge.pct, 2)}%`}
+                {(ge.sec ?? ge.pct) < 0 ? "速い" : "遅い"}
+              </span>
+              {ge.source !== "venue" && <span className="text-[10px] opacity-80">(全体値)</span>}
+            </span>
+          )}
           {par != null && (
             <span
               className="sm:ml-auto text-(--color-muted)"
-              title="当条件 (同場・同馬場・同距離・同馬場状態) の標準的な勝ちタイム (参考)"
+              title="当条件 (同場・同芝ダ・同距離・同馬場状態) の標準的な勝ちタイム (参考)"
             >
               当条件の標準勝ちタイム{" "}
               <span className="font-bold text-(--color-foreground) tnum">{fmtRaceTime(par)}</span>
@@ -503,8 +580,26 @@ export function TimeEvalCard({
                 <th className="py-2 pr-3 text-right" title="タイム換算指数 0-100 (50 = レース中央値、1 秒速いごとに +10)">
                   指数
                 </th>
-                <th className="py-2 pr-3" title="同じ競馬場・馬場・距離での走数とベスト走破時計 (換算なしの生時計・括弧は馬場状態)">
+                <th
+                  className="py-2 pr-3"
+                  title="同じ競馬場・芝ダ・距離・馬場状態 (良/稍/渋) での走数とベスト走破時計 (換算なしの生時計)。無ければ同コース (馬場状態違い) の走数"
+                >
                   同条件
+                </th>
+                <th
+                  className="py-2 pr-3"
+                  title="距離適性: 当レース距離 ±10% の走と それ以外の走の換算タイム差 (負 = この距離の方が走れている)"
+                >
+                  距離
+                </th>
+                <th className="py-2 pr-3" title="芝ダ適性: 当レースと同じ芝ダの走と 違う芝ダの走の換算タイム差">
+                  芝ダ
+                </th>
+                <th
+                  className="py-2 pr-3"
+                  title="馬場適性: 同じ芝ダのうち、当レースと同じ馬場状態 (良/稍/渋=重・不良) の走と それ以外の走の換算タイム差"
+                >
+                  馬場
                 </th>
                 <th className="py-2 pr-3 text-right" title="換算タイムのベスト">
                   換算ベスト
@@ -512,7 +607,10 @@ export function TimeEvalCard({
                 <th className="py-2 pr-3 text-right" title="推定タイムに使った走 / 対象とした過去走">
                   使用走
                 </th>
-                <th className="py-2 pr-3" title="推定タイムの信頼度 (使った走の数・換算の近さから)">
+                <th
+                  className="py-2 pr-3"
+                  title="推定タイムの信頼度 (同じ芝ダ・距離の証拠の重み: 高 = 1.5 以上かつ 3 走以上 / 中 = 0.5 以上かつ 2 走以上 / 低 = 別距離・芝ダの換算だけ)。括弧内は証拠の重み W と中央値寄せの割合"
+                >
                   信頼度
                 </th>
                 <th
@@ -591,16 +689,41 @@ export function TimeEvalCard({
                             </>
                           )}
                         </>
+                      ) : (h.course_n ?? 0) > 0 ? (
+                        <span
+                          className="text-(--color-muted)"
+                          title={`馬場状態まで同じ走は無し。同コース (馬場違い) ${h.course_n}走・ベスト ${fmtRaceTime(h.course_best_sec)}${h.course_best_going ? ` (${h.course_best_going})` : ""}`}
+                        >
+                          同コース{h.course_n}走
+                        </span>
                       ) : (
                         <span className="text-(--color-muted)">—</span>
                       )}
                     </td>
+                    <FitCell fit={h.fit?.distance} axis="距離" />
+                    <FitCell fit={h.fit?.surface} axis="芝ダ" />
+                    <FitCell fit={h.fit?.going} axis="馬場" />
                     <td className="py-1.5 pr-3 text-right">{fmtRaceTime(h.conv_best_sec)}</td>
                     <td className="py-1.5 pr-3 text-right text-(--color-muted)">
                       {h.n_used}/{h.n_runs}
                     </td>
-                    <td className="py-1.5 pr-3">
-                      <Badge tone={conf.tone}>{conf.label}</Badge>
+                    <td className="py-1.5 pr-3 whitespace-nowrap">
+                      <span
+                        title={
+                          h.evidence != null
+                            ? `証拠の重み W=${h.evidence.toFixed(2)} (同条件 1 走 = 1.0 相当)${
+                                h.shrink != null && h.shrink > 0
+                                  ? ` / レース中央値へ ${Math.round(h.shrink * 100)}% 寄せ (重み付き平均 ${fmtRaceTime(h.est_raw_sec)} → ${fmtRaceTime(h.est_sec)})`
+                                  : ""
+                              }`
+                            : undefined
+                        }
+                      >
+                        <Badge tone={conf.tone}>{conf.label}</Badge>
+                        {h.shrink != null && h.shrink >= 0.3 && (
+                          <span className="ml-1 text-[10px] text-(--color-muted) tnum">寄せ{Math.round(h.shrink * 100)}%</span>
+                        )}
+                      </span>
                     </td>
                     <CompareRankCell
                       first
@@ -646,7 +769,10 @@ export function TimeEvalCard({
       )}
 
       <p className="mt-3 text-xs text-(--color-muted)">
-        推定タイム = 各走の走破時計を当レース条件に換算し、近走ほど・距離が近いほど重く平均した値。換算モデル{" "}
+        推定タイム = 各走の走破時計を当レース条件に換算し、近走ほど重く平均した値。馬場状態まで同じ「同条件」の走を
+        最重視し (同コース → 他場同距離 → 別距離 → 芝ダ換算 の順に軽く)、同条件の無い馬 (換算だけの馬) は
+        レース中央値へ寄せる (「寄せ%」)。距離 / 芝ダ / 馬場 の適性は、当レースに近い条件の走と それ以外の走の
+        換算差 (負 = 得意)。馬場差 (例: ダートの道悪が速い/遅い) は場ごとに学習した値で換算。換算モデル{" "}
         {te.version}
         {modelNote}。市場・Claude の順位と並べて比較してください。
       </p>

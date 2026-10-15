@@ -118,14 +118,28 @@ export type TimeEvalRun = {
   conv_sec: number | null;      // 当レース条件への換算タイム (対象外は null)
   // 開催日の馬場差補正 (秒)。+ = その日は時計の掛かる馬場だった → 換算タイムは速くなる。
   day_adj_sec?: number | null;
-  //   same      = 同場・同馬場・同距離 (生時計をそのまま比較できる)
-  //   same_dist = 他場の同馬場・同距離
-  //   distance  = 同馬場の別距離 (換算)
-  //   surface   = 芝↔ダの別馬場 (換算・信頼度低)
-  //   excluded  = 換算対象外 (障害 / ばんえい / 海外 / 時計欠落 / コース不明)
-  kind: "same" | "same_dist" | "distance" | "surface" | "excluded";
+  //   same        = 同場・同芝ダ・同距離・同馬場状態 (良/稍/渋=重・不良) — 生時計をそのまま比較できる (最重視)
+  //   same_course = 同場・同芝ダ・同距離で馬場状態だけ違う (その場の馬場差で換算, te2〜)
+  //   same_dist   = 他場の同芝ダ・同距離
+  //   distance    = 同芝ダの別距離 (換算・弱め)
+  //   surface     = 芝↔ダの別馬場 (換算・最も弱い)
+  //   excluded    = 換算対象外 (障害 / ばんえい / 海外 / 時計欠落 / コース不明)
+  kind: "same" | "same_course" | "same_dist" | "distance" | "surface" | "excluded";
   weight?: number | null;       // 推定タイム集約時の重み
   note?: string | null;         // 対象外の理由など
+};
+
+// 適性 1 軸 (距離 / 芝ダ / 馬場, te2〜): 当レースに近い条件の走 (like) と それ以外の走の換算タイムの差。
+// delta_sec < 0 = 平均的な換算が言うより当条件で走れている (得意)。label は backend が決める
+// (得意 / 普通 / 不安 / 未経験 = 近い条件の走が無い / 実績のみ = 比べる他条件の走が無い / —)。
+export type TimeEvalFit = {
+  n_like: number;
+  n_other: number;
+  delta_sec: number | null;
+  best_sec: number | null;      // 近い条件の走の換算ベスト
+  mean_sec: number | null;
+  top3_like: number;            // 近い条件の走での 3 着内回数 (着順が分かる走のみ)
+  label: string;
 };
 
 // 1 頭分の換算結果。horses は rank 順 (順位なしは末尾)。
@@ -133,21 +147,28 @@ export type TimeEvalHorse = {
   number: number;
   name: string;
   rank: number | null;          // 1 = 推定タイム最速。null = 使える走が無い
-  est_sec: number | null;       // 当レース条件での推定タイム
+  est_sec: number | null;       // 当レース条件での推定タイム (証拠の弱い馬はレース中央値へ寄せた後)
+  est_raw_sec?: number | null;  // 寄せる前の重み付き平均 (te2〜)
   gap_sec: number | null;       // est_sec − レース内最速 est_sec (1 位は 0.0)
   index: number | null;         // 0-100: 50 = レース中央値、1 秒速いごとに +10
-  same_n: number;               // 同条件の走数
+  evidence?: number | null;     // 証拠の重みの合計 W (同条件 1 走 = 1.0 相当, te2〜)
+  shrink?: number | null;       // レース中央値へ寄せた割合 0-1 (te2〜)
+  same_n: number;               // 同条件 (馬場状態込み) の走数
   same_best_sec: number | null; // 同条件のベスト生時計
   same_best_going?: string | null;
+  course_n?: number;            // 同コース (馬場状態を問わない) の走数 (te2〜)
+  course_best_sec?: number | null;
+  course_best_going?: string | null;
   conv_best_sec: number | null; // 換算タイムのベスト
   n_runs: number;               // 対象とした過去走数
   n_used: number;               // est_sec に使った走数
   confidence: "high" | "mid" | "low" | "none";
+  fit?: { distance: TimeEvalFit; surface: TimeEvalFit; going: TimeEvalFit } | null;  // te2〜
   runs: TimeEvalRun[];          // 新しい順
 };
 
 export type TimeEval = {
-  version: string;              // "te1"
+  version: string;              // "te1" | "te2" (換算モデル・集約の版)
   available: boolean;
   // available=false の理由 (例 "ばんえいは換算対象外" / "当レースの距離・馬場が不明")。
   reason?: string | null;
@@ -160,12 +181,24 @@ export type TimeEval = {
     going_source: "announced" | "assumed" | "";
     par_sec?: number | null;    // 当条件の標準的な勝ちタイム (参考)
     par_n?: number | null;
+    // 当レースの馬場状態が 良 に対して時計をどれだけ動かすか (この場で学習した値, te2〜)。
+    // sec < 0 = 良より速い馬場。source: venue = この場の値 / circuit = 中央 or 地方全体 / other / none。
+    going_effect?: {
+      going: string;
+      group: string;            // 良 / 稍 / 渋
+      pct: number;
+      sec: number | null;
+      source: "venue" | "circuit" | "other" | "none";
+      n: number;
+    } | null;
+    prior_sec?: number | null;  // 証拠の弱い馬の寄せ先 (証拠が十分な馬の推定の中央値)
   };
   model?: {
     fitted_at?: string | null;
     data_until?: string | null;
     n_runs?: number | null;
     day_effects?: boolean | null;
+    venue_going?: boolean | null;  // 場別の馬場差 γ_v を持つモデルか (te2〜)
   } | null;
   horses: TimeEvalHorse[];
 };

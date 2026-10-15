@@ -1,13 +1,25 @@
-"""タイム換算比較 (te1): 各馬の過去走の走破時計を当レースの条件 (場・芝ダ・距離・馬場状態) に換算して比べる。
+"""タイム換算比較 (te2): 各馬の過去走の走破時計を当レースの条件 (場・芝ダ・距離・馬場状態) に換算して比べる。
 
 ユーザ指示 (2026-10-10):「予測分析の仕方をガラっとかえる。馬の過去の走りから、当レース・馬場の距離と
 同じレースの時計がどれくらいで、他の距離、馬場を当レースの距離・馬場に換算するとどれくらいの評価が
 つくか自動で計算して出力して比較する」。
+ユーザ指示 (2026-10-14):「芝ダの違いや距離の違いは換算しても弱めにする。距離適性、芝ダ適性、馬場適性を
+ちゃんと出す。馬場含む同条件を最重視する。同条件が無い馬は仕方が無いので換算で評価するが、弱めにする。
+ダートの不良や重めは良より早くなる性質がある。このような性質もしっかり考える」。
 
-  - 同条件 (同じ場・芝ダ・距離) の走は生の時計をそのまま並べる (同条件ベスト)。
-  - それ以外の走は time_model の条件効果で当レース条件の時計に換算する (開催日の馬場差も補正)。
-  - 推定タイム = 換算時計を「新しい走ほど・距離が近いほど・同じ芝ダほど・同じ場ほど」重く平均 (直近 5 走)。
-    この集約と換算モデルは 2026-10-10 の walk-forward 検証で選定 (scripts/time_eval_backtest.py)。
+  - 1 走の種別 (当レースとの関係):
+      same        同じ場・芝ダ・距離・馬場状態 (良/稍/渋=重・不良) — 生の時計をそのまま比較できる。最重視
+      same_course 同じ場・芝ダ・距離で馬場状態だけ違う — その場の馬場差 γ_v で換算
+      same_dist   他場の同じ芝ダ・距離 — 場の差 θ で換算
+      distance    同じ芝ダの別距離 — 距離差を換算 (弱め: 距離が離れるほど急に軽く)
+      surface     芝↔ダの換算 — 最も弱い
+  - 推定タイム = 換算時計の重み付き平均 (重み = 新しさ 0.85^i × 種別の重み × 距離の近さ)。証拠の重みの合計 W が
+    小さい馬 (同条件が無く換算だけ) はレース中央値へ寄せる: est = (W·平均 + W0·中央値) / (W + W0)。
+  - 距離適性 / 芝ダ適性 / 馬場適性 = 「当レースに近い条件の走」と「それ以外の走」の換算時計の差 (負 = 平均的な
+    換算が言うより当条件で走れている = 得意)。換算モデルは条件の平均効果しか持たないので、馬ごとの得手不得手は
+    ここで出す。
+  - 馬場差は場ごとに学習 (time_model γ_v)。「ダートの道悪は速い」は中央と一部の地方 (水沢・高知・浦和・門別) で
+    成り立ち、南関東・東海・兵庫では逆 (重で遅い) だったので、向きを決め打ちせずデータに語らせる。
   - 市場 (オッズ・人気) は一切使わない = 市場・Claude 指数と独立に比較できる。
 
 出力 (snapshot の "time_eval" / Web の TimeEvalCard / CLI 表) は全て丸め済み・NaN なし。
@@ -20,20 +32,49 @@ from typing import Any
 
 from . import time_model as tm
 
-# 推定タイムの集約 (直近 5 走の重み付き平均)。重みは事前に決めた値 (検証で調整していない)。
-EST_RUNS = 5
-RECENCY_DECAY = 0.85        # 1 走古くなるごとの重み
-DIST_SCALE = 0.2            # 距離の近さ: exp(-|ln(当距離/走距離)| / 0.2)
-CROSS_SURFACE_W = 0.35      # 芝↔ダの換算は信頼度が低い
-SAME_VENUE_W = 1.15
-INDEX_PER_SEC = 10.0        # タイム指数: レース中央値 50、1 秒速いごとに +10
-SHOW_RUNS = 12              # 明細に出す過去走の最大数
+# ---- 集約のパラメータ (2026-10-14 の設計。値は walk-forward 検証 scripts/time_eval_agg_sweep.py で選定, 2026-10-15) ----
+# 換算 (distance / surface) の弱め方は、事前に用意した候補のうち最も穏やかな conv-mild を採用
+# (distance 0.7 / surface 0.25 / DIST_SCALE 0.2)。より弱い候補 (0.5 / 0.15 / 0.15 や 0.35 / 0.10 / 0.12) は
+# 勝ち馬 AUC が全期間で単調に下がった (換算した時計にも勝ち馬情報がある)。詳細は CLAUDE.md の te2 節。
+EST_RUNS = 8                 # 集約に使う「時計が妥当な平地走」の数 (新しい順)
+RECENCY_DECAY = 0.85         # 1 走古くなるごとの重み
+KIND_W = {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25}
+DIST_SCALE = 0.2             # 距離の近さ: exp(-|ln(当距離/走距離)| / DIST_SCALE) (distance / surface 種別のみ)
+SAME_VENUE_W = 1.15          # 別距離・別芝ダでも同じ場なら少し重く
+SHRINK_W0 = 0.3              # 証拠の重み W がこれと同程度以下の馬はレース中央値へ寄る (W0/(W+W0) だけ)
+STRONG_W = 1.0               # 寄せ先の中央値を作る「証拠が十分な馬」の W の下限
+NEAR_DIST = 0.10             # 距離適性の「同距離帯」: |ln(当距離/走距離)| <= 0.10 (1400m なら 1270〜1545m)
+FIT_SEC = 0.3                # 適性ラベルのしきい値 (秒): 差 <= -0.3 得意 / >= +0.3 不安
+INDEX_PER_SEC = 10.0         # タイム指数: レース中央値 50、1 秒速いごとに +10
+SHOW_RUNS = 12               # 明細・適性に使う過去走の最大数
+
+_PARAM_NAMES = ("EST_RUNS", "RECENCY_DECAY", "KIND_W", "DIST_SCALE", "SAME_VENUE_W", "SHRINK_W0",
+                "STRONG_W", "NEAR_DIST", "FIT_SEC")
+
+
+def params() -> dict:
+    """現在の集約パラメータ (検証スクリプト・表示用)。"""
+    return {k: (dict(globals()[k]) if isinstance(globals()[k], dict) else globals()[k]) for k in _PARAM_NAMES}
+
+
+def set_params(**kw: Any) -> None:
+    """集約パラメータを差し替える (walk-forward 検証のスイープ用。本番コードからは呼ばない)。"""
+    for k, v in kw.items():
+        if k not in _PARAM_NAMES:
+            raise KeyError(k)
+        globals()[k] = dict(v) if isinstance(v, dict) else v
 
 
 def _r1(x: float | None) -> float | None:
     if x is None or not math.isfinite(x):
         return None
     return round(float(x), 1)
+
+
+def _r2(x: float | None) -> float | None:
+    if x is None or not math.isfinite(x):
+        return None
+    return round(float(x), 2)
 
 
 def _fmt_date(d: int) -> str:
@@ -57,9 +98,15 @@ def target_of(race: Any) -> dict:
             "going": going or "良", "going_source": "announced" if going else "assumed"}
 
 
+def _cond(target: dict | None) -> tuple:
+    """当レース条件の比較キー (par や馬場差の表示値は含めない — モデル再学習で変わる)。"""
+    t = target or {}
+    return (t.get("venue"), t.get("surface"), t.get("distance"), t.get("going"))
+
+
 def _unavailable(target: dict, reason: str, model: dict | None = None) -> dict:
     return {"version": tm.VERSION, "available": False, "reason": reason,
-            "target": {**target, "par_sec": None, "par_n": None},
+            "target": {**target, "par_sec": None, "par_n": None, "going_effect": None},
             "model": _model_meta(model, target.get("venue", "")), "horses": []}
 
 
@@ -73,7 +120,18 @@ def _model_meta(model: dict | None, venue: str = "") -> dict | None:
     until = by_c.get(tm.circuit(venue)) if venue else None
     return {"fitted_at": model.get("fitted_at"), "data_until": until or model.get("data_until"),
             "n_runs": model.get("n_runs"),
-            "day_effects": bool((model.get("params") or {}).get("day_effects"))}
+            "day_effects": bool((model.get("params") or {}).get("day_effects")),
+            "venue_going": bool(model.get("gamma_venue"))}
+
+
+def _going_effect_info(model: dict, tgt: dict, base_sec: float | None) -> dict:
+    """当レースの馬場状態が 良 に対してどれだけ時計を動かすか (学習値)。sec は base_sec (標準勝ち時計 or
+    レース中央値) に対する秒差。負 = 良より速い馬場。"""
+    g = tgt["going"]
+    val, source, n = tm.going_effect_detail(model, tgt["venue"], tgt["surface"], g)
+    return {"going": g, "group": tm.going_group(g), "pct": round(val * 100, 2),
+            "sec": _r1(base_sec * (math.exp(val) - 1.0)) if base_sec else None,
+            "source": source, "n": n}
 
 
 def _run_record(pr: Any, tgt: dict, model: dict, lt: float) -> tuple[dict, float | None, int]:
@@ -119,6 +177,8 @@ def _run_record(pr: Any, tgt: dict, model: dict, lt: float) -> tuple[dict, float
                 rec["kind"] = "distance"
             elif venue != tgt["venue"]:
                 rec["kind"] = "same_dist"
+            elif tm.going_group(going) != tm.going_group(tgt["going"]):
+                rec["kind"] = "same_course"
             else:
                 rec["kind"] = "same"
             return rec, conv, d
@@ -126,26 +186,61 @@ def _run_record(pr: Any, tgt: dict, model: dict, lt: float) -> tuple[dict, float
 
 
 def _weight(i: int, rec: dict, tgt: dict) -> float:
-    w = RECENCY_DECAY ** i
-    w *= math.exp(-abs(math.log(tgt["distance"] / rec["distance"])) / DIST_SCALE)
-    if rec["surface"] != tgt["surface"]:
-        w *= CROSS_SURFACE_W
-    if rec["venue"] == tgt["venue"]:
-        w *= SAME_VENUE_W
+    """集約の重み: 新しさ × 種別 × (別距離・別芝ダなら距離の近さと同場)。"""
+    w = (RECENCY_DECAY ** i) * KIND_W[rec["kind"]]
+    if rec["kind"] in ("distance", "surface"):
+        w *= math.exp(-abs(math.log(tgt["distance"] / rec["distance"])) / DIST_SCALE)
+        if rec["venue"] == tgt["venue"]:
+            w *= SAME_VENUE_W
     return w
 
 
-def _confidence(used: list[dict], tgt: dict) -> str:
-    """high: 3 走以上 + 同じ芝ダで距離が近い (±15%) 走あり / mid: 2 走以上で同じ芝ダあり / low: それ以外。"""
+_CORE_KINDS = ("same", "same_course", "same_dist")
+
+
+def _confidence(used: list[tuple[float, float, dict]]) -> str:
+    """high: 同じ芝ダ・距離 (馬場込み同条件 / 同コース / 他場同距離) の証拠が重み合計 1.5 以上 かつ 3 走以上
+    / mid: その証拠が 0.5 以上 かつ 2 走以上 / low: 別距離・芝ダ換算だけ、または 1 走 / none: 使える走なし。"""
     if not used:
         return "none"
-    same_surface = [r for r in used if r["kind"] != "surface"]
-    near = [r for r in same_surface if abs(math.log(tgt["distance"] / r["distance"])) <= 0.15]
-    if len(used) >= 3 and near:
+    core = sum(w for w, _c, r in used if r["kind"] in _CORE_KINDS)
+    if len(used) >= 3 and core >= 1.5:
         return "high"
-    if len(used) >= 2 and same_surface:
+    if len(used) >= 2 and core >= 0.5:
         return "mid"
     return "low"
+
+
+def _fit_block(items: list[tuple[dict, float]], like: Any) -> dict:
+    """適性 1 軸: 当レースに近い条件の走 (like) と それ以外の走の換算時計の差。負 = 当条件の方が走れている。"""
+    L = [(r, c) for r, c in items if like(r)]
+    O = [(r, c) for r, c in items if not like(r)]
+    out = {"n_like": len(L), "n_other": len(O), "delta_sec": None,
+           "best_sec": _r1(min(c for _r, c in L)) if L else None,
+           "mean_sec": _r1(sum(c for _r, c in L) / len(L)) if L else None,
+           "top3_like": sum(1 for r, _c in L if r["finish_pos"] in (1, 2, 3)),
+           "label": "—"}
+    if L and O:
+        delta = sum(c for _r, c in L) / len(L) - sum(c for _r, c in O) / len(O)
+        out["delta_sec"] = _r1(delta)
+        out["label"] = "得意" if delta <= -FIT_SEC else ("不安" if delta >= FIT_SEC else "普通")
+    elif L:
+        out["label"] = "実績のみ"
+    elif O:
+        out["label"] = "未経験"
+    return out
+
+
+def _fits(items: list[tuple[dict, float]], tgt: dict) -> dict:
+    """距離 / 芝ダ / 馬場 の適性。馬場は同じ芝ダの走だけで見る (芝の重と ダの渋は別物)。"""
+    td = tgt["distance"]
+    tg = tm.going_group(tgt["going"])
+    same_surface = [(r, c) for r, c in items if r["surface"] == tgt["surface"]]
+    return {
+        "distance": _fit_block(items, lambda r: abs(math.log(td / r["distance"])) <= NEAR_DIST),
+        "surface": _fit_block(items, lambda r: r["surface"] == tgt["surface"]),
+        "going": _fit_block(same_surface, lambda r: tm.going_group(r["going"]) == tg),
+    }
 
 
 def evaluate(rd: Any, model: dict | None = None) -> dict:
@@ -175,48 +270,77 @@ def evaluate(rd: Any, model: dict | None = None) -> dict:
         race_day = jd.year * 10000 + jd.month * 100 + jd.day
 
     rows = []
+    raw_by_row: list[tuple[float | None, float]] = []     # (重み付き平均 or None, 証拠の重み W)
     for h in getattr(race, "horses", []) or []:
         if getattr(h, "absent", False):
             continue
         runs = list(getattr(h, "past_runs_ext", None) or getattr(h, "past_runs", None) or [])
         recs: list[dict] = []
         used: list[tuple[float, float, dict]] = []
+        items: list[tuple[dict, float]] = []
         valid_i = 0
         if race_day:
             runs = [pr for pr in runs if 0 < tm.date_key(getattr(pr, "date", "")) < race_day]
         for pr in runs[:SHOW_RUNS]:
             rec, conv, _d = _run_record(pr, tgt, model, lt)
             recs.append(rec)
-            # 推定に使うのは「時計が妥当な平地走」の新しい順 5 本 (換算データの無いコースでも枠は消費)。
-            # 検証ハーネスとの違いは海外/不明の場の走を枠に数えない点のみ (1.5 万頭中 3 頭が変わる程度)
+            # 推定に使うのは「時計が妥当な平地走」の新しい順 EST_RUNS 本 (換算データの無いコースでも枠は消費)。
             counted = rec["note"] not in ("時計なし", "障害", "ばんえい/不明", "海外/不明の場", "時計異常")
+            if conv is not None:
+                items.append((rec, conv))
             if counted:
                 if valid_i < EST_RUNS and conv is not None:
                     w = _weight(valid_i, rec, tgt)
                     rec["weight"] = round(w, 3)
                     used.append((w, conv, rec))
                 valid_i += 1
-        est = (sum(w * c for w, c, _ in used) / sum(w for w, _, _ in used)) if used else None
+        W = sum(w for w, _c, _r in used)
+        raw = (sum(w * c for w, c, _r in used) / W) if used else None
         same = [r for r in recs if r["kind"] == "same" and r["own_sec"]]
+        course = [r for r in recs if r["kind"] in ("same", "same_course") and r["own_sec"]]
         same_best = min(same, key=lambda r: r["own_sec"]) if same else None
-        convs = [r["conv_sec"] for r in recs if r["conv_sec"] is not None]
-        conf = _confidence([r for _, _, r in used], tgt)
+        course_best = min(course, key=lambda r: r["own_sec"]) if course else None
+        convs = [c for _r, c in items]
         rows.append({
             "number": int(getattr(h, "number", 0) or 0), "name": getattr(h, "name", ""),
-            "rank": None, "est_sec": est, "gap_sec": None, "index": None,
+            "rank": None, "est_sec": None, "est_raw_sec": _r1(raw), "gap_sec": None, "index": None,
+            "evidence": _r2(W), "shrink": None,
             "same_n": len(same), "same_best_sec": same_best["own_sec"] if same_best else None,
             "same_best_going": same_best["going"] if same_best else None,
+            "course_n": len(course), "course_best_sec": course_best["own_sec"] if course_best else None,
+            "course_best_going": course_best["going"] if course_best else None,
             "conv_best_sec": _r1(min(convs)) if convs else None,
-            "n_runs": len(recs), "n_used": len(used), "confidence": conf, "runs": recs,
+            "n_runs": len(recs), "n_used": len(used), "confidence": _confidence(used),
+            "fit": _fits(items, tgt) if items else None,
+            "runs": recs,
         })
+        raw_by_row.append((raw, W))
+
+    # 証拠の弱い馬はレース中央値へ寄せる (同条件が無く換算だけの馬が換算の運で 1 位にならないように)。
+    # 寄せ先 = 証拠が十分な馬 (W >= STRONG_W) の重み付き平均の中央値 (2 頭未満なら全馬の中央値)。
+    strong = sorted(r for r, w in raw_by_row if r is not None and w >= STRONG_W)
+    anyr = sorted(r for r, _w in raw_by_row if r is not None)
+    pool = strong if len(strong) >= 2 else anyr
+    prior = (pool[len(pool) // 2] if len(pool) % 2 else (pool[len(pool) // 2 - 1] + pool[len(pool) // 2]) / 2) if pool else None
+    for row, (raw, W) in zip(rows, raw_by_row):
+        if raw is None:
+            continue
+        if prior is None or SHRINK_W0 <= 0:
+            row["est_sec"], row["shrink"] = raw, 0.0
+        else:
+            row["est_sec"] = (W * raw + SHRINK_W0 * prior) / (W + SHRINK_W0)
+            row["shrink"] = round(SHRINK_W0 / (W + SHRINK_W0), 2)
 
     _assign_ranks(rows)
     for r in rows:
         r["est_sec"] = _r1(r["est_sec"])
     pw = tm.par_win(model, tgt["surface"], tgt["distance"], tgt["venue"],
                     tgt["going"] if tgt["going_source"] == "announced" else "")
+    base = pw[0] if pw else prior
     return {"version": tm.VERSION, "available": True, "reason": None,
-            "target": {**tgt, "par_sec": _r1(pw[0]) if pw else None, "par_n": pw[1] if pw else None},
+            "target": {**tgt, "par_sec": _r1(pw[0]) if pw else None, "par_n": pw[1] if pw else None,
+                       "going_effect": _going_effect_info(model, tgt, base),
+                       "prior_sec": _r1(prior)},
             "model": _model_meta(model, tgt["venue"]), "horses": rows}
 
 
@@ -250,11 +374,12 @@ def merge_previous(cur: dict | None, prev: dict | None, runners: set[int]) -> di
       - 今回 過去走 0 走の馬は、前回が **同じ当レース条件** (場・芝ダ・距離・馬場状態) で評価済みなら引き継ぐ
     いずれも **runners (今回の出走馬 = 取消を除く) に居ない馬は落とし**、順位・差・指数を付け直す
     (前回の値を丸ごと返すと、後から取り消した馬が「タイム1位」のまま残っていた)。
+    条件の比較は 場・芝ダ・距離・馬場状態 だけ (par や馬場差の表示値は再学習で変わる)。
     """
     import copy
     usable_prev = prev if (prev and prev.get("available") and _n_ranked(prev) > 0) else None
     if cur and cur.get("available") and _n_ranked(cur) > 0:
-        if usable_prev and usable_prev.get("target") == cur.get("target"):
+        if usable_prev and _cond(usable_prev.get("target")) == _cond(cur.get("target")):
             old = {h["number"]: h for h in usable_prev.get("horses", [])}
             out = copy.deepcopy(cur)
             changed = False
@@ -296,8 +421,15 @@ def fmt_time(sec: float | None) -> str:
     return f"{m}:{rest / 10:04.1f}"
 
 
-_KIND_LABEL = {"same": "同条件", "same_dist": "同距離", "distance": "距離換算",
+_KIND_LABEL = {"same": "同条件", "same_course": "同コース", "same_dist": "同距離", "distance": "距離換算",
                "surface": "芝ダ換算", "excluded": "対象外"}
+
+
+def _fit_text(f: dict | None) -> str:
+    if not f:
+        return "—"
+    d = f.get("delta_sec")
+    return f"{f['label']}" + (f"({d:+.1f})" if d is not None else "") + (f" {f['n_like']}走" if f["n_like"] else "")
 
 
 def print_time_eval(te: dict, console: Any = None, *, detail: bool = False) -> None:
@@ -312,27 +444,36 @@ def print_time_eval(te: dict, console: Any = None, *, detail: bool = False) -> N
         con.print(f"[bold]タイム換算比較[/bold] {cond}: [dim]{te.get('reason')}[/dim]")
         return
     t = Table(title=f"タイム換算比較 — {cond}", show_lines=False)
-    for col in ("順", "馬", "馬名", "推定", "差", "指数", "同条件", "換算ベスト", "走", "信頼"):
-        t.add_column(col, justify="right" if col not in ("馬名", "信頼", "同条件") else "left")
+    for col in ("順", "馬", "馬名", "推定", "差", "指数", "同条件", "距離", "芝ダ", "馬場", "証拠", "走", "信頼"):
+        t.add_column(col, justify="right" if col not in ("馬名", "信頼", "同条件", "距離", "芝ダ", "馬場") else "left")
     for h in te.get("horses", []):
-        same = (f"{h['same_n']}走 {fmt_time(h['same_best_sec'])}({h.get('same_best_going') or ''})"
-                if h["same_n"] else "—")
+        same = (f"{h['same_n']}走 {fmt_time(h['same_best_sec'])}" if h["same_n"]
+                else (f"同コース{h['course_n']}走" if h.get("course_n") else "—"))
+        f = h.get("fit") or {}
         t.add_row(str(h["rank"] or "—"), str(h["number"]), h["name"], fmt_time(h["est_sec"]),
                   f"+{h['gap_sec']:.1f}" if h.get("gap_sec") else ("—" if h["rank"] != 1 else "0.0"),
                   f"{h['index']:.0f}" if h.get("index") is not None else "—",
-                  same, fmt_time(h["conv_best_sec"]), f"{h['n_used']}/{h['n_runs']}",
+                  same, _fit_text(f.get("distance")), _fit_text(f.get("surface")), _fit_text(f.get("going")),
+                  f"{h['evidence']:.1f}" if h.get("evidence") is not None else "—",
+                  f"{h['n_used']}/{h['n_runs']}",
                   {"high": "高", "mid": "中", "low": "低", "none": "—"}[h["confidence"]])
     con.print(t)
+    ge = tgt.get("going_effect") or {}
+    if ge and ge.get("group") != "良" and ge.get("sec") is not None:
+        con.print(f"[dim]馬場 {ge['going']}: この場の{tgt.get('surface', '')}は良より {ge['sec']:+.1f} 秒 "
+                  f"({ge['pct']:+.2f}%, 学習 {ge.get('n') or 0} 走)[/dim]")
     if tgt.get("par_sec"):
         con.print(f"[dim]参考: この条件の平均的な勝ち時計 {fmt_time(tgt['par_sec'])} (n={tgt.get('par_n')})[/dim]")
     if detail:
         for h in te.get("horses", []):
-            con.print(f"[bold]{h['number']} {h['name']}[/bold]  推定 {fmt_time(h['est_sec'])}")
+            con.print(f"[bold]{h['number']} {h['name']}[/bold]  推定 {fmt_time(h['est_sec'])}"
+                      f" (重み付き平均 {fmt_time(h.get('est_raw_sec'))}・中央値寄せ {int((h.get('shrink') or 0) * 100)}%)")
             for r in h["runs"]:
                 conv = fmt_time(r["conv_sec"]) if r["conv_sec"] is not None else "—"
                 con.print(f"   {r['date']} {r['venue']} {r['surface'][:1]}{r['distance']} {r['going'] or '-'}"
                           f" {fmt_time(r['own_sec'])} → {conv} [{_KIND_LABEL[r['kind']]}"
-                          f"{(':' + r['note']) if r.get('note') else ''}]")
+                          f"{(':' + r['note']) if r.get('note') else ''}]"
+                          f"{(' w=' + format(r['weight'], '.2f')) if r.get('weight') is not None else ''}")
 
 
 def _cli(argv: list[str]) -> int:

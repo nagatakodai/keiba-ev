@@ -1,4 +1,4 @@
-"""タイム換算モデル (src/time_model.py, te1) の学習データ抽出 + 学習。
+"""タイム換算モデル (src/time_model.py, te1〜te2) の学習データ抽出 + 学習。
 
   python scripts/build_time_model.py                # 公式データ同期 → ledger を全部読んで学習 → data/cache/time_model.json
   python scripts/build_time_model.py --extract-raw  # data/raw から netkeiba_raw.jsonl を作り直してから学習
