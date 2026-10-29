@@ -11,7 +11,9 @@ evaluate だけやり直す (設定は time_eval.set_params / time_model の定�
       地方の公式データ (scripts/time_eval_official_backtest.py と同じ母集団・日次再学習・地方のみ)。
 
 出力: 設定ごとの AUCw/AUC3/MAE/top1/ROI と、基準設定 (--baseline, 既定 old) に対する差の 95%CI
-(レース単位 paired bootstrap)。指標の定義は scripts/time_eval_backtest.py と同じ。
+(レース単位 paired bootstrap)。AUCw/AUC3/top1/ROI の定義は scripts/time_eval_backtest.py と同じ。**MAE だけ集計単位が
+違う**: ここはレースごとの平均誤差をレースで平均 (頭数で重み付けしない) / backtest 2 本は全馬をプールした平均
+(多頭数のレースが重い) — 設定間の差 (同じ定義同士) は比べられるが、値そのものを backtest の MAE と並べない。
 
 結果 (2026-10-15, 選定 01-03 → 確認 04-05 + 公式 2025-10〜12 / 2026-06〜09): 新しい集約は時計の誤差 (MAE) を
 全期間で改善する一方、勝ち馬 AUC は換算を弱くするほど単調に下がる (conv-weak < conv-strong < conv-mild ≒ old)。
@@ -37,17 +39,12 @@ sys.path.insert(0, str(ROOT))
 from src import time_eval as te_mod  # noqa: E402
 from src import time_model as tm  # noqa: E402
 
-# ---- 集約の設定 (old = 2026-10-10 の te1 と同じ重み) ----
-OLD_PARAMS = {"EST_RUNS": 5, "RECENCY_DECAY": 0.85,
-              "KIND_W": {"same": 1.15, "same_course": 1.15, "same_dist": 1.0, "distance": 1.0, "surface": 0.35},
-              "DIST_SCALE": 0.2, "SAME_VENUE_W": 1.15, "SHRINK_W0": 0.0, "STRONG_W": 1.0,
-              "NEAR_DIST": 0.10, "FIT_SEC": 0.3}
-# new = 本番の te2 既定 (2026-10-15 選定: conv-mild)。2026-10-14 の初期値 (distance 0.5 / surface 0.15 / DIST_SCALE 0.15)
-# は new/conv-strong として残す。
-NEW_PARAMS = {"EST_RUNS": 8, "RECENCY_DECAY": 0.85,
-              "KIND_W": {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25},
-              "DIST_SCALE": 0.2, "SAME_VENUE_W": 1.15, "SHRINK_W0": 0.3, "STRONG_W": 1.0,
-              "NEAR_DIST": 0.10, "FIT_SEC": 0.3}
+# ---- 集約の設定: 版ごとの定義は src/time_eval.PRESETS (事前登録の判定にも使う凍結値) ----
+# old = te1 (2026-10-10) の重み / new = te2 (2026-10-15 選定: conv-mild) の集約。2026-10-14 の初期値
+# (distance 0.5 / surface 0.15 / DIST_SCALE 0.15) は new/conv-strong として残す。new/* の派生はすべて te2 の集約が基準
+# (2026-10-15 の表を再現できるように)。本番の te2.1 (2026-10-29〜) は "te2.1" 設定。
+OLD_PARAMS = te_mod.PRESETS["te1"]["params"]
+NEW_PARAMS = te_mod.PRESETS["te2"]["params"]
 
 
 def _p(**over):
@@ -63,6 +60,9 @@ def _p(**over):
 CONFIGS: dict[str, dict] = {
     # 旧集約 × 旧モデル / 新モデル (モデルの効果だけを分離)
     "old": {"params": OLD_PARAMS, "model": "old"},
+    # te2 (2026-10-15 凍結) = 新集約 × γ_v の旧推定 (GOING_FIT=transfer) / te2.1 (2026-10-29〜 本番)
+    "te2": {"params": NEW_PARAMS, "model": "v30t"},
+    "te2.1": {"params": te_mod.PRESETS["te2.1"]["params"], "model": "v30"},
     "old+vg": {"params": OLD_PARAMS, "model": "v30"},
     # 新集約 (既定) とモデルの縮約 K
     "new": {"params": NEW_PARAMS, "model": "v30"},
@@ -73,9 +73,10 @@ CONFIGS: dict[str, dict] = {
     "new/w0=0": {"params": _p(SHRINK_W0=0.0), "model": "v30"},
     "new/w0=0.6": {"params": _p(SHRINK_W0=0.6), "model": "v30"},
     "new/w0=1.0": {"params": _p(SHRINK_W0=1.0), "model": "v30"},
-    # 使う走数
+    # 使う走数 (sameall = 同条件・同コースの走だけは枠外でも使う)
     "new/est5": {"params": _p(EST_RUNS=5), "model": "v30"},
     "new/est12": {"params": _p(EST_RUNS=12), "model": "v30"},
+    "new/sameall": {"params": _p(SAME_ALL_RUNS=True), "model": "v30"},
     # 換算 (距離・芝ダ) をさらに弱く (conv-strong = 2026-10-14 の初期値 / conv-weak = さらに弱く)
     "new/conv-strong": {"params": _p(KIND_W={"distance": 0.5, "surface": 0.15}, DIST_SCALE=0.15), "model": "v30"},
     "new/conv-weak": {"params": _p(KIND_W={"distance": 0.35, "surface": 0.10}, DIST_SCALE=0.12), "model": "v30"},
@@ -84,10 +85,11 @@ CONFIGS: dict[str, dict] = {
     "new/course1.0": {"params": _p(KIND_W={"same_course": 1.0, "same_dist": 0.8}), "model": "v30"},
 }
 
-MODEL_VARIANTS = {"old": {"VENUE_GOING": False, "K_GOING": 30.0},
-                  "v30": {"VENUE_GOING": True, "K_GOING": 30.0},
-                  "v10": {"VENUE_GOING": True, "K_GOING": 10.0},
-                  "v100": {"VENUE_GOING": True, "K_GOING": 100.0}}
+MODEL_VARIANTS = {"old": {"VENUE_GOING": False, "K_GOING": 30.0, "GOING_FIT": "shrink"},
+                  "v30": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "shrink"},
+                  "v30t": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "transfer"},
+                  "v10": {"VENUE_GOING": True, "K_GOING": 10.0, "GOING_FIT": "shrink"},
+                  "v100": {"VENUE_GOING": True, "K_GOING": 100.0, "GOING_FIT": "shrink"}}
 
 
 def fit_variants(rows: list[dict], variants: set[str]) -> dict[str, dict]:

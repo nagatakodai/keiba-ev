@@ -132,10 +132,13 @@ export type TimeEvalRun = {
 // 適性 1 軸 (距離 / 芝ダ / 馬場, te2〜): 当レースに近い条件の走 (like) と それ以外の走の換算タイムの差。
 // delta_sec < 0 = 平均的な換算が言うより当条件で走れている (得意)。label は backend が決める
 // (得意 / 普通 / 不安 / 未経験 = 近い条件の走が無い / 実績のみ = 比べる他条件の走が無い / —)。
+// 得意 / 不安 は差が 0.3 秒以上かつ誤差 se_sec の 1.645 倍以上のときだけ (te2.1〜。それ以外は 普通 = 誤差の範囲)。
 export type TimeEvalFit = {
   n_like: number;
   n_other: number;
   delta_sec: number | null;
+  se_sec?: number | null;       // 差の誤差 (1σ, 秒): 走ごとのばらつき ±1.1% と走数から (te2.1〜)
+  z?: number | null;            // delta_sec / se_sec (te2.1〜)
   best_sec: number | null;      // 近い条件の走の換算ベスト
   mean_sec: number | null;
   top3_like: number;            // 近い条件の走での 3 着内回数 (着順が分かる走のみ)
@@ -168,7 +171,7 @@ export type TimeEvalHorse = {
 };
 
 export type TimeEval = {
-  version: string;              // "te1" | "te2" (換算モデル・集約の版)
+  version: string;              // "te1" | "te2" | "te2.1" (換算モデル・集約の版)
   available: boolean;
   // available=false の理由 (例 "ばんえいは換算対象外" / "当レースの距離・馬場が不明")。
   reason?: string | null;

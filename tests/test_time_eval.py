@@ -489,7 +489,9 @@ def test_fit_labels_distance_surface_going():
     te = te_mod.evaluate(_race(weather_text="雨 / 重", horses=[h]), _model2())
     f = te["horses"][0]["fit"]
     assert f["going"]["n_like"] == 1 and f["going"]["n_other"] == 2          # 馬場は同じ芝ダ (ダート) の走だけで比べる
-    assert f["going"]["delta_sec"] < -0.3 and f["going"]["label"] == "得意" and f["going"]["top3_like"] == 1
+    # 1 走 vs 2 走の −1.5 秒は誤差 (±1.2 秒) の範囲 → 普通 (2026-10-29: 得意/不安 は z ≥ FIT_Z のときだけ)
+    assert f["going"]["delta_sec"] < -0.3 and f["going"]["top3_like"] == 1
+    assert f["going"]["se_sec"] > 1.0 and abs(f["going"]["z"]) < te_mod.FIT_Z and f["going"]["label"] == "普通"
     assert f["distance"]["n_like"] == 3 and f["distance"]["n_other"] == 1    # ±10% = 1400 のみ (1600 は外)
     assert f["surface"]["n_like"] == 3 and f["surface"]["n_other"] == 1
     assert f["surface"]["label"] in ("得意", "普通", "不安")
@@ -560,3 +562,181 @@ def test_going_effect_detail_fallback_order():
 def test_set_params_rejects_unknown():
     with pytest.raises(KeyError):
         te_mod.set_params(NOPE=1)
+
+
+# ------------------------------------------------------------ te2.1 (2026-10-29): te2 レビュー指摘の回帰テスト ----
+
+@pytest.fixture
+def restore_presets():
+    """use_preset / 定数差し替えのテストが他のテストへ漏れないように、集約パラメータと換算モデルの定数を戻す。"""
+    saved = te_mod.params()
+    saved_tm = {k: getattr(tm, k) for k in ("VENUE_GOING", "K_GOING", "GOING_FIT", "MAX_ITERS")}
+    yield
+    te_mod.set_params(**saved)
+    for k, v in saved_tm.items():
+        setattr(tm, k, v)
+
+
+def test_fit_labels_need_z_not_just_03_sec():
+    """適性ラベルは差 0.3 秒だけでは付けない: 同じ馬の換算時計は走ごとに ±1% ばらつくので、走数が少ない差は 普通。"""
+    few = Horse(number=1, name="A", past_runs=[
+        _pr("2026.09.20", "大井", "ダート", 1400, "重", 88.0),            # 当条件 1 走
+        _pr("2026.09.05", "大井", "ダート", 1400, "良", 89.9),            # 別馬場 1 走 (換算で −1.5% → ≈ 88.6)
+    ])
+    g = te_mod.evaluate(_race(weather_text="雨 / 重", horses=[few]), _model2())["horses"][0]["fit"]["going"]
+    assert g["n_like"] == 1 and g["n_other"] == 1 and g["delta_sec"] is not None and g["delta_sec"] < 0
+    assert g["delta_sec"] <= -0.3                                       # 旧判定 (±0.3 秒だけ) なら 得意 だった差
+    assert g["se_sec"] == pytest.approx(0.011 * 88.3 * math.sqrt(2), abs=0.06) and g["label"] == "普通"
+    # 走数が揃って差がはっきりしていれば 得意
+    many = Horse(number=2, name="B", past_runs=[
+        *[_pr(f"2026.09.{20 - k:02d}", "大井", "ダート", 1400, "重", 86.0 + 0.1 * k) for k in range(4)],
+        *[_pr(f"2026.08.{20 - k:02d}", "大井", "ダート", 1400, "良", 90.5 + 0.1 * k) for k in range(4)],
+    ])
+    g2 = te_mod.evaluate(_race(weather_text="雨 / 重", horses=[many]), _model2())["horses"][0]["fit"]["going"]
+    assert g2["n_like"] == 4 and g2["n_other"] == 4
+    assert g2["z"] <= -te_mod.FIT_Z and g2["label"] == "得意"
+    # te2 の判定 (z なし) に戻すと 1 走 vs 1 走でもラベルが付く (= 旧挙動)
+    saved = te_mod.params()
+    te_mod.set_params(FIT_Z=0.0)
+    try:
+        g0 = te_mod.evaluate(_race(weather_text="雨 / 重", horses=[few]), _model2())["horses"][0]["fit"]["going"]
+    finally:
+        te_mod.set_params(**saved)
+    assert g0["label"] == "得意"
+
+
+def _one_day_heavy_rows(seed=13, n_heavy=10, eff=-0.03):
+    """大井 (良 6 日 × 120 頭) と 船橋 (良 + 重 の日が多い) に、水沢 の 重 が 1 日だけ (n_heavy 走) あるデータ。"""
+    rnd = random.Random(seed)
+    rows = []
+    day_eff = {}
+
+    def de(v, d):
+        return day_eff.setdefault((v, d), rnd.gauss(0, 0.002))
+
+    for h in range(120):
+        ab = rnd.gauss(0, 0.01)
+        for k in range(6):
+            g = "重" if (k % 3 == 2) else "良"
+            d = 20260101 + k
+            t = 89.0 * math.exp(ab + (0.004 if g == "重" else 0.0) + de("船橋", d) + rnd.gauss(0, 0.002))
+            rows.append({"h": f"F{h}", "d": d, "v": "船橋", "s": "ダート", "dist": 1400, "g": g, "t": round(t, 2), "wt": 0.0})
+            # 同じ馬が 水沢 の良も走る (場同士がつながる)
+            d2 = 20260201 + k
+            t2 = 90.0 * math.exp(ab + de("水沢", d2) + rnd.gauss(0, 0.002))
+            rows.append({"h": f"F{h}", "d": d2, "v": "水沢", "s": "ダート", "dist": 1400, "g": "良", "t": round(t2, 2), "wt": 0.0})
+    for h in range(n_heavy):                       # 水沢 の 重 は 1 日・n_heavy 走だけ
+        ab = rnd.gauss(0, 0.01)
+        for k in range(3):
+            d = 20260201 + k
+            rows.append({"h": f"M{h}", "d": d, "v": "水沢", "s": "ダート", "dist": 1400, "g": "良",
+                         "t": round(90.0 * math.exp(ab + de("水沢", d) + rnd.gauss(0, 0.002)), 2), "wt": 0.0})
+        d = 20260220
+        rows.append({"h": f"M{h}", "d": d, "v": "水沢", "s": "ダート", "dist": 1400, "g": "重",
+                     "t": round(90.0 * math.exp(ab + eff + de("水沢", d) + rnd.gauss(0, 0.002)), 2), "wt": 0.0})
+    return rows
+
+
+def test_small_going_cell_is_shrunk_toward_circuit_as_designed(restore_presets):
+    """1 日 10 走しかない場別の馬場セルは、走数 n と K_GOING の比で全体の γ へ寄る (n/(n+K) だけ生の差が残る)。
+    te2 (GOING_FIT=transfer) は δ のセル平均を γ_v へ丸ごと移すので縮約が打ち消され、生の差のままだった。"""
+    rows = _one_day_heavy_rows()
+    m = tm.fit(rows)
+    prior = m["gamma"]["nar|ダート|重"]
+    n = m["gamma_venue_n"]["水沢|ダート|重"]
+    assert n == 10 and m["params"]["going_fit"] == "shrink" and m["params"]["converged"]
+    w = n / (n + tm.K_GOING)
+    gv = m["gamma_venue"]["水沢|ダート|重"]
+    # 生の差 −3% を n/(n+K) = 25% だけ残して全体の γ へ (日の偶然 ±0.2% ぶんの許容)
+    assert gv == pytest.approx(prior + w * (-0.03 - prior), abs=0.003)
+    tm.GOING_FIT = "transfer"
+    m_t = tm.fit(rows)
+    assert m_t["params"]["going_fit"] == "transfer"
+    gv_t = m_t["gamma_venue"]["水沢|ダート|重"]
+    assert gv_t < gv - 0.01                                            # 旧推定は縮約されず生の差に近い
+    # 縮約で γ_v に入らなかった分はその日の δ が持つ = γ_v + δ の合計 (学習データ上の当てはめ) は旧推定と同じ
+    total = gv + m["delta"]["水沢|20260220|ダート"]
+    assert total == pytest.approx(gv_t + m_t["delta"].get("水沢|20260220|ダート", 0.0), abs=0.002)
+
+
+def test_fit_converges_when_a_venue_shares_no_horses(restore_presets):
+    """他の場と馬を共有しない場があっても θ が漂流せず収束する (te2 = GOING_FIT=transfer は θ へ水準を移す量が毎回
+    同じで、反復回数に比例して θ が動き MAX_ITERS まで回っていた)。共有馬が無い場の水準はデータで決まらないので、
+    初期値 (各コースの平均時計) のまま止まるのが正しい。"""
+    rnd = random.Random(21)
+    rows = []
+    day = {}
+    de = lambda v, d: day.setdefault((v, d), rnd.gauss(0, 0.002))  # noqa: E731
+    for h in range(150):                                   # 大井: 良と重を交互に 10 日
+        ab = rnd.gauss(0, 0.01)
+        for k in range(10):
+            g, d = ("重" if k % 2 else "良"), 20260101 + k
+            rows.append({"h": f"O{h}", "d": d, "v": "大井", "s": "ダート", "dist": 1400, "g": g, "wt": 0.0,
+                         "t": round(89.0 * math.exp(ab + (0.007 if g == "重" else 0) + de("大井", d) + rnd.gauss(0, 0.002)), 2)})
+    for h in range(100):                                   # 水沢: 良 6 日 + 15 頭だけ 重 の日 (大井とは馬を共有しない)
+        ab = rnd.gauss(0, 0.01)
+        for k in range(6):
+            d = 20260201 + k
+            rows.append({"h": f"M{h}", "d": d, "v": "水沢", "s": "ダート", "dist": 1400, "g": "良", "wt": 0.0,
+                         "t": round(90.0 * math.exp(ab + de("水沢", d) + rnd.gauss(0, 0.002)), 2)})
+        if h < 15:
+            rows.append({"h": f"M{h}", "d": 20260220, "v": "水沢", "s": "ダート", "dist": 1400, "g": "重", "wt": 0.0,
+                         "t": round(90.0 * math.exp(ab - 0.03 + de("水沢", 20260220) + rnd.gauss(0, 0.002)), 2)})
+    m = tm.fit(rows)
+    diff = m["theta"]["ダート|1400|水沢"] - m["theta"]["ダート|1400|大井"]
+    assert m["params"]["converged"] and m["params"]["iterations"] < 50
+    assert diff == pytest.approx(math.log(90.0 / 89.0), abs=0.003)
+    tm.GOING_FIT = "transfer"
+    m_t = tm.fit(rows)
+    assert not m_t["params"]["converged"] and m_t["params"]["iterations"] == tm.MAX_ITERS
+    assert m_t["theta"]["ダート|1400|水沢"] - m_t["theta"]["ダート|1400|大井"] > diff + 0.01   # 漂流した
+
+
+def test_merge_does_not_mix_versions():
+    """版の違う前回 (例 te2 → te2.1、te1 → te2) の馬行は今回の順位付けに混ぜない。丸ごと引き継ぐときは前回の版のまま。"""
+    full = _te(_horses())
+    hs = _horses()
+    hs[0].past_runs = []
+    partial = _te(hs)
+    old = json.loads(json.dumps(full))
+    old["version"] = "te1"
+    out = te_mod.merge_previous(partial, old, {1, 2, 3})
+    assert next(h for h in out["horses"] if h["number"] == 1)["rank"] is None
+    assert out["version"] == tm.VERSION
+    # 今回が評価不能なら前回を丸ごと (版は前回のまま)
+    none = _te([Horse(number=n, name=f"x{n}") for n in (1, 2, 3)])
+    out2 = te_mod.merge_previous(none, old, {1, 2, 3})
+    assert out2["version"] == "te1" and any(h["rank"] for h in out2["horses"])
+
+
+def test_presets_reproduce_registered_versions(restore_presets):
+    """事前登録の判定に使う版の設定は凍結 (te1 = 2026-10-13 / te2 = 2026-10-15)。use_preset が集約と換算モデルを揃える。"""
+    p1, p2 = te_mod.PRESETS["te1"], te_mod.PRESETS["te2"]
+    assert p2["params"]["EST_RUNS"] == 8 and p2["params"]["SHRINK_W0"] == 0.3 and p2["params"]["FIT_Z"] == 0.0
+    assert p2["params"]["KIND_W"] == {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25}
+    assert p2["model"] == {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "transfer"}
+    assert p1["params"]["EST_RUNS"] == 5 and p1["params"]["SHRINK_W0"] == 0.0 and not p1["model"]["VENUE_GOING"]
+    te_mod.use_preset("te1")
+    assert te_mod.EST_RUNS == 5 and tm.VENUE_GOING is False
+    te_mod.KIND_W["same"] = 9.9                    # 版の定義 (PRESETS) は書き換わらない
+    assert te_mod.PRESETS["te1"]["params"]["KIND_W"]["same"] == 1.15
+    te_mod.use_preset("te2.1")
+    assert te_mod.params() == te_mod.PRESETS["te2.1"]["params"] and tm.GOING_FIT == "shrink" and tm.VENUE_GOING
+    with pytest.raises(KeyError):
+        te_mod.use_preset("te9")
+
+
+def test_old_same_condition_runs_are_used_beyond_window(restore_presets):
+    """直近 8 走が換算走で埋まっても、9 走目以降の 同条件 の走は (新しさの減衰付きで) 推定に入る = 同条件 列と一致 (te2.1)。"""
+    runs = [_pr(f"2026.09.{28 - 2 * k:02d}", "大井", "ダート", 1600, "良", 104.0) for k in range(8)]   # 直近 8 走 = 距離換算
+    runs += [_pr("2026.07.20", "大井", "ダート", 1400, "良", 88.0), _pr("2026.07.05", "大井", "ダート", 1400, "良", 88.2)]
+    h = Horse(number=1, name="A", past_runs_ext=runs, past_runs=runs[:5])
+    row = te_mod.evaluate(_race(horses=[h]), _model())["horses"][0]
+    same = [r for r in row["runs"] if r["kind"] == "same"]
+    assert row["same_n"] == 2 and len(same) == 2
+    assert all(r["weight"] == pytest.approx(round(te_mod.RECENCY_DECAY ** (8 + i), 3)) for i, r in enumerate(same))
+    assert row["n_used"] == 10
+    te_mod.set_params(SAME_ALL_RUNS=False)               # te2: 枠外の同条件走は捨てていた (重み None・推定は換算だけ)
+    row2 = te_mod.evaluate(_race(horses=[h]), _model())["horses"][0]
+    assert [r["weight"] for r in row2["runs"] if r["kind"] == "same"] == [None, None] and row2["n_used"] == 8
+    assert row["est_raw_sec"] < row2["est_raw_sec"]      # 同条件の 88.0 秒台が入って推定が速くなる

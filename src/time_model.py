@@ -52,7 +52,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER_DIR = ROOT / "data" / "cache" / "time_ledger"
 MODEL_PATH = ROOT / "data" / "cache" / "time_model.json"
-VERSION = "te2"       # te1 = 2026-10-10 / te2 = 2026-10-14 (場別の馬場状態効果 γ_v + 新しい集約 src/time_eval.py)
+VERSION = "te2.1"     # te1 = 2026-10-10 / te2 = 2026-10-14 (場別の馬場状態効果 γ_v + 新しい集約 src/time_eval.py)
+                      # / te2.1 = 2026-10-29 (γ_v の縮約を設計どおりに・δ の水準合わせで θ が漂流しない = GOING_FIT)
 
 JRA_VENUES = {"札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"}
 # 地方の場名 (JRA accessU は 2 文字に切り詰める: 名古→名古屋)。海外・不明は換算対象外。
@@ -74,6 +75,12 @@ DENSE_MIN_ROWS = 50  # 学習窓の起点に使う「データが揃った日」
                      # 1 日の走数がこれ以上 (実データは 1 日 69〜500 走。live 行は数えない — fit 参照)
 MAX_ITERS = 500      # 交互最小二乗の上限 (通常 100〜200 回で収束)
 TOL = 1e-7           # 1 反復の最大変化 (log 秒) がこれ未満で収束 = 90 秒のレースで 0.00001 秒未満
+GOING_FIT = "shrink"  # 場別の馬場状態効果 γ_v と δ の分け方 (VENUE_GOING=True のとき):
+                      #   "shrink"   (te2.1, 2026-10-29〜 本番): γ_v = δ も含めた残差のセル平均を K_GOING で全体の γ へ
+                      #              縮約 / δ は各 (場, 芝ダ) の良の走で平均 0 に揃えるだけ (θ へは移さない)
+                      #   "transfer" (te2, 2026-10-15 凍結 = te2 事前登録の判定用): 縮約の後に δ のセル平均を γ_v へ
+                      #              丸ごと移し、良の水準を θ へ移す。少数日のセルで縮約が打ち消され (1 日 10 走の
+                      #              東京 芝 重 +3.5% vs 設計 +2.2%)、他場と馬を共有しない場は θ が反復回数に比例して漂流する
 
 
 # ------------------------------------------------------------ 正規化 ----
@@ -370,6 +377,12 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
     csi = np.array([cs_index[(circuit(c[2]), c[0])] for c in cells])
     g_cs = [(g[0], g[1]) for g in glev]
     g_good = [g[2] == "良" for g in glev]
+    # δ の水準合わせ用: 各走・各開催日・各コースが属する (場, 芝ダ) と、良の走
+    vs_of_cell = np.array([vs_index[(c[2], c[0])] for c in cells])
+    vs_of_day = np.array([vs_index[(k[0], k[2])] for k in days])
+    vs_of_run = vs_of_cell[ci]
+    good_run = v_good[vi]
+    n_good_vs = np.bincount(vs_of_run[good_run], minlength=len(vs_keys)).astype(float)
 
     theta = np.bincount(ci, weights=y, minlength=nC) / np.maximum(nc, 1)
     gam = np.zeros(nG)
@@ -383,6 +396,10 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         prev_theta, prev_gam, prev_delta = theta.copy(), gamv.copy(), delta.copy()
         a = np.bincount(hi, weights=y - theta[ci] - gamv[vi] - delta[di], minlength=nH) / np.maximum(nh, 1)
         res = y - theta[ci] - a[hi] - delta[di]
+        if VENUE_GOING and GOING_FIT == "shrink":
+            # 馬場状態の効果は「その馬場状態の走の残差の合計 (γ_v + その日たちの δ)」から推定し、K_GOING で全体の γ へ
+            # 1 回だけ縮約する。縮約で γ_v に入らなかった分は δ (その日たちの偶然) に残る。
+            res = res + delta[di]
         # 全体 (中央/地方 × 芝ダ × 馬場) の γ: 場別 γ_v の縮約先 (良 = 0)
         res_g = np.bincount(gi, weights=res, minlength=nG) / np.maximum(ng, 1)
         base = {g_cs[j]: res_g[j] for j in range(nG) if g_good[j]}
@@ -418,19 +435,21 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         theta = (raw + K * curve) / (nc + K)
         if day_effects:
             delta = np.bincount(di, weights=y - theta[ci] - gamv[vi] - a[hi], minlength=nD) / (nd + K_DAY)
-        if day_effects and VENUE_GOING:
-            # 再中心化: δ の「馬場状態セル (場, 芝ダ, 馬場) ごとの平均」を γ_v (良との差) と θ (良の水準) へ移す。
-            # 馬場状態は開催日ごとに決まるので δ と γ_v は見分けが付きにくく、放っておくと道悪の効果の一部が
-            # δ に残る (2026-10-14 実測: 水沢 重 の日の δ 平均 −0.83%・大井 不良 +0.47%)。今日 (δ 未知) や
-            # δ を推定していない日の換算には γ_v しか効かないので、馬場状態の効果は γ_v に集め、δ は
-            # 「その馬場状態の日として速かったか遅かったか」だけにする。学習データ上の当てはめは変わらない。
+        if day_effects and VENUE_GOING and GOING_FIT == "shrink":
+            # δ の水準合わせ: 各 (場, 芝ダ) の良の走の δ 平均を 0 にする (= 今日 (δ 未知) は「平均的な良の日」+ γ_v)。
+            # 水準は次の反復の θ の更新が吸う (ここで θ へ移すと、他場と馬を共有しない場では毎回同じ量が移り続けて
+            # θ が漂流する)。馬場状態は開催日ごとに決まるので δ は道悪の日の時計を吸いやすい (2026-10-14 実測:
+            # 水沢 重 の日の δ 平均 −0.83%) — 上の γ_v は δ を含めた残差から推定するので、δ が吸った分も γ_v に入る
+            # (走の多いセルでは δ のセル平均 ≈ 0、少数日のセルは縮約の残り = その日たちの偶然だけが δ に残る)。
+            gl = np.bincount(vs_of_run[good_run], weights=delta[di[good_run]], minlength=len(vs_keys))
+            delta = delta - (gl / np.maximum(n_good_vs, 1))[vs_of_day]
+        elif day_effects and VENUE_GOING:
+            # te2 (2026-10-15 凍結) の再中心化: δ の馬場状態セル平均を γ_v (良との差) と θ (良の水準) へ移す
             mv = np.bincount(vi, weights=delta[di], minlength=nV) / np.maximum(nv, 1)
             base_mv = {v_vs[j]: mv[j] for j in range(nV) if v_good[j]}
             level = np.array([base_mv.get(v_vs[j], 0.0) for j in range(nV)])
             gamv = np.where(v_good, 0.0, gamv + (mv - level))
-            tr_run = mv[vi]                                                   # 各走から δ を引く量
-            delta = delta - np.bincount(di, weights=tr_run, minlength=nD) / np.maximum(nd, 1)
-            vs_of_cell = np.array([vs_index[(c[2], c[0])] for c in cells])
+            delta = delta - np.bincount(di, weights=mv[vi], minlength=nD) / np.maximum(nd, 1)
             lev_vs = np.zeros(len(vs_keys))
             for j in range(nV):
                 if v_good[j]:
@@ -443,6 +462,7 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
                    float(np.max(np.abs(delta - prev_delta))) if nD else 0.0)
         if n_iter > 1 and step < TOL:
             break
+    converged = bool(n_iter > 1 and step < TOL)
 
     # 表示用の参考: 条件別の勝ち時計中央値 (馬場別 n>=10 / 全馬場 n>=5)
     # 1 レース = レース番号 r がある行 (地方の公式データ) は (場, 日, R)。無い行 (netkeiba / live) は
@@ -478,7 +498,8 @@ def fit(rows: list[dict], *, day_effects: bool = True) -> dict:
         "n_runs": len(use), "n_horses": nH, "n_cells": nC, "n_days": nD,
         "params": {"K": K, "K_DAY": K_DAY, "K_GOING": K_GOING, "venue_going": VENUE_GOING,
                    "WINDOW_DAYS": WINDOW_DAYS, "MAX_BEHIND": MAX_BEHIND, "day_effects": day_effects,
-                   "iterations": n_iter},
+                   "going_fit": GOING_FIT if VENUE_GOING else None,
+                   "iterations": n_iter, "converged": converged},
         "theta": {f"{s}|{d}|{v}": round(float(theta[i]), 6) for i, (s, d, v) in enumerate(cells)},
         "theta_n": {f"{s}|{d}|{v}": int(nc[i]) for i, (s, d, v) in enumerate(cells)},
         "gamma": {f"{c}|{s}|{g}": round(float(gam[i]), 6) for i, (c, s, g) in enumerate(glev)},

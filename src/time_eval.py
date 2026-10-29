@@ -1,4 +1,4 @@
-"""タイム換算比較 (te2): 各馬の過去走の走破時計を当レースの条件 (場・芝ダ・距離・馬場状態) に換算して比べる。
+"""タイム換算比較 (te2〜te2.1): 各馬の過去走の走破時計を当レースの条件 (場・芝ダ・距離・馬場状態) に換算して比べる。
 
 ユーザ指示 (2026-10-10):「予測分析の仕方をガラっとかえる。馬の過去の走りから、当レース・馬場の距離と
 同じレースの時計がどれくらいで、他の距離、馬場を当レースの距離・馬場に換算するとどれくらいの評価が
@@ -13,11 +13,12 @@
       same_dist   他場の同じ芝ダ・距離 — 場の差 θ で換算
       distance    同じ芝ダの別距離 — 距離差を換算 (弱め: 距離が離れるほど急に軽く)
       surface     芝↔ダの換算 — 最も弱い
-  - 推定タイム = 換算時計の重み付き平均 (重み = 新しさ 0.85^i × 種別の重み × 距離の近さ)。証拠の重みの合計 W が
-    小さい馬 (同条件が無く換算だけ) はレース中央値へ寄せる: est = (W·平均 + W0·中央値) / (W + W0)。
+  - 推定タイム = 換算時計の重み付き平均 (重み = 新しさ 0.85^i × 種別の重み × 距離の近さ)。使う走 = 妥当な平地走の
+    新しい順 EST_RUNS 本 + それより古い 同条件・同コース の走 (te2.1〜)。証拠の重みの合計 W が小さい馬 (同条件が無く
+    換算だけ) はレース中央値へ寄せる: est = (W·平均 + W0·中央値) / (W + W0)。
   - 距離適性 / 芝ダ適性 / 馬場適性 = 「当レースに近い条件の走」と「それ以外の走」の換算時計の差 (負 = 平均的な
     換算が言うより当条件で走れている = 得意)。換算モデルは条件の平均効果しか持たないので、馬ごとの得手不得手は
-    ここで出す。
+    ここで出す。得意/不安 は差が走ごとのばらつきの誤差を十分に超えたときだけ (z ≥ FIT_Z, te2.1〜)。
   - 馬場差は場ごとに学習 (time_model γ_v)。「ダートの道悪は速い」は中央と一部の地方 (水沢・高知・浦和・門別) で
     成り立ち、南関東・東海・兵庫では逆 (重で遅い) だったので、向きを決め打ちせずデータに語らせる。
   - 市場 (オッズ・人気) は一切使わない = 市場・Claude 指数と独立に比較できる。
@@ -39,17 +40,25 @@ from . import time_model as tm
 EST_RUNS = 8                 # 集約に使う「時計が妥当な平地走」の数 (新しい順)
 RECENCY_DECAY = 0.85         # 1 走古くなるごとの重み
 KIND_W = {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25}
+# ↑ distance には下の距離の近さ (と同場 ×1.15) が掛かるので、同場の ±8% 以内の距離の走 (例 大井 1600 → 1650) は
+#   他場の同距離走 (same_dist 0.6) より重くなり得る (0.7 × 0.86 × 1.15 = 0.69)。序列の逆転は設計の意図ではないが、
+#   same_course / same_dist を 0.6〜1.0 で振っても検証値に差が無かったのでそのまま (2026-10-15 sweep)。
 DIST_SCALE = 0.2             # 距離の近さ: exp(-|ln(当距離/走距離)| / DIST_SCALE) (distance / surface 種別のみ)
 SAME_VENUE_W = 1.15          # 別距離・別芝ダでも同じ場なら少し重く
 SHRINK_W0 = 0.3              # 証拠の重み W がこれと同程度以下の馬はレース中央値へ寄る (W0/(W+W0) だけ)
 STRONG_W = 1.0               # 寄せ先の中央値を作る「証拠が十分な馬」の W の下限
 NEAR_DIST = 0.10             # 距離適性の「同距離帯」: |ln(当距離/走距離)| <= 0.10 (1400m なら 1270〜1545m)
-FIT_SEC = 0.3                # 適性ラベルのしきい値 (秒): 差 <= -0.3 得意 / >= +0.3 不安
+FIT_SEC = 0.3                # 適性ラベルのしきい値 (秒): 差 <= -0.3 得意 / >= +0.3 不安 (かつ下の z を満たすとき)
+FIT_SIGMA = 0.011            # 同じ馬の換算時計の走ごとのばらつき (時計比。地方公式 2026-09 の実測 1.08% ≒ 90 秒で 1.0 秒)
+FIT_Z = 1.645                # 適性ラベルに要る z = 差 / (FIT_SIGMA·時計·√(1/近い走数 + 1/それ以外の走数))。同じ馬の走を
+                             # ランダムに 2 群へ分けた差 (= 適性差なし) でラベルが付く率は ±0.3 秒だけだと 65%、z 1.645 で 10%
 INDEX_PER_SEC = 10.0         # タイム指数: レース中央値 50、1 秒速いごとに +10
 SHOW_RUNS = 12               # 明細・適性に使う過去走の最大数
+SAME_ALL_RUNS = True         # 同条件・同コースの走は EST_RUNS の枠外でも (SHOW_RUNS まで・新しさの減衰付きで) 使う (te2.1。
+                             # te2 は枠外を捨てていたので、直近 8 走が換算走で埋まった馬は 同条件 列に出る走が推定に入らなかった)
 
 _PARAM_NAMES = ("EST_RUNS", "RECENCY_DECAY", "KIND_W", "DIST_SCALE", "SAME_VENUE_W", "SHRINK_W0",
-                "STRONG_W", "NEAR_DIST", "FIT_SEC")
+                "STRONG_W", "NEAR_DIST", "FIT_SEC", "FIT_SIGMA", "FIT_Z", "SAME_ALL_RUNS")
 
 
 def params() -> dict:
@@ -63,6 +72,37 @@ def set_params(**kw: Any) -> None:
         if k not in _PARAM_NAMES:
             raise KeyError(k)
         globals()[k] = dict(v) if isinstance(v, dict) else v
+
+
+# ---- 版ごとの設定 (事前登録の判定と検証スクリプト用。凍結 — 定義を変えるなら新しい名前で登録し直す) ----
+#   te1   = 2026-10-13 凍結の te1 市場ロジット事前登録 (te1 の重み・中央値寄せなし・馬場状態の効果は中央/地方 1 本)
+#   te2   = 2026-10-15 凍結の te2 事前登録 (te2 の集約 + γ_v の旧推定 GOING_FIT="transfer")
+#   te2.1 = 2026-10-29〜 本番 (γ_v を設計どおりに縮約・δ の水準合わせで θ が漂流しない・適性ラベルに z)
+# FIT_SIGMA / FIT_Z は適性ラベルにだけ効く (推定タイム・順位・指数は変えない)。te1 / te2 は当時の ±0.3 秒だけの判定。
+_TE2_PARAMS = {"EST_RUNS": 8, "RECENCY_DECAY": 0.85,
+               "KIND_W": {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25},
+               "DIST_SCALE": 0.2, "SAME_VENUE_W": 1.15, "SHRINK_W0": 0.3, "STRONG_W": 1.0, "NEAR_DIST": 0.10,
+               "FIT_SEC": 0.3, "FIT_SIGMA": FIT_SIGMA, "FIT_Z": 0.0, "SAME_ALL_RUNS": False}
+PRESETS: dict[str, dict] = {
+    "te1": {"params": {**_TE2_PARAMS, "EST_RUNS": 5, "SHRINK_W0": 0.0,
+                       "KIND_W": {"same": 1.15, "same_course": 1.15, "same_dist": 1.0, "distance": 1.0, "surface": 0.35}},
+            "model": {"VENUE_GOING": False, "K_GOING": 30.0, "GOING_FIT": "transfer"}},
+    "te2": {"params": dict(_TE2_PARAMS),
+            "model": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "transfer"}},
+    "te2.1": {"params": params(),
+              "model": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "shrink"}},
+}
+
+
+def use_preset(name: str) -> None:
+    """集約 (この module) と換算モデルの学習設定 (time_model の定数) を版 name に揃える。以後の tm.fit と evaluate が
+    その版で動く (検証スクリプト用。本番コードからは呼ばない)。"""
+    p = PRESETS[name]
+    set_params(**p["params"])                 # dict の値は set_params が複製する (PRESETS を書き換えない)
+    for k, v in p["model"].items():
+        if not hasattr(tm, k):
+            raise KeyError(k)
+        setattr(tm, k, v)
 
 
 def _r1(x: float | None) -> float | None:
@@ -212,18 +252,26 @@ def _confidence(used: list[tuple[float, float, dict]]) -> str:
 
 
 def _fit_block(items: list[tuple[dict, float]], like: Any) -> dict:
-    """適性 1 軸: 当レースに近い条件の走 (like) と それ以外の走の換算時計の差。負 = 当条件の方が走れている。"""
+    """適性 1 軸: 当レースに近い条件の走 (like) と それ以外の走の換算時計の差。負 = 当条件の方が走れている。
+
+    同じ馬の換算時計は走ごとに ±1% (90 秒で ±1 秒) ばらつくので、差が 0.3 秒あっても走数が少なければ偶然と
+    見分けが付かない (1 走 vs 1 走の差の誤差は ±1.4 秒)。得意/不安 は差が FIT_SEC 以上 **かつ** 誤差の FIT_Z 倍以上の
+    ときだけ付け、それ以外は 普通 (= 差が誤差の範囲)。誤差 se_sec と z も出す (2026-10-29)。"""
     L = [(r, c) for r, c in items if like(r)]
     O = [(r, c) for r, c in items if not like(r)]
-    out = {"n_like": len(L), "n_other": len(O), "delta_sec": None,
+    out = {"n_like": len(L), "n_other": len(O), "delta_sec": None, "se_sec": None, "z": None,
            "best_sec": _r1(min(c for _r, c in L)) if L else None,
            "mean_sec": _r1(sum(c for _r, c in L) / len(L)) if L else None,
            "top3_like": sum(1 for r, _c in L if r["finish_pos"] in (1, 2, 3)),
            "label": "—"}
     if L and O:
         delta = sum(c for _r, c in L) / len(L) - sum(c for _r, c in O) / len(O)
-        out["delta_sec"] = _r1(delta)
-        out["label"] = "得意" if delta <= -FIT_SEC else ("不安" if delta >= FIT_SEC else "普通")
+        scale = sum(c for _r, c in items) / len(items)
+        se = FIT_SIGMA * scale * math.sqrt(1.0 / len(L) + 1.0 / len(O))
+        z = delta / se if se > 0 else 0.0
+        out["delta_sec"], out["se_sec"], out["z"] = _r1(delta), _r1(se), _r1(z)
+        sig = abs(delta) >= FIT_SEC and abs(z) >= FIT_Z
+        out["label"] = ("得意" if delta < 0 else "不安") if sig else "普通"
     elif L:
         out["label"] = "実績のみ"
     elif O:
@@ -289,7 +337,8 @@ def evaluate(rd: Any, model: dict | None = None) -> dict:
             if conv is not None:
                 items.append((rec, conv))
             if counted:
-                if valid_i < EST_RUNS and conv is not None:
+                if conv is not None and (valid_i < EST_RUNS
+                                         or (SAME_ALL_RUNS and rec["kind"] in ("same", "same_course"))):
                     w = _weight(valid_i, rec, tgt)
                     rec["weight"] = round(w, 3)
                     used.append((w, conv, rec))
@@ -375,11 +424,14 @@ def merge_previous(cur: dict | None, prev: dict | None, runners: set[int]) -> di
     いずれも **runners (今回の出走馬 = 取消を除く) に居ない馬は落とし**、順位・差・指数を付け直す
     (前回の値を丸ごと返すと、後から取り消した馬が「タイム1位」のまま残っていた)。
     条件の比較は 場・芝ダ・距離・馬場状態 だけ (par や馬場差の表示値は再学習で変わる)。
+    馬単位の引き継ぎは前回と今回の版 (version) が同じときだけ: 版が違うと推定の定義 (例 te1 → te2 の中央値寄せ・
+    馬場込みの同条件) が違うので、同じ順位付けに混ぜない (2026-10-29)。前回を丸ごと使うときは前回の版のまま返す。
     """
     import copy
     usable_prev = prev if (prev and prev.get("available") and _n_ranked(prev) > 0) else None
     if cur and cur.get("available") and _n_ranked(cur) > 0:
-        if usable_prev and _cond(usable_prev.get("target")) == _cond(cur.get("target")):
+        if (usable_prev and _cond(usable_prev.get("target")) == _cond(cur.get("target"))
+                and usable_prev.get("version") == cur.get("version")):
             old = {h["number"]: h for h in usable_prev.get("horses", [])}
             out = copy.deepcopy(cur)
             changed = False

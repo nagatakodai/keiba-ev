@@ -354,3 +354,9 @@ def test_time_model_rebuild_backs_off_when_official_sync_still_due(monkeypatch):
     asyncio.run(f._maybe_rebuild_time_model())          # 次の tick: 待ち中なので起動しない
     assert calls["build"] == 1
     assert "time_model_official" in f.status()
+    # いま使っている換算モデルの版・収束 (conftest がモデルの保存先を tmp に隔離 = 未生成なら None)
+    assert f.status()["time_model"] is None
+    time_model.save_model({"version": "te2.1", "fitted_at": "x", "params": {"iterations": 72, "converged": True,
+                                                                            "going_fit": "shrink"}})
+    st = f.status()["time_model"]
+    assert st["version"] == "te2.1" and st["converged"] is True and st["iterations"] == 72

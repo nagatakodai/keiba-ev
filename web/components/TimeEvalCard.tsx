@@ -78,10 +78,21 @@ function FitCell({ fit, axis }: { fit: TimeEvalFit | null | undefined; axis: str
   }
   const tone = FIT_TONE[fit.label] ?? "muted";
   const delta = fit.delta_sec;
+  const se = fit.se_sec;
+  // 差の色はラベルと揃える (backend が 差 0.3 秒以上かつ誤差の 1.645 倍以上のときだけ 得意/不安 にする)。
+  // 旧 snapshot (te2, se なし) は従来どおり差 ±0.3 秒で色付け。
+  const deltaClass =
+    fit.label === "得意" || (se == null && delta != null && delta <= -0.3)
+      ? "text-emerald-300"
+      : fit.label === "不安" || (se == null && delta != null && delta >= 0.3)
+        ? "text-amber-300"
+        : "text-(--color-muted)";
   const detail = [
-    `${axis}適性: ${fit.label}`,
+    `${axis}適性: ${fit.label}${fit.label === "普通" && se != null ? " (差が誤差の範囲)" : ""}`,
     `当レースに近い条件 ${fit.n_like}走 / それ以外 ${fit.n_other}走`,
-    delta != null ? `換算タイムの差 ${fmtSignedSec(delta)} 秒 (近い条件 − それ以外。負 = 当条件の方が走れている)` : "",
+    delta != null
+      ? `換算タイムの差 ${fmtSignedSec(delta)} 秒${se != null ? ` ± ${se.toFixed(1)} 秒` : ""} (近い条件 − それ以外。負 = 当条件の方が走れている)`
+      : "",
     fit.best_sec != null ? `近い条件のベスト換算 ${fmtRaceTime(fit.best_sec)}` : "",
     fit.n_like > 0 ? `近い条件で 3着内 ${fit.top3_like} 回 (着順が分かる走のみ)` : "",
   ]
@@ -92,7 +103,7 @@ function FitCell({ fit, axis }: { fit: TimeEvalFit | null | undefined; axis: str
       <span className="inline-flex items-center gap-1">
         <Badge tone={tone}>{fit.label}</Badge>
         {delta != null && (
-          <span className={`text-[11px] tnum ${delta <= -0.3 ? "text-emerald-300" : delta >= 0.3 ? "text-amber-300" : "text-(--color-muted)"}`}>
+          <span className={`text-[11px] tnum ${deltaClass}`}>
             {fmtSignedSec(delta)}
           </span>
         )}
@@ -609,7 +620,7 @@ export function TimeEvalCard({
                 </th>
                 <th
                   className="py-2 pr-3"
-                  title="推定タイムの信頼度 (同じ芝ダ・距離の証拠の重み: 高 = 1.5 以上かつ 3 走以上 / 中 = 0.5 以上かつ 2 走以上 / 低 = 別距離・芝ダの換算だけ)。括弧内は証拠の重み W と中央値寄せの割合"
+                  title="推定タイムの信頼度 (同じ芝ダ・距離の証拠の重み: 高 = 1.5 以上かつ 3 走以上 / 中 = 0.5 以上かつ 2 走以上 / 低 = 別距離・芝ダの換算だけ)。証拠の重み W と中央値寄せの内訳は各馬のバッジの hover (寄せ 30% 以上は「寄せNN%」を併記)"
                 >
                   信頼度
                 </th>

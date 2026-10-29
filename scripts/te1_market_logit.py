@@ -13,9 +13,10 @@
 [β, γ] モデル比、参考に β のみ比も。レース単位 bootstrap CI)・全期間の α (CI + 尤度比検定・片側 p)・
 単勝 ¥100 均等買いの描写 (事後の切り分け = 多重比較)。
 
-  python scripts/time_eval_official_backtest.py --variants nk+off --months <月,...> --dump <dump.jsonl>
-  python scripts/te1_market_logit.py --dump <dump.jsonl> [--variant nk+off]
+  python scripts/time_eval_official_backtest.py --te <版> --variants nk+off --months <月,...> --dump <dump.jsonl>
+  python scripts/te1_market_logit.py --dump <dump.jsonl> --te <版> [--since YYYYMMDD] [--variant nk+off]
         [--fit-months 202606,202607] [--test-months 202608,202609,202610] [--boot 2000]
+  事前登録の判定: te1 = `--te te1 --since 20261013` / te2 = `--te te2 --since 20261015` (backtest も同じ --te で)。
 
 事前登録 (2026-10-13 凍結): 地方平地・te1 推定 3 頭以上・確定オッズが全出走馬にあるレース、上の式。
 2026-06〜10-12 (5,083R, 発見に使った期間) は 全期間 α=+0.076 [+0.025,+0.126] (片側 p=0.002)・学習 6-7 月 α=+0.099
@@ -72,15 +73,24 @@ def load_win_odds(months: list[str]) -> dict[tuple, dict[int, float]]:
     return out
 
 
-def build(dump: Path, variant: str, odds: dict) -> list[dict]:
-    """dump × オッズ → レースごとの {month, X (n×3: log q, z, d), y, odds, pay, te1_top, fav}。"""
+def build(dump: Path, variant: str, odds: dict, te: str | None = None, since: int = 0) -> list[dict]:
+    """dump × オッズ → レースごとの {month, X (n×3: log q, z, d), y, odds, pay, te1_top, fav}。
+
+    te = 換算の版 (dump の "te"。2026-10-29 以前の dump には無い = None 扱い)、since = この日 (YYYYMMDD) 以降のレースだけ。
+    1 つの dump に版が混ざっているのに te を指定しないと、版の違う指数を混ぜて当てはめてしまうので止める。"""
     races = []
+    seen_te: set = set()
     with open(dump, encoding="utf-8") as f:
         for line in f:
             d = json.loads(line)
             if d.get("variant") != variant:
                 continue
+            seen_te.add(d.get("te"))
+            if te is not None and d.get("te") != te:
+                continue
             key = tuple(d["key"])
+            if since and int(key[1]) < since:
+                continue
             od = odds.get(key)
             runners = d["runners"]
             if not od or len(runners) < 5:
@@ -110,6 +120,8 @@ def build(dump: Path, variant: str, odds: dict) -> list[dict]:
                           "X": np.column_stack([np.log(q), z, (~have).astype(float)]), "y": y,
                           "odds": np.array([od[n] for n in nums]), "pays": pays, "winners": set(winners),
                           "top": top, "fav": nums[int(np.argmax(q))]})
+    if te is None and len(seen_te) > 1:
+        raise SystemExit(f"dump に版が混ざっています {sorted(map(str, seen_te))} — --te で 1 つ選んでください")
     return races
 
 
@@ -201,17 +213,21 @@ def main() -> int:
     ap.add_argument("--fit-months", default="202606,202607")
     ap.add_argument("--test-months", default="202608,202609,202610")
     ap.add_argument("--boot", type=int, default=2000)
+    ap.add_argument("--te", default=None, help="換算の版 (dump の te: te1 / te2 / te2.1)。事前登録は登録した版で")
+    ap.add_argument("--since", type=int, default=0,
+                    help="この日 (YYYYMMDD) 以降のレースだけ (事前登録: te1 は 20261013・te2 は 20261015 以降)")
     args = ap.parse_args()
     fit_m, test_m = args.fit_months.split(","), args.test_months.split(",")
     odds = load_win_odds(sorted(set(fit_m + test_m)))
-    races = build(Path(args.dump), args.variant, odds)
+    races = build(Path(args.dump), args.variant, odds, args.te, args.since)
     fit_r = [r for r in races if r["month"] in fit_m]
     test_r = [r for r in races if r["month"] in test_m]
     have = {r["month"] for r in races}
     for m in fit_m + test_m:
         if m not in have:
             print(f"  [注意] {m} のレースが dump に無い (backtest の --months / オッズの sync-odds を確認)")
-    print(f"races: fit {len(fit_r):,} / test {len(test_r):,} (variant {args.variant})")
+    print(f"races: fit {len(fit_r):,} / test {len(test_r):,} (variant {args.variant}, te {args.te or '-'}, "
+          f"since {args.since or '-'})")
     if not fit_r or not test_r:
         print("データ不足")
         return 1

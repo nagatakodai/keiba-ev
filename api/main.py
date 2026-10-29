@@ -212,7 +212,24 @@ class ResultAutoFetcher:
             "time_model_last_attempt_at": self.time_model_last_attempt_at,
             "time_model_last_error": self.time_model_last_error,
             "time_model_official": self._official_status(),
+            "time_model": self._model_status(),
         }
+
+    @staticmethod
+    def _model_status() -> dict[str, Any] | None:
+        """いま使っているタイム換算モデル (data/cache/time_model.json) の版・学習日・収束 (読むだけ・失敗は None)。"""
+        try:
+            from src.time_model import load_model
+            m = load_model()
+            if not m:
+                return None
+            p = m.get("params") or {}
+            return {"version": m.get("version"), "fitted_at": m.get("fitted_at"),
+                    "data_until_by_circuit": m.get("data_until_by_circuit"), "n_runs": m.get("n_runs"),
+                    "iterations": p.get("iterations"), "converged": p.get("converged"),
+                    "going_fit": p.get("going_fit")}
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def _official_status() -> dict[str, Any] | None:

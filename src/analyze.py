@@ -1413,7 +1413,7 @@ def _save_prediction_snapshot(
         # prov_delta = Claude − 仮指数、support=補強件数、alerts=直前/軟情報フラグ)。
         "index_compare": _build_index_compare(rd, llm_win_index, llm_support, llm_alerts,
                                                llm_evidence, llm_paddock, _prov),
-        # タイム換算比較 (te1): 各馬の過去走を当レース条件 (場・芝ダ・距離・馬場状態) に換算した
+        # タイム換算比較 (te2〜): 各馬の過去走を当レース条件 (場・芝ダ・距離・馬場状態) に換算した
         # 推定タイム順。Web の TimeEvalCard / CLI 表。time_index = {馬番: 0-100} (順位を使う側向け)。
         "time_eval": _te,
         "time_index": ({str(k): v for k, v in _time_eval_mod.time_index(_te).items()} or None),

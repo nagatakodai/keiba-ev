@@ -1,4 +1,4 @@
-"""タイム換算比較 (te1) の walk-forward バックテスト — 地方・公式データ期間 (読み取り専用)。
+"""タイム換算比較 (te1〜te2.1) の walk-forward バックテスト — 地方・公式データ期間 (読み取り専用)。
 
 評価レース = 地方競馬全国協会の公式月次データ (data/cache/nar_official/race-YYYYMM.zip) の平地レース
 (ばんえい除外・5 頭以上・勝ち馬あり)。scripts/time_eval_backtest.py (netkeiba キャッシュ 2026-01〜05) の
@@ -19,6 +19,11 @@
 
   python scripts/time_eval_official_backtest.py [--variants nk,nk+off05,nk+off] [--months 202606,...]
                                                 [--retrain daily|monthly] [--dump out.jsonl] [--no-jra-history]
+                                                [--te te1|te2|te2.1]
+
+  --te は集約と換算モデルの版 (src/time_eval.PRESETS、既定 = 本番の版)。**事前登録の判定は登録した版で回す**:
+  te1 の市場ロジット事前登録 (2026-10-13 凍結) は --te te1、te2 の事前登録 (2026-10-15 凍結) は --te te2。
+  dump の各行に "te" (版) を書き、scripts/te1_market_logit.py --te で絞る。
 
 指標 (scripts/time_eval_backtest.py と同じ定義): AUCw/AUC3 (レース内で勝ち馬/3着内が他馬より速く推定された
 割合)・ρtime・MADdm (レース中央値を除いた推定と実時計の差の中央値, 秒 — 0.05 秒刻み)・MAE (同・平均, 連続量)・
@@ -241,7 +246,7 @@ def summarize(rows: list[dict]) -> dict:
             "known_day": m("known_day_share")}
 
 
-def run_variant(variant: str, evr: list[dict], hist: dict, retrain: str, dump=None) -> dict:
+def run_variant(variant: str, evr: list[dict], hist: dict, retrain: str, dump=None, te_name: str = "") -> dict:
     ledger = ledger_for(variant)
     t0 = time.time()
     by_day: dict[int, list[dict]] = defaultdict(list)
@@ -270,7 +275,7 @@ def run_variant(variant: str, evr: list[dict], hist: dict, retrain: str, dump=No
             s = score_race(er, te)
             res_by_month[f"{d // 100:06d}"].append(s)
             if dump is not None and te.get("available"):
-                dump.write(json.dumps({"variant": variant, "key": list(er["key"]),
+                dump.write(json.dumps({"variant": variant, "te": te_name, "key": list(er["key"]),
                                        "est": {h["number"]: h["est_sec"] for h in te["horses"]},
                                        "index": {h["number"]: h["index"] for h in te["horses"]},
                                        "rank": {h["number"]: h["rank"] for h in te["horses"]},
@@ -290,7 +295,12 @@ def main() -> int:
     ap.add_argument("--retrain", choices=("daily", "monthly"), default="daily")
     ap.add_argument("--dump", default=None, help="各レースの推定を JSONL に書き出す (市場比較などの後段用)")
     ap.add_argument("--no-jra-history", action="store_true", help="過去走に中央の走を入れない (地方の走だけ)")
+    ap.add_argument("--te", choices=sorted(te_mod.PRESETS), default=tm.VERSION,
+                    help="集約と換算モデルの版 (事前登録の判定は登録した版: te1 / te2)")
     args = ap.parse_args()
+    te_mod.use_preset(args.te)
+    print(f"te: {args.te} (VENUE_GOING={tm.VENUE_GOING} GOING_FIT={tm.GOING_FIT} EST_RUNS={te_mod.EST_RUNS} "
+          f"SHRINK_W0={te_mod.SHRINK_W0} SAME_ALL_RUNS={te_mod.SAME_ALL_RUNS})", flush=True)
     months = args.months.split(",")
     hist_months = no.months_between(args.history_from, max(months))
     t0 = time.time()
@@ -302,7 +312,7 @@ def main() -> int:
     dump = open(args.dump, "w", encoding="utf-8") if args.dump else None
     results = {}
     for v in args.variants.split(","):
-        results[v] = run_variant(v, evr, hist, args.retrain, dump)
+        results[v] = run_variant(v, evr, hist, args.retrain, dump, args.te)
         print(f"variant {v}: done ({results[v]['_sec']}s)", flush=True)
     if dump:
         dump.close()

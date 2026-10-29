@@ -142,6 +142,11 @@ def main() -> int:
           f"runs={model.get('n_runs'):,} horses={model.get('n_horses'):,} courses={model.get('n_cells'):,} "
           f"days={model.get('n_days'):,} iterations={(model.get('params') or {}).get('iterations')} "
           f"({time.time() - t0:.0f}s)", flush=True)
+    if (model.get("params") or {}).get("converged") is False:
+        # 本番の ledger は 70 回前後で収束する。上限まで回ったのは、他の場と馬を共有しない場 (θ の水準がデータで
+        # 決まらない) など ledger が疎なとき — 換算はその場と他場の間で信頼できない (GET /api/results/auto の time_model)
+        print(f"WARNING: 換算モデルが収束していません (iterations={model['params'].get('iterations')} = MAX_ITERS)",
+              flush=True)
     return 0
 
 
