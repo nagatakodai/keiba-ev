@@ -40,8 +40,8 @@ from . import time_model as tm
 EST_RUNS = 8                 # 集約に使う「時計が妥当な平地走」の数 (新しい順)
 RECENCY_DECAY = 0.85         # 1 走古くなるごとの重み
 KIND_W = {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25}
-# ↑ distance には下の距離の近さ (と同場 ×1.15) が掛かるので、同場の ±8% 以内の距離の走 (例 大井 1600 → 1650) は
-#   他場の同距離走 (same_dist 0.6) より重くなり得る (0.7 × 0.86 × 1.15 = 0.69)。序列の逆転は設計の意図ではないが、
+# ↑ distance には下の距離の近さ (と同場 ×1.15) が掛かるので、同場の ±6% 以内の距離の走 (例 大井 1600 → 1650) は
+#   他場の同距離走 (same_dist 0.6) より重くなる (0.7 × 0.86 × 1.15 = 0.69。境目は |ln 比| < 0.2·ln(0.805/0.6) = 0.059)。序列の逆転は設計の意図ではないが、
 #   same_course / same_dist を 0.6〜1.0 で振っても検証値に差が無かったのでそのまま (2026-10-15 sweep)。
 DIST_SCALE = 0.2             # 距離の近さ: exp(-|ln(当距離/走距離)| / DIST_SCALE) (distance / surface 種別のみ)
 SAME_VENUE_W = 1.15          # 別距離・別芝ダでも同じ場なら少し重く
@@ -58,7 +58,7 @@ SAME_ALL_RUNS = True         # 同条件・同コースの走は EST_RUNS の枠
                              # te2 は枠外を捨てていたので、直近 8 走が換算走で埋まった馬は 同条件 列に出る走が推定に入らなかった)
 
 _PARAM_NAMES = ("EST_RUNS", "RECENCY_DECAY", "KIND_W", "DIST_SCALE", "SAME_VENUE_W", "SHRINK_W0",
-                "STRONG_W", "NEAR_DIST", "FIT_SEC", "FIT_SIGMA", "FIT_Z", "SAME_ALL_RUNS")
+                "STRONG_W", "NEAR_DIST", "FIT_SEC", "FIT_SIGMA", "FIT_Z", "SAME_ALL_RUNS", "SHOW_RUNS", "INDEX_PER_SEC")
 
 
 def params() -> dict:
@@ -77,20 +77,27 @@ def set_params(**kw: Any) -> None:
 # ---- 版ごとの設定 (事前登録の判定と検証スクリプト用。凍結 — 定義を変えるなら新しい名前で登録し直す) ----
 #   te1   = 2026-10-13 凍結の te1 市場ロジット事前登録 (te1 の重み・中央値寄せなし・馬場状態の効果は中央/地方 1 本)
 #   te2   = 2026-10-15 凍結の te2 事前登録 (te2 の集約 + γ_v の旧推定 GOING_FIT="transfer")
-#   te2.1 = 2026-10-29〜 本番 (γ_v を設計どおりに縮約・δ の水準合わせで θ が漂流しない・適性ラベルに z)
+#   te2.1 = 2026-10-29 凍結・本番 (γ_v を設計どおりに縮約・δ の水準合わせで θ が漂流しない・枠外の同条件走・適性に z)
+# 値はすべて literal で、換算モデルの学習の定数 (time_model) も全部持つ = 本番の既定を後で変えても過去の版は動かない。
+# 本番の既定 = 最新の版 (tests/test_time_eval.py が一致を確認する: 既定を変えるなら新しい版を足して登録し直す)。
+# 版で止められるのは定数だけ — 判定のコード (正規化・種別・寄せ方) を変えると過去の版も変わるので、変えるときは
+# 過去の版で同じ値が出ることを確かめる (GOING_FIT のように分岐を残す)。
 # FIT_SIGMA / FIT_Z は適性ラベルにだけ効く (推定タイム・順位・指数は変えない)。te1 / te2 は当時の ±0.3 秒だけの判定。
 _TE2_PARAMS = {"EST_RUNS": 8, "RECENCY_DECAY": 0.85,
                "KIND_W": {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25},
                "DIST_SCALE": 0.2, "SAME_VENUE_W": 1.15, "SHRINK_W0": 0.3, "STRONG_W": 1.0, "NEAR_DIST": 0.10,
-               "FIT_SEC": 0.3, "FIT_SIGMA": FIT_SIGMA, "FIT_Z": 0.0, "SAME_ALL_RUNS": False}
+               "FIT_SEC": 0.3, "FIT_SIGMA": 0.011, "FIT_Z": 0.0, "SAME_ALL_RUNS": False, "SHOW_RUNS": 12,
+               "INDEX_PER_SEC": 10.0}
+_FIT_CONSTS = {"K": 8.0, "K_DAY": 3.0, "K_GOING": 30.0, "WINDOW_DAYS": 540, "MAX_BEHIND": 3.0,
+               "DENSE_MIN_ROWS": 50, "MAX_ITERS": 500, "TOL": 1e-7}       # 3 版とも同じ (10-13 / 10-15 の commit で確認)
 PRESETS: dict[str, dict] = {
     "te1": {"params": {**_TE2_PARAMS, "EST_RUNS": 5, "SHRINK_W0": 0.0,
                        "KIND_W": {"same": 1.15, "same_course": 1.15, "same_dist": 1.0, "distance": 1.0, "surface": 0.35}},
-            "model": {"VENUE_GOING": False, "K_GOING": 30.0, "GOING_FIT": "transfer"}},
+            "model": {**_FIT_CONSTS, "VENUE_GOING": False, "GOING_FIT": "transfer"}},
     "te2": {"params": dict(_TE2_PARAMS),
-            "model": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "transfer"}},
-    "te2.1": {"params": params(),
-              "model": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "shrink"}},
+            "model": {**_FIT_CONSTS, "VENUE_GOING": True, "GOING_FIT": "transfer"}},
+    "te2.1": {"params": {**_TE2_PARAMS, "FIT_Z": 1.645, "SAME_ALL_RUNS": True},
+              "model": {**_FIT_CONSTS, "VENUE_GOING": True, "GOING_FIT": "shrink"}},
 }
 
 

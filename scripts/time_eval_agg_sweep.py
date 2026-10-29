@@ -19,7 +19,11 @@ evaluate だけやり直す (設定は time_eval.set_params / time_model の定�
 全期間で改善する一方、勝ち馬 AUC は換算を弱くするほど単調に下がる (conv-weak < conv-strong < conv-mild ≒ old)。
 中央値寄せ SHRINK_W0 も 0.3 が MAE 最良で、大きくすると AUC が下がる。場別の馬場差 γ_v (old+vg) は AUC/MAE とも
 中立 (当レースの γ は全馬共通なので順位に効かず、過去走の δ 既知の日は再中心化で合計が変わらないため)。
-→ 既定は conv-mild (NEW_PARAMS)。数表は CLAUDE.md の te2 節。
+→ 既定は conv-mild (NEW_PARAMS)。数表は CLAUDE.md の te2 節 (old / old+vg / new / new/* の設定で再現できる)。
+
+2026-10-29 (te2 → te2.1, 基準 te2): `--configs te2,te2.1/fit,te2.1,te2.1/est12 --baseline te2`。te2.1 の γ_v の推定
+(GOING_FIT=shrink, モデル s*) は te2 (transfer, v*) と違い K_GOING が効くので、その感度は te2.1/k10・te2.1/k100。
+数表は CLAUDE.md の te2.1 節。
 """
 from __future__ import annotations
 
@@ -41,8 +45,7 @@ from src import time_model as tm  # noqa: E402
 
 # ---- 集約の設定: 版ごとの定義は src/time_eval.PRESETS (事前登録の判定にも使う凍結値) ----
 # old = te1 (2026-10-10) の重み / new = te2 (2026-10-15 選定: conv-mild) の集約。2026-10-14 の初期値
-# (distance 0.5 / surface 0.15 / DIST_SCALE 0.15) は new/conv-strong として残す。new/* の派生はすべて te2 の集約が基準
-# (2026-10-15 の表を再現できるように)。本番の te2.1 (2026-10-29〜) は "te2.1" 設定。
+# (distance 0.5 / surface 0.15 / DIST_SCALE 0.15) は new/conv-strong として残す。
 OLD_PARAMS = te_mod.PRESETS["te1"]["params"]
 NEW_PARAMS = te_mod.PRESETS["te2"]["params"]
 
@@ -58,13 +61,11 @@ def _p(**over):
 
 
 CONFIGS: dict[str, dict] = {
+    # ---- 2026-10-15 の表 (te2 の選定)。モデル v* は当時の γ_v の推定 (GOING_FIT=transfer) = 表をそのまま再現する ----
     # 旧集約 × 旧モデル / 新モデル (モデルの効果だけを分離)
     "old": {"params": OLD_PARAMS, "model": "old"},
-    # te2 (2026-10-15 凍結) = 新集約 × γ_v の旧推定 (GOING_FIT=transfer) / te2.1 (2026-10-29〜 本番)
-    "te2": {"params": NEW_PARAMS, "model": "v30t"},
-    "te2.1": {"params": te_mod.PRESETS["te2.1"]["params"], "model": "v30"},
     "old+vg": {"params": OLD_PARAMS, "model": "v30"},
-    # 新集約 (既定) とモデルの縮約 K
+    # 新集約 (既定) とモデルの縮約 K (transfer では K_GOING がほぼ効かない — te2.1 の節)
     "new": {"params": NEW_PARAMS, "model": "v30"},
     "new/k10": {"params": NEW_PARAMS, "model": "v10"},
     "new/k100": {"params": NEW_PARAMS, "model": "v100"},
@@ -73,33 +74,45 @@ CONFIGS: dict[str, dict] = {
     "new/w0=0": {"params": _p(SHRINK_W0=0.0), "model": "v30"},
     "new/w0=0.6": {"params": _p(SHRINK_W0=0.6), "model": "v30"},
     "new/w0=1.0": {"params": _p(SHRINK_W0=1.0), "model": "v30"},
-    # 使う走数 (sameall = 同条件・同コースの走だけは枠外でも使う)
+    # 使う走数
     "new/est5": {"params": _p(EST_RUNS=5), "model": "v30"},
     "new/est12": {"params": _p(EST_RUNS=12), "model": "v30"},
-    "new/sameall": {"params": _p(SAME_ALL_RUNS=True), "model": "v30"},
     # 換算 (距離・芝ダ) をさらに弱く (conv-strong = 2026-10-14 の初期値 / conv-weak = さらに弱く)
     "new/conv-strong": {"params": _p(KIND_W={"distance": 0.5, "surface": 0.15}, DIST_SCALE=0.15), "model": "v30"},
     "new/conv-weak": {"params": _p(KIND_W={"distance": 0.35, "surface": 0.10}, DIST_SCALE=0.12), "model": "v30"},
     # 同コース (別馬場) / 他場同距離 の重さ
     "new/course0.6": {"params": _p(KIND_W={"same_course": 0.6, "same_dist": 0.45}), "model": "v30"},
     "new/course1.0": {"params": _p(KIND_W={"same_course": 1.0, "same_dist": 0.8}), "model": "v30"},
+    # ---- 2026-10-29 の表 (te2 → te2.1)。te2 = 上の new と同じ (凍結した版の名前で呼ぶ) ----
+    "te2": {"params": NEW_PARAMS, "model": "v30"},
+    "te2.1/fit": {"params": NEW_PARAMS, "model": "s30"},                  # te2 の集約 × te2.1 の γ_v (①②だけ)
+    "te2.1/est12": {"params": _p(EST_RUNS=12), "model": "s30"},          # ③ の代わりに全 12 走を使う場合
+    "te2.1": {"params": te_mod.PRESETS["te2.1"]["params"], "model": "s30"},   # 本番 (①②③)
+    "te2.1/k10": {"params": te_mod.PRESETS["te2.1"]["params"], "model": "s10"},
+    "te2.1/k100": {"params": te_mod.PRESETS["te2.1"]["params"], "model": "s100"},
 }
 
-MODEL_VARIANTS = {"old": {"VENUE_GOING": False, "K_GOING": 30.0, "GOING_FIT": "shrink"},
-                  "v30": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "shrink"},
-                  "v30t": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "transfer"},
-                  "v10": {"VENUE_GOING": True, "K_GOING": 10.0, "GOING_FIT": "shrink"},
-                  "v100": {"VENUE_GOING": True, "K_GOING": 100.0, "GOING_FIT": "shrink"}}
+# v* = te2 (2026-10-15) の γ_v の推定 (transfer) / s* = te2.1 (2026-10-29) の推定 (shrink)。数字は K_GOING。
+MODEL_VARIANTS = {"old": {"VENUE_GOING": False, "K_GOING": 30.0, "GOING_FIT": "transfer"},
+                  "v30": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "transfer"},
+                  "v10": {"VENUE_GOING": True, "K_GOING": 10.0, "GOING_FIT": "transfer"},
+                  "v100": {"VENUE_GOING": True, "K_GOING": 100.0, "GOING_FIT": "transfer"},
+                  "s30": {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "shrink"},
+                  "s10": {"VENUE_GOING": True, "K_GOING": 10.0, "GOING_FIT": "shrink"},
+                  "s100": {"VENUE_GOING": True, "K_GOING": 100.0, "GOING_FIT": "shrink"}}
 
 
 def fit_variants(rows: list[dict], variants: set[str]) -> dict[str, dict]:
+    saved = {k: getattr(tm, k) for k in ("VENUE_GOING", "K_GOING", "GOING_FIT")}
     out = {}
-    for v in sorted(variants):
-        for k, val in MODEL_VARIANTS[v].items():
+    try:
+        for v in sorted(variants):
+            for k, val in MODEL_VARIANTS[v].items():
+                setattr(tm, k, val)
+            out[v] = tm.fit(rows)
+    finally:
+        for k, val in saved.items():                 # 本番の既定 (te2.1) に戻す
             setattr(tm, k, val)
-        out[v] = tm.fit(rows)
-    for k, val in MODEL_VARIANTS["v30"].items():
-        setattr(tm, k, val)
     return out
 
 

@@ -570,7 +570,8 @@ def test_set_params_rejects_unknown():
 def restore_presets():
     """use_preset / 定数差し替えのテストが他のテストへ漏れないように、集約パラメータと換算モデルの定数を戻す。"""
     saved = te_mod.params()
-    saved_tm = {k: getattr(tm, k) for k in ("VENUE_GOING", "K_GOING", "GOING_FIT", "MAX_ITERS")}
+    keys = {k for p in te_mod.PRESETS.values() for k in p["model"]}
+    saved_tm = {k: getattr(tm, k) for k in keys}
     yield
     te_mod.set_params(**saved)
     for k, v in saved_tm.items():
@@ -710,18 +711,39 @@ def test_merge_does_not_mix_versions():
 
 
 def test_presets_reproduce_registered_versions(restore_presets):
-    """事前登録の判定に使う版の設定は凍結 (te1 = 2026-10-13 / te2 = 2026-10-15)。use_preset が集約と換算モデルを揃える。"""
-    p1, p2 = te_mod.PRESETS["te1"], te_mod.PRESETS["te2"]
-    assert p2["params"]["EST_RUNS"] == 8 and p2["params"]["SHRINK_W0"] == 0.3 and p2["params"]["FIT_Z"] == 0.0
-    assert p2["params"]["KIND_W"] == {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25}
-    assert p2["model"] == {"VENUE_GOING": True, "K_GOING": 30.0, "GOING_FIT": "transfer"}
-    assert p1["params"]["EST_RUNS"] == 5 and p1["params"]["SHRINK_W0"] == 0.0 and not p1["model"]["VENUE_GOING"]
+    """事前登録の判定に使う版の設定は凍結 (te1 = 2026-10-13 / te2 = 2026-10-15 / te2.1 = 2026-10-29) — 値は literal で、
+    換算モデルの学習の定数も全部持つ。本番の既定 = 最新の版 (既定を変えたらこのテストが落ちる = 新しい版を足して登録し直す)。"""
+    fit_consts = {"K": 8.0, "K_DAY": 3.0, "K_GOING": 30.0, "WINDOW_DAYS": 540, "MAX_BEHIND": 3.0,
+                  "DENSE_MIN_ROWS": 50, "MAX_ITERS": 500, "TOL": 1e-7}
+    te2 = {"EST_RUNS": 8, "RECENCY_DECAY": 0.85,
+           "KIND_W": {"same": 1.0, "same_course": 0.8, "same_dist": 0.6, "distance": 0.7, "surface": 0.25},
+           "DIST_SCALE": 0.2, "SAME_VENUE_W": 1.15, "SHRINK_W0": 0.3, "STRONG_W": 1.0, "NEAR_DIST": 0.10,
+           "FIT_SEC": 0.3, "FIT_SIGMA": 0.011, "FIT_Z": 0.0, "SAME_ALL_RUNS": False, "SHOW_RUNS": 12,
+           "INDEX_PER_SEC": 10.0}
+    want = {
+        "te1": ({**te2, "EST_RUNS": 5, "SHRINK_W0": 0.0,
+                 "KIND_W": {"same": 1.15, "same_course": 1.15, "same_dist": 1.0, "distance": 1.0, "surface": 0.35}},
+                {**fit_consts, "VENUE_GOING": False, "GOING_FIT": "transfer"}),
+        "te2": (te2, {**fit_consts, "VENUE_GOING": True, "GOING_FIT": "transfer"}),
+        "te2.1": ({**te2, "FIT_Z": 1.645, "SAME_ALL_RUNS": True},
+                  {**fit_consts, "VENUE_GOING": True, "GOING_FIT": "shrink"}),
+    }
+    assert set(te_mod.PRESETS) == set(want)
+    for name, (params, model) in want.items():
+        assert te_mod.PRESETS[name]["params"] == params, name
+        assert te_mod.PRESETS[name]["model"] == model, name
+        assert set(params) == set(te_mod._PARAM_NAMES), name           # 集約のパラメータを全部持つ
+    # 本番の既定 = 最新の版 (te2.1)
+    assert te_mod.params() == want["te2.1"][0]
+    assert {k: getattr(tm, k) for k in want["te2.1"][1]} == want["te2.1"][1] and tm.VERSION == "te2.1"
+    # use_preset は集約と学習の定数を全部揃える (後で変えた定数も戻る)。版の定義 (PRESETS) は書き換わらない
+    tm.K_DAY = 99.0
     te_mod.use_preset("te1")
-    assert te_mod.EST_RUNS == 5 and tm.VENUE_GOING is False
-    te_mod.KIND_W["same"] = 9.9                    # 版の定義 (PRESETS) は書き換わらない
+    assert te_mod.EST_RUNS == 5 and tm.VENUE_GOING is False and tm.K_DAY == 3.0
+    te_mod.KIND_W["same"] = 9.9
     assert te_mod.PRESETS["te1"]["params"]["KIND_W"]["same"] == 1.15
-    te_mod.use_preset("te2.1")
-    assert te_mod.params() == te_mod.PRESETS["te2.1"]["params"] and tm.GOING_FIT == "shrink" and tm.VENUE_GOING
+    te_mod.use_preset("te2")
+    assert tm.GOING_FIT == "transfer" and te_mod.KIND_W["same"] == 1.0 and te_mod.FIT_Z == 0.0
     with pytest.raises(KeyError):
         te_mod.use_preset("te9")
 
